@@ -1,15 +1,15 @@
 [package]
-name = "sp_server"
+name = "siege_perilous"
 version = "0.5.0"
 authors = ["peter.holko@gmail.com"]
 edition = "2021"
 
 [[bin]]
-name = "sp_server"
+name = "siege_perilous"
 path = "src/main.rs"
 
 [lib]
-name = "sp_server"
+name = "siege_perilous"
 path = "src/lib.rs"
 
 [dependencies]

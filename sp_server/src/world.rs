@@ -6,7 +6,7 @@ use crate::{
     item::{self, Inventory},
     map::Map,
     network::{send_to_client, MapWeather, ResponsePacket},
-    obj::{Id, Obj, PlayerId, SubclassNPC, Template, Viewshed},
+    obj::{Id, Obj, PlayerId, SubclassNPC, Template, UpdateObj, Viewshed},
     templates::{ObjTemplate, Templates},
     AppState,
 };
@@ -185,13 +185,14 @@ pub fn time_of_day_vision_mod(game_ticks: i32) -> f32 {
 }
 
 pub fn day_system(
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     app_state: Option<Res<State<AppState>>>,
     clients: Option<Res<Clients>>,
     templates: Option<Res<Templates>>,
     player_query: Query<&PlayerId>,
     mut viewshed_query: Query<
-        (&Id, &Template, &Inventory, &mut Viewshed, Option<&Effects>),
+        (Entity, &Id, &Template, &Inventory, &mut Viewshed, Option<&Effects>),
         Without<SubclassNPC>,
     >,
     mut map_events: ResMut<MapEvents>,
@@ -215,7 +216,7 @@ pub fn day_system(
         let time_mod = time_of_day_vision_mod(game_tick.0);
         let is_night = remainder >= NIGHT || remainder < FIRST_LIGHT;
 
-        for (id, template, inventory, mut viewshed, effects) in viewshed_query.iter_mut() {
+        for (entity, id, template, inventory, mut viewshed, effects) in viewshed_query.iter_mut() {
             let template_name = &template.0;
             let base_vision = templates_res
                 .and_then(|templates| {
@@ -247,11 +248,10 @@ pub fn day_system(
             debug!("Update vision for obj: {:?}", id.0);
 
             //Add obj update event
-            let obj_update_event = VisibleEvent::UpdateObjEvent {
+            commands.trigger(UpdateObj {
+                entity: entity,
                 attrs: vec![(VISION.to_string(), "Pending".to_string())],
-            };
-
-            map_events.new(id.0, game_tick.0 + 1, obj_update_event);
+            });
         }
 
         // Make unique list of player ids

@@ -28,8 +28,8 @@ use crate::obj::{
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire, Class,
     ClassStructure, EndRepeatAction, Id, Misc, Name, NewObj, Obj, Order, PlayerId, Position,
     RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
-    StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, Viewshed, WorkEntry,
-    WorkQueue, WorkStatus, WorkType,
+    StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj, Viewshed,
+    WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::StartLocations;
 use crate::recipe::Recipes;
@@ -2829,6 +2829,7 @@ fn info_attrs_system(
 }
 
 fn info_advance_system(
+    mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     game_tick: Res<GameTick>,
     entity_map: ResMut<EntityObjMap>,
@@ -2903,11 +2904,10 @@ fn info_advance_system(
                     }
 
                     //Add obj update event
-                    let obj_update_event = VisibleEvent::UpdateObjEvent {
+                    commands.trigger(UpdateObj {
+                        entity: entity,
                         attrs: vec![(TEMPLATE.to_string(), next_template.clone())],
-                    };
-
-                    map_events.new(*id, game_tick.0, obj_update_event);
+                    });
 
                     let (new_next_template, new_required_xp) =
                         SkillData::hero_advance(next_template.clone());
@@ -5893,6 +5893,7 @@ fn assign_system(
 }
 
 fn equip_system(
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     mut events: ResMut<PlayerEvents>,
@@ -6040,11 +6041,10 @@ fn equip_system(
                         viewshed.range = new_vision;
 
                         //Add obj update event
-                        let obj_update_event = VisibleEvent::UpdateObjEvent {
+                        commands.trigger(UpdateObj {
+                            entity: owner_entity,
                             attrs: vec![(VISION.to_string(), viewshed.range.to_string())],
-                        };
-
-                        map_events.new(*obj_id, game_tick.0 + 1, obj_update_event);
+                        });
                     } else {
                         // Equip item slot
                         items_updated = owner_inventory.equip(item_to_equip.id, item_to_equip.slot);

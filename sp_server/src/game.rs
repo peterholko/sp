@@ -1322,11 +1322,10 @@ fn move_event_completed_system(
                     effects.0.remove(&Effect::WatchtowerLight);
 
                     //Add obj update event
-                    let obj_update_event = VisibleEvent::UpdateObjEvent {
+                    commands.trigger(UpdateObj {
+                        entity: mover_entity,
                         attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                    };
-
-                    map_events.new(mover_id.0, game_tick.0 + 1, obj_update_event);
+                    });
                 }
             }
         }
@@ -1356,11 +1355,10 @@ fn move_event_completed_system(
                         .insert(Effect::WatchtowerLight, (game_tick.0 + 1, 0.0, 1));
 
                     //Add obj update event
-                    let obj_update_event = VisibleEvent::UpdateObjEvent {
+                    commands.trigger(UpdateObj {
+                        entity: mover_entity,
                         attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                    };
-
-                    map_events.new(mover_id.0, game_tick.0 + 1, obj_update_event);
+                    });
                 }
             }
         }
@@ -1834,18 +1832,10 @@ fn activate_event_system(
                             Obj::template_to_image(&structure_template.template.clone()) + "lit";
 
                         // Structure State Change Event to Lit
-                        let structure_image_change_event = VisibleEvent::UpdateObjEvent {
+                        commands.trigger(UpdateObj {
+                            entity: structure_entity,
                             attrs: vec![(IMAGE.to_string(), structure_campfire_image)],
-                        };
-
-                        let map_event = MapEvent {
-                            event_id: Uuid::new_v4(),
-                            obj_id: structure.id.0,
-                            run_tick: game_tick.0 + 1,
-                            event_type: structure_image_change_event,
-                        };
-
-                        events_to_add.push(map_event);
+                        });
 
                         // Add campfire light effect
                         commands.trigger(AddLightEffect {
@@ -2230,10 +2220,11 @@ pub fn upgrade_system(
 
 fn add_light_effect_system(
     light_effect: On<AddLightEffect>,
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     source_query: Query<(&PlayerId, &Position, &State)>,
-    mut query: Query<(&PlayerId, &Id, &Position, &State, &mut Effects)>,
+    mut query: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects)>,
 ) {
     // Get source player id and position
     let Ok((source_player_id, source_pos, source_state)) = source_query.get(light_effect.entity)
@@ -2243,7 +2234,7 @@ fn add_light_effect_system(
     };
 
     // Add watchtower light effect to all objects on the same tile
-    for (obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
         if obj_pos.x == source_pos.x
             && obj_pos.y == source_pos.y
             && obj_player_id.0 == source_player_id.0
@@ -2254,23 +2245,21 @@ fn add_light_effect_system(
                 .0
                 .insert(light_effect.effect.clone(), (game_tick.0 + 1, 0.0, 1));
 
-            let obj_update_event = map_events.new(
-                obj_id.0,
-                game_tick.0 + 1,
-                VisibleEvent::UpdateObjEvent {
-                    attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                },
-            );
+            commands.trigger(UpdateObj {
+                entity: obj_entity,
+                attrs: vec![(VISION.to_string(), "Pending".to_string())],
+            });
         }
     }
 }
 
 fn remove_light_effect_system(
     light_effect: On<RemoveLightEffect>,
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     source_query: Query<(&PlayerId, &Position, &State)>,
-    mut query: Query<(&PlayerId, &Id, &Position, &State, &mut Effects)>,
+    mut query: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects)>,
 ) {
     // Get source player id and position
     let Ok((source_player_id, source_pos, source_state)) = source_query.get(light_effect.entity)
@@ -2279,8 +2268,8 @@ fn remove_light_effect_system(
         return;
     };
 
-    // Add watchtower light effect to all objects on the same tile
-    for (obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
+    // Remove watchtower light effect from all objects on the same tile
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
         if obj_pos.x == source_pos.x
             && obj_pos.y == source_pos.y
             && obj_player_id.0 == source_player_id.0
@@ -2289,13 +2278,10 @@ fn remove_light_effect_system(
             // Remove effect from object
             obj_effects.0.remove(&light_effect.effect);
 
-            let obj_update_event = map_events.new(
-                obj_id.0,
-                game_tick.0 + 1,
-                VisibleEvent::UpdateObjEvent {
-                    attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                },
-            );
+            commands.trigger(UpdateObj {
+                entity: obj_entity,
+                attrs: vec![(VISION.to_string(), "Pending".to_string())],
+            });
         }
     }
 }
@@ -8718,7 +8704,7 @@ fn true_death_system(
         ),
         With<SubclassHero>,
     >,
-    villager_query: Query<(&PlayerId, &Id), With<SubclassVillager>>,
+    villager_query: Query<(Entity, &PlayerId, &Id), With<SubclassVillager>>,
 ) {
     for (entity, player_id, id, name, template, skills, true_death, state_dead) in
         hero_query.iter_mut()
@@ -8758,16 +8744,15 @@ fn true_death_system(
             send_to_client(player_id.0, packet, &clients);
 
             // Transfer villagers to merchant player
-            for (villager_player_id, villager_id) in villager_query.iter() {
+            for (villager_entity, villager_player_id, villager_id) in villager_query.iter() {
                 if villager_player_id.0 == player_id.0 {
                     info!("Transferring villager: {:?}", villager_id.0);
 
                     // Add Update Event for Player Id change
-                    let obj_update_event = VisibleEvent::UpdateObjEvent {
+                    commands.trigger(UpdateObj {
+                        entity: villager_entity,
                         attrs: vec![(PLAYER_ID.to_string(), MERCHANT_PLAYER_ID.to_string())],
-                    };
-
-                    map_events.new(villager_id.0, game_tick.0 + 10, obj_update_event);
+                    });
                 }
             }
 
@@ -9323,11 +9308,13 @@ fn effect_added_system(
 }
 
 pub fn item_duration_system(
+    mut commands: Commands,
     game_tick: ResMut<GameTick>,
     clients: Res<Clients>,
     ids: Res<Ids>,
     mut map_events: ResMut<MapEvents>,
     active_infos: Res<ActiveInfos>,
+    entity_map: Res<EntityObjMap>,
     mut query: Query<(&PlayerId, &Id, &mut Inventory)>,
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
@@ -9340,11 +9327,14 @@ pub fn item_duration_system(
                 inventory.remove_item(item.id);
 
                 if item.class == TORCH {
-                    let obj_update_event = VisibleEvent::UpdateObjEvent {
-                        attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                    };
-
-                    map_events.new(item.owner, game_tick.0 + 1, obj_update_event);
+                    if let Some(owner_entity) = entity_map.get_entity(item.owner) {
+                        commands.trigger(UpdateObj {
+                            entity: owner_entity,
+                            attrs: vec![(VISION.to_string(), "Pending".to_string())],
+                        });
+                    } else {
+                        error!("Cannot find entity for obj id: {:?}", item.owner);
+                    }
 
                     // Get player id from obj id
                     let Some(player_id) = ids.get_player(item.owner) else {
@@ -9409,11 +9399,10 @@ pub fn fuel_system(
                 let structure_image = Obj::template_to_image(&template.0.clone());
 
                 // Structure State Change Event to Lit
-                let structure_image_change_event = VisibleEvent::UpdateObjEvent {
+                commands.trigger(UpdateObj {
+                    entity: entity,
                     attrs: vec![(IMAGE.to_string(), structure_image)],
-                };
-
-                map_events.new(id.0, game_tick.0 + 1, structure_image_change_event);
+                });
 
                 // Remove campfire component from entity
                 commands.entity(entity).remove::<Campfire>();
