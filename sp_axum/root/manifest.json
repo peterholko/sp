@@ -1,0 +1,15 @@
+{
+  "short_name": "Perilous",
+  "name": "Survive Perilous RPG",
+  "icons": [
+    {
+      "src": "/perilouslogo-180x180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "start_url": ".",
+  "display": "fullscreen",
+  "theme_color": "#000000",
+  "background_color": "#000000"
+}

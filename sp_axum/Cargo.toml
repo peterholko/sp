@@ -1,0 +1,31 @@
+[package]
+name = "sp-axum"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = { version = "0.7.9", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-extra = { version="0.9.6", features = ["cookie"] }
+tokio = { version = "1.0", features = ["full"] }
+tower = { version = "0.5.1", features = ["util"] }
+tower-http = { version = "0.6.1", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15.7"
+serde = { version = "1.0", features = ["derive"] }
+futures-util = "0.3"
+bb8 = "0.9.0"
+bb8-postgres = "0.9.0"
+tokio-postgres = { version = "0.7.12", features = ["with-chrono-0_4"] }
+argon2 = "0.5.1"
+thiserror = "1.0"
+rand = "0.8.5"
+rand_core = "0.6.4"
+rand_chacha = "0.3.1"
+chrono = "0.4.39"
+tokio-tungstenite = { version = "0.21", features = ["native-tls", "rustls-tls-webpki-roots"] }
+native-tls = "0.2"
+uuid = { version = "1", features = ["v4"] }
+

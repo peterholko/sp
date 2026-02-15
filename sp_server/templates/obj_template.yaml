@@ -1,0 +1,950 @@
+# obj_template.yaml
+
+##################
+### CREATURES ####
+##################
+
+- name: Wolf
+  class: unit
+  subclass: npc
+  template: Wolf
+  image: wolf
+  family: Animal
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 5
+  base_vision: 4
+  int: animal
+  aggression: strategic
+  kill_xp: 12000
+  waterwalk: 1
+
+- name: Giant Rat
+  class: unit
+  subclass: npc
+  template: Giant Rat
+  image: giantrat
+  family: Animal
+  base_hp: 1000
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: animal
+  aggression: strategic
+  kill_xp: 100
+
+- name: Necromancer
+  class: unit
+  subclass: npc
+  template: Necromancer
+  image: necromancer
+  family: Undead
+  base_hp: 5000
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 4
+  int: cunning
+  aggression: strategic
+  kill_xp: 100
+  order: necro_event
+
+- name: Scorpion
+  class: unit
+  subclass: npc
+  template: Scorpion
+  image: scorpion
+  family: Animal
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: mindless
+  aggression: frenzied
+  kill_xp: 100
+
+- name: Shadow
+  class: unit
+  subclass: npc
+  template: Shadow
+  image: shadow
+  family: Undead
+  base_hp: 500
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: mindless
+  aggression: frenzied
+  kill_xp: 100
+
+- name: Skeleton
+  class: unit
+  subclass: npc
+  template: Skeleton
+  image: skeleton
+  family: Undead
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: mindless
+  aggression: frenzied
+  kill_xp: 100
+
+- name: Spider
+  class: unit
+  subclass: npc
+  template: Spider
+  image: spider
+  family: Animal
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: animal
+  aggression: strategic
+  kill_xp: 100
+
+- name: Wose
+  class: unit
+  subclass: npc
+  template: Wose
+  image: wose
+  family: Animal
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: cunning
+  aggression: strategic
+  kill_xp: 100
+
+- name: Yeti
+  class: unit
+  subclass: npc
+  template: Yeti
+  image: yeti
+  family: Creature
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: cunning
+  aggression: frenzied
+ 
+- name: Zombie
+  class: unit
+  subclass: npc
+  template: Zombie
+  image: zombie
+  family: Undead
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 2
+  int: mindless
+  aggression: frenzied
+  kill_xp: 100
+  order: wander
+
+- name: Elite Zombie
+  class: unit
+  subclass: npc
+  template: Elite Zombie
+  image: elitezombie
+  family: Undead
+  base_hp: 150
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  int: mindless
+  base_vision: 2
+  aggression: frenzied
+  kill_xp: 100
+  images: 
+    - zombie2
+  hsl: 
+    - 90
+    - 50
+    - 0
+
+- name: Wolf Rider
+  class: unit
+  subclass: npc
+  template: Wolf Rider
+  image: wolfrider
+  family: Animal
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 5
+  base_vision: 3
+  int: cunning
+  aggression: strategic
+  kill_xp: 5
+  order: move_to_pos
+  waterwalk: 1
+
+- name: Goblin Pillager
+  class: unit
+  subclass: npc
+  template: Goblin Pillager
+  image: goblinpillager
+  family: Goblin
+  base_hp: 10
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 5
+  base_vision: 3
+  int: cunning
+  aggression: strategic
+  kill_xp: 5
+  order: move_to_pos
+  waterwalk: 1
+
+- name: Nightmare Shadow
+  class: unit
+  subclass: npc
+  template: Nightmare Shadow
+  image: shadow
+  family: Undead
+  base_hp: 500
+  base_stamina: 10000
+  base_dmg: 10
+  dmg_range: 6
+  base_def: 7
+  base_speed: 5
+  base_vision: 4
+  int: cunning
+  aggression: frenzied
+  kill_xp: 5
+  order: move_to_pos
+  waterwalk: 1
+
+##################
+##### EMPIRE #####
+##################
+
+- name: Meager Merchant
+  class: unit
+  subclass: merchant
+  template: Meager Merchant
+  image: meagermerchant
+  base_hp: 2000
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 3
+  kill_xp: 100
+  order: merchant
+  waterwalk: 1
+  landwalk: 0
+  
+- name: Tax Ship
+  class: unit
+  subclass: transport
+  template: Tax Ship
+  image: taxship
+  base_hp: 2000
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 3
+  kill_xp: 100
+  order: tax_collector_ship
+  waterwalk: 1
+  landwalk: 0
+
+- name: Tax Collector
+  class: unit
+  subclass: npc
+  template: Tax Collector
+  image: taxcollector
+  groups: [Tax Collector]
+  base_hp: 2000
+  base_stamina: 10000
+  base_dmg: 2
+  dmg_range: 6
+  base_def: 7
+  base_speed: 3
+  base_vision: 3
+  kill_xp: 100
+  order: tax_collector
+  waterwalk: 0
+  landwalk: 1
+  capacity: 500
+
+##################
+##### HEROES #####
+##################
+
+- name: Novice Warrior
+  class: unit
+  subclass: hero
+  template: Novice Warrior
+  image: novicewarrior
+  base_hp: 50
+  base_stamina: 50
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 3
+  capacity: 500
+
+- name: Novice Ranger
+  class: unit
+  subclass: hero
+  template: Novice Ranger
+  image: noviceranger
+  base_hp: 100
+  base_stamina: 10000
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 2
+  capacity: 1000
+
+- name: Novice Mage
+  class: unit
+  subclass: hero
+  template: Novice Mage
+  image: novicemage
+  base_hp: 100
+  base_stamina: 10000
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 2
+  capacity: 500
+
+- name: Skilled Warrior
+  class: unit
+  subclass: hero
+  template: Skilled Warrior
+  image: skilledwarrior
+  base_hp: 200
+  base_stamina: 10000
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 2
+  capacity: 500 
+
+- name: Great Warrior
+  class: unit
+  subclass: hero
+  template: Great Warrior
+  image: greatwarrior
+  base_hp: 500
+  base_stamina: 10000
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 2
+  capacity: 500
+
+- name: Legendary Warrior
+  class: unit
+  subclass: hero
+  template: Legendary Warrior
+  image: legendarywarrior
+  base_hp: 1000
+  base_stamina: 10000
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 5
+  base_vision: 2
+  capacity: 500   
+
+##################
+#### VILLAGERS ###
+##################
+
+- name: Human Villager
+  class: unit
+  subclass: villager
+  template: Human Villager
+  image: humanvillager
+  base_hp: 500
+  base_stamina: 10000
+  base_dmg: 0
+  dmg_range: 0
+  base_def: 0
+  base_speed: 0
+  base_vision: 2
+  base_work: 25
+  capacity: 150
+  images: 
+    - humanvillager1
+    - humanvillager2
+    - humanvillager3
+    - humanvillager4
+  hsl:
+    - 90
+    - 50
+    - 0 
+
+##################
+### STRUCTURES ###
+##################
+
+#### CRAFTING ####
+
+- name: Crafting Tent
+  class: structure
+  subclass: craft
+  template: Crafting Tent
+  image: craftingtent
+  base_hp: 100
+  base_def: 0
+  build_cost: 500
+  level: 0
+  capacity: 200
+  activity: Crafting
+  workspaces: 2
+  refine: [Log, Ore, Game Animal]
+  req: 
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 5
+  upgrade_to: [Blacksmith, Workshop]
+
+- name: Mine
+  class: structure
+  subclass: resource
+  template: Mine
+  image: mine
+  base_hp: 250
+  base_def: 0
+  build_cost: 24 #480
+  level: 0
+  capacity: 200
+  activity: Mining
+  workspaces: 2
+  profession: the Miner
+  operate_skill: Mining
+  req: 
+    - type: Timber
+      quantity: 5
+    - type: Ingot
+      quantity: 5
+
+- name: Small Tent
+  class: structure
+  subclass: shelter
+  template: Small Tent
+  image: tent
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 50
+  max_residents: 1
+  campfire: true
+  level: 0  
+  req: 
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 5
+  upgrade_to: [Large Tent]
+  upgrade_req:
+    - type: Log
+      quantity: 10
+    - type: Hide
+      quantity: 10  
+
+- name: Large Tent
+  class: structure
+  subclass: shelter
+  template: Large Tent
+  image: tent
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 0
+  max_residents: 2
+  level: 1  
+  req: 
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 5
+  upgrade_to: []     
+
+- name: Yurt
+  class: structure
+  subclass: shelter
+  template: Yurt
+  image: tent
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 0
+  max_residents: 1
+  level: 1
+  req: 
+    - type: Log
+      quantity: 25
+    - type: Hide
+      quantity: 25
+  upgrade_to: [Large Yurt]
+  upgrade_req:
+    - type: Log
+      quantity: 50
+    - type: Hide
+      quantity: 50 
+
+- name: Large Yurt
+  class: structure
+  subclass: shelter
+  template: Large Yurt
+  image: tent
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 0
+  max_residents: 3
+  level: 2
+  req: 
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 5
+  upgrade_to: []     
+
+- name: Farm
+  class: structure
+  subclass: farm
+  template: Farm
+  image: farm
+  base_hp: 250
+  base_def: 0
+  build_cost: 24
+  capacity: 500
+  level: 0
+  profession: the Farmer
+  req: 
+    - type: Log
+      quantity: 5
+
+- name: Trapper
+  class: structure
+  subclass: resource
+  template: Trapper
+  image: trapper
+  base_hp: 250
+  base_def: 0
+  build_cost: 240
+  level: 1
+  profession: the Hunter
+  activity: Hunting
+  req: 
+    - type: Log
+      quantity: 40
+
+- name: Lumbercamp
+  class: structure
+  subclass: resource
+  template: Lumbercamp
+  image: lumbercamp
+  base_hp: 250
+  base_def: 0
+  build_cost: 480
+  capacity: 200
+  level: 0
+  profession: the Forester
+  activity: Logging
+  req: 
+    - type: Timber
+      quantity: 25
+    - type: Ingot
+      quantity: 30
+
+- name: Quarry
+  class: structure
+  subclass: resource
+  template: Quarry
+  image: quarry
+  base_hp: 250
+  base_def: 0
+  build_cost: 480
+  level: 0
+  profession: the Stonecutter
+  activity: Stonecutting
+  req: 
+    - type: Timber
+      quantity: 30
+    - type: Ingot
+      quantity: 30
+
+- name: Tavern
+  class: structure
+  subclass: craft
+  template: Tavern
+  image: tavern
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 1
+  capacity: 21
+  profession: the Innkeeper
+  req: 
+    - type: Log
+      quantity: 1
+
+- name: Workshop
+  class: structure
+  subclass: craft
+  template: Workshop
+  image: workshop
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 1
+  capacity: 50
+  profession: the Carpenter
+  activity: Operating
+  req: 
+    - type: Log
+      quantity: 1
+  upgrade_req:
+    - type: Log
+      quantity: 10
+    - type: Hide
+      quantity: 10           
+
+- name: Mason
+  class: structure
+  subclass: craft
+  template: Mason
+  image: mason
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 1
+  capacity: 50
+  profession: the Mason
+  activity: Operating
+  refine: [Stone]
+  req: 
+    - type: Log
+      quantity: 1
+
+- name: Blacksmith
+  class: structure
+  subclass: craft
+  template: Blacksmith
+  image: blacksmith
+  base_hp: 250
+  base_def: 0
+  build_cost: 500
+  upgrade_cost: 750
+  level: 0
+  capacity: 300
+  profession: the Blacksmith
+  activity: Operating
+  refine: [Ore]
+  req: 
+    - type: Log
+      quantity: 50
+    - type: Hide
+      quantity: 50
+  upgrade_req:
+    - type: Log
+      quantity: 10
+    - type: Hide
+      quantity: 10
+
+- name: Tailor
+  class: structure
+  subclass: craft
+  template: Tailor
+  image: tailor
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 2
+  capacity: 50
+  profession: the Tailor
+  activity: Operating
+  refine: [Ore]
+  req: 
+    - type: Log
+      quantity: 1
+
+- name: Alchemist
+  class: structure
+  subclass: craft
+  template: Alchemist
+  image: alchemist
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 3
+  capacity: 21
+  profession: the Alchemist
+  activity: Operating
+  req: 
+    - type: Log
+      quantity: 1
+
+- name: Herbalist
+  class: structure
+  subclass: craft
+  template: Herbalist
+  image: herbalist
+  base_hp: 250
+  base_def: 0
+  build_cost: 5
+  level: 3
+  capacity: 21
+  profession: the Herbalist
+  req: 
+    - type: Log
+      quantity: 1
+
+- name: Burrow
+  class: structure
+  subclass: storage
+  template: Burrow
+  image: burrow
+  base_hp: 250
+  base_def: 0
+  build_cost: 240
+  level: 0
+  capacity: 200
+  req: 
+    - type: Log
+      quantity: 10
+
+- name: Warehouse
+  class: structure
+  subclass: storage
+  template: Warehouse
+  image: warehouse
+  base_hp: 250
+  base_def: 0
+  build_cost: 960
+  level: 1
+  capacity: 1000
+  req: 
+    - type: Timber
+      quantity: 50
+    - type: Ingot
+      quantity: 50
+
+##################
+###### WALLS #####
+##################
+
+- name: Stockade
+  class: structure
+  subclass: wall
+  template: Stockade
+  image: stockade
+  base_hp: 20
+  base_def: 0
+  build_cost: 50
+  capacity: 100
+  level: 0
+  req: 
+    - type: Log
+      quantity: 5
+  upkeep:
+    - type: Log
+      quantity: 1
+  upgrade_to: [Fieldstone Walls]
+  upgrade_req:
+    - type: Log
+      quantity: 10
+
+- name: Watchtower
+  class: structure
+  subclass: watchtower
+  template: Watchtower
+  image: watchtower
+  base_hp: 20
+  base_def: 0
+  build_cost: 50
+  capacity: 100
+  level: 0
+  req: 
+    - type: Log
+      quantity: 5
+  upkeep:
+    - type: Log
+      quantity: 1
+  upgrade_to: [Fieldstone Walls]
+  upgrade_req:
+    - type: Log
+      quantity: 10
+
+- name: Palisade 
+  class: structure
+  subclass: wall
+  template: Palisade
+  image: palisade
+  base_hp: 200
+  base_def: 0
+  build_cost: 120
+  capacity: 100
+  level: 1
+  req: 
+    - type: Log
+      quantity: 5
+  upkeep:
+    - type: Log
+      quantity: 1
+
+- name: Fieldstone Walls 
+  class: structure
+  subclass: wall
+  template: Fieldstone Walls
+  image: fieldstonewalls
+  base_hp: 200
+  base_def: 0
+  build_cost: 50
+  upgrade_cost: 50
+  capacity: 100
+  level: 1
+  req: 
+    - type: Log
+      quantity: 5
+  upgrade_req:
+    - type: Log
+      quantity: 10
+  upkeep:
+    - type: Log
+      quantity: 1   
+
+##################
+###### POI #######
+##################
+
+- name: Shipwreck
+  class: poi
+  subclass: poi
+  template: Shipwreck
+  image: shipwreck
+  base_hp: 0
+
+- name: Monolith
+  class: poi
+  subclass: monolith
+  template: Monolith
+  image: monolith
+  base_hp: 10000000
+  capacity: 100
+  
+- name: Burned House
+  class: poi
+  subclass: poi
+  template: Burned House
+  image: burnedhouse
+  base_hp: 10000000
+  
+- name: Haunted Mine
+  class: poi
+  subclass: poi
+  template: Haunted Mine
+  image: hauntedmine
+  base_hp: 10000000
+
+- name: Graveyard
+  class: poi
+  subclass: poi
+  template: Graveyard
+  image: graveyard
+  base_hp: 10000000
+
+- name: Mausoleum
+  class: poi
+  subclass: poi
+  template: Mausoleum
+  image: mausoleum
+  base_hp: 10000000
+
+- name: Sealed Cavern
+  class: poi
+  subclass: poi
+  template: Sealed Cavern
+  image: sealedcavern
+  base_hp: 10000000
+
+##################
+###### MISC ######
+##################
+
+- name: Human Corpse
+  class: corpse
+  subclass: corpse
+  template: Human Corpse
+  image: humancorpse
+
+- name: Campfire
+  class: structure
+  subclass: campfire
+  template: Campfire
+  image: campfire
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 25
+  level: 0
+  campfire: true
+  req: 
+    - type: Stick
+      quantity: 1
+    - type: Resin
+      quantity: 1
+
+ 
+
+
+

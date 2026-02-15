@@ -1,0 +1,3152 @@
+use bevy::{ecs::query::QueryData, prelude::*};
+use big_brain::prelude::*;
+use std::collections::HashMap;
+
+use crate::{
+    ai_logging::entity_display,
+    common::{
+        Dehydrated, Destination, Drink, Eat, Exhausted, Heat, Hunger, Idle, MoveTo, Sleep,
+        Starving, Thirst, Tired,
+    },
+    constants::*,
+    event::{
+        DrinkEventCompleted, EatEventCompleted, EventCompleted, EventExecuting,
+        EventExecutingState, FindEventCompleted, GameEvent, GameEventType, GameEvents, MapEvents,
+        SleepEventCompleted, VisibleEvent,
+    },
+    experiment::{self, Experiment, Experiments},
+    game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
+    ids::{EntityObjMap, Ids},
+    item::{Inventory, Item, ItemLocation},
+    map::Map,
+    network::{send_to_client, ResponsePacket},
+    obj::{Name, StartBuild, State, *},
+    player::{ActiveInfoType, ActiveInfos},
+    recipe::Recipes,
+    templates::Templates,
+    villager_util::VillagerUtil,
+    villager_info, villager_debug, villager_error, villager_trace, villager_warn, with_span,
+    AppState,
+};
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct EnemyDistanceScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct IdleScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct ThirstyScorer;
+
+// Hunger
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct HungryScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct SetFleeDestination;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct Flee;
+
+#[derive(Debug, Clone, Component)]
+pub struct ShelterAvailable;
+
+#[derive(Debug, Clone, Component)]
+pub struct ShelterUnavailable;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct SetOrderDestination;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct SetStorageDestination;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct FindDrink;
+
+#[derive(Debug, Clone, Component)]
+pub struct NoDrinks {
+    pub at_tick: i32,
+}
+
+#[derive(Debug, Clone, Component)]
+pub struct NoFood {
+    pub at_tick: i32,
+}
+
+#[derive(Debug, Clone, Component)]
+pub struct NoShelter {
+    pub _at_tick: i32,
+}
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct TransferDrink;
+
+#[derive(Debug, Clone, Component)]
+pub struct Storage {
+    pub id: i32,
+}
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct FindFood;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct TransferFood;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct FindShelterScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct ShelterDistanceScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct NearShelterScorer;
+
+// Sleep
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct DrowsyScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct ExhaustedScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct HeatScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct FindShelter {
+    pub trigger_event: String,
+}
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct ProcessOrder;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct GoodMorale;
+
+#[derive(Component, Debug)]
+pub struct Morale {
+    pub morale: f32,
+}
+
+impl Morale {
+    pub fn new(morale: f32) -> Self {
+        Self { morale }
+    }
+}
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct CapacityScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct UnloadItems;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct StructureCapacityScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct LoadItems;
+
+#[derive(Debug, Clone, Component)]
+pub struct Dialogue {
+    pub trigger_event: String,
+    pub at_tick: i32,
+}
+
+#[derive(Debug, Clone, Component)]
+pub struct TargetItem(pub Item);
+
+#[derive(Debug, Clone, Component)]
+pub struct Target(pub i32);
+
+#[derive(QueryData)]
+#[query_data(mutable, derive(Debug))]
+pub struct VillagerQuery {
+    id: &'static Id,
+    player_id: &'static PlayerId,
+    pos: &'static Position,
+    class: &'static Class,
+    state: &'static mut State,
+    inventory: &'static mut Inventory,
+    active_task: &'static mut ActiveTask,
+}
+
+#[derive(QueryData)]
+#[query_data(mutable, derive(Debug))]
+pub struct VillagerWithOrderQuery {
+    id: &'static Id,
+    player_id: &'static PlayerId,
+    pos: &'static Position,
+    class: &'static Class,
+    order: &'static Order,
+    template: &'static Template,
+    inventory: &'static Inventory,
+}
+
+#[derive(QueryData)]
+#[query_data(mutable, derive(Debug))]
+pub struct VillagerBaseQuery {
+    pub id: &'static Id,
+    pub player_id: &'static PlayerId,
+    pub pos: &'static Position,
+    pub class: &'static Class,
+    pub subclass: &'static Subclass,
+    pub state: &'static State,
+    pub active_task: &'static ActiveTask,
+}
+
+pub struct VillagerPlugin;
+
+impl Plugin for VillagerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (
+                move_to_system.in_set(BigBrainSet::Actions),
+                find_drink_system.in_set(BigBrainSet::Actions),
+                transfer_drink_system.in_set(BigBrainSet::Actions),
+                drink_action_system.in_set(BigBrainSet::Actions),
+                find_food_system.in_set(BigBrainSet::Actions),
+                transfer_food_system.in_set(BigBrainSet::Actions),
+                eat_action_system.in_set(BigBrainSet::Actions),
+                sleep_action_system.in_set(BigBrainSet::Actions),
+                find_shelter_system.in_set(BigBrainSet::Actions),
+                set_order_destination_system.in_set(BigBrainSet::Actions),
+                process_order_system.in_set(BigBrainSet::Actions),
+                set_flee_destination_system.in_set(BigBrainSet::Actions),
+                set_storage_destination_system.in_set(BigBrainSet::Actions),
+                load_items_system.in_set(BigBrainSet::Actions),
+                unload_items_system.in_set(BigBrainSet::Actions),
+            )
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
+                enemy_distance_scorer_system.in_set(BigBrainSet::Scorers),
+                idle_scorer_system.in_set(BigBrainSet::Scorers),
+                thirsty_scorer_system.in_set(BigBrainSet::Scorers),
+                hungry_scorer_system.in_set(BigBrainSet::Scorers),
+                drowsy_scorer_system.in_set(BigBrainSet::Scorers),
+                exhausted_scorer_system.in_set(BigBrainSet::Scorers),
+                heat_scorer_system.in_set(BigBrainSet::Scorers),
+                morale_scorer_system.in_set(BigBrainSet::Scorers),
+                structure_capacity_scorer_system.in_set(BigBrainSet::Scorers),
+                capacity_scorer_system.in_set(BigBrainSet::Scorers),
+                vital_dialogue_system,
+                remove_no_drinks_system,
+                remove_no_food_system,
+                active_task_system,
+            )
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            clear_event_executing.after(BigBrainSet::Actions),
+        );
+    }
+}
+
+pub fn enemy_distance_scorer_system(
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    hero_query: Query<ObjQuery, With<SubclassHero>>,
+    obj_query: Query<ObjQuery, Without<SubclassHero>>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<EnemyDistanceScorer>>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        if let Ok(villager) = obj_query.get(*actor) {
+            let Some(hero_id) = ids.get_hero(villager.player_id.0) else {
+                span.span().in_scope(|| {
+                    villager_error!(*actor, obj_id, "Cannot find hero for player={}", villager.player_id.0);
+                });
+                continue;
+            };
+
+            let Some(hero_entity) = entity_map.get_entity(hero_id) else {
+                span.span().in_scope(|| {
+                    villager_error!(*actor, obj_id, "Cannot find hero entity for hero_id={}", hero_id);
+                });
+                continue;
+            };
+
+            let Ok(_hero) = hero_query.get(hero_entity) else {
+                span.span().in_scope(|| {
+                    villager_error!(*actor, obj_id, "Cannot find hero for entity={:?}", hero_entity);
+                });
+                continue;
+            };
+
+            let mut nearby_enemies = false;
+
+            for obj in obj_query.iter() {
+                if *obj.state == State::Dead {
+                    continue;
+                }
+
+                if obj.class.is_poi() {
+                    continue;
+                }
+
+                if obj.player_id.0 != villager.player_id.0 && obj.player_id.0 != MERCHANT_PLAYER_ID
+                {
+                    let distance =
+                        Map::distance((villager.pos.x, villager.pos.y), (obj.pos.x, obj.pos.y));
+
+                    if distance <= 2 {
+                        nearby_enemies = true;
+                    }
+                }
+            }
+
+            if nearby_enemies {
+                score.set(1.0);
+            } else {
+                score.set(0.0);
+            }
+        }
+    }
+}
+
+pub fn idle_scorer_system(
+    templates: Res<Templates>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<IdleScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        score.set(0.1);
+    }
+}
+
+pub fn thirsty_scorer_system(
+    entity_map: Res<EntityObjMap>,
+    thirsts: Query<&Thirst>,
+    no_drinks: Query<&NoDrinks>,
+    event_query: Query<(&EventExecuting, &ActiveTask)>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ThirstyScorer>>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        if let Ok(thirst) = thirsts.get(*actor) {
+            let (event_executing, active_task) = event_query
+                .get(*actor)
+                .expect("Missing event executing or active task component");
+
+            // Skip calculating the score if the event is completed,
+            // as this will cause a cancellation of the action due to transition state
+            if event_executing.state == EventExecutingState::Completed {
+                continue;
+            }
+
+            // Calculate thirst score
+            let mut thirst_score;
+
+            // Do not understand why we need this check
+            if thirst.thirst >= DEHYDRATED_SCORE {
+                thirst_score = EMERGENCY_SCORE;
+            } else {
+                let mut no_drink_mod = 0.0;
+
+                // If no drinks, subtract 10 f
+                if let Ok(_no_drinks) = no_drinks.get(*actor) {
+                    no_drink_mod = -50.0;
+                }
+
+                if *active_task == ActiveTask::GettingDrink || *active_task == ActiveTask::Drinking
+                {
+                    thirst_score = thirst.thirst * 1.50 + no_drink_mod;
+
+                    if thirst_score >= MAX_ROUTINE_SCORE {
+                        thirst_score = MAX_ROUTINE_SCORE;
+                    }
+                } else {
+                    thirst_score = thirst.thirst + no_drink_mod;
+
+                    if thirst_score >= MAX_ROUTINE_SCORE {
+                        thirst_score = MAX_ROUTINE_SCORE;
+                    }
+                }
+            }
+
+            let mut final_score = thirst_score / 100.0;
+
+            if final_score > 1.0 {
+                final_score = 1.0;
+            } else if final_score < 0.0 {
+                final_score = 0.0;
+            }
+            span.span().in_scope(|| {
+                villager_debug!(*actor, obj_id, "Thirst score={:.2} state={:?}", final_score, event_executing.state);
+            });
+            score.set(final_score);
+        }
+    }
+}
+
+pub fn hungry_scorer_system(
+    entity_map: Res<EntityObjMap>,
+    hungers: Query<&Hunger>,
+    no_food: Query<&NoFood>,
+    event_query: Query<(&EventExecuting, &ActiveTask)>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<HungryScorer>>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        if let Ok(hunger) = hungers.get(*actor) {
+            let (event_executing, active_task) = event_query
+                .get(*actor)
+                .expect("Missing event executing or active task component");
+
+            // Skip calculating the score if the event is completed,
+            // as this will cause a cancellation of the action due to transition state
+            if event_executing.state == EventExecutingState::Completed {
+                continue;
+            }
+
+            let mut hunger_score;
+
+            if hunger.hunger >= STARVING_SCORE {
+                hunger_score = EMERGENCY_SCORE;
+            } else {
+                let mut no_food_mod = 0.0;
+
+                // If no food, subtract 10 f
+                if let Ok(_no_food) = no_food.get(*actor) {
+                    no_food_mod = -50.0;
+                }
+
+                if *active_task == ActiveTask::GettingFood || *active_task == ActiveTask::Eating {
+                    hunger_score = hunger.hunger * 1.50 + no_food_mod;
+
+                    if hunger_score >= MAX_ROUTINE_SCORE {
+                        hunger_score = MAX_ROUTINE_SCORE;
+                    }
+                } else {
+                    hunger_score = hunger.hunger + no_food_mod;
+
+                    if hunger_score >= MAX_ROUTINE_SCORE {
+                        hunger_score = MAX_ROUTINE_SCORE;
+                    }
+                }
+            }
+
+            let mut final_score = hunger_score / 100.0;
+
+            if final_score > 1.0 {
+                final_score = 1.0;
+            } else if final_score < 0.0 {
+                final_score = 0.0;
+            }
+
+            span.span().in_scope(|| {
+                villager_debug!(*actor, obj_id, "Hunger score={:.2} state={:?}", final_score, event_executing.state);
+            });
+            score.set(final_score);
+        }
+    }
+}
+
+pub fn drowsy_scorer_system(
+    tired_query: Query<&Tired>,
+    no_shelter: Query<&NoShelter>,
+    event_query: Query<(&EventExecuting, &ActiveTask)>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<DrowsyScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        if let Ok(tired) = tired_query.get(*actor) {
+            let (event_executing, active_task) = event_query
+                .get(*actor)
+                .expect("Missing event executing or active task component");
+
+            // Skip calculating the score if the event is completed,
+            // as this will cause a cancellation of the action due to transition state
+            if event_executing.state == EventExecutingState::Completed {
+                continue;
+            }
+
+            let mut tired_score;
+            let mut no_shelter_mod = 0.0;
+
+            // If no shelter, subtract 10 f
+            if let Ok(_no_shelter) = no_shelter.get(*actor) {
+                no_shelter_mod = -50.0;
+            }
+
+            if *active_task == ActiveTask::FindingShelter {
+                tired_score = tired.tired * 1.50 + no_shelter_mod;
+
+                if tired_score >= MAX_ROUTINE_SCORE {
+                    tired_score = MAX_ROUTINE_SCORE;
+                }
+            } else {
+                tired_score = tired.tired;
+
+                if tired_score >= MAX_ROUTINE_SCORE {
+                    tired_score = MAX_ROUTINE_SCORE;
+                }
+            }
+
+            let mut final_score = tired_score / 100.0;
+
+            if final_score > 1.0 {
+                final_score = 1.0;
+            } else if final_score < 0.0 {
+                final_score = 0.0;
+            }
+
+            score.set(final_score);
+        }
+    }
+}
+
+pub fn exhausted_scorer_system(
+    tired_query: Query<&Tired, Without<EventExecuting>>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ExhaustedScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        if let Ok(tired) = tired_query.get(*actor) {
+            let exhausted_score;
+
+            if tired.tired >= EXHAUSTED_SCORE {
+                exhausted_score = EMERGENCY_SCORE;
+            } else {
+                exhausted_score = 0.0;
+            }
+            score.set(exhausted_score / 100.0);
+        }
+    }
+}
+
+pub fn heat_scorer_system(
+    heat_query: Query<&Heat>,
+    no_shelter: Query<&NoShelter>,
+    active_task: Query<&ActiveTask>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<HeatScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        if let Ok(heat) = heat_query.get(*actor) {
+            /*let Ok(villager_attrs) = villager_attrs.get(*actor) else {
+                error!("No villager attrs component for {:?}", *actor);
+                continue;
+            };
+            let mut heat_score;
+
+            if heat.heat >= OVERHEATED {
+                heat_score = EMERGENCY_SCORE;
+            } else if heat.heat <= HYPOTHERMIC {
+                heat_score = EMERGENCY_SCORE;
+            } else {
+                let normalized_heat = heat.heat.abs();
+
+                let mut no_shelter_mod = 0.0;
+
+                if let Ok(_no_shelter) = no_shelter.get(*actor) {
+                    no_shelter_mod = -50.0;
+                }
+
+                if villager_attrs.activity == villager::Activity::FindingShelter {
+                    heat_score = normalized_heat * 1.50 + no_shelter_mod;
+
+                    if heat_score >= MAX_ROUTINE_SCORE {
+                        heat_score = MAX_ROUTINE_SCORE;
+                    }
+                } else {
+                    heat_score = normalized_heat;
+
+                    if heat_score >= MAX_ROUTINE_SCORE {
+                        heat_score = MAX_ROUTINE_SCORE;
+                    }
+                }
+            }
+
+            score.set(heat_score / 100.0);*/
+            score.set(0.0);
+        }
+    }
+}
+
+pub fn morale_scorer_system(
+    morale_query: Query<&Morale>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<GoodMorale>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        if let Ok(_morale) = morale_query.get(*actor) {
+            score.set(0.6);
+            /*if tired.tired >= 80.0 {
+                span.span()
+                    .in_scope(|| debug!("Tired above threshold! Score: {}", tired.tired / 100.0));
+            }*/
+        }
+    }
+}
+
+pub fn structure_capacity_scorer_system(
+    entity_map: Res<EntityObjMap>,
+    templates: Res<Templates>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<StructureCapacityScorer>>,
+    villager_query: Query<(&Id, &Assignment)>,
+    structure_query: Query<(&Id, &Template, &Inventory)>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        let Ok((villager_id, assignment)) = villager_query.get(*actor) else {
+            span.span().in_scope(|| {
+                villager_error!(*actor, obj_id, "No villager assignment");
+            });
+            score.set(0.0);
+            continue;
+        };
+
+        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id) else {
+            span.span().in_scope(|| {
+                villager_error!(*actor, obj_id, "No structure entity for structure_id={}", assignment.structure_id);
+            });
+            score.set(0.0);
+            continue;
+        };
+
+
+        let Ok((structure_id, structure_template, inventory)) = structure_query.get(structure_entity) else {
+            span.span().in_scope(|| {
+                villager_error!(*actor, obj_id, "No inventory component for structure_id={}", assignment.structure_id);
+            });
+            score.set(0.0);
+            continue;
+        };
+
+        // If structure capacity is over 90% full set score to MAX ROUTINE
+        let current_weight = inventory.get_total_weight();
+        let structure_capacity = Obj::get_capacity(&structure_template.0, &templates.obj_templates);
+
+        span.span().in_scope(|| {
+            villager_trace!(*actor, obj_id, "weight={} capacity={}", current_weight, structure_capacity);
+        });
+
+        if current_weight >= (structure_capacity as f32 * 0.9) as i32 {
+            score.set(MAX_ROUTINE_SCORE / 100.0);
+        } else {
+            score.set(0.0);
+        }
+    }
+}
+
+pub fn capacity_scorer_system(
+    entity_map: Res<EntityObjMap>,
+    templates: Res<Templates>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<CapacityScorer>>,
+    villager_query: Query<(&Id, &Template, &Inventory)>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        let Ok((villager_id, villager_template, inventory)) = villager_query.get(*actor) else {
+            span.span().in_scope(|| {
+                villager_error!(*actor, obj_id, "No villager component");
+            });
+            continue;
+        };
+
+        // Check if villager has an order, if not set score to 0.0
+        let total_weight = inventory.get_total_weight();
+        let total_weight_ore = inventory.get_total_weight_by_class(ORE.to_string());
+        let total_weight_log = inventory.get_total_weight_by_class(LOG.to_string());
+
+        let resource_weight = total_weight_ore + total_weight_log;
+        let non_resource_weight = total_weight - resource_weight;
+
+        let capacity = Obj::get_capacity(&villager_template.0, &templates.obj_templates);
+
+        let mut capacity_score =
+            (resource_weight as f32) / (capacity - non_resource_weight) as f32 * 100.0;
+
+        if capacity_score > MAX_ROUTINE_SCORE {
+            capacity_score = MAX_ROUTINE_SCORE;
+        }
+
+        //info!("Capacity score: {:?}", capacity_score);
+
+        score.set(capacity_score / 100.0);
+    }
+}
+
+pub fn idle_action_systel(
+    mut active_task_query: Query<&mut ActiveTask>,
+    mut query: Query<(&Actor, &mut ActionState, &Idle, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _idle, _span) in &mut query {
+        if let Ok(mut active_task) = active_task_query.get_mut(*actor) {
+            *active_task = ActiveTask::Idle;
+        }
+
+        *state = ActionState::Success;
+    }
+}
+
+pub fn set_order_destination_system(
+    mut commands: Commands,
+    entity_map: Res<EntityObjMap>,
+    obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
+    mut villager_query: Query<
+        (
+            &PlayerId,
+            &Position,
+            &Order,
+            &mut ActiveTask,
+            Option<&Assignment>, // Villager may not have an assignment
+        ),
+        With<SubclassVillager>,
+    >,
+    mut action_query: Query<(&Actor, &mut ActionState, &SetOrderDestination, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _set_order_destination, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok((villager_player_id, villager_pos, order, mut villager_attrs, assignment)) =
+                    villager_query.get_mut(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let order_pos = match order {
+                    Order::Follow { target } => {
+                        let Ok((_player_id, _id, target_pos, _class, _stats)) =
+                            obj_query.get(*target)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No target position for follow order");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
+                        Some(*target_pos)
+                    }
+                    Order::Gather { pos, .. } => Some(*pos),
+                    Order::Build
+                    | Order::Operate
+                    | Order::Plant
+                    | Order::Tend
+                    | Order::Harvest
+                    | Order::WorkQueue => {
+                        if let Some(assignment) = assignment {
+                            Some(assignment.structure_pos)
+                        } else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for work queue order");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        }
+                    }
+                    Order::Repair => {
+                        let mut structures_to_repair = Vec::new();
+
+                        for (player_id, id, target_pos, class, stats) in obj_query.iter() {
+                            if villager_player_id.0 == player_id.0
+                                && class.is_structure()
+                                && stats.hp < stats.base_hp
+                            {
+                                structures_to_repair.push((*id, *target_pos));
+                            }
+                        }
+
+                        let nearest_structure = structures_to_repair
+                            .iter()
+                            .min_by_key(|(_id, pos)| Map::dist(*villager_pos, *pos));
+
+                        let Some(nearest_structure) = nearest_structure else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No nearest structure for repair order");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
+                        let (id, pos) = nearest_structure;
+
+                        commands.entity(*actor).insert(Target(id.0));
+
+                        Some(*pos)
+                    }
+                    _ => None,
+                };
+
+                let Some(order_pos) = order_pos else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "No order position for order={:?}", order);
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                commands
+                    .entity(*actor)
+                    .insert(Destination { pos: order_pos });
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling set order destination");
+                });
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn process_order_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    templates: Res<Templates>,
+    event_completed: Query<&EventCompleted>,
+    (
+        villager_query,
+        template_query,
+        mut active_task_query,
+        mut state_query,
+        mut work_queue_query,
+        mut event_executing_query,
+        mut query,
+    ): (
+        Query<(&Id, &Order, Option<&Assignment>, Option<&Target>), With<SubclassVillager>>,
+        Query<(&Name, &Template, &Inventory)>,
+        Query<&mut ActiveTask>,
+        Query<&mut State>,
+        Query<&mut WorkQueue>,
+        Query<&mut EventExecuting>,
+        Query<(&Actor, &mut ActionState, &ProcessOrder, &ActionSpan)>,
+    ),
+) {
+    for (Actor(actor), mut state, _process_order, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Ok((villager_id, villager_order, villager_assignment, villager_target)) =
+                    villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "No order to execute or villager is busy");
+                    });
+                    continue;
+                };
+
+                let Ok(mut active_task) = active_task_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "No active task component");
+                    });
+                    continue;
+                };
+
+                let Ok(mut villager_state) = state_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "No state component");
+                    });
+                    continue;
+                };
+
+                if *villager_state != State::None {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Process order called but villager is not idle");
+                    });
+                    continue;
+                }
+
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Processing order={:?}", villager_order);
+                });
+
+                match villager_order {
+                    Order::Follow { target: _ } => {
+                        *active_task = ActiveTask::Following;
+                    }
+                    Order::Gather {
+                        res_type,
+                        pos: _,
+                        storage_pos: _,
+                        storage_id: _,
+                    } => {
+                        *villager_state = State::Gathering;
+
+                        // Add Game Event to start work
+                        let event = GameEvent {
+                            event_id: ids.new_map_event_id(),
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + 1,
+                            event_type: GameEventType::GatherEvent {
+                                gatherer_id: villager_id.0,
+                                res_type: res_type.clone(),
+                            },
+                        };
+
+                        game_events.insert(event.event_id, event);
+                    }
+                    Order::Build => {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "Processing build order");
+                        });
+
+                        let Some(assignment) = villager_assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for build order");
+                            });
+                            continue;
+                        };
+
+                        // Get structure entity
+                        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No structure entity for structure_id={}", assignment.structure_id);
+                            });
+                            continue;
+                        };
+
+                        let Ok(structure_state) = state_query.get(structure_entity) else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No structure state component for entity={:?}", structure_entity);
+                            });
+                            continue;
+                        };
+
+                        // If structure is already completed don't add trigger
+                        if *structure_state == State::None {
+                            span.span().in_scope(|| {
+                                villager_debug!(*actor, obj_id, "Structure is already completed");
+                            });
+                            continue;
+                        }
+
+                        // Set active task to building
+                        *active_task = ActiveTask::Building;
+
+                        // Add trigger to start build
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "Adding trigger to start build");
+                        });
+                        commands.trigger(StartBuild {
+                            entity: structure_entity,
+                            builder_entity: *actor,
+                        });
+                    }
+                    Order::WorkQueue => {
+                        // Unwrap assignment
+                        let Some(assignment) = villager_assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for work queue order");
+                            });
+                            continue;
+                        };
+
+                        // Get structure entity
+                        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No structure entity for structure_id={}", assignment.structure_id);
+                            });
+                            continue;
+                        };
+
+                        let Ok((structure_name, template, inventory)) =
+                            template_query.get(structure_entity)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No template for structure entity={:?}", structure_entity);
+                            });
+                            continue;
+                        };
+
+                        let Ok(mut work_queue) = work_queue_query.get_mut(structure_entity) else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No work queue for structure entity={:?}", structure_entity);
+                            });
+                            continue;
+                        };
+
+                        // Check if there is an available work entry
+                        if work_queue.0.iter().all(|entry| entry.worker_id != -1) {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No available work entry for structure_id={}", assignment.structure_id);
+                            });
+                            continue;
+                        }
+
+                        // Find first work entry with no villager id
+                        let Some(work_entry) =
+                            work_queue.0.iter_mut().find(|entry| entry.worker_id == -1)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_debug!(*actor, obj_id, "No available work entry");
+                            });
+                            continue;
+                        };
+
+                        // Assign villager id to work entry
+                        work_entry.worker_id = villager_id.0;
+
+                        // Trigger start work
+                        commands.trigger(StartWork {
+                            entity: *actor,
+                            worker_id: villager_id.0,
+                            structure_id: assignment.structure_id,
+                        });
+                    }
+                    Order::Operate => {
+                        // Unwrap assignment
+                        let Some(assignment) = villager_assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for operate order");
+                            });
+                            continue;
+                        };
+
+                        // Get structure entity
+                        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No structure entity for structure_id={}", assignment.structure_id);
+                            });
+                            continue;
+                        };
+
+                        let Ok((structure_name, template, inventory)) =
+                            template_query.get(structure_entity)
+                        else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No template for structure entity={:?}", structure_entity);
+                            });
+                            continue;
+                        };
+
+                        let obj_template = templates
+                            .obj_templates
+                            .get_by_name_template(structure_name.0.clone(), template.0.clone());
+                        let capacity = obj_template.capacity.unwrap_or(0);
+                        let activity_str = obj_template.activity.unwrap_or("Operating".to_string());
+
+                        let current_total_weight = inventory.get_total_weight();
+
+                        if current_total_weight >= capacity {
+                            span.span().in_scope(|| {
+                                villager_debug!(*actor, obj_id, "Structure is full, transferring resources");
+                            });
+                            commands.trigger(TransferAllResources {
+                                entity: structure_entity,
+                                target_entity: *actor,
+                            });
+                            continue;
+                        } else {
+                            let operate_event = VisibleEvent::OperateEvent {
+                                structure_id: assignment.structure_id,
+                            };
+
+                            *villager_state = State::Operating;
+
+                            map_events.new(
+                                villager_id.0,
+                                game_tick.0 + 40, // in the future
+                                operate_event,
+                            );
+                        }
+                    }
+                    Order::Plant => {
+                        // Unwrap assignment
+                        let Some(assignment) = villager_assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for plant order");
+                            });
+                            continue;
+                        };
+
+                        // Create plant event
+                        let plant_event = VisibleEvent::PlantEvent {
+                            structure_id: assignment.structure_id,
+                        };
+
+                        *villager_state = State::Planting;
+
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::Planting,
+                        });
+
+                        map_events.new(
+                            villager_id.0,
+                            game_tick.0 + 50, // in the future
+                            plant_event,
+                        );
+                    }
+                    Order::Harvest => {
+                        // Unwrap assignment
+                        let Some(assignment) = villager_assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No assignment for harvest order");
+                            });
+                            continue;
+                        };
+
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "Creating Harvest Event");
+                        });
+                        // Create harvest event
+                        let harvest_event = VisibleEvent::HarvestEvent {
+                            structure_id: assignment.structure_id,
+                        };
+
+                        *villager_state = State::Harvesting;
+
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::Harvesting,
+                        });
+
+                        map_events.new(
+                            villager_id.0,
+                            game_tick.0 + 50, // in the future
+                            harvest_event,
+                        );
+                    }
+                    Order::Repair => {
+                        *villager_state = State::Repairing;
+
+                        // Get target structure id
+                        let Some(villager_target) = villager_target else {
+                            span.span().in_scope(|| {
+                                villager_error!(*actor, obj_id, "No target for repair order");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
+                        // Add Repair Event
+                        let repair_event = VisibleEvent::RepairEvent {
+                            structure_id: villager_target.0,
+                        };
+
+                        map_events.new(
+                            villager_id.0,
+                            game_tick.0 + 50, // in the future
+                            repair_event,
+                        );
+
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::Repairing,
+                        });
+                    }
+                    Order::Explore => {
+                        let explore_event = VisibleEvent::ExploreEvent;
+
+                        map_events.new(
+                            villager_id.0,
+                            game_tick.0 + 8, // in the future
+                            explore_event,
+                        );
+                    }
+                    _ => {}
+                }
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Process Order executing");
+                });
+                if let Ok(_event_completed) = event_completed.get(*actor) {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Event completed");
+                    });
+                    let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                        span.span().in_scope(|| {
+                            villager_error!(*actor, obj_id, "Cannot find event executing");
+                        });
+                        continue;
+                    };
+                    event_executing.state = EventExecutingState::Completed;
+                    commands.entity(*actor).remove::<EventCompleted>();
+
+                    *state = ActionState::Success;
+                } else {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Process Order still executing, waiting for completed");
+                    });
+                }
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling order action");
+                });
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find event executing");
+                    });
+                    continue;
+                };
+                event_executing.state = EventExecutingState::Completed;
+                commands.entity(*actor).remove::<EventCompleted>(); // TODO is this needed?
+
+                commands.trigger(CancelEvents {
+                    entity: *actor,
+                });
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn set_flee_destination_system(
+    mut commands: Commands,
+    map: Res<Map>,
+    ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    hero_query: Query<BaseQuery, (With<SubclassHero>, Without<SubclassVillager>)>,
+    villager_query: Query<BaseQuery, With<SubclassVillager>>,
+    shelter_query: Query<BaseQuery, (With<Shelter>, Without<SubclassVillager>)>,
+    blocking_query: Query<BaseQuery>,
+    mut action_query: Query<(&Actor, &mut ActionState, &SetFleeDestination, &ActionSpan)>,
+) {
+    /*for (Actor(actor), mut state, _set_flee_destination, _span) in &mut action_query {
+        match *state {
+            ActionState::Requested => {
+                debug!("Set Flee Destination");
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok(villager) = villager_query.get(*actor) else {
+                    error!("[{:?}] Cannot find villager {:?}", line!(), *actor);
+                    continue;
+                };
+
+                let Some(hero_id) = ids.get_hero(villager.player_id.0) else {
+                    error!(
+                        "[{:?}] Cannot find hero for player {:?}",
+                        line!(),
+                        villager.player_id
+                    );
+                    continue;
+                };
+
+                let Some(hero_entity) = entity_map.get_entity(hero_id) else {
+                    error!("Cannot find hero entity for hero {:?}", hero_id);
+                    continue;
+                };
+
+                let Ok(hero) = hero_query.get(hero_entity) else {
+                    error!("Cannot find hero for {:?}", hero_entity);
+                    continue;
+                };
+
+                let Some(shelter_entity) = entity_map.get_entity(villager.shelter) else {
+                    error!(
+                        "Cannot find shelter entity for shelter {:?}",
+                        villager.shelter
+                    );
+                    continue;
+                };
+
+                if let Ok(shelter) = shelter_query.get(shelter_entity) {
+                    // If villager has a shelter, set destination to shelter
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: *shelter.pos });
+                } else if hero.pos != villager.pos {
+                    let blocking_list =
+                        Obj::blocking_list_basequery(villager.player_id.0, &blocking_query);
+
+                    if let Some(path_result) = Map::find_fast_path(
+                        *villager.pos,
+                        *hero.pos,
+                        &map,
+                        villager.player_id.0,
+                        blocking_list,
+                        true,
+                        false,
+                        false,
+                        false,
+                    ) {
+                        debug!("Path to structure: {:?}", path_result);
+
+                        let (path, _c) = path_result;
+                        let next_pos = &path[1];
+
+                        debug!("Next pos: {:?}", next_pos);
+
+                        let flee_pos = Position {
+                            x: next_pos.0,
+                            y: next_pos.1,
+                        };
+
+                        commands
+                            .entity(*actor)
+                            .insert(Destination { pos: flee_pos });
+                        *state = ActionState::Success;
+                    } else {
+                        *state = ActionState::Failure;
+                    }
+                } else {
+                    *state = ActionState::Success;
+                }
+            }
+            ActionState::Cancelled => {
+                debug!("Flee cancelled...");
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }*/
+}
+
+pub fn find_drink_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    map: Res<Map>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    structure_query: Query<
+        (&Id, &PlayerId, &Position, &Inventory),
+        (With<ClassStructure>, Without<SubclassVillager>),
+    >,
+    find_event_completed: Query<&FindEventCompleted>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut action_query: Query<(&Actor, &mut ActionState, &FindDrink, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _find_drink, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Ok(villager) = villager_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    continue;
+                };
+
+                // Create find event
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + FIND_DRINK_TICKS,
+                    VisibleEvent::FindDrinkEvent {
+                        obj_id: villager.id.0,
+                    },
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Find Drink still executing");
+                    });
+                    continue;
+                }
+
+                // Reset EventExecutingState back to none
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Find Drink completed");
+                });
+                event_executing.state = EventExecutingState::None;
+
+                let Ok(villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    continue;
+                };
+
+                let Some((item_location, item, item_pos)) = find_item_location_by_class(
+                    villager.player_id.0,
+                    &villager.pos,
+                    &villager.inventory,
+                    &structure_query,
+                    DRINK.to_string(),
+                    &map,
+                ) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot find any drinks");
+                    });
+                    commands.entity(*actor).insert(NoDrinks {
+                        at_tick: game_tick.0,
+                    });
+
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Remove NoDrinks if a drink is found
+                commands.entity(*actor).remove::<NoDrinks>();
+
+                // Add TargetItem component
+                commands.entity(*actor).insert(TargetItem(item.clone()));
+
+                // Set destination to item position
+                if item_location == ItemLocation::Own {
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: *villager.pos });
+                } else if item_location == ItemLocation::OwnStructure {
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: item_pos });
+                }
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling Find Drink action");
+                });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::None;
+
+                commands.trigger(CancelEvents {
+                    entity: *actor,
+                });
+
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn move_to_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    dest_query: Query<&Destination>,
+    obj_query: Query<(&Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
+    state_query: Query<&mut State>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut action_query: Query<(&Actor, &mut ActionState, &MoveTo, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _move_to, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "MoveTo requested");
+                });
+                let Some(obj_id_val) = obj_id else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, None, "Cannot find obj id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(villager_player_id) = ids.get_player(obj_id_val) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find player id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let blocking_list =
+                    Obj::blocking_list(villager_player_id, actor, &obj_query, &state_query);
+
+                let Ok(destination) = dest_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "No Destination component");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get obj query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if *pos != destination.pos {
+                    if let Some(path_result) = Map::find_fast_path(
+                        *pos,
+                        destination.pos,
+                        &map,
+                        villager_player_id,
+                        blocking_list,
+                        true,
+                        false,
+                        false,
+                        false,
+                    ) {
+                        span.span().in_scope(|| {
+                            villager_trace!(*actor, obj_id, "Path found, length={}", path_result.0.len());
+                        });
+
+                        let (path, _c) = path_result;
+                        let next_pos = &path[1];
+
+                        span.span().in_scope(|| {
+                            villager_trace!(*actor, obj_id, "Next pos=({}, {})", next_pos.0, next_pos.1);
+                        });
+
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::Moving,
+                        });
+
+                        // Add Move Event
+                        let move_event = VisibleEvent::MoveEvent {
+                            src: *pos,
+                            dst: Position {
+                                x: next_pos.0,
+                                y: next_pos.1,
+                            },
+                        };
+
+                        map_events.new(
+                            id.0,
+                            game_tick.0 + 48, // in the future
+                            move_event,
+                        );
+
+                        let mut event_executing = event_executing_query
+                            .get_mut(*actor)
+                            .expect("Missing EventExecuting component");
+                        event_executing.state = EventExecutingState::Executing;
+                    } else {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "Cannot find path to destination");
+                        });
+                        *state = ActionState::Failure
+                    }
+                }
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "MoveTo executing");
+                });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Event state={:?}", event_executing.state);
+                });
+                if !event_executing.state.is_finished() {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "MoveTo still executing");
+                    });
+                    continue;
+                }
+
+                let Some(obj_id_val) = obj_id else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, None, "Cannot find obj id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(villager_player_id) = ids.get_player(obj_id_val) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find player id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let blocking_list =
+                    Obj::blocking_list(villager_player_id, actor, &obj_query, &state_query);
+
+                if let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                {
+                    let Ok(destination) = dest_query.get(*actor) else {
+                        span.span().in_scope(|| {
+                            villager_error!(*actor, obj_id, "No Destination component");
+                        });
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+
+                    if *pos != destination.pos {
+                        // Check if moving event failed
+                        if event_executing.state.is_failed() {
+                            span.span().in_scope(|| {
+                                villager_warn!(*actor, obj_id, "Moving event failed");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        }
+
+                        let Some(path_result) = Map::find_fast_path(
+                            *pos,
+                            destination.pos,
+                            &map,
+                            villager_player_id,
+                            blocking_list,
+                            true,
+                            false,
+                            false,
+                            false,
+                        ) else {
+                            span.span().in_scope(|| {
+                                villager_trace!(*actor, obj_id, "Cannot find path to destination");
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
+                        span.span().in_scope(|| {
+                            villager_trace!(*actor, obj_id, "Path found, length={}", path_result.0.len());
+                        });
+
+                        let (path, _c) = path_result;
+                        let next_pos = &path[1];
+
+                        span.span().in_scope(|| {
+                            villager_trace!(*actor, obj_id, "Next pos=({}, {})", next_pos.0, next_pos.1);
+                        });
+
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::Moving,
+                        });
+
+                        // Add Move Event
+                        let move_event = VisibleEvent::MoveEvent {
+                            src: *pos,
+                            dst: Position {
+                                x: next_pos.0,
+                                y: next_pos.1,
+                            },
+                        };
+
+                        map_events.new(
+                            id.0,
+                            game_tick.0 + 48, // in the future
+                            move_event,
+                        );
+
+                        // Set EventExecutingState to Executing
+                        event_executing.state = EventExecutingState::Executing;
+                    } else {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "Adjacent to destination, success");
+                        });
+                        *state = ActionState::Success;
+                    }
+                }
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling MoveTo");
+                });
+
+                let Some(villager_id) = obj_id else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, None, "Cannot find obj id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager_id,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn transfer_drink_system(
+    entity_map: Res<EntityObjMap>,
+    mut ids: ResMut<Ids>,
+    templates: Res<Templates>,
+    villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
+    mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
+    mut action_query: Query<(&Actor, &mut ActionState, &TransferDrink, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _transfer_drink, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Transfer Drink requested");
+                });
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok((_villager_player_id, villager_id, target_item)) =
+                    villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Target item owner={}", target_item.0.owner);
+                });
+
+                // Check if target item owner is the villager
+                if target_item.0.owner == villager_id.0 {
+                    // Item is already in the villager's inventory
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Item already in inventory");
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                // Get target item owner entity
+                let Some(target_entity) = entity_map.get_entity(target_item.0.owner) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find target item owner entity for owner={}", target_item.0.owner);
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(
+                    [(villager_id, villager_pos, mut villager_inventory), (target_id, target_pos, mut target_inventory)],
+                ) = inventory_query.get_many_mut([*actor, target_entity])
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find inventories");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Check if villager and target are on the same position
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Villager pos={:?} target_id={} target_pos={:?}", villager_pos, target_id.0, target_pos);
+                });
+                if villager_pos != target_pos {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Villager and target not on same position");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Transfer item to villager's inventory from target's inventory
+                Inventory::transfer_quantity(
+                    target_item.0.id,
+                    ids.new_item_id(),
+                    &mut target_inventory,
+                    &mut villager_inventory,
+                    1,
+                    &templates.item_templates,
+                );
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling transfer drink");
+                });
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn drink_action_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    entity_map: Res<EntityObjMap>,
+    event_completed: Query<&EventCompleted>,
+    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut query: Query<(&Actor, &mut ActionState, &Drink, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _drink, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        // Use the drink_action's actor to look up the corresponding Thirst Component.
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Drink action requested");
+                });
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(drink_item) = villager.inventory.get_by_class(DRINK.to_owned()) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot find drink item");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                *villager.state = State::Drinking;
+
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Drinking,
+                });
+
+                // Create drinking event
+                let drink_event = VisibleEvent::DrinkEvent {
+                    item_id: drink_item.id,
+                    obj_id: villager.id.0,
+                };
+
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + TICKS_PER_SEC * 20, // in the future
+                    drink_event,
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Drink Event still executing");
+                    });
+                    continue;
+                }
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling Drink action");
+                });
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager.id.0,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn find_food_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    map: Res<Map>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    structure_query: Query<
+        (&Id, &PlayerId, &Position, &Inventory),
+        (With<ClassStructure>, Without<SubclassVillager>),
+    >,
+    find_event_completed: Query<&FindEventCompleted>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut action_query: Query<(&Actor, &mut ActionState, &FindFood, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _find_food, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    continue;
+                };
+
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + FIND_FOOD_TICKS, // in the future
+                    VisibleEvent::FindFoodEvent {
+                        obj_id: villager.id.0,
+                    },
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Find Food still executing");
+                    });
+                    continue;
+                }
+
+                // Reset EventExecutingState back to none
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Find Food completed");
+                });
+                event_executing.state = EventExecutingState::None;
+
+                let Ok(villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some((item_location, item, item_pos)) = find_item_location_by_class(
+                    villager.player_id.0,
+                    &villager.pos,
+                    &villager.inventory,
+                    &structure_query,
+                    FOOD.to_string(),
+                    &map,
+                ) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot find any food");
+                    });
+                    commands.entity(*actor).insert(NoFood {
+                        at_tick: game_tick.0,
+                    });
+
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Remove NoFood if a food is found
+                commands.entity(*actor).remove::<NoFood>();
+
+                // Add TargetItem component
+                commands.entity(*actor).insert(TargetItem(item.clone()));
+
+                // Set destination to item position
+                if item_location == ItemLocation::Own {
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: *villager.pos });
+                } else if item_location == ItemLocation::OwnStructure {
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: item_pos });
+                }
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling find food");
+                });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::None;
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager.id.0,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn transfer_food_system(
+    entity_map: Res<EntityObjMap>,
+    mut ids: ResMut<Ids>,
+    templates: Res<Templates>,
+    villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
+    mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
+    mut action_query: Query<(&Actor, &mut ActionState, &TransferFood, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _transfer_food, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Transfer Food requested");
+                });
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok((_villager_player_id, villager_id, target_item)) =
+                    villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Target item owner={}", target_item.0.owner);
+                });
+
+                // Check if target item owner is the villager
+                if target_item.0.owner == villager_id.0 {
+                    // Item is already in the villager's inventory
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Item already in inventory");
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                // Get target item owner entity
+                let Some(target_entity) = entity_map.get_entity(target_item.0.owner) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find target item owner entity for owner={}", target_item.0.owner);
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(
+                    [(villager_id, villager_pos, mut villager_inventory), (target_id, target_pos, mut target_inventory)],
+                ) = inventory_query.get_many_mut([*actor, target_entity])
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find inventories");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Check if villager and target are on the same position
+                span.span().in_scope(|| {
+                    villager_trace!(*actor, obj_id, "Villager pos={:?} target_id={} target_pos={:?}", villager_pos, target_id.0, target_pos);
+                });
+                if villager_pos != target_pos {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Villager and target not on same position");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Transfer item to villager's inventory from target's inventory
+                Inventory::transfer_quantity(
+                    target_item.0.id,
+                    ids.new_item_id(),
+                    &mut target_inventory,
+                    &mut villager_inventory,
+                    1,
+                    &templates.item_templates,
+                );
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling transfer food");
+                });
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn eat_action_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    entity_map: Res<EntityObjMap>,
+    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut query: Query<(&Actor, &mut ActionState, &Eat, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _eat, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Eat action requested");
+                });
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find villager");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(food_item) = villager.inventory.get_by_class(FOOD.to_owned()) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot find food item");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                *villager.state = State::Eating;
+
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Eating,
+                });
+
+                let eat_event = VisibleEvent::EatEvent {
+                    item_id: food_item.id,
+                    obj_id: villager.id.0,
+                };
+
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + TICKS_PER_SEC * 5, // in the future
+                    eat_event,
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Eat Event still executing");
+                    });
+                    continue;
+                }
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling Eat action");
+                });
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager.id.0,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn find_shelter_system(
+    mut commands: Commands,
+    mut ids: ResMut<Ids>,
+    game_tick: Res<GameTick>,
+    entity_map: Res<EntityObjMap>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    mut villager_query: Query<(&Id, &Position, &mut ActiveShelter), With<SubclassVillager>>,
+    structure_query: Query<&Position, (With<ClassStructure>, Without<SubclassVillager>)>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    exhausted: Query<&Exhausted>,
+    mut action_query: Query<(&Actor, &mut ActionState, &FindShelter, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _find_shelter_action, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Ok((villager_id, _villager_pos, _active_shelter)) = villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    continue;
+                };
+
+                // Create find event
+                map_events.new(
+                    villager_id.0,
+                    game_tick.0 + FIND_SHELTER_TICKS,
+                    VisibleEvent::FindShelterEvent {
+                        obj_id: villager_id.0,
+                    },
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Find Shelter still executing");
+                    });
+                    continue;
+                }
+
+                let Ok((villager_id, villager_pos, mut active_shelter)) =
+                    villager_query.get_mut(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    continue;
+                };
+
+                if active_shelter.0 == NO_SHELTER {
+                    if exhausted.get(*actor).is_ok() {
+                        commands
+                            .entity(*actor)
+                            .insert(Destination { pos: *villager_pos });
+
+                        *state = ActionState::Success;
+                    } else {
+                        *state = ActionState::Failure;
+                    }
+                } else {
+                    let Some(shelter_entity) = entity_map.get_entity(active_shelter.0) else {
+                        span.span().in_scope(|| {
+                            villager_error!(*actor, obj_id, "Cannot find shelter entity for shelter_id={}", active_shelter.0);
+                        });
+                        continue;
+                    };
+
+                    if let Ok((shelter_pos)) = structure_query.get(shelter_entity) {
+                        commands
+                            .entity(*actor)
+                            .insert(Destination { pos: *shelter_pos });
+
+                        *state = ActionState::Success;
+                    } else {
+                        span.span().in_scope(|| {
+                            villager_error!(*actor, obj_id, "Cannot find shelter {:?}", shelter_entity);
+                        });
+                        *state = ActionState::Failure;
+                    }
+                }
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling find shelter");
+                });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::None;
+
+                let Ok((villager_id, villager_pos, _active_shelter)) = villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager_id.0,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn sleep_action_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    entity_map: Res<EntityObjMap>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    mut query: Query<(&Actor, &mut ActionState, &Sleep, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _sleep, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Sleep action requested");
+                });
+
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find villager");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                *villager.state = State::Sleeping;
+
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Sleeping,
+                });
+
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + 50, // in the future
+                    VisibleEvent::SleepEvent {
+                        obj_id: villager.id.0,
+                    },
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if event_executing.state != EventExecutingState::Completed {
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Sleep Event still executing");
+                    });
+                    continue;
+                }
+
+                // Reset EventExecutingState back to none
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Sleep Event completed");
+                });
+                event_executing.state = EventExecutingState::None;
+
+                *state = ActionState::Success;
+            }
+            // All Actions should make sure to handle cancellations!
+            ActionState::Cancelled => {
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::None;
+
+                // Reset activity
+                let Ok(mut villager) = villager_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: villager.id.0,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type,
+                };
+
+                game_events.insert(event.event_id, event);
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn set_storage_destination_system(
+    mut commands: Commands,
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
+    _templates: Res<Templates>,
+    (obj_query, mut query): (
+        Query<BaseQuery>,
+        Query<(
+            &Actor,
+            &mut ActionState,
+            &SetStorageDestination,
+            &ActionSpan,
+        )>,
+    ),
+) {
+    for (Actor(actor), mut state, _set_storage_destination, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Some(obj_id_val) = obj_id else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, None, "Cannot find obj id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(villager_player_id) = ids.get_player(obj_id_val) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find player id");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(villager) = obj_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find obj");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let mut nearest_storage_dist = 10000 as u32;
+                let mut nearest_storage_id = None;
+                let mut nearest_storage_pos = None;
+
+                for structure in obj_query.iter() {
+                    // Skip if player_id of villager and structure are not matching
+                    if villager_player_id != structure.player_id.0 {
+                        continue;
+                    }
+
+                    // Check if the structure is a shelter
+                    if *structure.subclass != Subclass::Storage {
+                        continue;
+                    }
+
+                    if *structure.state != State::None {
+                        continue;
+                    }
+
+                    let Some(path_result) = Map::find_fast_path(
+                        *villager.pos,
+                        *structure.pos,
+                        &map,
+                        villager_player_id,
+                        Vec::new(),
+                        true,
+                        false,
+                        false,
+                        false,
+                    ) else {
+                        span.span().in_scope(|| {
+                            villager_trace!(*actor, obj_id, "No path found to structure");
+                        });
+                        continue;
+                    };
+
+                    span.span().in_scope(|| {
+                        villager_trace!(*actor, obj_id, "Path to structure, cost={}", path_result.1);
+                    });
+
+                    let (path, c) = path_result;
+
+                    if nearest_storage_dist > c {
+                        nearest_storage_dist = c;
+                        nearest_storage_id = Some(structure.id.0);
+                        nearest_storage_pos = Some(*structure.pos);
+                    }
+                }
+
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Nearest storage id={:?} pos={:?}", nearest_storage_id, nearest_storage_pos);
+                });
+
+                if let (Some(storage_id), Some(storage_pos)) =
+                    (nearest_storage_id, nearest_storage_pos)
+                {
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: storage_pos });
+
+                    commands.entity(*actor).insert(Storage { id: storage_id });
+
+                    *state = ActionState::Success;
+                } else {
+                    *state = ActionState::Failure;
+                }
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Cancelling set storage destination");
+                });
+                *state = ActionState::Failure
+            }
+            _ => {}
+        }
+    }
+}
+
+
+pub fn load_items_system(
+    mut commands: Commands,
+    entity_map: Res<EntityObjMap>,
+    villager_query: Query<&Assignment>,
+    mut query: Query<(&Actor, &mut ActionState, &LoadItems, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _load_items, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Load items requested");
+                });
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Loading items");
+                });
+
+                let Ok(assignment) = villager_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find assignment");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(structure_entity) = entity_map.get_entity(assignment.structure_id) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find structure entity for structure_id={}", assignment.structure_id);
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                commands.trigger(TransferAllResources {
+                    entity: structure_entity,
+                    target_entity: *actor,
+                });
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn unload_items_system(
+    entity_map: Res<EntityObjMap>,
+    mut inventory_query: Query<(&PlayerId, &Position, &mut Inventory)>,
+    storage_query: Query<&Storage>,
+    mut query: Query<(&Actor, &mut ActionState, &UnloadItems, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _unload_items, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Unload items requested");
+                });
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, "Unloading items");
+                });
+
+                let Ok(storage) = storage_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find storage component");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Get storage entity
+                let Some(storage_entity) = entity_map.get_entity(storage.id) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find storage entity for storage_id={}", storage.id);
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(
+                    [(villager_player_id, villager_pos, mut villager_inventory), (storage_player_id, storage_pos, mut storage_inventory)],
+                ) = inventory_query.get_many_mut([*actor, storage_entity])
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Cannot find inventories");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                // Check if villager and storage player_id are matching
+                if villager_player_id.0 != storage_player_id.0 {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Villager and storage player_id not matching");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Check if villager and storage are on the same position
+                if villager_pos != storage_pos {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, "Villager and storage not on same position");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Transfer items to storage
+                Inventory::transfer_all_items(&mut villager_inventory, &mut storage_inventory);
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+/*pub fn activity_update_system(
+    clients: Res<Clients>,
+    active_infos: Res<ActiveInfos>,
+    query: Query<(&Id, &PlayerId, &VillagerAttrs), Changed<VillagerAttrs>>,
+) {
+    for (id, player_id, attrs) in query.iter() {
+        // Skip if activity is none
+        if attrs.activity == ActiveTask::None {
+            continue;
+        }
+
+        // Check if player has an active info for this mover
+        if let Some(_active_info) = active_infos.get(&(id.0, ActiveInfoType::Obj)) {
+            let response_packet = ResponsePacket::InfoActivityUpdate {
+                id: id.0,
+                activity: attrs.activity.to_string(),
+            };
+
+            info!("Activity sending to client {:?}", response_packet);
+
+            send_to_client(player_id.0, response_packet, &clients)
+        }
+    }
+}*/
+
+fn find_item_location_by_class(
+    villager_player_id: i32,
+    villager_pos: &Position,
+    villager_inventory: &Inventory,
+    structure_query: &Query<
+        (&Id, &PlayerId, &Position, &Inventory),
+        (With<ClassStructure>, Without<SubclassVillager>),
+    >,
+    item_class: String,
+    map: &Res<Map>,
+) -> Option<(ItemLocation, Item, Position)> {
+    let mut nearest_source_dist = 10000 as u32;
+    let mut nearest_item = None;
+    let mut nearest_pos = None;
+
+    // Check if the villager has any items of the given class
+    if let Some(item) = villager_inventory.get_by_class(item_class.clone()) {
+        return Some((ItemLocation::Own, item.clone(), *villager_pos));
+    }
+
+    // Check if the structures have any items of the given class
+    for (id, player_id, pos, inventory) in structure_query.iter() {
+        if player_id.0 == villager_player_id {
+            let Some(item) = inventory.get_by_class(item_class.clone()) else {
+                debug!(
+                    "Structure does not have any items of class {:?}",
+                    item_class
+                );
+                continue;
+            };
+
+            let Some(path_result) = Map::find_fast_path(
+                *villager_pos,
+                *pos,
+                &map,
+                villager_player_id,
+                Vec::new(),
+                true,
+                false,
+                false,
+                false,
+            ) else {
+                debug!("Not path found to structure...");
+                continue;
+            };
+
+            let (_path, c) = path_result;
+            debug!("Path count: {:?}", c);
+
+            if nearest_source_dist > c {
+                nearest_source_dist = c;
+                nearest_item = Some(item.clone());
+                nearest_pos = Some(*pos);
+            }
+        }
+    }
+
+    if let (Some(nearest_item), Some(nearest_pos)) = (nearest_item, nearest_pos) {
+        return Some((
+            ItemLocation::OwnStructure,
+            nearest_item.clone(),
+            nearest_pos.clone(),
+        ));
+    } else {
+        return None;
+    }
+}
+
+pub fn dialogue_system(
+    game_tick: Res<GameTick>,
+    templates: Res<Templates>,
+    mut map_events: ResMut<MapEvents>,
+    dialogue_query: Query<(&Id, &Dialogue)>,
+) {
+    for (id, dialogue) in dialogue_query.iter() {
+        if game_tick.0 >= dialogue.at_tick {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("NoDrinks"),
+                id,
+                &mut map_events,
+            );
+        }
+    }
+}
+
+pub fn vital_dialogue_system(
+    game_tick: Res<GameTick>,
+    templates: Res<Templates>,
+    mut map_events: ResMut<MapEvents>,
+    dehydrated: Query<(&Id, &Dehydrated), Without<StateDead>>,
+    starving: Query<(&Id, &Starving), Without<StateDead>>,
+    exhausted: Query<(&Id, &Exhausted), Without<StateDead>>,
+) {
+    for (id, dehydrated) in dehydrated.iter() {
+        if game_tick.0 == dehydrated.at_tick + 5 {
+            // Add 5 ticks for delay
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("DehydratedLevel1"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == dehydrated.at_tick + DEHYDRATED_WARNING1_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("DehydratedLevel2"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == dehydrated.at_tick + DEHYDRATED_WARNING2_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("DehydratedLevel3"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == dehydrated.at_tick + DEHYDRATED_DEATH_AT - 20 {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("DehydratedDying"),
+                id,
+                &mut map_events,
+            );
+        }
+    }
+
+    for (id, starving) in starving.iter() {
+        if game_tick.0 == starving.at_tick + 5 {
+            // Add 5 ticks for delay
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("StarvingLevel1"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == starving.at_tick + STARVING_WARNING1_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("StarvingLevel2"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == starving.at_tick + STARVING_WARNING2_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("StarvingLevel3"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == starving.at_tick + STARVING_DEATH_AT - 20 {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("StarvingDying"),
+                id,
+                &mut map_events,
+            );
+        }
+    }
+
+    for (id, exhausted) in exhausted.iter() {
+        if game_tick.0 == exhausted.at_tick + 5 {
+            // Add 5 ticks for delay
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("ExhaustedLevel1"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == exhausted.at_tick + EXHAUSTED_WARNING1_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("ExhaustedLevel2"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == exhausted.at_tick + EXHAUSTED_WARNING2_AT {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("ExhaustedLevel3"),
+                id,
+                &mut map_events,
+            );
+        } else if game_tick.0 == exhausted.at_tick + EXHAUSTED_DEATH_AT - 20 {
+            Obj::add_speech_event(
+                game_tick.0,
+                templates.get_dialogue("ExhaustedDying"),
+                id,
+                &mut map_events,
+            );
+        }
+    }
+}
+
+pub fn remove_no_drinks_system(
+    mut commands: Commands,
+    no_drink_query: Query<(Entity, &NoDrinks)>,
+    game_tick: Res<GameTick>,
+) {
+    for (entity, no_drink) in no_drink_query.iter() {
+        if game_tick.0 > no_drink.at_tick + TICKS_PER_SEC * 10 {
+            commands.entity(entity).remove::<NoDrinks>();
+        }
+    }
+}
+
+pub fn remove_no_food_system(
+    mut commands: Commands,
+    no_food_query: Query<(Entity, &NoFood)>,
+    game_tick: Res<GameTick>,
+) {
+    for (entity, no_food) in no_food_query.iter() {
+        if game_tick.0 > no_food.at_tick + TICKS_PER_SEC * 10 {
+            commands.entity(entity).remove::<NoFood>();
+        }
+    }
+}
+
+pub fn active_task_system(
+    mut villager_query: Query<&mut ActiveTask, With<SubclassVillager>>,
+    order_query: Query<(&State, &Order), With<SubclassVillager>>,
+    actions: Query<(
+        &Actor,
+        &ActionState,
+        // === Your action marker components ===
+        Option<&FindDrink>,
+        Option<&Drink>,
+        Option<&TransferDrink>,
+        Option<&FindFood>,
+        Option<&TransferFood>,
+        Option<&Eat>,
+        Option<&MoveTo>,
+        Option<&Sleep>,
+        Option<&FindShelter>,
+        Option<&UnloadItems>,
+        Option<&Idle>,
+        Option<&ProcessOrder>,
+        Option<&Flee>,
+    )>,
+) {
+    // Best task per villager: (rank, task)
+    let mut best: HashMap<Entity, (i32, ActiveTask)> = HashMap::new();
+
+    for (
+        Actor(actor),
+        state,
+        find_drink,
+        drink,
+        transfer_drink,
+        find_food,
+        transfer_food,
+        eat,
+        move_to,
+        sleep,
+        find_shelter,
+        unload_items,
+        idle,
+        process_order,
+        flee,
+    ) in &actions
+    {
+        // Inline ranking: Executing > Requested > everything else
+        let rank = match *state {
+            ActionState::Executing => 2,
+            ActionState::Requested => 1,
+            _ => 0,
+        };
+
+        if rank == 0 {
+            continue;
+        }
+
+        // Map action component -> ActiveTask
+        let task = if flee.is_some() {
+            ActiveTask::Fleeing
+        } else if find_drink.is_some() || drink.is_some() || transfer_drink.is_some() {
+            ActiveTask::GettingDrink
+        } else if find_food.is_some() || eat.is_some() || transfer_food.is_some() {
+            ActiveTask::GettingFood
+        } else if sleep.is_some() {
+            ActiveTask::Sleeping
+        } else if find_shelter.is_some() {
+            ActiveTask::FindingShelter
+        } else if unload_items.is_some() {
+            ActiveTask::Unloading
+        } else if process_order.is_some() {
+            if let Ok((state, order)) = order_query.get(*actor) {
+                match order {
+                    Order::Follow { .. } => ActiveTask::Following,
+                    Order::Build => ActiveTask::Building,
+                    Order::WorkQueue => {
+                        if *state == State::Crafting {
+                            ActiveTask::Crafting
+                        } else if *state == State::Refining {
+                            ActiveTask::Refining
+                        } else if *state == State::Experimenting {
+                            ActiveTask::Experimenting
+                        } else {
+                            ActiveTask::Operating
+                        }
+                    }
+                    Order::Explore => ActiveTask::Exploring,
+                    Order::Plant => ActiveTask::Planting,
+                    Order::Tend => ActiveTask::Tending,
+                    _ => ActiveTask::Unknown,
+                }
+            } else {
+                ActiveTask::Operating
+            }
+        } else if idle.is_some() {
+            ActiveTask::Idle
+        } else {
+            continue;
+        };
+
+        match best.get(actor) {
+            Some((best_rank, _)) if *best_rank >= rank => {}
+            _ => {
+                best.insert(*actor, (rank, task));
+            }
+        }
+    }
+
+    // Default everyone to None
+    for mut active_task in &mut villager_query {
+        *active_task = ActiveTask::None;
+    }
+
+    // Apply best task per villager
+    for (villager_entity, (_rank, task)) in best {
+        if let Ok(mut active_task) = villager_query.get_mut(villager_entity) {
+            info!("Active Task: {:?}", task);
+            *active_task = task;
+        }
+    }
+}
+
+pub fn clear_event_executing(
+    mut event_executing_query: Query<&mut EventExecuting>,
+    actions: Query<(&Actor, &ActionState)>,
+) {
+    for (Actor(actor), action_state) in &actions {
+        match *action_state {
+            ActionState::Failure | ActionState::Cancelled | ActionState::Success => {
+
+                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                    if event_executing.state != EventExecutingState::None {
+                        info!("Clearing EventExecuting for {:?}", *actor);
+                        event_executing.state = EventExecutingState::None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "villager_tests.rs"]
+mod tests;

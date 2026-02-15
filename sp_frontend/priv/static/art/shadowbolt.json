@@ -1,0 +1,10 @@
+{
+    "frames": {
+        "width": 72,
+        "height": 72
+    },
+    "animations": {
+        "none": [5],
+        "projectile": [0, 5, "none", 0.05]
+    }
+}

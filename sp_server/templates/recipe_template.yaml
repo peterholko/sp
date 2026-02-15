@@ -1,0 +1,264 @@
+# recipe_template.yaml
+
+##################
+##### RECIPE #####
+##################
+
+- name: Copper Training Axe
+  class: Weapon
+  subclass: Axe
+  image: trainingaxe
+  tier: 1
+  slot: Main Hand
+  damage: 10
+  speed: 5
+  weight: 10
+  structure_req: 
+    - Crafting Tent
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 0
+  req: 
+    - type: Copper Ingot
+      quantity: 1
+    - type: Maple Timber
+      quantity: 1
+
+- name: Copper Broad Axe
+  class: Weapon
+  subclass: Axe
+  image: broadaxe
+  tier: 1
+  slot: Main Hand
+  damage: 30
+  speed: 4.5
+  weight: 10
+  structure_req:
+    - Blacksmith 
+  stamina_req: 12
+  skill_req: 10
+  req: 
+    - type: Copper Ingot
+      # quantity: 40
+      quantity: 2
+    - type: Maple Timber
+      # quantity: 15
+      quantity: 2
+
+- name: Copper Heavy Axe
+  class: Weapon
+  subclass: Axe
+  image: heavyaxe
+  tier: 1
+  slot: Main Hand
+  damage: 35
+  speed: 4.5
+  weight: 10
+  structure_req:
+    - Blacksmith 
+  stamina_req: 12
+  skill_req: 25
+  req: 
+    - type: Copper Ingot
+      #quantity: 75
+      quantity: 2
+    - type: Maple Timber
+      #quantity: 25
+      quantity: 2
+
+- name: Copper Training Sword
+  class: Weapon
+  subclass: Sword
+  image: sword
+  tier: 1
+  slot: Main Hand
+  damage: 5
+  speed: 4.5
+  weight: 10
+  structure_req:
+    - Blacksmith  
+  stamina_req: 12
+  skill_req: 0
+  req: 
+    - type: Copper Ingot
+      quantity: 75
+    - type: Maple Timber
+      quantity: 25
+ 
+- name: Copper Training Club
+  class: Weapon
+  subclass: Hammer
+  image: club
+  slot: Main Hand
+  damage: 5
+  speed: 4.5
+  weight: 10
+  structure_req: 
+    - Crafting Tent
+    - Blacksmith
+  stamina_req: 12
+  skill_req: 0
+  req: 
+    - type: Copper Ingot
+      quantity: 75
+    - type: Maple Timber
+      quantity: 25
+
+      
+
+##################
+##### TOOLS #####
+##################
+
+- name: Training Pick Axe
+  class: Gathering
+  subclass: Pick Axe
+  image: pickaxe
+  slot: Main Hand
+  weight: 5
+  structure_req: 
+    - Crafting Tent
+    - Blacksmith
+  req: 
+    - type: Ingot
+      quantity: 2
+    - type: Log
+      quantity: 2
+
+
+
+##################
+##### BOWS #####
+##################
+
+- name: Training Bow
+  class: Weapon
+  subclass: Bow
+  image: bow
+  slot: Main Hand
+  weight: 10
+  structure_req: 
+    - Workshop
+  req:
+    - type: Timber
+      quantity: 5
+
+##################
+##### FUEL #####
+##################
+
+- name: Firewood
+  class: Fuel
+  subclass: Firewood
+  image: firewood
+  weight: 1
+  crafting_time: 200
+  structure_req: 
+    - Crafting Tent
+  amount: 5
+  req:
+    - type: Log
+      quantity: 1
+
+- name: Charcoal
+  class: Fuel
+  subclass: Fuel
+  image: charcoal
+  weight: 10
+  structure_req: 
+    - Workshop
+  req:
+    - type: Wood
+      quantity: 1
+
+##################
+### HAND CRAFT ###
+##################
+
+- name: Sharpened Stick
+  class: Weapon
+  subclass: Spear
+  image: sharpenedstick
+  slot: Main Hand
+  weight: 2
+  crafting_time: 50
+  req:
+    - type: Stick
+      quantity: 1
+    - type: Flint Shard
+      quantity: 1
+
+- name: Crude Torch
+  class: Torch
+  subclass: Crude Torch
+  image: crudetorch
+  weight: 1
+  req:
+    - type: Stick
+      quantity: 1
+    - type: Resin
+      quantity: 1
+  crafting_time: 100
+  amount: 1
+
+- name: Crude Bandage
+  class: Medical
+  subclass: Bandage
+  image: bandage
+  weight: 1
+  crafting_time: 25
+  req:
+    - type: Cloth Scrap
+      quantity: 1
+
+- name: Hand Campfire
+  class: Structure Kit
+  subclass: Campfire
+  image: campfirekit
+  weight: 3
+  crafting_time: 40
+  req:
+    - type: Stick
+      quantity: 2
+    - type: Stone
+      quantity: 2
+
+- name: Twine
+  class: Material
+  subclass: Cordage
+  image: twine
+  weight: 1
+  crafting_time: 30
+  req:
+    - type: Plant Fibers
+      quantity: 3
+
+- name: Improvised Sling
+  class: Weapon
+  subclass: Ranged
+  image: sling
+  slot: Main Hand
+  weight: 1
+  crafting_time: 60
+  req:
+    - type: Twine
+      quantity: 1
+    - type: Cloth Scrap
+      quantity: 1
+
+##################
+### COOKING #####
+##################      
+
+- name: Cooked Meat
+  class: Food
+  subclass: Cooked Meat
+  image: cookedmeat
+  weight: 1
+  item_name_from_req: true
+  crafting_time: 50
+  structure_req: 
+    - Crafting Tent
+  req:
+    - type: Raw Meat
+      quantity: 1

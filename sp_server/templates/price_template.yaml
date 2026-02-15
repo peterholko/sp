@@ -1,0 +1,46 @@
+# price_template.yaml
+# Empire buy and sell prices for items
+
+- name: Copper Ore
+  buy_price: 5
+  buy_quantity: 1000
+  sell_price: 10
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Copper Ingot
+  buy_price: 10
+  buy_quantity: 1000
+  sell_price: 20
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Maple Log
+  buy_price: 5
+  buy_quantity: 1000
+  sell_price: 10
+  sell_quantity: 25  
+  impact_factor: 0.1
+
+- name: Maple Timber
+  buy_price: 10
+  buy_quantity: 3
+  sell_price: 20
+  sell_quantity: 25    
+  impact_factor: 0.1
+
+- name: Pick Axe
+  buy_price: 10
+  buy_quantity: 100
+  sell_price: 25
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Yurt Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
+  sell_quantity: 100
+  impact_factor: 0.1
+
+

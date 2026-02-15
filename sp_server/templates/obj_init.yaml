@@ -1,0 +1,23 @@
+# obj_init.yaml
+
+- name: Monolith1
+  pos: [18,35]
+  obj_type: Monolith
+
+- name: Monolith2
+  pos: [8,22]
+  obj_type: Monolith
+
+- name: Monolith3
+  pos: [15,14]
+  obj_type: Monolith
+
+- name: Monolith4
+  pos: [6,29]
+  obj_type: Monolith
+
+- name: Monolith5
+  pos: [20,7]
+  obj_type: Monolith
+
+

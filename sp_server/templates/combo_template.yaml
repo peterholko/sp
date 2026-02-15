@@ -1,0 +1,73 @@
+# combo_template.yaml
+
+- name: Hamstring
+  attacks: [quick, quick]
+  effects: [Hamstrung]
+  quick_damage: 1.0
+  precise_damage: 1.0
+  fierce_damage: 1.0
+  
+- name: Gouge
+  attacks: [precise, quick]
+  effects: [Stunned]
+  quick_damage: 1.0
+  precise_damage: 1.0
+  fierce_damage: 1.0
+
+- name: Imtimidating Shout
+  attacks: [fierce, fierce]
+  effects: [Fear]
+  quick_damage: 1.0
+  precise_damage: 1.0
+  fierce_damage: 1.0  
+
+- name: Shrouded Slash
+  attacks: [precise, fierce, quick]
+  effects: [Expose Armor]
+  quick_damage: 3.0
+  precise_damage: 1.0
+  fierce_damage: 1.0  
+
+- name: Shatter Cleave
+  attacks: [quick, fierce, fierce]
+  effects: [Bleed]
+  quick_damage: 1.0
+  precise_damage: 1.0
+  fierce_damage: 3.5
+
+- name: Massive Pummel
+  attacks: [quick, precise, fierce, precise]
+  effects: [Concussed]
+  quick_damage: 1.0
+  precise_damage: 5.0
+  fierce_damage: 1.0
+
+- name: Nightmare Strike
+  attacks: [fierce, precise, quick, fierce]
+  effects: []
+  quick_damage: 1.0
+  precise_damage: 1.0
+  fierce_damage: 8.0
+
+
+
+#Venomous Strike
+#Thunderous Blow
+#Phantom Thrust
+#Blazing Inferno
+#Vortex Strike
+#Frostbite Slash
+#Shadow Step
+#Soul Drain
+#Celestial Smite
+#Rending Fury
+#Arcane Barrage
+#Serpent's Fang
+#Astral Scream
+#Storm Surge
+#Dragon's Roar
+#Gravity Crush
+#Divine Wrath
+#Ebon Blade
+#Cyclone Strike
+#Celestial Nova

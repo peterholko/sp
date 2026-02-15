@@ -1,0 +1,64 @@
+[package]
+name = "sp_server"
+version = "0.5.0"
+authors = ["peter.holko@gmail.com"]
+edition = "2021"
+
+[[bin]]
+name = "sp_server"
+path = "src/main.rs"
+
+[lib]
+name = "sp_server"
+path = "src/lib.rs"
+
+[dependencies]
+bevy = { version = "0.17.3", default-features = false, features = ["multi_threaded", "bevy_asset", "bevy_scene", "bevy_state", "debug"] }
+crossbeam-channel = "0.5.1"
+tokio-tungstenite = { version = "0.27.0", features=["rustls-tls-native-roots"]}
+rustls-pki-types = { version = "1.10.0", features = ["std"] }
+tokio-rustls = { version = "0.26.0" }
+rustls = { version = "0.23.18" }
+tokio-postgres = { version = "0.7.12", features = ["with-chrono-0_4"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await", "sink", "std"] }
+pin-project = "1.0"
+futures-channel = "0.3"
+tokio = { version = "1.0.0", default-features = false, features = ["io-std", "macros", "net", "rt-multi-thread", "time", "sync", "process"] }
+url = "2.0.0"
+env_logger = "0.7"
+async-compat = "0.2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde_with = "2.2.0"
+tiled = "0.11.2"
+glob = "0.3.0"
+lazy_static = "1.4.0"
+itertools = "0.10.5"
+# big-brain = { version = "0.21.1", features = ["trace"] }
+big-brain = {git = "https://codeberg.org/zkat/big-brain.git", rev = "12ffd46498f4703dd80b0121c9b964b413f887ee"}
+pathfinding = "4.1.1"
+rand = "0.8.5"
+argon2 = "0.5.1"
+thiserror = "1.0"
+deadpool-postgres = "0.14.0"
+dotenvy = "0.15.7"
+chrono = "0.4.39"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.1", features = ["env-filter"] }
+tracing-appender = "0.2"
+rustrict = "0.7.36"
+
+[dependencies.uuid]
+version = "1.7.0"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "2.1"
+tungstenite = "0.17.3"
+

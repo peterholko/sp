@@ -1,0 +1,30 @@
+# terrain_feature_template.yaml
+
+- name: Rock Golem Quarry Sites
+  image: golem
+  description: Mine stone from quarries guarded by rock golems for mystical stones and minerals.
+  bonus: +50 mining ore
+  terrain:
+    - Plains Hills
+    - Desert Hills
+    - Snow Hills
+    - Grassland Hills
+
+- name: Iron-rich Basins
+  image: richiron
+  description: Areas particularly rich in iron ore, essential for tool and weapon crafting.
+  bonus: +50 Iron ore mining
+  terrain:
+    - Plains Hills
+    - Desert Hills
+    - Snow Hills
+    - Grassland Hills
+
+- name: Old Growth Groves
+  image: oldgrowth
+  description: Ancient trees that could provide rare wood or magical properties.
+  bonus: +50 Logging
+  terrain: 
+    - Deciduous Forest
+    - Frozen Forest
+    - Pine Forest 

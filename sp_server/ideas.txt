@@ -1,0 +1,170 @@
+### Exploring Improvements ###
+
+1. Special Terrain features with bonuses to resources uncovered during the exploring action
+2. Terrain features affect adjacent tiles
+3. Add fuel for crafting / harvesting structures
+4. Firewood -> Charcoal -> Coal -> Magic sources
+
+10.  Multi tile exploring (could cause problems determining which tile to explore next)
+
+
+Sources: 
+Vein-Specific / Groups:
+Ore => Vein
+Wood => Grove
+Stone =>  Deposit/Bed/Cluster
+Hides => Trove
+
+Problem:
+ Assuming there are 5 different copper ores with randomly created properties at world generation and assuming resource regionality is implemented, 
+ after the player has uncovered the nearby copper ore, the resource will be viewed as static in the player's mind.  They will know the exact properties of any new
+ uncovered copper ore nearby which eliminates any of the "element of discovery" emotion in the player.  
+
+Proposed Solution:
+A specific source's properties would be randomly generated at explore time not world generation.  
+
+The dynamic properties causes item stacking to be become problemtic, the implementation of sources should help mitigate this issue.  
+For example, a specific vein source would create ore items the exact same properties and hence be stackable.  
+
+Merging or Mixing (???)
+Ore items from different veins could be merged or mixed together.  Does it make sense for stone or wood or plants or hides? 
+    Should mixing only be available at the sub type "Copper Ore" or the specific "Valleyrun Copper Ore"
+    Is then mixing allowed at the ingot level?  
+    Appears to make more sense that the mixing should happen at the refined good level?        
+
+
+Pros:
+    1. This will allow the player to experience the element of discovery and provide an incentive to explore.
+
+Cons: 
+    1. The randomness of the resource properties could frustrate the player if they are looking for any amount of a specific resource. 
+
+Consider adding 3 or 5 ***** stars for the specific resource property and once the primary resource is refined then those stars will be randomly generated into the actual specific numerical property value
+
+Veins/Grove/Deposit architecture:
+
+ - Valleyrun Copper Ore
+    Quality: ****
+ 
+ => Valleyrun Copper ingot
+    Quality: ****
+
+
+Wants: 
+
+1. Regional Variations - to force item type regionization
+2. Enable interesting exploration via discovering new resources
+3. Refining should do something more than just turn raw into refined items.
+    - Reduce the negative property and enhance the positive property
+    - Allows mixing/combining of different ore
+
+
+Jan 17 
+
+
+Idea #1:
+
+On world generation, randomize clusters of resources with specific randomized properties. 
+
+    Valleyrun Copper Ore cluster (distributed over multiple hill tiles)
+        +5 Endurance
+        -1 Spirit
+        +1 Strength
+
+
+    Flameforge Copper Ore cluster (distributed over multiple hill tiles, can overlap with other clusters)    
+        +2 Axe Damage
+        -1 Hammer Speed
+        +2 Heavy Armor Defense
+
+
+    Another idea is to random a property but with a range and refining the resource will set the property 
+
+Next, allow mining action to uncover and randomly generate new clusters, 
+    -Should new clusters be the re-rolled clusters or using the same static properties generated at world gen time?
+
+Exploring should be slightly enhanced: 
+
+    1. Some other indicator rather than the number of undiscovered resources.  
+
+    2. Add Exploration levels (1-5), 
+        - Exploration level determine how much to reveal on the tile
+        - Untamed levels (wildness) is linked but reduced by clearing monsters on it.
+
+        Exploration level 1, reveals level 1 resources, etc... ?
+
+Process:
+
+1. Generate clusters (3 nearby tiles of the resource, 1 resource will be focal point of the cluster with higher yield/quantity)
+
+Questions: 
+-How many copper ores to generate?   
+-Regionality, still distributed by tile type, snow vs desert vs plains hills ?
+
+Goals:
+-Specialization & regionality (possible some logic to prevent overlaping or perfect distrbution of properties)
+
+
+
+
+
+
+
+
+Idea #2
+
+Randomize properties on the resource without any value (except maybe positive or negative) 
+
+    Something like: 
+
+    Valleyrun Copper Ore     (Refined) =>    Valleyrun Copper Ingot
+        +++Endurance                              +++Endurance
+        --Spirit                                  --Spirit
+         +Strength                                +Strength 
+
+Idea #3:
+
+*** Randomize property on ore by veins (i.e. tiles or something else) then group the ores under a single item, could be very complex to handle.  
+
+
+
+
+
+
+Vein-Specific Attributes: Each vein of ore, grove of trees, or patch of plants could have unique attributes. For example, a vein of copper might yield ore that's naturally more conductive, or a forest area might produce wood that's unusually durable. Players would mine or harvest the entire vein or area, with all resources from that specific source sharing the same attributes.
+
+Regional Variations: Different regions or biomes could impart unique properties to resources found there. For example, copper ore from a desert region might be sun-hardened, while the same ore from a swampy area could have moisture-resistant properties.
+
+Seasonal or Temporal Effects: Resources gathered during certain seasons or under specific celestial events (like a full moon) could have special properties. This would encourage timely exploration and gathering.
+
+Ancient or Mythical Sources: Discoverable legendary sources of resources, like an ancient copper mine or a mythical grove, could provide resources with rare and unique properties. These would be finite and highly sought after.
+
+Environmental Influences: The environment surrounding the resource could affect its properties. For example, copper ore near a volcanic area could be naturally heat-resistant, while wood from a forest frequently hit by lightning could have enhanced magical properties.
+
+Resource Infusion: Allow players to infuse resources with elements found in their environment. For instance, soaking wood in a magical spring or exposing ore to rare cosmic events could grant them unique properties.
+
+Harvesting Method Impact: The method or tool used for harvesting could influence the properties of the resources. Using a special enchanted pickaxe might yield ore with magical properties, whereas a standard pickaxe would yield regular ore.
+
+Combination Effects: When resources are gathered from areas close to each other, they could combine properties. For instance, harvesting wood near a copper vein might give the wood conductive properties.
+
+Ecosystem Interactions: The presence of certain flora or fauna near the resource could impart unique attributes. For example, hides from animals living near a mineral-rich water source might be naturally tougher.
+
+Magical or Elemental Zones: Areas imbued with magic or elemental forces could affect the properties of resources found there, like stones in a mana-rich area being naturally enchanted.
+
+
+
+
+
+
+
+
+
+
+
+Compeleted:
+
+1. Resource overlay
+
+
+
+

@@ -1,0 +1,181 @@
+# characteristic_template.yaml
+
+###################
+#### RESOURCES ####
+###################
+
+#### GENERIC ####
+- name: All Attributes
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]
+
+- name: Creativity
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]
+
+- name: Dexterity
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]   
+
+- name: Endurance
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]
+
+- name: Focus
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]  
+
+- name: Intellect
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]
+
+- name: Spirit
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]   
+
+- name: Strength
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]
+
+- name: Toughness
+  ranges: 
+    - [1, 3]
+    - [3, 10]
+    - [10, 20]
+  tag: [Attributes]  
+
+
+#### WEAPONS ####
+
+- name: Axe Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon, Axe]
+
+- name: Sword Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon]
+
+- name: Hammer Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon]
+
+- name: Dagger Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon]
+
+- name: Spear Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon]
+
+- name: Axe Speed 
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Melee Weapon, Axe]
+
+- name: Bow Damage
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Range Weapon]
+
+#### ARMOR ####
+
+- name: Heavy Armor Defense
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Heavy Armor]
+
+- name: Heavy Armor Durability
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Heavy Armor]
+
+- name: Medium Armor Defense
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Medium Armor]
+
+- name: Medium Armor Durability
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Medium Armor]  
+
+- name: Light Armor Defense
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Light Armor]
+
+- name: Light Armor Durability
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Armor, Light Armor]
+
+#### STRUCTURE ####
+
+- name: Structure Hp
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Structure]
+
+- name: Structure Defense
+  ranges: 
+    - [1, 10]
+    - [5, 20]
+    - [10, 50]
+  tag: [Structure]  

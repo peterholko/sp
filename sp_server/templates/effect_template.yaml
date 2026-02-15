@@ -1,0 +1,155 @@
+# effect_template.yaml
+
+#####################
+#### BASE EFFECT ####
+#####################
+
+
+
+#- name: Deep Wound
+#  chance: 90
+#  quick_spd_atk: -0.33
+#  fierce_dmg_atk: 0.50
+
+- name: Deep Wound
+  max_hp: -0.50
+  healing: -0.25
+  duration: -1
+
+- name: Bleed
+  dot: 0.01
+  duration: 20
+
+- name: Concussed
+  speed: -0.90
+  attack_speed: -0.90
+  defense: -0.25
+  duration: 10
+
+- name: Disarmed
+  damage: -0.75
+  duration: 10
+
+- name: Impaled
+  instant_kill_chance: 0.25
+  duration: -1
+  #TODO reconsider
+
+- name: Dazed
+  speed: -0.05
+  duration: 20
+  stackable: true
+
+- name: Demoralizing Shout
+  damage: -0.05
+  duration: 20
+  stackable: true
+
+- name: Fear
+  damage: -1.0
+  duration: 10
+
+- name: Stunned
+  #damage: -1.0
+  #speed: -1.0
+  duration: 5
+
+- name: Expose Armor
+  armor: -0.05
+  duration: 20
+  stackable: true
+
+- name: Bloodthirst
+  lifeleech: 0.04
+  duration: -1
+
+- name: Disorient
+  viewshed: 1
+  armor: -0.25
+  duration: 10
+
+- name: BullsEye
+  ignore_all_armor: true
+  next_attack: true
+  duration: -1
+
+- name: Hamstrung
+  speed: -0.50
+  duration: 30
+
+- name: Food Poisoning
+  health: -0.5
+  stamina: -0.5
+  duration: 500
+
+######################
+## Positive Effects ##
+######################
+
+- name: Fortified
+  immunity: Standard
+  exceptions: [Siege, Magic, Ranged]
+  defense: 2.0
+  duration: -1
+
+- name: Sanctuary
+  defense: 5.0
+  duration: -1
+
+- name: Weak Sanctuary
+  defense: 2.0
+  duration: -1
+
+- name: Burning
+  damage: 0.01
+  duration: 20
+
+- name: Dim Light
+  vision: 1.0
+  duration: 20
+
+- name: Steady Light
+  vision: 1.0
+  duration: 50
+
+- name: Bright Light
+  vision: 2.0
+  duration: 50
+
+- name: Lantern Glow
+  vision: 3.0
+  duration: 100
+
+- name: Campfire Light
+  vision: 1.0
+  duration: -1
+
+- name: Watchtower Light
+  vision: 2.0
+  duration: -1
+
+  
+#- name: Boosted Quick
+#  quick_damage: 2.0
+#  duration: 20
+
+#- name: Enhanced Fierce
+#  fierce_damage: 3.0
+#  duration: 20
+
+#- name: Perfected Precise
+#  precise_damage: 4.0
+#  duration: 20
+
+#- name: Ultra Fierce
+#  fierce_damage: 8.0
+#  duration: 20
+
+
+
+
+
+
+
+  
+  

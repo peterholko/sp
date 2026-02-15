@@ -1,0 +1,52 @@
+# dialog.yaml
+
+- name: FindingDrink
+  text: "Time to find a drink"
+
+- name: GettingDrink
+  text: "Time to grab a cold ale"
+
+- name: FindingFood
+  text: "Time to find some food"
+
+- name: GettingFood
+  text: "I'm starving"
+
+- name: NeedRest
+  text: "I need to find a place to rest"
+
+- name: NoShelter
+  text: "I can't find a place to rest"
+
+- name: Exhausted
+  text: "I'm exhausted, the ground looks comfy"
+
+- name: Operate
+  text: "Hard work, but it pays. Can't grumble"
+
+- name: NoDrinks
+  text: "I can't find anything to drink"
+
+- name: DehydratedLevel1
+  text: "I need water... my throat is dry."
+
+- name: DehydratedLevel2
+  text: "I'm so parched... I can barely move."
+
+- name: DehydratedLevel3
+  text: "I can't go on... water, please."
+
+- name: DehydratedDying
+  text: "Ughhh... water..."
+
+- name: NoFood
+  text: "I can't find anything to eat"
+
+- name: FindingShelter
+  text: "I need to find shelter"
+
+- name: OrderFollow
+  text: "Yes sir, following when available!"
+
+- name: Wolf
+  text: "A wolf howls in the distance"

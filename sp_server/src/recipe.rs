@@ -1,0 +1,275 @@
+use bevy::prelude::*;
+
+use crate::item::Item;
+use crate::templates::{ItemAttr, ItemTemplate, RecipeTemplate, ResReq, Templates};
+use crate::{item, network};
+
+#[derive(Debug, Clone)]
+pub struct Recipe {
+    pub name: String,
+    pub class: String,
+    pub subclass: String,
+    pub image: String,
+    pub weight: f32,
+    pub durability: Option<i32>,
+    pub attrs: Option<Vec<ItemAttr>>,
+    pub owner: i32,
+    pub tier: Option<i32>,
+    pub slot: Option<item::Slot>,
+    pub damage: Option<i32>,
+    pub speed: Option<f32>,
+    pub armor: Option<i32>,
+    pub crafting_time: Option<i32>,
+    pub structure_req: Option<Vec<String>>,
+    pub stamina_req: Option<i32>,
+    pub skill_req: Option<i32>,
+    pub amount: Option<i32>,
+    pub req: Vec<ResReq>,
+    pub item_name_from_req: Option<bool>,
+}
+
+#[derive(Resource, Debug)]
+pub struct Recipes {
+    recipes: Vec<Recipe>,
+    recipe_templates: Vec<RecipeTemplate>,
+}
+
+impl Recipes {
+    #[cfg(test)]
+    pub fn from_recipes(recipes: Vec<Recipe>) -> Self {
+        Self {
+            recipes,
+            recipe_templates: Vec::new(),
+        }
+    }
+
+    pub fn set_templates(&mut self, recipe_templates: Vec<RecipeTemplate>) {
+        self.recipe_templates = recipe_templates;
+    }
+
+    pub fn create(&mut self, player: i32, name: String, templates: &Res<Templates>) {
+        for recipe_template in self.recipe_templates.iter() {
+            if name == recipe_template.name {
+                // Assume every recipe template has a equivalent item template
+                let item_template =
+                    Item::get_template(recipe_template.name.clone(), &templates.item_templates);
+
+                let mut class = item_template.class.clone();
+                let mut subclass = item_template.subclass.clone();
+                let mut image = item_template.image.clone();
+                let mut weight = item_template.weight.clone();
+                let mut durability = item_template.durability.clone();
+                let mut attrs = None;
+                let mut slot = None;
+                let mut structure_req = None;
+
+                if let Some(item_template_attrs) = &item_template.attrs {
+                    attrs = Some(item_template_attrs.clone());
+                }
+
+                if let Some(item_template_slot) = &item_template.slot {
+                    slot = Some(item::Slot::str_to_slot(item_template_slot.clone()));
+                }
+
+                // Override with recipe template if it exists
+                if let Some(recipe_template_class) = &recipe_template.class {
+                    class = recipe_template_class.clone();
+                }
+
+                if let Some(recipe_template_subclass) = &recipe_template.subclass {
+                    subclass = recipe_template_subclass.clone();
+                }
+
+                if let Some(recipe_template_image) = &recipe_template.image {
+                    image = recipe_template_image.clone();
+                }
+
+                if let Some(recipe_template_weight) = &recipe_template.weight {
+                    weight = recipe_template_weight.clone();
+                }
+
+                if let Some(recipe_template_durability) = &recipe_template.durability {
+                    durability = Some(*recipe_template_durability);
+                }
+
+                if let Some(recipe_template_attrs) = &recipe_template.attrs {
+                    attrs = Some(recipe_template_attrs.clone());
+                }
+
+                if let Some(recipe_template_slot) = &recipe_template.slot {
+                    slot = Some(item::Slot::str_to_slot(recipe_template_slot.clone()));
+                }
+
+                if let Some(recipe_template_structure_req) = &recipe_template.structure_req {
+                    structure_req = Some(recipe_template_structure_req.clone());
+                }
+
+                let new_recipe = Recipe {
+                    name: recipe_template.name.clone(),
+                    class: class,
+                    subclass: subclass,
+                    image: image,
+                    weight: weight,
+                    durability: durability,
+                    attrs: attrs,
+                    owner: player,
+                    structure_req: structure_req,
+                    tier: recipe_template.tier,
+                    slot: slot,
+                    damage: recipe_template.damage,
+                    speed: recipe_template.speed,
+                    armor: recipe_template.armor,
+                    stamina_req: recipe_template.stamina_req,
+                    crafting_time: recipe_template.crafting_time,
+                    skill_req: recipe_template.skill_req,
+                    amount: recipe_template.amount,
+                    req: recipe_template.req.clone(),
+                    item_name_from_req: recipe_template.item_name_from_req,
+                };
+
+                self.recipes.push(new_recipe);
+            }
+        }
+
+        println!("Recipes: {:?}", self.recipes);
+    }
+
+    pub fn get_by_name(&self, name: String) -> Option<Recipe> {
+        for recipe in self.recipes.iter() {
+            if recipe.name == *name {
+                return Some(recipe.clone());
+            }
+        }
+
+        return None;
+    }
+
+    pub fn get_by_structure(&self, structure_id: i32) -> Vec<Recipe> {
+        let mut owner_recipes: Vec<Recipe> = Vec::new();
+
+        for recipe in self.recipes.iter() {
+            if recipe.owner == structure_id {
+                owner_recipes.push(recipe.clone());
+            }
+        }
+
+        return owner_recipes;
+    }
+
+    pub fn get_basic_recipes_packet(&self) -> Vec<network::Recipe> {
+        info!("Getting basic recipes");
+        let mut basic_recipes: Vec<network::Recipe> = Vec::new();
+
+        for recipe in self.recipes.iter() {
+            info!("Recipe: {:?}", recipe);
+            if recipe.structure_req.is_none() {
+                info!("Basic Recipe: {:?}", recipe);
+                let recipe_packet = network::Recipe {
+                    name: recipe.name.clone(),
+                    image: recipe.image.clone(),
+                    class: recipe.class.clone(),
+                    subclass: recipe.subclass.clone(),
+                    tier: recipe.tier.clone(),
+                    slot: item::Slot::to_str(recipe.slot.clone()),
+                    damage: recipe.damage,
+                    speed: recipe.speed,
+                    armor: recipe.armor,
+                    stamina_req: recipe.stamina_req,
+                    crafting_time: recipe.crafting_time,
+                    skill_req: recipe.skill_req,
+                    weight: recipe.weight,
+                    amount: recipe.amount,
+                    req: recipe.req.clone(),
+                };
+
+                basic_recipes.push(recipe_packet);
+            }
+        }
+
+        return basic_recipes;
+    }
+
+    pub fn get_by_structure_packet(&self, owner: i32, structure: String) -> Vec<network::Recipe> {
+        let mut owner_recipes: Vec<network::Recipe> = Vec::new();
+
+        for recipe in self.recipes.iter() {
+            // Remove all whitespaces
+
+            info!(
+                "Structure Req: {:?} Structure: {:?}",
+                recipe.structure_req.clone(),
+                structure.clone()
+            );
+
+            if let Some(recipe_structure_req) = &recipe.structure_req {
+                if recipe.owner == owner && recipe_structure_req.contains(&structure) {
+                    let recipe_packet = network::Recipe {
+                        name: recipe.name.clone(),
+                        image: recipe.image.clone(),
+                        class: recipe.class.clone(),
+                        subclass: recipe.subclass.clone(),
+                        tier: recipe.tier.clone(),
+                        slot: item::Slot::to_str(recipe.slot.clone()),
+                        damage: recipe.damage,
+                        speed: recipe.speed,
+                        armor: recipe.armor,
+                        stamina_req: recipe.stamina_req,
+                        crafting_time: recipe.crafting_time,
+                        skill_req: recipe.skill_req,
+                        weight: recipe.weight,
+                        amount: recipe.amount,
+                        req: recipe.req.clone(),
+                    };
+
+                    owner_recipes.push(recipe_packet);
+                }
+            }
+        }
+
+        return owner_recipes;
+    }
+
+    pub fn get_by_subclass_tier(
+        structure: String,
+        subclass: String,
+        tier: i32,
+        templates: &Res<Templates>,
+    ) -> Vec<RecipeTemplate> {
+        let all_recipes = RecipeTemplate::get_by_structure(structure, templates);
+
+        let mut recipes_by_subclass_tier = Vec::new();
+
+        for recipe in all_recipes.iter() {
+            if let Some(recipe_tier) = recipe.tier {
+                if let Some(recipe_subclass) = &recipe.subclass {
+                    if *recipe_subclass == subclass && recipe_tier == tier {
+                        recipes_by_subclass_tier.push(recipe.clone());
+                    }
+                } else {
+                    // If recipe subclass is not set, get subclass from item template
+                    let item_template =
+                        Item::get_template(recipe.name.clone(), &templates.item_templates);
+
+                    if item_template.subclass == subclass && recipe_tier == tier {
+                        recipes_by_subclass_tier.push(recipe.clone());
+                    }
+                }
+            }
+        }
+
+        return recipes_by_subclass_tier;
+    }
+}
+
+pub struct RecipePlugin;
+
+impl Plugin for RecipePlugin {
+    fn build(&self, app: &mut App) {
+        let recipes = Recipes {
+            recipes: Vec::new(),
+            recipe_templates: Vec::new(),
+        };
+
+        app.insert_resource(recipes);
+    }
+}

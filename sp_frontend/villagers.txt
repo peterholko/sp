@@ -1,0 +1,89 @@
+Villagers Design
+----------------
+Hero must be within 3 tiles to give a villager order.
+
+Allow players to assign villager to follow.  If ends up over 3 tiles way, cancel follow.
+
+*** Starting tasks ***
+1. Exploring
+2. Gathering
+3. Wood-cutting (if forest nearby)
+4. Stone-cutting (lack of forests?)
+
+
+
+** Required Improvements **:
+Displaying current tasks
+Displaying needs
+
+
+
+
+
+
+Villagers/Heros Have:
+Thrist
+Hunger
+Fatigue
+
+
+Villagers Only Have:
+Goals/Motives
+Traits/Personality
+Morale
+
+Villagers Stats:
+Strength 
+Dexterity
+Endurance
+Toughness
+Intellect
+Spirit
+Creativity
+Focus
+Morale
+
+Loyal
+Ambitious
+Rule Of Law
+Risk Taker
+
+
+Tasks:
+Mining - Order
+Woodcutting - Order
+Stone-cutting - Order
+Crafting - Order
+Experimenting - Order
+Refining - Order
+Repairing - Order
+Defending - Order
+Following - Order
+Eating - Behavior
+Sleeping - Behavior
+Idling - Behavior
+Find Dwelling - Behavior
+Flee To Shelter - Behavior
+Flee To Hero - Behavior
+Flee Randomly - Behavior
+Forage - Behavior 
+Abandon - Behavior
+
+Combat Orders:
+Defend: Will defends location
+Attack: Will attack target
+Guard: Will protect target
+
+Recruting/Hiring:
+-Neutral? Harbor displays multiple potential villager 
+-Recruits will also travel to player markets 
+
+
+-Villager will take wages from storage? 
+-Player moves gold into Villager inventory for wages? 
+
+
+
+
+
+
