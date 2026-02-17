@@ -555,7 +555,7 @@ pub fn new(
         image = Obj::template_to_image(&villager_template.template);
     }
 
-    let mut villager = Obj {
+    /*let mut villager = Obj {
         id: Id(villager_id),
         player_id: PlayerId(player_id),
         position: Position {
@@ -721,7 +721,7 @@ pub fn new(
     // Create a new object event
     commands.trigger(NewObj {
         entity: villager_entity_id,
-    }); 
+    }); */
 
     // Villager obj
     /*let villager_id = ids.new_obj_id();

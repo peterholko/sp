@@ -577,6 +577,10 @@ pub fn morale_scorer_system(
     }
 }
 
+/// Scores the need to load items into an assigned structure.
+///
+/// Returns score 0.0 for villagers without assignments (expected for idle villagers).
+/// This is not an error - villagers start with no assignment until work is assigned.
 pub fn structure_capacity_scorer_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
@@ -588,8 +592,9 @@ pub fn structure_capacity_scorer_system(
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         let Ok((villager_id, assignment)) = villager_query.get(*actor) else {
+            // Expected for idle villagers without work assignments
             span.span().in_scope(|| {
-                villager_error!(*actor, obj_id, "No villager assignment");
+                villager_debug!(*actor, obj_id, "No villager assignment");
             });
             score.set(0.0);
             continue;
@@ -679,6 +684,10 @@ pub fn idle_action_systel(
     }
 }
 
+/// Sets the destination based on the villager's current order.
+///
+/// Returns ActionState::Failure for Order::None and orders without valid positions.
+/// This is expected behavior - idle villagers have Order::None by design.
 pub fn set_order_destination_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
@@ -778,9 +787,16 @@ pub fn set_order_destination_system(
                 };
 
                 let Some(order_pos) = order_pos else {
-                    span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, "No order position for order={:?}", order);
-                    });
+                    // Only log error for non-idle orders that should have a position
+                    if !matches!(order, Order::None | Order::Explore) {
+                        span.span().in_scope(|| {
+                            villager_error!(*actor, obj_id, "No order position for order={:?}", order);
+                        });
+                    } else {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, "No order position for idle order={:?}", order);
+                        });
+                    }
                     *state = ActionState::Failure;
                     continue;
                 };

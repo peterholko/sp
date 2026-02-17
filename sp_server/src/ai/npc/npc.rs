@@ -4,13 +4,14 @@ use bevy::prelude::*;
 use big_brain::prelude::*;
 use rand::Rng;
 
+use crate::ai_logging::entity_display;
 use crate::combat::{AttackType, Combat, CombatQuery};
 use crate::common::{
     AttackTarget, Destination, Hide, Idle, MoveTo, SetAttackTarget, Target, TaskTarget,
 };
 use crate::effect::Effect;
 use crate::effect::Effects;
-use crate::event::{EventCompleted, EventExecuting, Spell};
+use crate::event::{EventCompleted, EventExecuting, EventExecutingState, Spell};
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
 use crate::game::*;
 use crate::ids::EntityObjMap;
@@ -19,8 +20,8 @@ use crate::item;
 use crate::item::*;
 use crate::map::{Map, MapPos};
 use crate::obj::{
-    BaseQuery, BaseQueryMutState, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State, StateChange, Stats,
-    Subclass, SubclassNPC, Template, Viewshed,
+    BaseQuery, BaseQueryMutState, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
+    StateChange, Stats, Subclass, SubclassNPC, Template, Viewshed,
 };
 use crate::obj::{BaseQueryEffects, ClassStructure};
 use crate::player;
@@ -28,8 +29,7 @@ use crate::player::Player;
 use crate::templates::Templates;
 use crate::AppState;
 use crate::{constants::*, ids};
-use crate::ai_logging::entity_display;
-use crate::{npc_info, npc_debug, npc_error, npc_trace, npc_warn, with_span};
+use crate::{npc_debug, npc_error, npc_info, npc_trace, npc_warn, with_span};
 
 pub const BASE_MOVE_TICKS: f32 = 100.0;
 pub const BASE_SPEED: f32 = 1.0;
@@ -347,8 +347,9 @@ pub fn target_scorer_system(
             &mut VisibleTarget,
             Option<&mut TaskTarget>,
             &Stats,
+            &EventExecuting
         ),
-        (With<SubclassNPC>, Without<EventExecuting>),
+        With<SubclassNPC>,
     >,
     target_query: Query<(
         &Id,
@@ -377,6 +378,7 @@ pub fn target_scorer_system(
             mut npc_visible_target,
             npc_task_target,
             npc_stats,
+            event_executing,
         )) = npc_query.get_mut(*actor)
         else {
             span.span().in_scope(|| {
@@ -384,6 +386,17 @@ pub fn target_scorer_system(
             });
             continue;
         };
+
+        if event_executing.state == EventExecutingState::Executing {
+            span.span().in_scope(|| {
+                npc_debug!(
+                    *actor,
+                    obj_id,
+                    "Currently executing event, skipping target scoring"
+                );
+            });
+            continue;
+        }
 
         let mut selected_target = NPCTarget {
             id: NO_TARGET,
@@ -414,9 +427,15 @@ pub fn target_scorer_system(
             let target_stronger = false;
 
             span.span().in_scope(|| {
-                npc_debug!(*actor, obj_id,
+                npc_debug!(
+                    *actor,
+                    obj_id,
                     "Evaluating target player={} id={} class={} subclass={:?} state={:?}",
-                    target_player.0, target_id.0, target_class.0, target_subclass, target_state
+                    target_player.0,
+                    target_id.0,
+                    target_class.0,
+                    target_subclass,
+                    target_state
                 );
             });
 
@@ -440,7 +459,9 @@ pub fn target_scorer_system(
             }
 
             span.span().in_scope(|| {
-                npc_trace!(*actor, obj_id,
+                npc_trace!(
+                    *actor,
+                    obj_id,
                     "npc_strength={} target_strength={}",
                     npc_stats.get_strength(),
                     target_stats.get_strength()
@@ -452,7 +473,12 @@ pub fn target_scorer_system(
             }*/
 
             span.span().in_scope(|| {
-                npc_trace!(*actor, obj_id, "is_fortified={}", target_effects.has(Effect::Fortified));
+                npc_trace!(
+                    *actor,
+                    obj_id,
+                    "is_fortified={}",
+                    target_effects.has(Effect::Fortified)
+                );
             });
             // Check if fortified
             if target_effects.has(Effect::Fortified) {
@@ -469,9 +495,13 @@ pub fn target_scorer_system(
             let distance = Map::dist(*npc_pos, *target_pos);
 
             span.span().in_scope(|| {
-                npc_trace!(*actor, obj_id,
+                npc_trace!(
+                    *actor,
+                    obj_id,
                     "viewshed_range={} distance={} min_distance={}",
-                    npc_viewshed.range, distance, selected_target.distance
+                    npc_viewshed.range,
+                    distance,
+                    selected_target.distance
                 );
             });
 
@@ -489,23 +519,42 @@ pub fn target_scorer_system(
         }
 
         span.span().in_scope(|| {
-            npc_debug!(*actor, obj_id, "selected_target_fortified={}", selected_target.fortified);
+            npc_debug!(
+                *actor,
+                obj_id,
+                "selected_target_fortified={}",
+                selected_target.fortified
+            );
         });
         if selected_target.fortified {
             span.span().in_scope(|| {
-                npc_debug!(*actor, obj_id, "Nearest target is fortified, changing target to fortification");
+                npc_debug!(
+                    *actor,
+                    obj_id,
+                    "Nearest target is fortified, changing target to fortification"
+                );
             });
 
             let Some(fortified_entity) = entity_map.get_entity(selected_target.id) else {
                 span.span().in_scope(|| {
-                    npc_error!(*actor, obj_id, "Cannot find entity from id={}", selected_target.id);
+                    npc_error!(
+                        *actor,
+                        obj_id,
+                        "Cannot find entity from id={}",
+                        selected_target.id
+                    );
                 });
                 continue;
             };
 
             let Ok(fortifier) = fortified_query.get(fortified_entity) else {
                 span.span().in_scope(|| {
-                    npc_error!(*actor, obj_id, "Cannot find fortified entity {:?}", fortified_entity);
+                    npc_error!(
+                        *actor,
+                        obj_id,
+                        "Cannot find fortified entity {:?}",
+                        fortified_entity
+                    );
                 });
                 continue;
             };
@@ -680,7 +729,9 @@ pub fn steal_target_scorer_system(
     }
 
     for (Actor(actor), mut score, _span) in &mut query {
-        let Ok((npc_player_id, npc_pos, npc_inventory, mut npc_task_target)) = npc_query.get_mut(*actor) else {
+        let Ok((npc_player_id, npc_pos, npc_inventory, mut npc_task_target)) =
+            npc_query.get_mut(*actor)
+        else {
             continue;
         };
 
@@ -934,7 +985,7 @@ pub fn nearby_corpses_scorer_system(
     if game_tick.0 % TICKS_PER_SEC == 0 {
         for (Actor(actor), mut score, _span) in &mut query {
             let Ok((npc_pos, npc_viewshed, mut npc_task_target)) = npc_query.get_mut(*actor) else {
-                error!("Cannot find npc query for {:?}", *actor);
+                error!("Nearby Corpses Scorer => Cannot find npc query for {:?}", *actor);
                 continue;
             };
 
@@ -1229,10 +1280,10 @@ pub fn move_to_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     dest_query: Query<&Destination>,
-    event_completed: Query<&EventCompleted>,
     obj_query: Query<(&Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
     state_query: Query<&mut State>,
     npc_effects_query: Query<&Effects>,
+    mut event_executing_query: Query<&mut EventExecuting>,
     mut action_query: Query<(&Actor, &mut ActionState, &NpcMoveTo, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _move_to, span) in &mut action_query {
@@ -1297,7 +1348,12 @@ pub fn move_to_system(
                         false,
                     ) {
                         span.span().in_scope(|| {
-                            npc_trace!(*actor, obj_id, "Path found, length={}", path_result.0.len());
+                            npc_trace!(
+                                *actor,
+                                obj_id,
+                                "Path found, length={}",
+                                path_result.0.len()
+                            );
                         });
 
                         let (path, _c) = path_result;
@@ -1326,6 +1382,11 @@ pub fn move_to_system(
                             game_tick.0 + 48, // in the future
                             move_event,
                         );
+
+                        let mut event_executing = event_executing_query
+                            .get_mut(*actor)
+                            .expect("Missing EventExecuting component");
+                        event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
                             npc_debug!(*actor, obj_id, "Cannot find path to destination");
@@ -1333,12 +1394,26 @@ pub fn move_to_system(
                         *state = ActionState::Failure
                     }
                 }
+
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
                 span.span().in_scope(|| {
                     npc_trace!(*actor, obj_id, "MoveTo executing");
                 });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                span.span().in_scope(|| {
+                    npc_trace!(*actor, obj_id, "Event state={:?}", event_executing.state);
+                });
+                if !event_executing.state.is_finished() {
+                    span.span().in_scope(|| {
+                        npc_trace!(*actor, obj_id, "MoveTo still executing");
+                    });
+                    continue;
+                }
 
                 let Some(obj_id_val) = obj_id else {
                     span.span().in_scope(|| {
@@ -1369,16 +1444,14 @@ pub fn move_to_system(
                     };
 
                     if *pos != destination.pos {
-                        let Ok(_event) = event_completed.get(*actor) else {
+                        // Check if moving event failed
+                        if event_executing.state.is_failed() {
                             span.span().in_scope(|| {
-                                npc_trace!(*actor, obj_id, "Waiting for move event completion");
+                                npc_warn!(*actor, obj_id, "Moving event failed");
                             });
+                            *state = ActionState::Failure;
                             continue;
-                        };
-
-                        // Remove EventExecuting & MovingEventCompleted
-                        commands.entity(*actor).remove::<EventExecuting>();
-                        commands.entity(*actor).remove::<EventCompleted>();
+                        }
 
                         let Some(path_result) = Map::find_fast_path(
                             *pos,
@@ -1399,7 +1472,12 @@ pub fn move_to_system(
                         };
 
                         span.span().in_scope(|| {
-                            npc_trace!(*actor, obj_id, "Path found, length={}", path_result.0.len());
+                            npc_trace!(
+                                *actor,
+                                obj_id,
+                                "Path found, length={}",
+                                path_result.0.len()
+                            );
                         });
 
                         let (path, _c) = path_result;
@@ -1432,22 +1510,21 @@ pub fn move_to_system(
                             game_tick.0 + move_duration, // in the future
                             move_event,
                         );
+
+                        // Set EventExecutingState to Executing
+                        event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
                             npc_debug!(*actor, obj_id, "Adjacent to destination, success");
                         });
-                        commands.entity(*actor).remove::<EventExecuting>();
-                        commands.entity(*actor).remove::<EventCompleted>();
                         *state = ActionState::Success;
                     }
                 }
             }
             ActionState::Cancelled => {
                 span.span().in_scope(|| {
-                    npc_debug!(*actor, obj_id, "MoveTo cancelled");
+                    npc_debug!(*actor, obj_id, "Cancelling MoveTo");
                 });
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_obj_id) = obj_id else {
                     span.span().in_scope(|| {
@@ -1457,9 +1534,7 @@ pub fn move_to_system(
                     continue;
                 };
 
-                let event_type = GameEventType::CancelAllMapEvents {
-                    obj_id: npc_obj_id,
-                };
+                let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_obj_id };
 
                 let event_id = ids.new_map_event_id();
 
@@ -1490,13 +1565,18 @@ pub fn move_to_target_system(
     templates: Res<Templates>,
     mut obj_query: Query<ObjStatQuery>,
     target_query: Query<&Target>,
-    event_completed: Query<&EventCompleted>,
-    mut query: Query<(&Actor, &mut ActionState, &NpcMoveToTarget)>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut query: Query<(&Actor, &mut ActionState, &NpcMoveToTarget, &ActionSpan)>,
 ) {
-    for (Actor(actor), mut state, _move_to_target) in &mut query {
+    for (Actor(actor), mut state, _move_to_target, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
                 info!("Actor: {:?} MoveToTarget action requested", *actor);
+                span.span().in_scope(|| {
+                    npc_debug!(*actor, obj_id, "MoveTo requested");
+                });
+
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
                     *state = ActionState::Failure;
@@ -1548,10 +1628,7 @@ pub fn move_to_target_system(
 
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
-                if reached_destination {
-                    info!("NPC {:?} has reached target {:?}", npc_id, target.id);
-                    *state = ActionState::Success;
-                } else {
+                if !reached_destination {
                     // Check if NPC is stunned and cannot move
                     if npc.effects.has(Effect::Stunned) {
                         debug!("NPC is stunned");
@@ -1616,21 +1693,31 @@ pub fn move_to_target_system(
 
                     map_events.new(npc.id.0, game_tick.0 + move_duration, move_event);
 
-                    *state = ActionState::Executing;
+                    let mut event_executing = event_executing_query
+                        .get_mut(*actor)
+                        .expect("Missing EventExecuting component");
+                    event_executing.state = EventExecutingState::Executing;
                 }
+
+                *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                // Check if the moving event is still executing
-                let Ok(_event) = event_completed.get(*actor) else {
-                    info!(
-                        "Actor: {:?} Moving event still executing, waiting for completed component",
-                        *actor
-                    );
-                    continue;
-                };
+                span.span().in_scope(|| {
+                    npc_trace!(*actor, obj_id, "MoveToTarget executing");
+                });
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
 
-                // Remove EventExecuting & MovingEventCompleted
-                cleanup_event_components(&mut commands, *actor);
+                span.span().in_scope(|| {
+                    npc_trace!(*actor, obj_id, "Event state={:?}", event_executing.state);
+                });
+                if !event_executing.state.is_finished() {
+                    span.span().in_scope(|| {
+                        npc_trace!(*actor, obj_id, "MoveToTarget still executing");
+                    });
+                    continue;
+                }
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -1700,10 +1787,16 @@ pub fn move_to_target_system(
 
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
-                if reached_destination {
-                    info!("NPC {:?} is adjacent to target {:?}", npc_id, target.id);
-                    *state = ActionState::Success;
-                } else {
+                if !reached_destination {
+                    // Check if moving event failed
+                    if event_executing.state.is_failed() {
+                        span.span().in_scope(|| {
+                            npc_warn!(*actor, obj_id, "Moving event failed");
+                        });
+                        *state = ActionState::Failure;
+                        continue;
+                    }
+
                     let Some(path_result) = Map::find_fast_path(
                         *npc.pos,
                         *target.pos,
@@ -1746,21 +1839,43 @@ pub fn move_to_target_system(
 
                     map_events.new(npc.id.0, game_tick.0 + move_duration, move_event);
 
-                    *state = ActionState::Executing;
+                    // Set EventExecutingState to Executing
+                    event_executing.state = EventExecutingState::Executing;
+                } else {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, "Adjacent to destination, success");
+                    });
+                    *state = ActionState::Success;                
                 }
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!("MoveToTarget action was cancelled. Considering this a failure.");
-                cleanup_event_components(&mut commands, *actor);
+                span.span().in_scope(|| {
+                    npc_debug!(*actor, obj_id, "Cancelling MoveToTarget");
+                });
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    span.span().in_scope(|| {
+                        npc_error!(*actor, None, "Cannot find obj id");
+                    });
                     *state = ActionState::Failure;
                     continue;
                 };
 
-                cancel_npc_events(npc_id, game_tick.0, &mut ids, &mut game_events);
+                let event_type = GameEventType::CancelAllMapEvents {
+                    obj_id: npc_id,
+                };
+
+                let event_id = ids.new_map_event_id();
+
+                let event = GameEvent {
+                    event_id: event_id,
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + 1, // Add one game tick
+                    event_type: event_type,
+                };
+
+                game_events.insert(event_id, event);
 
                 *state = ActionState::Failure;
             }
@@ -1985,7 +2100,6 @@ pub fn move_near_target_system(
                 };
 
                 // Remove EventExecuting & MovingEventCompleted
-                cleanup_event_components(&mut commands, *actor);
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -2183,7 +2297,6 @@ pub fn move_near_target_system(
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
                 debug!("MoveToTarget action was cancelled. Considering this a failure.");
-                cleanup_event_components(&mut commands, *actor);
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -2210,7 +2323,7 @@ pub fn attack_target_system(
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     mut player_stats: ResMut<PlayerStats>,
-    completed_query: Query<&EventCompleted>,
+    mut event_executing_query: Query<&mut EventExecuting>,
     mut visible_target_query: Query<&mut VisibleTarget>,
     mut npc_query: Query<CombatQuery, With<SubclassNPC>>,
     mut target_query: Query<CombatQuery, Without<SubclassNPC>>,
@@ -2316,26 +2429,41 @@ pub fn attack_target_system(
                 );
 
                 // Add Cooldown Event
-                let cooldown_event = VisibleEvent::CooldownEvent { duration: npc_speed };
+                let cooldown_event = VisibleEvent::CooldownEvent {
+                    duration: npc_speed,
+                };
 
                 map_events.new(npc.id.0, game_tick.0 + npc_speed, cooldown_event);
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} AttackTarget action still executing, waiting for completed component", *actor);
-                    continue;
-                };
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
 
-                cleanup_event_components(&mut commands, *actor);
+                if !event_executing.state.is_finished() {
+                    //info!("Actor: {:?} AttackTarget action still executing, waiting for cooldown", *actor);
+                    continue;
+                }
+
+                // Check if cooldown event failed
+                if event_executing.state.is_failed() {
+                    debug!("Cooldown event failed");
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 *state = ActionState::Success;
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
                 debug!("AttackTarget action was cancelled. Considering this a failure.");
-                cleanup_event_components(&mut commands, *actor);
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -2721,8 +2849,6 @@ pub fn raise_dead_system(
 
                 info!("Actor: {:?} RaiseDead action completed", *actor);
 
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 *state = ActionState::Success;
             }
@@ -2732,8 +2858,6 @@ pub fn raise_dead_system(
                     "Actor: {:?} RaiseDead action was cancelled. Considering this a failure.",
                     *actor
                 );
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -2999,8 +3123,6 @@ pub fn spoil_target_action_system(
 
                 info!("Actor: {:?} Spoil target action completed", *actor);
 
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 *state = ActionState::Success;
             }
@@ -3011,8 +3133,6 @@ pub fn spoil_target_action_system(
                     "Actor: {:?} SpoilTarget action was cancelled. Considering this a failure.",
                     *actor
                 );
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -3140,8 +3260,6 @@ pub fn steal_target_action_system(
 
                 info!("Actor: {:?} Spoil target action completed", *actor);
 
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 *state = ActionState::Success;
             }
@@ -3152,8 +3270,6 @@ pub fn steal_target_action_system(
                     "Actor: {:?} SpoilTarget action was cancelled. Considering this a failure.",
                     *actor
                 );
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -3266,8 +3382,6 @@ pub fn torch_target_action_system(
 
                 info!("Actor: {:?} Torch target action completed", *actor);
 
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 *state = ActionState::Success;
             }
@@ -3278,8 +3392,6 @@ pub fn torch_target_action_system(
                     "Actor: {:?} TorchTarget action was cancelled. Considering this a failure.",
                     *actor
                 );
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -3407,8 +3519,6 @@ pub fn cast_spell_target_system(
 
                 info!("Actor: {:?} Cast spell target action completed", *actor);
 
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 *state = ActionState::Success;
             }
@@ -3419,8 +3529,6 @@ pub fn cast_spell_target_system(
                     "Actor: {:?} CastSpellTarget action was cancelled. Considering this a failure.",
                     *actor
                 );
-                commands.entity(*actor).remove::<EventExecuting>();
-                commands.entity(*actor).remove::<EventCompleted>();
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     error!("Cannot find obj id for entity {:?}", *actor);
@@ -3586,11 +3694,6 @@ pub fn idle_action_system(mut query: Query<(&Actor, &mut ActionState, &Idle, &Ac
     for (Actor(actor), mut state, _idle, _span) in &mut query {
         *state = ActionState::Success;
     }
-}
-
-fn cleanup_event_components(commands: &mut Commands, actor: Entity) {
-    commands.entity(actor).remove::<EventExecuting>();
-    commands.entity(actor).remove::<EventCompleted>();
 }
 
 fn cancel_npc_events(npc_id: i32, current_tick: i32, ids: &mut Ids, game_events: &mut GameEvents) {

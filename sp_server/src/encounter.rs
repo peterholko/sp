@@ -10,7 +10,7 @@ use rand::Rng;
 use crate::common::{Destination, MoveTo, Hide, Idle, TaskTarget, AttackTarget, SetAttackTarget, Transport};
 use crate::constants::*;
 use crate::effect::Effects;
-use crate::event::{MapEvents, VisibleEvent};
+use crate::event::{EventExecuting, EventExecutingState, MapEvents, VisibleEvent};
 use crate::game::{
     GameTick, Home, HunterBehavior, Minions, SpoilTargetBehavior, WanderingBehavior,
 };
@@ -181,10 +181,14 @@ impl Encounter {
                 SubclassNPC,
                 VisibleTarget::new(NO_TARGET),
                 WanderingBehavior { num_moves: 0 }, // Initialize number of sequential wandering moves
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("NPC Chase")
                     .picker(Highest)
-                    .when(VisibleTargetScorer, chase_and_attack), 
+                    .when(VisibleTargetScorer, chase_and_attack),
             ))
             .id();
 
@@ -253,6 +257,10 @@ impl Encounter {
                 Home { pos: home_pos },
                 VisibleTarget::new(NO_TARGET),
                 TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("Necromancer")
                     .picker(Highest)
@@ -334,6 +342,10 @@ impl Encounter {
                 TaxCollectorTransport {
                     tax_collector_id: tax_collector_obj.id.0,
                 },
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("Tax Collector Ship")
                     .picker(Highest)
@@ -408,6 +420,10 @@ impl Encounter {
                 },
                 StateAboard {
                     transport_id: tax_collector_ship_obj.id.0,
+                },
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
                 },
                 Thinker::build()
                     .label("Tax Collector")
@@ -497,6 +513,10 @@ impl Encounter {
                 SubclassNPC,
                 VisibleTarget::new(target),
                 TaskTarget::new(target),
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("Spoil Settlement Crisis")
                     .picker(Highest)
@@ -578,6 +598,10 @@ impl Encounter {
                 ItemsToSteal {
                     item_classes: vec![GOLD_COINS.to_string(), WEAPON.to_string()],
                 },
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("Steal Settlement Crisis")
                     .picker(Highest)
@@ -656,6 +680,10 @@ impl Encounter {
                 SubclassNPC,
                 VisibleTarget::new(target),
                 TaskTarget::new(target),
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
                 Thinker::build()
                     .label("Torch Settlement Crisis")
                     .picker(Highest)

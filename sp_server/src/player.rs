@@ -570,6 +570,7 @@ impl Plugin for PlayerPlugin {
                 move_system,
                 attack_system,
                 gather_system,
+                get_stats_system,
                 info_skills_system,
                 info_attrs_system,
                 info_advance_system,
@@ -2086,15 +2087,15 @@ fn get_stats_system(
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
     entity_map: Res<EntityObjMap>,
-    query: Query<CoreQuery>,
-    stats_query: Query<&Stats>,
-    attrs_query: Query<(&Thirst, &Hunger, &Tired, &Heat)>,
+    query: Query<(&PlayerId, &Stats, &Thirst, &Hunger, &Tired, &Heat)>,
+    attrs_query: Query<()>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
     for (event_id, event) in events.iter() {
         match event {
             PlayerEvent::GetStats { player_id, id } => {
+                info!("PlayerEvent::GetStats for id: {:?}", id);
                 events_to_remove.push(*event_id);
 
                 let Some(entity) = entity_map.get_entity(*id) else {
@@ -2102,44 +2103,42 @@ fn get_stats_system(
                     break;
                 };
 
-                let Ok(obj) = query.get(entity) else {
+                let Ok((obj_player_id, obj_stats, obj_thirst, obj_hunger, obj_tired, obj_heat)) =
+                    query.get(entity)
+                else {
                     error!("Cannot find obj for {:?}", entity);
                     break;
                 };
 
-                if obj.player_id.0 != *player_id {
+                if obj_player_id.0 != *player_id {
                     // Silent error
                     error!("GetStats request for object not owned by player.");
                     continue;
                 };
 
-                if let Ok(stats) = stats_query.get(obj.entity) {
-                    let mut thirst_str = None;
-                    let mut hunger_str = None;
-                    let mut tired_str = None;
+                let mut thirst_str = None;
+                let mut hunger_str = None;
+                let mut tired_str = None;
 
-                    if let Ok((thirst, hunger, tired, heat)) = attrs_query.get(obj.entity) {
-                        thirst_str = Some(thirst.num_to_string());
-                        hunger_str = Some(hunger.num_to_string());
-                        tired_str = Some(tired.num_to_string());
-                    }
+                thirst_str = Some(obj_thirst.num_to_string());
+                hunger_str = Some(obj_hunger.num_to_string());
+                tired_str = Some(obj_tired.num_to_string());
 
-                    let packet = ResponsePacket::Stats {
-                        data: StatsData {
-                            id: *id,
-                            hp: stats.hp,
-                            base_hp: stats.base_hp,
-                            stamina: stats.stamina.unwrap_or(100),
-                            base_stamina: stats.base_stamina.unwrap_or(100),
-                            thirst: thirst_str,
-                            hunger: hunger_str,
-                            tiredness: tired_str,
-                            effects: Vec::new(),
-                        },
-                    };
+                let packet = ResponsePacket::Stats {
+                    data: StatsData {
+                        id: *id,
+                        hp: obj_stats.hp,
+                        base_hp: obj_stats.base_hp,
+                        stamina: obj_stats.stamina.unwrap_or(100),
+                        base_stamina: obj_stats.base_stamina.unwrap_or(100),
+                        thirst: thirst_str,
+                        hunger: hunger_str,
+                        tiredness: tired_str,
+                        effects: Vec::new(),
+                    },
+                };
 
-                    send_to_client(*player_id, packet, &clients);
-                }
+                send_to_client(*player_id, packet, &clients);
             }
             _ => {}
         }
@@ -2640,6 +2639,7 @@ fn info_obj_system(
     for (event_id, event) in events.iter() {
         match event {
             PlayerEvent::InfoObj { player_id, id } => {
+                info!("PlayerEvent::InfoObj for id: {:?}", id);
                 events_to_remove.push(*event_id);
 
                 let Some(entity) = entity_map.get_entity(*id) else {
@@ -2731,6 +2731,7 @@ fn info_skills_system(
     for (event_id, event) in events.iter() {
         match event {
             PlayerEvent::InfoSkills { player_id, id } => {
+                info!("PlayerEvent::InfoSkills for id: {:?}", id);
                 events_to_remove.push(*event_id);
 
                 let Some(entity) = entity_map.get_entity(*id) else {

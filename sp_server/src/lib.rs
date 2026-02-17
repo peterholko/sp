@@ -103,11 +103,7 @@ pub fn setup(command: &String) {
         )))
         .add_plugins(LogPlugin {
             level: bevy::log::Level::INFO,
-            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=warn,\
-                     siege_perilous::npc=info,siege_perilous::villager=info,\
-                     siege_perilous::ai=info,siege_perilous::tax_collector=info,\
-                     siege_perilous::game=info,siege_perilous::item=info,\
-                     siege_perilous::map=warn,siege_perilous::world=info".into(),
+            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=warn,siege_perilous::player=info,siege_perilous::npc=info,siege_perilous::villager=info,siege_perilous::ai=info,siege_perilous::tax_collector=info,siege_perilous::game=info,siege_perilous::item=info,siege_perilous::map=warn,siege_perilous::world=info".into(),
             custom_layer: |_| {
                 // Create a file appender for AI debug logs
                 let file_appender = tracing_appender::rolling::daily("logs", "ai_debug.log");
@@ -132,7 +128,7 @@ pub fn setup(command: &String) {
 
                 Some(Box::new(file_layer))
             },
-            fmt_layer: |_| None,
+            ..default()
         })
         .add_plugins(GamePlugin {
             new_game: new_game,

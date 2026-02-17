@@ -1246,8 +1246,8 @@ fn move_event_completed_system(
             let encounter_probability = Encounter::probability(encounter_moves.0, wildness);
 
             // Roll for encounter
-            //let roll = rand::thread_rng().gen_range(0.0..1.0);
-            let roll = 99.0;
+            let roll = rand::thread_rng().gen_range(0.0..1.0);
+            //let roll = 99.0;
             info!("Encounter roll: {:?}", roll);
 
             if roll < encounter_probability {
@@ -5133,10 +5133,10 @@ fn effect_expired_event_system(
 }
 
 fn cooldown_event_system(
-    mut commands: Commands,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
+    mut event_executing_query: Query<&mut EventExecuting>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -5153,19 +5153,10 @@ fn cooldown_event_system(
                         continue;
                     };
 
-                    //TODO why isn't the state reset to none?
-                    // Set state back to none
-                    /*let Ok(mut obj_state) = query.get_mut(map_event.entity_id) else {
-                        error!("Query failed to find entity {:?}", map_event.entity_id);
-                        continue;
-                    };*/
-
-                    commands.entity(entity).insert(EventCompleted {
-                        event_id: map_event.event_id,
-                        event_type: "cooldown".to_string(),
-                        at_tick: game_tick.0,
-                        success: true,
-                    });
+                    let mut event_executing = event_executing_query
+                        .get_mut(entity)
+                        .expect("Missing EventExecuting component");
+                    event_executing.state = EventExecutingState::Completed;
                 }
                 _ => {}
             }
