@@ -16,7 +16,7 @@ use crate::combat::{Combat, CombatQuery};
 use crate::effect::Effects;
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, Clients, DamageRecord, GameTick, Merchant, Monolith, NetworkReceiver, ObjQuery,
+    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, Merchant, Monolith, NetworkReceiver, ObjQuery,
     PlayerStat, PlayerStats,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
@@ -447,6 +447,10 @@ pub enum PlayerEvent {
     CancelAction {
         player_id: i32,
     },
+    DebugObj {
+        player_id: i32,
+        obj_id: i32,
+    },
 }
 
 pub type ActiveInfoPlayerId = i32;
@@ -633,6 +637,7 @@ impl Plugin for PlayerPlugin {
                 sleep_system,
                 cancel_action_system,
                 experiment_system,
+                debug_obj_system,
             )
                 .run_if(in_state(AppState::Running)),
         )
@@ -8384,6 +8389,43 @@ fn cancel_action_system(
         );
     }
 }*/
+
+fn debug_obj_system(
+    mut events: ResMut<PlayerEvents>,
+    mut debug_objs: ResMut<DebugObjs>,
+    clients: Res<Clients>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        if let PlayerEvent::DebugObj { player_id, obj_id } = event {
+            events_to_remove.push(*event_id);
+
+            let enabled = if debug_objs.0.contains(obj_id) {
+                debug_objs.0.remove(obj_id);
+                false
+            } else {
+                debug_objs.0.insert(*obj_id);
+                true
+            };
+
+            info!("Debug logging for obj {} set to {}", obj_id, enabled);
+
+            send_to_client(
+                *player_id,
+                ResponsePacket::DebugObj {
+                    obj_id: *obj_id,
+                    enabled,
+                },
+                &clients,
+            );
+        }
+    }
+
+    for id in events_to_remove {
+        events.remove(&id);
+    }
+}
 
 /*pub fn send_info_experiment(
     player_id: i32,

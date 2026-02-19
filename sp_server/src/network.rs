@@ -260,6 +260,8 @@ enum NetworkPacket {
     },
     #[serde(rename = "cancel_action")]
     CancelAction,
+    #[serde(rename = "debug_obj")]
+    DebugObj { obj_id: i32 },
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -812,6 +814,11 @@ pub enum ResponsePacket {
         y: i32,
         label: String,
         effect: String,
+    },
+    #[serde(rename = "debug_obj")]
+    DebugObj {
+        obj_id: i32,
+        enabled: bool,
     },
     Ok,
     None,
@@ -1691,7 +1698,7 @@ async fn handle_connection(
     // Get the player account_name from the accounts table
     let row_account = client
         .query_one(
-            "SELECT account_name, player_state FROM accounts WHERE player_id = $1",
+            "SELECT account_name, player_state, is_admin FROM accounts WHERE player_id = $1",
             &[&player_id],
         )
         .await;
@@ -1702,6 +1709,7 @@ async fn handle_connection(
 
     let player_username: String = row_account.get::<_, Option<String>>("account_name").unwrap_or_default();
     let player_state: String = row_account.get("player_state");
+    let is_admin: bool = row_account.get::<_, Option<bool>>("is_admin").unwrap_or(false);
 
     let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, fate FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
 
@@ -2110,6 +2118,15 @@ async fn handle_connection(
                                             }
                                             NetworkPacket::CancelAction => {
                                                 handle_cancel_action(player_id, client_to_game_sender.clone())
+                                            }
+                                            NetworkPacket::DebugObj { obj_id } => {
+                                                if is_admin {
+                                                    handle_debug_obj(player_id, obj_id, client_to_game_sender.clone())
+                                                } else {
+                                                    ResponsePacket::Error {
+                                                        errmsg: "Insufficient privileges".to_owned(),
+                                                    }
+                                                }
                                             }
 
                                             _ => ResponsePacket::Ok
@@ -3577,6 +3594,21 @@ fn handle_cancel_action(
 
     // Response will come from game.rs
     ResponsePacket::Ok
+}
+
+fn handle_debug_obj(
+    player_id: i32,
+    obj_id: i32,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::DebugObj {
+            player_id: player_id,
+            obj_id: obj_id,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::None
 }
 
 #[cfg(test)]
