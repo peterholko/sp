@@ -153,6 +153,7 @@ pub fn setup(command: &String) {
         .register_type::<event::VisibleEvent>()
         .register_type::<event::VisibleEvents>()
         .register_type::<game::DamageRecord>()
+        .register_type::<game::DebugObjs>()
         .register_type::<game::ExploredMap>()
         .register_type::<game::Home>()
         .register_type::<game::GameTick>()
