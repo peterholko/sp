@@ -1,7 +1,7 @@
 use crate::{
     constants::*,
     effect::Effects,
-    event::{MapEvents, VisibleEvent},
+    event::VisibleEvent,
     game::{Clients, GameTick},
     item::{self, Inventory},
     map::Map,
@@ -195,7 +195,6 @@ pub fn day_system(
         (Entity, &Id, &Template, &Inventory, &mut Viewshed, Option<&Effects>),
         Without<SubclassNPC>,
     >,
-    mut map_events: ResMut<MapEvents>,
 ) {
     if let Some(state) = app_state {
         if *state.get() != AppState::Running {
@@ -245,7 +244,7 @@ pub fn day_system(
                 .floor()
                 .max(0.0) as u32;
 
-            debug!("Update vision for obj: {:?}", id.0);
+            info!("Update vision for obj: {:?}", id.0);
 
             //Add obj update event
             commands.trigger(UpdateObj {

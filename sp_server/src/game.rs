@@ -710,7 +710,8 @@ impl Plugin for GamePlugin {
             .add_observer(transfer_all_resources_observer)
             .add_observer(food_poisoning_effect_observer)
             .add_observer(remove_worker_from_work_queue_observer)
-            .add_observer(cancel_events_observer);
+            .add_observer(cancel_events_observer)
+            .add_observer(update_obj_observer);
     }
 }
 
@@ -7844,6 +7845,13 @@ fn remove_obj_observer(
         error!("Query failed to find entity {:?}", remove_obj.entity);
         return;
     };
+
+    // Guard against double-removal: if the obj is already gone from the entity map,
+    // a previous RemoveObj observer already processed this entity this frame.
+    // entity_map mutations are immediate (not deferred), so this is a reliable guard.
+    if entity_map.get_entity(id.0).is_none() {
+        return;
+    }
 
     commands.entity(remove_obj.entity).despawn();
     entity_map.remove_obj(id.0);
