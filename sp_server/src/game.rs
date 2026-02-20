@@ -142,6 +142,10 @@ impl GameTick {
 #[reflect(Resource)]
 pub struct ExploredMap(pub HashMap<i32, Vec<(i32, i32)>>);
 
+#[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
+#[reflect(Resource)]
+pub struct DebugObjs(pub HashSet<i32>);
+
 // Enum for the different two type types of perception updates (init and update)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PerceptionUpdateType {
@@ -805,6 +809,8 @@ impl Game {
 
         let player_stats = PlayerStats(HashMap::new());
 
+        let debug_objs = DebugObjs(HashSet::new());
+
         //Insert the clients and client to game channel into the Bevy resources
         commands.insert_resource(ids);
         commands.insert_resource(entity_obj_map);
@@ -820,6 +826,7 @@ impl Game {
         commands.insert_resource(prices);
         commands.insert_resource(encounter_probability);
         commands.insert_resource(player_stats);
+        commands.insert_resource(debug_objs);
 
         next_state.set(AppState::Running);
     }
@@ -868,6 +875,8 @@ impl Game {
         let entity_obj_map: EntityObjMap = EntityObjMap(HashMap::new());
 
         println!("Inserting resources...");
+        let debug_objs = DebugObjs(HashSet::new());
+
         commands.insert_resource(DynamicSceneHandle(handle));
         commands.insert_resource(database_managers);
         commands.insert_resource(entity_obj_map);
@@ -875,6 +884,7 @@ impl Game {
         commands.insert_resource(network_receiver);
         commands.insert_resource(processed_map_events);
         commands.insert_resource(perception_updates);
+        commands.insert_resource(debug_objs);
         println!("Inserting resources complete...");
 
         // Initialize game world
