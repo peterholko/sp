@@ -14,13 +14,13 @@ use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::{reload, EnvFilter, Registry};
 
 use std::collections::hash_map::Entry;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::{
-    collections::HashMap,
     collections::HashSet,
     hash::Hash,
     sync::{Arc, Mutex},
@@ -145,6 +145,13 @@ pub struct ExploredMap(pub HashMap<i32, Vec<(i32, i32)>>);
 #[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
 #[reflect(Resource)]
 pub struct DebugObjs(pub HashSet<i32>);
+
+#[derive(Resource, Debug, Default)]
+pub struct LogLevelOverrides {
+    pub overrides: HashMap<String, String>,
+    #[allow(clippy::type_complexity)]
+    pub reload_handle: Option<Arc<Mutex<reload::Handle<EnvFilter, Registry>>>>,
+}
 
 // Enum for the different two type types of perception updates (init and update)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -557,6 +564,7 @@ impl Plugin for GamePlugin {
             .add_plugins(VillagerPlugin)
             .add_plugins(TaxCollectorPlugin);
         app.add_systems(OnEnter(AppState::Running), init_objs);
+        app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(Update, stamina_recovery_system.run_if(in_state(AppState::Running)))
@@ -715,12 +723,23 @@ impl Plugin for GamePlugin {
             .add_observer(food_poisoning_effect_observer)
             .add_observer(remove_worker_from_work_queue_observer)
             .add_observer(cancel_events_observer)
-            .add_observer(update_obj_observer);
+            .add_observer(update_obj_observer)
+            .add_observer(add_light_effect_system)
+            .add_observer(remove_light_effect_system);
     }
 }
 
 #[derive(Resource)]
 pub struct DynamicSceneHandle(pub Handle<DynamicScene>);
+
+fn inject_log_reload_handle(mut log_overrides: ResMut<LogLevelOverrides>) {
+    if let Ok(handle_lock) = crate::LOG_RELOAD_HANDLE.lock() {
+        if let Some(reload_handle) = &*handle_lock {
+            log_overrides.reload_handle = Some(Arc::new(Mutex::new(reload_handle.clone())));
+            info!("Log reload handle injected successfully");
+        }
+    }
+}
 
 pub struct Game {
     pub num_players: u32,
@@ -739,7 +758,7 @@ impl Game {
         println!("Bevy Setup System");
 
         // Initialize game tick
-        let game_tick: GameTick = GameTick(DAWN);
+        let game_tick: GameTick = GameTick(EVENING); // Set to Evening for testing campfire vision
 
         // Initialize map events vector
         let map_events: MapEvents = MapEvents(HashMap::new());
@@ -811,6 +830,7 @@ impl Game {
         let player_stats = PlayerStats(HashMap::new());
 
         let debug_objs = DebugObjs(HashSet::new());
+        let log_overrides = LogLevelOverrides::default();
 
         //Insert the clients and client to game channel into the Bevy resources
         commands.insert_resource(ids);
@@ -828,6 +848,7 @@ impl Game {
         commands.insert_resource(encounter_probability);
         commands.insert_resource(player_stats);
         commands.insert_resource(debug_objs);
+        commands.insert_resource(log_overrides);
 
         next_state.set(AppState::Running);
     }
@@ -877,6 +898,7 @@ impl Game {
 
         println!("Inserting resources...");
         let debug_objs = DebugObjs(HashSet::new());
+        let log_overrides = LogLevelOverrides::default();
 
         commands.insert_resource(DynamicSceneHandle(handle));
         commands.insert_resource(database_managers);
@@ -886,6 +908,7 @@ impl Game {
         commands.insert_resource(processed_map_events);
         commands.insert_resource(perception_updates);
         commands.insert_resource(debug_objs);
+        commands.insert_resource(log_overrides);
         println!("Inserting resources complete...");
 
         // Initialize game world
@@ -1895,7 +1918,6 @@ pub fn build_system(
         return;
     }
 
-    info!("Building system");
     for (
         structure_entity,
         structure_id,
@@ -1909,10 +1931,10 @@ pub fn build_system(
         mut structure_work_queue,
     ) in structure_query.iter_mut()
     {
-        info!("Processing structure: {:?}", structure_id);
-        info!("Structure position: {:?}", structure_pos);
-        info!("Structure state: {:?}", structure_state);
-        info!("Assignments: {:?}", structure_assignments.0.len());
+        debug!("Building system processing structure: {:?}", structure_id);
+        debug!("Structure position: {:?}", structure_pos);
+        debug!("Structure state: {:?}", structure_state);
+        debug!("Assignments: {:?}", structure_assignments.0.len());
 
         let mut total_build_rate = 0.0;
         let mut active_workers = Vec::new();
@@ -2089,7 +2111,6 @@ pub fn upgrade_system(
         return;
     }
 
-    info!("Upgrading system");
     for (
         structure_entity,
         structure_id,
@@ -2105,10 +2126,10 @@ pub fn upgrade_system(
         selected_upgrade,
     ) in structure_query.iter_mut()
     {
-        info!("Processing structure: {:?}", structure_id);
-        info!("Structure position: {:?}", structure_pos);
-        info!("Structure state: {:?}", structure_state);
-        info!("Assignments: {:?}", structure_assignments.0.len());
+        debug!("Upgrading system processing structure: {:?}", structure_id);
+        debug!("Structure position: {:?}", structure_pos);
+        debug!("Structure state: {:?}", structure_state);
+        debug!("Assignments: {:?}", structure_assignments.0.len());
 
         let mut total_build_rate = 0.0;
         let mut active_workers = Vec::new();
@@ -2235,7 +2256,8 @@ fn add_light_effect_system(
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     source_query: Query<(&PlayerId, &Position, &State)>,
-    mut query: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects)>,
+    mut query_with_effects: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects), With<Viewshed>>,
+    query_without_effects: Query<(Entity, &PlayerId, &Id, &Position, &State), (Without<Effects>, With<Viewshed>)>,
 ) {
     // Get source player id and position
     let Ok((source_player_id, source_pos, source_state)) = source_query.get(light_effect.entity)
@@ -2244,8 +2266,8 @@ fn add_light_effect_system(
         return;
     };
 
-    // Add watchtower light effect to all objects on the same tile
-    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
+    // Add light effect to all objects on the same tile that already have Effects
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query_with_effects.iter_mut() {
         if obj_pos.x == source_pos.x
             && obj_pos.y == source_pos.y
             && obj_player_id.0 == source_player_id.0
@@ -2262,6 +2284,28 @@ fn add_light_effect_system(
             });
         }
     }
+
+    // Add light effect to objects that don't have Effects yet (insert Effects component first)
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state) in query_without_effects.iter() {
+        if obj_pos.x == source_pos.x
+            && obj_pos.y == source_pos.y
+            && obj_player_id.0 == source_player_id.0
+            && obj_state.is_active()
+        {
+            // Create new Effects with the light effect
+            let mut new_effects = Effects(HashMap::new());
+            new_effects
+                .0
+                .insert(light_effect.effect.clone(), (game_tick.0 + 1, 0.0, 1));
+
+            commands.entity(obj_entity).insert(new_effects);
+
+            commands.trigger(UpdateObj {
+                entity: obj_entity,
+                attrs: vec![(VISION.to_string(), "Pending".to_string())],
+            });
+        }
+    }
 }
 
 fn remove_light_effect_system(
@@ -2270,7 +2314,7 @@ fn remove_light_effect_system(
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     source_query: Query<(&PlayerId, &Position, &State)>,
-    mut query: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects)>,
+    mut query: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects), With<Viewshed>>,
 ) {
     // Get source player id and position
     let Ok((source_player_id, source_pos, source_state)) = source_query.get(light_effect.entity)
@@ -8836,10 +8880,10 @@ fn despawn_wandering_npc_system(
 ) {
     // Every 100 ticks
     if (game_tick.0 % 100) == 0 {
-        info!("Attempting to despawn NPCs that have been wandering for 10 moves...");
+        trace!("Attempting to despawn NPCs that have been wandering for 10 moves...");
         for (entity, id, pos, wandering_behavior) in wandering_behavior_query.iter() {
             if wandering_behavior.num_moves > 10 {
-                info!("Despawning NPC: {:?} due to excess wandering.", id.0);
+                trace!("Despawning NPC: {:?} due to excess wandering.", id.0);
 
                 // Remove Thinker
                 commands.entity(entity).remove::<ThinkerBuilder>();
@@ -8878,7 +8922,7 @@ fn despawn_wandering_npc_system(
 fn snapshot_system(world: &mut World) {
     let game_tick = world.resource::<GameTick>();
     if game_tick.0 % 100 == 0 {
-        info!("Taking snapshot at {}...", game_tick.0);
+        trace!("Taking snapshot at {}...", game_tick.0);
 
         let scene = DynamicScene::from_world(&world);
         let registry = world.resource::<AppTypeRegistry>().read();
@@ -8895,7 +8939,7 @@ fn snapshot_system(world: &mut World) {
         let serialized_scene = scene.serialize(&registry).unwrap();
 
         // Showing the scene in the console
-        info!("Scene length: {}", serialized_scene.len());
+        trace!("Scene length: {}", serialized_scene.len());
 
         IoTaskPool::get()
             .spawn(async move {
@@ -8978,19 +9022,19 @@ fn update_game_tick(
                     Weather::ClearSunny,
                 );*/
                 let current_temperature = 5.0;
-                info!("Current temperature: {:?}", current_temperature);
+                trace!("Current temperature: {:?}", current_temperature);
 
                 let clothing_mod = 1.0;
 
                 let heat_level_change = (current_temperature - COMFORT_TEMPERATURE) * clothing_mod;
-                info!("Heat level change: {:?}", heat_level_change);
+                trace!("Heat level change: {:?}", heat_level_change);
 
                 heat.update(heat_level_change);
 
-                info!("Heat level: {:?}", heat.heat);
+                trace!("Heat level: {:?}", heat.heat);
             } else {
                 heat.update_to_comfortable(50.0);
-                info!("Returning to comform, heat level: {:?}", heat.heat);
+                trace!("Returning to comform, heat level: {:?}", heat.heat);
             }
         }
 

@@ -69,8 +69,8 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleRangerSelect = this.handleRangerSelect.bind(this);
     this.handleMageSelect = this.handleMageSelect.bind(this);
 
-    this.handleCreateNewHero = this.handleCreateNewHero.bind(this);
-    this.handleRejoinExistingHero = this.handleRejoinExistingHero.bind(this);
+    this.handleEnterWorld = this.handleEnterWorld.bind(this);
+    this.handleShowLogin = this.handleShowLogin.bind(this);
     this.handleLoginAccountNameChange = this.handleLoginAccountNameChange.bind(this);
     this.handleLoginPasswordChange = this.handleLoginPasswordChange.bind(this);
     this.handleLoginFormSubmit = this.handleLoginFormSubmit.bind(this);
@@ -254,12 +254,12 @@ export default class LoginControl extends React.Component<any, any> {
         try {
           const errorResult = await response.json();
           if (errorResult.error === 'password_required') {
-            // Account is registered — show login form
+            // Account is password-protected — show login form pre-filled with account name
             this.setState({
               hideLandingPage: true,
               showLoginPanel: true,
               loginError: '',
-              loginAccountName: '',
+              loginAccountName: errorResult.account_name || '',
               loginPassword: '',
               loginButtonPressed: false,
             });
@@ -306,12 +306,12 @@ export default class LoginControl extends React.Component<any, any> {
     }
   }
 
-  handleCreateNewHero() {
+  handleEnterWorld() {
     this.setState({ showEnterWorld: false, hideLandingPage: true });
     this.fingerprintAuth();
   }
 
-  handleRejoinExistingHero() {
+  handleShowLogin() {
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
@@ -599,6 +599,20 @@ export default class LoginControl extends React.Component<any, any> {
       hideTrueDeathPanel: true,
       hideGame: false
     });
+
+    fetch(`${window.location.origin}/set-display-name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hero_name: this.state.heroName }),
+    }).then(async (res) => {
+      if (res.ok) {
+        const data = await res.json();
+        if (data.account_name) {
+          Global.accountName = data.account_name;
+        }
+      }
+    }).catch(() => {});
+
     this.startAccountSetupTimer();
   }
 
@@ -841,14 +855,9 @@ export default class LoginControl extends React.Component<any, any> {
               </div>
 
               {this.state.showEnterWorld ? (
-                <>
-                  <p style={{ textAlign: 'center', marginTop: '1.5em' }}>
-                    <button type="button" className="enter-world-button" onClick={this.handleCreateNewHero}>Create New Hero</button>
-                  </p>
-                  <p style={{ textAlign: 'center', marginTop: '0.75em' }}>
-                    <button type="button" className="existing-account-button" onClick={this.handleRejoinExistingHero}>Rejoin Existing Hero</button>
-                  </p>
-                </>
+                <p style={{ textAlign: 'center', marginTop: '1.5em' }}>
+                  <button type="button" className="enter-world-button" onClick={this.handleEnterWorld}>Enter World</button>
+                </p>
               ) : (
                 <p style={{ textAlign: 'center', color: '#b4bcc4' }}>Connecting...</p>
               )}
@@ -884,7 +893,7 @@ export default class LoginControl extends React.Component<any, any> {
             </div>
 
             <p className="existing-account-link--select-class">
-              <span className="existing-account-text-link" onClick={this.handleRejoinExistingHero}>Already have an account? Log in</span>
+              <span className="existing-account-text-link" onClick={this.handleShowLogin}>Already have an account? Log in</span>
             </p>
           </>
         )}

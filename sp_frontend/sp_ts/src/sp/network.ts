@@ -88,7 +88,10 @@ export type NetworkPacket =
   | { cmd: 'hire'; source_id: number; target_id: number }
   | { cmd: 'buy_item'; seller_id: number; item_id: number; quantity: number }
   | { cmd: 'sell_item'; item_id: number; target_id: number; quantity: number }
-  | { cmd: 'cancel_action' };
+  | { cmd: 'cancel_action' }
+  | { cmd: 'debug_obj'; obj_id: number }
+  | { cmd: 'set_log_level'; target: string; level: string }
+  | { cmd: 'get_log_levels' };
 
 export interface StructureList {
   result: Structure[];
@@ -171,7 +174,10 @@ export type ResponsePacket =
   | { packet: 'Pong' }
   | { packet: 'Error'; errmsg: string }
   | { packet: 'Notice'; noticemsg: string; expiry?: number | null }
-  | { packet: 'info_true_death'; hero_name: string; hero_rank: string; total_xp: number; fate: string };
+  | { packet: 'info_true_death'; hero_name: string; hero_rank: string; total_xp: number; fate: string }
+  | { packet: 'debug_obj'; obj_id: number; enabled: boolean }
+  | { packet: 'log_level_set'; target: string; level: string; success: boolean }
+  | { packet: 'log_levels'; overrides: Array<[string, string]> };
 
 export interface PerceptionData {
   map: MapTile[];
@@ -1307,6 +1313,82 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
+  /**
+   * Send DebugObj command (admin only)
+   * Toggles debug logging for a specific object ID
+   * @param objId - The object ID to toggle debug logging for
+   */
+  public sendDebugObj(objId: number) {
+    var m = {
+      cmd: "debug_obj",
+      obj_id: objId
+    };
+    this.sendMessage(JSON.stringify(m));
+    console.log(`[Admin] Sent DebugObj for obj_id: ${objId}`);
+  }
+
+  /**
+   * Send SetLogLevel command (admin only)
+   * Dynamically change log level for a module
+   * @param target - Module path (e.g., "siege_perilous::combat")
+   * @param level - Log level: "ERROR", "WARN", "INFO", "DEBUG", "TRACE", or "OFF"
+   */
+  public sendSetLogLevel(target: string, level: string) {
+    const validLevels = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "OFF"];
+    if (!validLevels.includes(level)) {
+      console.error(`[Admin] Invalid log level: ${level}. Must be one of: ${validLevels.join(', ')}`);
+      return;
+    }
+
+    var m = {
+      cmd: "set_log_level",
+      target: target,
+      level: level
+    };
+    this.sendMessage(JSON.stringify(m));
+    console.log(`[Admin] Set log level for '${target}' to ${level}`);
+  }
+
+  /**
+   * Send GetLogLevels command (admin only)
+   * Query current log level overrides from server
+   */
+  public sendGetLogLevels() {
+    var m = {
+      cmd: "get_log_levels"
+    };
+    this.sendMessage(JSON.stringify(m));
+    console.log(`[Admin] Requesting current log level overrides`);
+  }
+
+  /**
+   * Enable DEBUG logging for NPC AI module
+   */
+  public debugNpcAI() {
+    this.sendSetLogLevel("siege_perilous::npc", "DEBUG");
+  }
+
+  /**
+   * Enable DEBUG logging for combat module
+   */
+  public debugCombat() {
+    this.sendSetLogLevel("siege_perilous::combat", "DEBUG");
+  }
+
+  /**
+   * Enable DEBUG logging for villager AI module
+   */
+  public debugVillagerAI() {
+    this.sendSetLogLevel("siege_perilous::villager", "DEBUG");
+  }
+
+  /**
+   * Reset all log overrides (informational - server doesn't support bulk reset)
+   */
+  public resetAllLogLevels() {
+    console.log('[Admin] To reset log levels, restart the server or set each module to "OFF"');
+  }
+
   constructor() { }
 
   public connect() {
@@ -1540,6 +1622,20 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.NEW_ITEMS, jsonData);
       } else if (jsonData.packet == 'world') {
         Global.gameEmitter.emit(NetworkEvent.WORLD, jsonData);
+      } else if (jsonData.packet === 'debug_obj') {
+        console.log(`[Admin Response] DebugObj for obj ${jsonData.obj_id}: ${jsonData.enabled ? 'ENABLED' : 'DISABLED'}`);
+      } else if (jsonData.packet === 'log_level_set') {
+        const status = jsonData.success ? '✓ SUCCESS' : '✗ FAILED';
+        console.log(`[Admin Response] ${status} - Log level for '${jsonData.target}' set to ${jsonData.level}`);
+      } else if (jsonData.packet === 'log_levels') {
+        console.log('[Admin Response] Current Log Level Overrides:');
+        if (jsonData.overrides.length === 0) {
+          console.log('  (none - all modules using default levels)');
+        } else {
+          jsonData.overrides.forEach(([target, level]) => {
+            console.log(`  ${target} = ${level}`);
+          });
+        }
       }
     }
   }

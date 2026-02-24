@@ -268,7 +268,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       this.props.structureData.state == UPGRADING)
 
     const showAssignButton = true;
-    const showStartUpgradeButton = this.props.structureData.state == NONE;
+    const showStartUpgradeButton = this.props.structureData.state == NONE && this.props.structureData.upgradeable;
 
     const showPlantButton = (this.props.structureData.state == NONE && isFarm);
     const showTendButton = (this.props.structureData.state == NONE && isFarm);

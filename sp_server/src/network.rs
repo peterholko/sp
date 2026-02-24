@@ -48,6 +48,21 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+// Macro for conditional network debug logging controlled by NETWORK_DEBUG env var
+macro_rules! net_debug {
+    ($($arg:tt)*) => {
+        if env::var("NETWORK_DEBUG").is_ok() {
+            println!($($arg)*);
+        }
+    };
+}
+
+// Macro for network error logging (always shown)
+macro_rules! net_error {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+    };
+}
 use glob::glob;
 
 use argon2::{
@@ -262,6 +277,13 @@ enum NetworkPacket {
     CancelAction,
     #[serde(rename = "debug_obj")]
     DebugObj { obj_id: i32 },
+    #[serde(rename = "set_log_level")]
+    SetLogLevel {
+        target: String,
+        level: String,
+    },
+    #[serde(rename = "get_log_levels")]
+    GetLogLevels,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -418,6 +440,7 @@ pub enum ResponsePacket {
         crop_type: Option<String>,
         crop_quantity: Option<i32>,
         crop_stage: Option<String>,
+        upgradeable: bool,
     },
     #[serde(rename = "info_npc")]
     InfoNPC {
@@ -819,6 +842,16 @@ pub enum ResponsePacket {
     DebugObj {
         obj_id: i32,
         enabled: bool,
+    },
+    #[serde(rename = "log_level_set")]
+    LogLevelSet {
+        target: String,
+        level: String,
+        success: bool,
+    },
+    #[serde(rename = "log_levels")]
+    LogLevels {
+        overrides: Vec<(String, String)>,
     },
     Ok,
     None,
@@ -1260,12 +1293,10 @@ pub fn to_map_without_vision(obj: ObjQueryMutReadOnlyItem<'_, '_>) -> MapObj {
 
 lazy_static! {
     static ref TILESET: HashMap<String, serde_json::Value> = {
-        println!("Loading tilesets");
         let mut tileset = HashMap::new();
 
         // Load tilesets
         for entry in glob("./tileset/*.json").expect("Failed to read glob pattern") {
-            println!("Entry: {:?}", entry);
           match entry {
               Ok(path) => {
                 let path = Path::new(&path);
@@ -1273,10 +1304,9 @@ lazy_static! {
                 let data = fs::read_to_string(&path).expect("Unable to read file");
                 let json: serde_json::Value = serde_json::from_str(&data).expect("JSON does not have correct format.");
                 let file_stem = file_stem.unwrap().to_str().unwrap().to_string();
-                println!("Loading tileset: {:?}", file_stem);
                 tileset.insert(file_stem, json);
               },
-              Err(e) => println!("{:?}", e),
+              Err(e) => eprintln!("Error loading tileset: {:?}", e),
           }
         }
 
@@ -1447,13 +1477,13 @@ pub async fn tokio_setup(
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let listener = TcpListener::bind(&addr).await.expect("Can't listen");
-    println!("Listening on: {}", addr);
+    net_debug!("Listening on: {}", addr);
 
     while let Ok((stream, _)) = listener.accept().await {
         let peer = stream
             .peer_addr()
             .expect("connected streams should have a peer address");
-        println!("Peer address: {}", peer);
+        net_debug!("Peer address: {}", peer);
 
         let tls_acceptor = tls_acceptor.clone();
         let client_to_game_sender = client_to_game_sender.clone();
@@ -1543,7 +1573,7 @@ async fn handle_connection(
     //Client ID
     let client_id = Uuid::new_v4();
 
-    println!(
+    net_debug!(
         "New client id: {:?} for WebSocket connection: {}",
         client_id, peer
     );
@@ -1552,14 +1582,14 @@ async fn handle_connection(
     let peer: SocketAddr = stream.get_ref().0.peer_addr().unwrap();
     let peer_ip = peer.ip();
 
-    println!("Peer address: {:?}", peer_ip);
+    net_debug!("Peer address: {:?}", peer_ip);
 
     // Get server address from env
     let env_addr = env::var("ADDRESS").unwrap();
     let server: SocketAddr = env_addr.parse().unwrap();
     let server_ip = server.ip();
 
-    println!("Server address: {:?}", server_ip);
+    net_debug!("Server address: {:?}", server_ip);
 
     // Shared session ID state
     let mut session_id: Option<String> = None;
@@ -1615,7 +1645,7 @@ async fn handle_connection(
     };
 
     if health_check {
-        println!("Server health check");
+        net_debug!("Server health check");
         let (mut ws_sender, _ws_receiver) = ws_stream.split();
         ws_sender
             .send(Message::Text("Pong".into()))
@@ -1630,7 +1660,7 @@ async fn handle_connection(
     };
 
     // Print the session id
-    println!("session_id: {:?}", session_id);
+    net_debug!("session_id: {:?}", session_id);
 
     let client = pool
         .get()
@@ -1649,13 +1679,16 @@ async fn handle_connection(
         return Err((client_id, Error::AttackAttempt));
     };
 
-    // Check if the session is expired
+    // Check if the session is expired (older than 1 day)
     let created_at: DateTime<Utc> = row_session.get::<_, DateTime<Utc>>("created_at");
     let now = chrono::Utc::now();
 
     println!("created_at: {:?}", created_at);
     println!("now: {:?}", now);
-    if created_at.signed_duration_since(now) > chrono::Duration::days(1) {
+
+    // Check if session is older than 1 day
+    if now.signed_duration_since(created_at) > chrono::Duration::days(1) {
+        println!("Session expired: created {} is older than 1 day", created_at);
         return Err((client_id, Error::AttackAttempt));
     }
 
@@ -1704,6 +1737,20 @@ async fn handle_connection(
         .await;
 
     let Ok(row_account) = row_account else {
+        // Account not found - this is a data integrity issue (orphaned session)
+        println!("DATA INTEGRITY ERROR: Account not found for player_id {} referenced by session {}", player_id, session_id);
+        println!("Cleaning up orphaned session...");
+
+        // Clean up the orphaned session
+        if let Err(e) = client
+            .execute("DELETE FROM sessions WHERE session = $1", &[&session_id])
+            .await
+        {
+            println!("Failed to delete orphaned session: {:?}", e);
+        } else {
+            println!("Orphaned session deleted successfully");
+        }
+
         return Err((client_id, Error::AttackAttempt));
     };
 
@@ -1842,7 +1889,7 @@ async fn handle_connection(
 
                                     Err(_) => ResponsePacket::Error{errmsg: "Unknown packet".to_owned()}
                                 };
-                                println!("{:?}", res_packet);
+                                net_debug!("{:?}", res_packet);
                                 //TODO send event to game
                                 //client_to_game_sender.send(Message::text(res)).expect("Could not send message");
 
@@ -2122,6 +2169,24 @@ async fn handle_connection(
                                             NetworkPacket::DebugObj { obj_id } => {
                                                 if is_admin {
                                                     handle_debug_obj(player_id, obj_id, client_to_game_sender.clone())
+                                                } else {
+                                                    ResponsePacket::Error {
+                                                        errmsg: "Insufficient privileges".to_owned(),
+                                                    }
+                                                }
+                                            }
+                                            NetworkPacket::SetLogLevel { target, level } => {
+                                                if is_admin {
+                                                    handle_set_log_level(player_id, target, level, client_to_game_sender.clone())
+                                                } else {
+                                                    ResponsePacket::Error {
+                                                        errmsg: "Insufficient privileges".to_owned(),
+                                                    }
+                                                }
+                                            }
+                                            NetworkPacket::GetLogLevels => {
+                                                if is_admin {
+                                                    handle_get_log_levels(player_id, client_to_game_sender.clone())
                                                 } else {
                                                     ResponsePacket::Error {
                                                         errmsg: "Insufficient privileges".to_owned(),
@@ -3606,6 +3671,41 @@ fn handle_debug_obj(
             player_id: player_id,
             obj_id: obj_id,
         })
+        .expect("Could not send message");
+
+    ResponsePacket::None
+}
+
+fn handle_set_log_level(
+    player_id: i32,
+    target: String,
+    level: String,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    // Validate level
+    if !["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "OFF"].contains(&level.as_str()) {
+        return ResponsePacket::Error {
+            errmsg: format!("Invalid log level: {}. Use ERROR, WARN, INFO, DEBUG, TRACE, or OFF", level),
+        };
+    }
+
+    client_to_game_sender
+        .send(PlayerEvent::SetLogLevel {
+            player_id,
+            target,
+            level,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::None
+}
+
+fn handle_get_log_levels(
+    player_id: i32,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::GetLogLevels { player_id })
         .expect("Could not send message");
 
     ResponsePacket::None

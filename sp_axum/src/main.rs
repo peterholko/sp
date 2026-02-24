@@ -104,6 +104,12 @@ struct AuthError {
 }
 
 #[derive(Serialize)]
+struct PasswordRequiredResponse {
+    error: String,
+    account_name: String,
+}
+
+#[derive(Serialize)]
 struct HealthResponse {
     healthy: bool,
     message: String,
@@ -162,6 +168,7 @@ async fn main() {
         .route("/logout", post(logout_handler))
         .route("/scores", get(scores_handler))
         .route("/health", get(health_handler))
+        .route("/set-display-name", post(set_display_name_handler))
         .with_state(AppState {
             pool,
             rng: shared_rng,
@@ -645,8 +652,9 @@ async fn fingerprint_auth_handler(
             println!("Fingerprint auth denied: player {} has password set, must use account login", player_id);
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(AuthError {
-                    msg: "Account requires password authentication".to_string(),
+                Json(PasswordRequiredResponse {
+                    error: "password_required".to_string(),
+                    account_name: account_name.unwrap_or_default(),
                 }),
             )
                 .into_response();
@@ -681,11 +689,13 @@ async fn fingerprint_auth_handler(
                     let password: Option<String> = account_row.get("password");
 
                     if password.is_some() {
+                        let acct_name: Option<String> = account_row.get("account_name");
                         println!("Device token auth denied: player {} has password set", player_id);
                         return (
                             StatusCode::UNAUTHORIZED,
-                            Json(AuthError {
-                                msg: "Account requires password authentication".to_string(),
+                            Json(PasswordRequiredResponse {
+                                error: "password_required".to_string(),
+                                account_name: acct_name.unwrap_or_default(),
                             }),
                         )
                             .into_response();
@@ -924,6 +934,76 @@ async fn register_handler(
         }),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+struct SetDisplayNameRequest {
+    hero_name: String,
+}
+
+#[derive(Serialize)]
+struct SetDisplayNameResponse {
+    account_name: String,
+}
+
+#[debug_handler]
+async fn set_display_name_handler(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(payload): Json<SetDisplayNameRequest>,
+) -> Response {
+    let Some(cookie) = jar.get("session") else {
+        return (StatusCode::UNAUTHORIZED, Json(AuthError { msg: "Session not found".to_string() })).into_response();
+    };
+
+    let conn = state.pool.get().await.expect("Error getting connection from pool");
+
+    // Get player_id from session
+    let session_row = conn
+        .query_one("SELECT player_id FROM sessions WHERE session = $1", &[&cookie.value()])
+        .await;
+
+    let Ok(session_row) = session_row else {
+        return (StatusCode::UNAUTHORIZED, Json(AuthError { msg: "Session not found".to_string() })).into_response();
+    };
+
+    let player_id: i32 = session_row.get("player_id");
+
+    // Only update if account has no password (guest account)
+    let account_row = conn
+        .query_one("SELECT password FROM accounts WHERE player_id = $1", &[&player_id])
+        .await;
+
+    let Ok(account_row) = account_row else {
+        return (StatusCode::NOT_FOUND, Json(AuthError { msg: "Account not found".to_string() })).into_response();
+    };
+
+    let password: Option<String> = account_row.get("password");
+    if password.is_some() {
+        // Already has a real account, don't overwrite the name
+        return StatusCode::OK.into_response();
+    }
+
+    // Sanitize hero name: keep only alphanumeric chars
+    let sanitized: String = payload.hero_name.chars().filter(|c| c.is_alphanumeric()).collect();
+    let hero_name = if sanitized.is_empty() { "Player".to_string() } else { sanitized };
+
+    // Generate random number 1-1000
+    let random_num: u32 = {
+        let mut rng = state.rng.lock().await;
+        rng.gen_range(1..=1000)
+    };
+
+    let display_name = format!("{}{}", hero_name, random_num);
+
+    let _ = conn
+        .execute(
+            "UPDATE accounts SET account_name = $1, hero_name = $2 WHERE player_id = $3",
+            &[&display_name, &hero_name, &player_id],
+        )
+        .await;
+
+    (StatusCode::OK, Json(SetDisplayNameResponse { account_name: display_name })).into_response()
 }
 
 #[debug_handler]

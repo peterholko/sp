@@ -22,9 +22,17 @@ use bevy::app::TaskPoolPlugin;
 use core::time::Duration;
 use bevy::state::state::States;
 use tracing_subscriber::filter::Targets;
-use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{reload, EnvFilter, Layer, Registry};
+use lazy_static::lazy_static;
+use std::sync::{Arc, Mutex};
 
 use game::{GamePlugin};
+
+lazy_static! {
+    pub static ref LOG_RELOAD_HANDLE: Arc<Mutex<Option<reload::Handle<EnvFilter, Registry>>>> =
+        Arc::new(Mutex::new(None));
+}
 
 pub mod event;
 pub mod database;
@@ -102,31 +110,26 @@ pub fn setup(command: &String) {
             TIMESTEP_10_PER_SECOND,
         )))
         .add_plugins(LogPlugin {
-            level: bevy::log::Level::INFO,
-            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=warn,siege_perilous::player=info,siege_perilous::npc=info,siege_perilous::villager=info,siege_perilous::ai=info,siege_perilous::tax_collector=info,siege_perilous::game=info,siege_perilous::item=info,siege_perilous::map=warn,siege_perilous::world=info".into(),
+            level: bevy::log::Level::DEBUG,
+            // Very permissive base filter - let all DEBUG logs through
+            // The reloadable layer in custom_layer will control what actually appears
+            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=warn,siege_perilous=debug".into(),
             custom_layer: |_| {
-                // Create a file appender for AI debug logs
-                let file_appender = tracing_appender::rolling::daily("logs", "ai_debug.log");
-                let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+                // Setup reloadable log filter for dynamic control
+                // This starts with all siege_perilous modules at INFO level
+                // Admin commands can dynamically change individual module levels to DEBUG/TRACE
+                let initial_filter = EnvFilter::new("siege_perilous=info");
+                let (reloadable_layer, reload_handle) = reload::Layer::new(initial_filter);
 
-                // Leak the guard to keep it alive for the lifetime of the program
-                // This is necessary because the guard must outlive the layer
-                Box::leak(Box::new(_guard));
+                // Store handle in lazy_static for Bevy system access
+                if let Ok(mut handle_lock) = LOG_RELOAD_HANDLE.lock() {
+                    *handle_lock = Some(reload_handle);
+                }
 
-                // Create a filter for AI modules at DEBUG level
-                let ai_filter = Targets::new()
-                    .with_target("siege_perilous::npc", tracing::Level::DEBUG)
-                    .with_target("siege_perilous::villager", tracing::Level::DEBUG)
-                    .with_target("siege_perilous::ai", tracing::Level::DEBUG)
-                    .with_target("siege_perilous::tax_collector", tracing::Level::DEBUG);
-
-                // Create a formatting layer that writes to the file
-                let file_layer = tracing_subscriber::fmt::layer()
-                    .with_writer(non_blocking)
-                    .with_ansi(false)
-                    .with_filter(ai_filter);
-
-                Some(Box::new(file_layer))
+                // Return the reloadable layer to enable dynamic log level control
+                // This layer must be returned (not just created) so it stays alive
+                // and the reload_handle remains valid
+                Some(Box::new(reloadable_layer))
             },
             ..default()
         })

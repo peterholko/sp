@@ -1,8 +1,11 @@
 use bevy::ecs::query::{QueryData, WorldQuery};
 use bevy::prelude::*;
 use serde::Deserialize;
+use std::env;
 use std::fs;
 use uuid::Uuid;
+use tracing_subscriber::{reload, EnvFilter, Registry};
+use std::sync::{Arc, Mutex};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -16,7 +19,7 @@ use crate::combat::{Combat, CombatQuery};
 use crate::effect::Effects;
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, Merchant, Monolith, NetworkReceiver, ObjQuery,
+    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, LogLevelOverrides, Merchant, Monolith, NetworkReceiver, ObjQuery,
     PlayerStat, PlayerStats,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
@@ -451,6 +454,14 @@ pub enum PlayerEvent {
         player_id: i32,
         obj_id: i32,
     },
+    SetLogLevel {
+        player_id: i32,
+        target: String,
+        level: String,
+    },
+    GetLogLevels {
+        player_id: i32,
+    },
 }
 
 pub type ActiveInfoPlayerId = i32;
@@ -638,6 +649,8 @@ impl Plugin for PlayerPlugin {
                 cancel_action_system,
                 experiment_system,
                 debug_obj_system,
+                set_log_level_system,
+                get_log_levels_system,
             )
                 .run_if(in_state(AppState::Running)),
         )
@@ -663,7 +676,9 @@ fn message_broker_system(
     mut ids: ResMut<Ids>,
 ) {
     if let Ok(evt) = client_to_game_receiver.try_recv() {
-        println!("{:?}", evt);
+        if env::var("NETWORK_DEBUG").is_ok() {
+            println!("{:?}", evt);
+        }
 
         player_events.insert(ids.player_event, evt.clone());
 
@@ -2494,6 +2509,12 @@ fn info_structure_system(
         selected_upgrade_name.clone(),
     );
 
+    let upgradeable = structure_template
+        .upgrade_to
+        .as_ref()
+        .map(|list| !list.is_empty())
+        .unwrap_or(false);
+
     let response_packet = ResponsePacket::InfoStructure {
         id: obj.id.0,
         name: obj.name.0.to_string(),
@@ -2529,6 +2550,7 @@ fn info_structure_system(
         crop_type: crop_type,
         crop_quantity: crop_quantity,
         crop_stage: crop_stage,
+        upgradeable: upgradeable,
     };
 
     active_infos.add(
@@ -5339,14 +5361,16 @@ fn activate_system(
                     continue;
                 }
 
-                // Check if the structure already has a campfire
-                if campfire_query.get(structure_entity).is_ok() {
-                    error!("Structure already has a campfire {:?}", structure_id);
-                    let packet = ResponsePacket::Error {
-                        errmsg: "Structure already has a campfire".to_string(),
-                    };
-                    send_to_client(*player_id, packet, &clients);
-                    continue;
+                // Check if the campfire is already lit
+                if let Ok(campfire) = campfire_query.get(structure_entity) {
+                    if campfire.is_lit {
+                        error!("Campfire is already lit {:?}", structure_id);
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Campfire is already lit".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
                 }
 
                 // Check if structure has fuel
@@ -8417,6 +8441,104 @@ fn debug_obj_system(
                     obj_id: *obj_id,
                     enabled,
                 },
+                &clients,
+            );
+        }
+    }
+
+    for id in events_to_remove {
+        events.remove(&id);
+    }
+}
+
+fn build_filter_from_overrides(overrides: &HashMap<String, String>) -> EnvFilter {
+    let mut filter = EnvFilter::new("info");
+
+    for (target, level) in overrides {
+        let directive = format!("{}={}", target, level.to_lowercase());
+        match directive.parse() {
+            Ok(dir) => filter = filter.add_directive(dir),
+            Err(e) => {
+                warn!("Invalid log directive '{}': {}", directive, e);
+            }
+        }
+    }
+
+    filter
+}
+
+fn set_log_level_system(
+    mut events: ResMut<PlayerEvents>,
+    mut log_overrides: ResMut<LogLevelOverrides>,
+    clients: Res<Clients>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        if let PlayerEvent::SetLogLevel { player_id, target, level } = event {
+            events_to_remove.push(*event_id);
+
+            let mut success = false;
+
+            // Update overrides map
+            if level == "OFF" {
+                log_overrides.overrides.remove(target);
+                info!("Log level for '{}' cleared (OFF)", target);
+            } else {
+                log_overrides.overrides.insert(target.clone(), level.clone());
+                info!("Log level for '{}' set to {}", target, level);
+            }
+
+            // Reload filter
+            if let Some(handle_arc) = &log_overrides.reload_handle {
+                if let Ok(handle) = handle_arc.lock() {
+                    let new_filter = build_filter_from_overrides(&log_overrides.overrides);
+                    match handle.reload(new_filter) {
+                        Ok(_) => success = true,
+                        Err(e) => error!("Failed to reload log filter: {}", e),
+                    }
+                }
+            } else {
+                error!("Reload handle not initialized");
+            }
+
+            send_to_client(
+                *player_id,
+                ResponsePacket::LogLevelSet {
+                    target: target.clone(),
+                    level: level.clone(),
+                    success,
+                },
+                &clients,
+            );
+        }
+    }
+
+    for id in events_to_remove {
+        events.remove(&id);
+    }
+}
+
+fn get_log_levels_system(
+    mut events: ResMut<PlayerEvents>,
+    log_overrides: Res<LogLevelOverrides>,
+    clients: Res<Clients>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        if let PlayerEvent::GetLogLevels { player_id } = event {
+            events_to_remove.push(*event_id);
+
+            let overrides: Vec<(String, String)> = log_overrides
+                .overrides
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            send_to_client(
+                *player_id,
+                ResponsePacket::LogLevels { overrides },
                 &clients,
             );
         }

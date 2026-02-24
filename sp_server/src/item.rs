@@ -1144,10 +1144,8 @@ impl Inventory {
                 continue;
             }
 
-            info!("Item: {:?}", item.attrs);
             match item.attrs.get(&attr) {
                 Some(item_value) => {
-                    info!("Item value: {:?}", item_value);
                     let val = match item_value {
                         AttrVal::Num(attr_val) => *attr_val,
                         _ => 0.0,
@@ -2004,7 +2002,6 @@ impl Items {
                 let new_durability = *item_durability - durability;
                 item.durability = Some(new_durability);
 
-                info!("Item: {:?}", item);
                 if new_durability <= 0 {
                     self.items.swap_remove(index);
                     return;
@@ -2164,10 +2161,6 @@ impl Items {
         let mut item_values = 0.0;
 
         for item in self.items.iter() {
-            info!(
-                "Item: {:?} owner: {:?} equipped_only: {:?}",
-                item, owner, equipped_only
-            );
             if item.owner != owner {
                 continue;
             }
@@ -2176,10 +2169,8 @@ impl Items {
                 continue;
             }
 
-            info!("Item: {:?}", item.attrs);
             match item.attrs.get(&attr) {
                 Some(item_value) => {
-                    info!("Item value: {:?}", item_value);
                     let val = match item_value {
                         AttrVal::Num(attr_val) => *attr_val,
                         _ => 0.0,

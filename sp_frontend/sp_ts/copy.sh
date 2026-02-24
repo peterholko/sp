@@ -1,1 +1,1 @@
-cp dist/sp2.js ~/projects/sp_axum/root/
+cp dist/sp2.js ~/projects/sp/sp_axum/root/

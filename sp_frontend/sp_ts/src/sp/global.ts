@@ -80,3 +80,14 @@ export class Global {
 
     public static zIndexManager: ZIndexManager = new ZIndexManager();
 }
+
+// Expose Global to browser console for admin debug commands
+declare global {
+    interface Window {
+        Global: typeof Global;
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.Global = Global;
+}
