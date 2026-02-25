@@ -57,6 +57,9 @@ features = [
     "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
 ]
 
+[profile.dev]
+debug = 1
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "2.1"
