@@ -424,7 +424,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     } as React.CSSProperties
 
     const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
+    const isLargeWindow = windowHeight > 880;
     const transferSmallY = '-50px';
     const transferLargeY = '210px';
 
