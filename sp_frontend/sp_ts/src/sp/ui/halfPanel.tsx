@@ -44,7 +44,7 @@ export default class HalfPanel extends React.Component<HalfPanelProps, any> {
   render() {
     // Get window height
     const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
+    const isLargeWindow = windowHeight > 880;
 
     const marginTopSmall = '-180px';
     const marginTopLarge = '80px';
