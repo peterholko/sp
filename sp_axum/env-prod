@@ -1,0 +1,13 @@
+ADDRESS=0.0.0.0:3030
+
+WS_HEALTH_URL=wss://localhost:8443
+WS_HEALTH_ALLOW_INVALID_CERTS=false
+
+CERT_PATH=/etc/letsencrypt/live/yourdomain.com/
+CERT_NAME=fullchain.pem
+KEY_NAME=privkey.pem
+
+DB_USER=
+DB_PASSWORD=
+DB_HOST=localhost
+DB_NAME=postgres
