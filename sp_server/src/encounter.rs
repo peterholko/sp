@@ -21,7 +21,7 @@ use crate::npc::{CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToS
 use crate::tax_collector::{AtLanding, Forfeiture, IsAboard, IsTaxCollected, MoveToEmpire, MoveToPos, MoveToTarget, NoTaxesToCollect, OverdueTaxScorer, TaxCollector, TaxCollectorTransport, TaxesToCollect};
 use crate::obj::{NewObj, Obj};
 use crate::obj::{
-    Class, Id, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassNPC, Template,
+    Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassNPC, Template,
     Viewshed,
 };
 
@@ -164,6 +164,7 @@ impl Encounter {
             },
             effects: Effects(HashMap::new()),
             inventory: Inventory { owner: npc_id, items: Vec::new() },
+            last_combat_tick: LastCombatTick::default(),
         };
         
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
@@ -490,6 +491,7 @@ impl Encounter {
             },
             effects: Effects(HashMap::new()),
             inventory: Inventory { owner: npc_id, items: Vec::new() },
+            last_combat_tick: LastCombatTick::default(),
         };
 
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
@@ -572,6 +574,7 @@ impl Encounter {
             },
             effects: Effects(HashMap::new()),
             inventory: Inventory { owner: npc_id, items: Vec::new() },
+            last_combat_tick: LastCombatTick::default(),
         };
         
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
@@ -657,6 +660,7 @@ impl Encounter {
             },
             effects: Effects(HashMap::new()),
             inventory: Inventory { owner: npc_id, items: Vec::new() },
+            last_combat_tick: LastCombatTick::default(),
         };
 
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);

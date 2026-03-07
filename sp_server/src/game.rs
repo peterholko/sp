@@ -59,7 +59,7 @@ use crate::npc::NPCPlugin;
 use crate::obj::{
     ActiveShelter, ActiveTask, AddLightEffect, Assignment, Assignments, BaseAttrs,
     BuildProgressUpdate, BuildUpgradeState, Campfire, CancelEvents, Class, ClassStructure,
-    EndRepeatAction, FoodPoisoningEffect, Id, Misc, Name, NewObj, Obj, Order, PlayerId, Position,
+    EndRepeatAction, FoodPoisoningEffect, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId, Position,
     RemoveLightEffect, RemoveObj, UpdateObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild,
     StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
     StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassVillager, Template,
@@ -5663,6 +5663,7 @@ fn drink_eat_system(
     mut needs_query: Query<(&mut Thirst, &mut Hunger, &mut Tired)>,
     mut query: Query<&mut Inventory>,
     mut event_executing_query: Query<&mut EventExecuting>,
+    mut stats_query: Query<&mut Stats>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -5887,6 +5888,13 @@ fn drink_eat_system(
 
                     if tired.tired <= 80.0 {
                         commands.entity(entity).remove::<Exhausted>();
+                    }
+
+                    // Fully restore stamina on sleep
+                    if let Ok(mut stats) = stats_query.get_mut(entity) {
+                        if let Some(base_stamina) = stats.base_stamina {
+                            stats.stamina = Some(base_stamina);
+                        }
                     }
 
                     // None visible state change
@@ -9543,16 +9551,19 @@ fn update_game_tick(
 
 fn stamina_recovery_system(
     game_tick: Res<GameTick>,
-    mut stats_query: Query<&mut Stats, Without<StateDead>>,
+    mut stats_query: Query<(&mut Stats, &LastCombatTick), Without<StateDead>>,
 ) {
     if game_tick.0 % TICKS_PER_SEC != 0 {
         return;
     }
 
-    for mut stats in stats_query.iter_mut() {
+    for (mut stats, last_combat_tick) in stats_query.iter_mut() {
         if let (Some(stamina), Some(base_stamina)) = (stats.stamina, stats.base_stamina) {
             if stamina < base_stamina {
-                stats.stamina = Some((stamina + 1).min(base_stamina));
+                // Recover faster out of combat (5/sec) vs in combat (1/sec)
+                let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
+                let recovery = if in_combat { 1 } else { 5 };
+                stats.stamina = Some((stamina + recovery).min(base_stamina));
             }
         }
     }

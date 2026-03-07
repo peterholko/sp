@@ -10,7 +10,7 @@ use crate::event::{MapEvents, VisibleEvent};
 use crate::game::{
     Fortified, GameTick,
 };
-use crate::obj::{Class, Id, PlayerId, Position, State, StateDead, Stats, Subclass, Template, Misc};
+use crate::obj::{Class, Id, LastCombatTick, PlayerId, Position, State, StateDead, Stats, Subclass, Template, Misc};
 use crate::ids::Ids;
 use crate::item::{self, Inventory,AttrKey, Item};
 use crate::map::Map;
@@ -87,6 +87,7 @@ pub struct CombatQuery {
     pub inventory: &'static mut Inventory,
     pub skills: Option<&'static mut Skills>,
     pub combo_tracker: Option<&'static mut ComboTracker>,
+    pub last_combat_tick: &'static mut LastCombatTick,
 }
 
 #[derive(QueryData)]
@@ -206,6 +207,10 @@ impl Combat {
         // 27 Update stamina - reduce by 5 per attack
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
         attacker.stats.stamina = Some(attacker_stamina - 5);
+
+        // Update last combat tick for both attacker and target
+        attacker.last_combat_tick.0 = game_tick.0;
+        target.last_combat_tick.0 = game_tick.0;
 
         // 28 Apply new effects from this attack
         /*Self::apply_combo_effects(
@@ -353,6 +358,10 @@ impl Combat {
         // 27 Update stamina - reduce by 5 per attack
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
         attacker.stats.stamina = Some(attacker_stamina - 5);
+
+        // Update last combat tick for both attacker and target
+        attacker.last_combat_tick.0 = game_tick.0;
+        target.last_combat_tick.0 = game_tick.0;
 
         // 28 Apply new effects from this attack
         Self::apply_combo_effects(

@@ -319,6 +319,15 @@ pub struct BaseAttrs {
 }
 
 #[derive(Debug, Component, Clone)]
+pub struct LastCombatTick(pub i32);
+
+impl Default for LastCombatTick {
+    fn default() -> Self {
+        LastCombatTick(-1000)
+    }
+}
+
+#[derive(Debug, Component, Clone)]
 pub struct Stats {
     pub hp: i32,
     pub stamina: Option<i32>,
@@ -821,6 +830,7 @@ pub struct Obj {
     pub stats: Stats,
     pub effects: Effects,
     pub inventory: Inventory,
+    pub last_combat_tick: LastCombatTick,
 }
 
 impl Obj {
@@ -866,6 +876,7 @@ impl Obj {
             },
             effects: Effects(HashMap::new()),
             inventory: Inventory { owner: obj_id, items: Vec::new() },
+            last_combat_tick: LastCombatTick::default(),
         };
 
         let entity_id;
@@ -933,6 +944,7 @@ impl Obj {
             },
             effects: Effects(HashMap::new()),
             inventory: inventory,
+            last_combat_tick: LastCombatTick::default(),
         };
 
         return obj;

@@ -263,7 +263,7 @@ fn stamina_recovery_increases_stamina_every_second() {
 
     let entity = app
         .world_mut()
-        .spawn(Stats {
+        .spawn((Stats {
             hp: 100,
             stamina: Some(50),
             base_hp: 100,
@@ -273,13 +273,14 @@ fn stamina_recovery_increases_stamina_every_second() {
             base_damage: None,
             base_speed: None,
             base_vision: None,
-        })
+        }, LastCombatTick::default()))
         .id();
 
     app.update();
 
+    // Out of combat: +5/sec recovery
     let stats = app.world().get::<Stats>(entity).unwrap();
-    assert_eq!(stats.stamina, Some(51));
+    assert_eq!(stats.stamina, Some(55));
 }
 
 #[test]
@@ -290,7 +291,7 @@ fn stamina_recovery_does_not_exceed_base_stamina() {
 
     let entity = app
         .world_mut()
-        .spawn(Stats {
+        .spawn((Stats {
             hp: 100,
             stamina: Some(100),
             base_hp: 100,
@@ -300,7 +301,7 @@ fn stamina_recovery_does_not_exceed_base_stamina() {
             base_damage: None,
             base_speed: None,
             base_vision: None,
-        })
+        }, LastCombatTick::default()))
         .id();
 
     app.update();
@@ -317,7 +318,7 @@ fn stamina_recovery_skips_non_second_ticks() {
 
     let entity = app
         .world_mut()
-        .spawn(Stats {
+        .spawn((Stats {
             hp: 100,
             stamina: Some(50),
             base_hp: 100,
@@ -327,7 +328,7 @@ fn stamina_recovery_skips_non_second_ticks() {
             base_damage: None,
             base_speed: None,
             base_vision: None,
-        })
+        }, LastCombatTick::default()))
         .id();
 
     app.update();
@@ -356,6 +357,7 @@ fn stamina_recovery_skips_dead_entities() {
                 base_speed: None,
                 base_vision: None,
             },
+            LastCombatTick::default(),
             StateDead {
                 dead_at: 0,
                 killer: "Test".to_string(),

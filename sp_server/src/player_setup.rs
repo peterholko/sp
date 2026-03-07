@@ -9,7 +9,7 @@ use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{Merchant, Monolith, ObjQuery, SpawnPositions};
 use crate::item::{Inventory, Slot};
-use crate::obj::{ActiveShelter, Campfire, NewObj};
+use crate::obj::{ActiveShelter, Campfire, LastCombatTick, NewObj};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
 use crate::world::get_time_of_day;
@@ -115,6 +115,7 @@ pub fn new(
             owner: burrow_id,
             items: Vec::new(),
         },
+        last_combat_tick: LastCombatTick::default(),
     };
 
     let structure_entity_id = commands.spawn((structure, ClassStructure, Storage)).id();
@@ -439,6 +440,7 @@ pub fn new(
         },
         effects: Effects(HashMap::new()),
         inventory: inventory.clone(),
+        last_combat_tick: LastCombatTick::default(),
     };
 
     let hero_skills = Skills::new();
@@ -598,6 +600,7 @@ pub fn new(
             owner: villager_id,
             items: Vec::new(),
         },
+        last_combat_tick: LastCombatTick::default(),
     };
 
     // Villager generate skills

@@ -29,8 +29,8 @@ use crate::network::{
 };
 use crate::obj::{
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire, Class,
-    ClassStructure, EndRepeatAction, Id, Misc, Name, NewObj, Obj, Order, PlayerId, Position,
-    RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
+    ClassStructure, EndRepeatAction, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId,
+    Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
     StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj, Viewshed,
     WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
@@ -4780,6 +4780,7 @@ fn create_foundation_system(
                         owner: structure_id,
                         items: Vec::new(),
                     },
+                    last_combat_tick: LastCombatTick::default(),
                 };
 
                 let build_state = BuildUpgradeState {
