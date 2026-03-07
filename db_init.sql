@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS scores (
     hero_rank   TEXT            NOT NULL,
     total_xp    INTEGER         NOT NULL,
     fate        TEXT            NOT NULL,
+    crisis_tier INTEGER         NOT NULL DEFAULT 0,
     created_at  TIMESTAMPTZ     DEFAULT NOW()
 );
 

@@ -20,7 +20,7 @@ use crate::effect::Effects;
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, LogLevelOverrides, Merchant, Monolith, NetworkReceiver, ObjQuery,
-    PlayerStat, PlayerStats,
+    PlayerStat, PlayerStats, SpawnPositions,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -700,6 +700,7 @@ fn new_player_system(
     mut plans: ResMut<Plans>,
     templates: Res<Templates>,
     mut player_stats: ResMut<PlayerStats>,
+    mut spawn_positions: ResMut<SpawnPositions>,
     monoliths: Query<ObjQuery, With<Monolith>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -728,6 +729,7 @@ fn new_player_system(
                     &templates,
                     &game_tick,
                     &monoliths,
+                    &mut spawn_positions,
                 ) {
                     Ok(_) => {
                         let event_type = GameEventType::Login {

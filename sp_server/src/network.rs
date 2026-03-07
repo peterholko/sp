@@ -869,6 +869,7 @@ pub enum ResponsePacket {
         hero_rank: String,
         total_xp: i32,
         fate: String,
+        crisis_tier: i32,
     },
 }
 
@@ -1422,6 +1423,7 @@ pub async fn tokio_setup(
                     hero_rank,
                     total_xp,
                     fate,
+                    crisis_tier,
                 } => {
                     let client = pool_clone
                         .get()
@@ -1429,14 +1431,14 @@ pub async fn tokio_setup(
                         .expect("Error getting DB connection from pool");
 
                     let statement = client
-                        .prepare("INSERT INTO scores (player_id, hero_name, hero_rank, total_xp, fate) VALUES ($1, $2, $3, $4, $5)")
+                        .prepare("INSERT INTO scores (player_id, hero_name, hero_rank, total_xp, fate, crisis_tier) VALUES ($1, $2, $3, $4, $5, $6)")
                         .await
                         .expect("Error preparing statement");
 
                     client
                         .execute(
                             &statement,
-                            &[&player_id, &hero_name, &hero_rank, &total_xp, &fate],
+                            &[&player_id, &hero_name, &hero_rank, &total_xp, &fate, &crisis_tier],
                         )
                         .await
                         .expect("Error executing statement");
@@ -1758,18 +1760,20 @@ async fn handle_connection(
     let player_state: String = row_account.get("player_state");
     let is_admin: bool = row_account.get::<_, Option<bool>>("is_admin").unwrap_or(false);
 
-    let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, fate FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
+    let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
 
     let mut hero_name: String = String::new();
     let mut hero_rank: String = String::new();
     let mut total_xp: i32 = 0;
     let mut fate: String = String::new();
+    let mut crisis_tier: i32 = 0;
 
     if let Ok(row_score) = row_score {
         hero_name = row_score.get("hero_name");
         hero_rank = row_score.get("hero_rank");
         total_xp = row_score.get("total_xp");
         fate = row_score.get("fate");
+        crisis_tier = row_score.get("crisis_tier");
     };
 
     //Store the incremented client id and the game to client sender in the clients hashmap
@@ -1814,6 +1818,7 @@ async fn handle_connection(
                 hero_rank: hero_rank.clone(),
                 total_xp: total_xp,
                 fate: fate.clone(),
+                crisis_tier: crisis_tier,
             }
         }
         _ => {

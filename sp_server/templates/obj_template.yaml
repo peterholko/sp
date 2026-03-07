@@ -10,16 +10,16 @@
   template: Wolf
   image: wolf
   family: Animal
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 5
-  base_vision: 4
+  base_hp: 45
+  base_stamina: 200
+  base_dmg: 4
+  dmg_range: 4
+  base_def: 3
+  base_speed: 6
+  base_vision: 5
   int: animal
   aggression: strategic
-  kill_xp: 12000
+  kill_xp: 150
   waterwalk: 1
 
 - name: Giant Rat
@@ -28,16 +28,16 @@
   template: Giant Rat
   image: giantrat
   family: Animal
-  base_hp: 1000
-  base_stamina: 10000
+  base_hp: 20
+  base_stamina: 150
   base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
+  dmg_range: 3
+  base_def: 1
+  base_speed: 4
   base_vision: 2
   int: animal
   aggression: strategic
-  kill_xp: 100
+  kill_xp: 50
 
 - name: Necromancer
   class: unit
@@ -45,16 +45,16 @@
   template: Necromancer
   image: necromancer
   family: Undead
-  base_hp: 5000
-  base_stamina: 10000
-  base_dmg: 2
+  base_hp: 120
+  base_stamina: 300
+  base_dmg: 8
   dmg_range: 6
-  base_def: 7
+  base_def: 6
   base_speed: 3
-  base_vision: 4
+  base_vision: 5
   int: cunning
   aggression: strategic
-  kill_xp: 100
+  kill_xp: 500
   order: necro_event
 
 - name: Scorpion
@@ -63,16 +63,16 @@
   template: Scorpion
   image: scorpion
   family: Animal
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
+  base_hp: 25
+  base_stamina: 150
+  base_dmg: 3
+  dmg_range: 3
+  base_def: 3
   base_speed: 3
   base_vision: 2
   int: mindless
   aggression: frenzied
-  kill_xp: 100
+  kill_xp: 75
 
 - name: Shadow
   class: unit
@@ -80,16 +80,16 @@
   template: Shadow
   image: shadow
   family: Undead
-  base_hp: 500
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
-  base_vision: 2
+  base_hp: 60
+  base_stamina: 200
+  base_dmg: 5
+  dmg_range: 4
+  base_def: 4
+  base_speed: 4
+  base_vision: 3
   int: mindless
   aggression: frenzied
-  kill_xp: 100
+  kill_xp: 200
 
 - name: Skeleton
   class: unit
@@ -97,16 +97,16 @@
   template: Skeleton
   image: skeleton
   family: Undead
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
+  base_hp: 30
+  base_stamina: 200
+  base_dmg: 4
+  dmg_range: 4
+  base_def: 3
   base_speed: 3
-  base_vision: 2
+  base_vision: 3
   int: mindless
   aggression: frenzied
-  kill_xp: 100
+  kill_xp: 120
 
 - name: Spider
   class: unit
@@ -114,16 +114,16 @@
   template: Spider
   image: spider
   family: Animal
-  base_hp: 10
-  base_stamina: 10000
+  base_hp: 20
+  base_stamina: 150
   base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
-  base_vision: 2
+  dmg_range: 3
+  base_def: 2
+  base_speed: 4
+  base_vision: 3
   int: animal
   aggression: strategic
-  kill_xp: 100
+  kill_xp: 60
 
 - name: Wose
   class: unit
@@ -131,16 +131,16 @@
   template: Wose
   image: wose
   family: Animal
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
-  base_vision: 2
+  base_hp: 80
+  base_stamina: 250
+  base_dmg: 5
+  dmg_range: 4
+  base_def: 8
+  base_speed: 2
+  base_vision: 3
   int: cunning
   aggression: strategic
-  kill_xp: 100
+  kill_xp: 250
 
 - name: Yeti
   class: unit
@@ -148,15 +148,16 @@
   template: Yeti
   image: yeti
   family: Creature
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
+  base_hp: 100
+  base_stamina: 300
+  base_dmg: 7
+  dmg_range: 5
+  base_def: 5
   base_speed: 3
-  base_vision: 2
+  base_vision: 3
   int: cunning
   aggression: frenzied
+  kill_xp: 400
  
 - name: Zombie
   class: unit
@@ -164,12 +165,12 @@
   template: Zombie
   image: zombie
   family: Undead
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
+  base_hp: 35
+  base_stamina: 200
+  base_dmg: 3
+  dmg_range: 3
+  base_def: 2
+  base_speed: 2
   base_vision: 2
   int: mindless
   aggression: frenzied
@@ -182,16 +183,16 @@
   template: Elite Zombie
   image: elitezombie
   family: Undead
-  base_hp: 150
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 3
+  base_hp: 80
+  base_stamina: 250
+  base_dmg: 5
+  dmg_range: 4
+  base_def: 4
+  base_speed: 2
   int: mindless
   base_vision: 2
   aggression: frenzied
-  kill_xp: 100
+  kill_xp: 200
   images: 
     - zombie2
   hsl: 
@@ -204,17 +205,17 @@
   subclass: npc
   template: Wolf Rider
   image: wolfrider
-  family: Animal
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
-  base_speed: 5
-  base_vision: 3
+  family: Goblin
+  base_hp: 75
+  base_stamina: 250
+  base_dmg: 6
+  dmg_range: 5
+  base_def: 5
+  base_speed: 7
+  base_vision: 4
   int: cunning
   aggression: strategic
-  kill_xp: 5
+  kill_xp: 300
   order: move_to_pos
   waterwalk: 1
 
@@ -224,16 +225,16 @@
   template: Goblin Pillager
   image: goblinpillager
   family: Goblin
-  base_hp: 10
-  base_stamina: 10000
-  base_dmg: 2
-  dmg_range: 6
-  base_def: 7
+  base_hp: 55
+  base_stamina: 200
+  base_dmg: 5
+  dmg_range: 4
+  base_def: 4
   base_speed: 5
   base_vision: 3
   int: cunning
   aggression: strategic
-  kill_xp: 5
+  kill_xp: 250
   order: move_to_pos
   waterwalk: 1
 
@@ -243,16 +244,16 @@
   template: Nightmare Shadow
   image: shadow
   family: Undead
-  base_hp: 500
-  base_stamina: 10000
+  base_hp: 150
+  base_stamina: 400
   base_dmg: 10
-  dmg_range: 6
-  base_def: 7
-  base_speed: 5
-  base_vision: 4
+  dmg_range: 8
+  base_def: 8
+  base_speed: 6
+  base_vision: 5
   int: cunning
   aggression: frenzied
-  kill_xp: 5
+  kill_xp: 750
   order: move_to_pos
   waterwalk: 1
 
@@ -322,11 +323,11 @@
   subclass: hero
   template: Novice Warrior
   image: novicewarrior
-  base_hp: 50
-  base_stamina: 50
-  base_dmg: 1
-  dmg_range: 1
-  base_def: 0
+  base_hp: 100
+  base_stamina: 100
+  base_dmg: 2
+  dmg_range: 2
+  base_def: 2
   base_speed: 5
   base_vision: 3
   capacity: 500
@@ -336,27 +337,27 @@
   subclass: hero
   template: Novice Ranger
   image: noviceranger
-  base_hp: 100
-  base_stamina: 10000
+  base_hp: 75
+  base_stamina: 100
   base_dmg: 1
-  dmg_range: 1
-  base_def: 0
-  base_speed: 5
-  base_vision: 2
-  capacity: 1000
+  dmg_range: 3
+  base_def: 1
+  base_speed: 6
+  base_vision: 4
+  capacity: 750
 
 - name: Novice Mage
   class: unit
   subclass: hero
   template: Novice Mage
   image: novicemage
-  base_hp: 100
-  base_stamina: 10000
+  base_hp: 60
+  base_stamina: 150
   base_dmg: 1
-  dmg_range: 1
-  base_def: 0
+  dmg_range: 2
+  base_def: 1
   base_speed: 5
-  base_vision: 2
+  base_vision: 3
   capacity: 500
 
 - name: Skilled Warrior
@@ -365,41 +366,41 @@
   template: Skilled Warrior
   image: skilledwarrior
   base_hp: 200
-  base_stamina: 10000
-  base_dmg: 1
-  dmg_range: 1
-  base_def: 0
+  base_stamina: 150
+  base_dmg: 3
+  dmg_range: 3
+  base_def: 4
   base_speed: 5
-  base_vision: 2
-  capacity: 500 
+  base_vision: 3
+  capacity: 600 
 
 - name: Great Warrior
   class: unit
   subclass: hero
   template: Great Warrior
   image: greatwarrior
-  base_hp: 500
-  base_stamina: 10000
-  base_dmg: 1
-  dmg_range: 1
-  base_def: 0
+  base_hp: 400
+  base_stamina: 200
+  base_dmg: 4
+  dmg_range: 4
+  base_def: 6
   base_speed: 5
-  base_vision: 2
-  capacity: 500
+  base_vision: 3
+  capacity: 700
 
 - name: Legendary Warrior
   class: unit
   subclass: hero
   template: Legendary Warrior
   image: legendarywarrior
-  base_hp: 1000
-  base_stamina: 10000
-  base_dmg: 1
-  dmg_range: 1
-  base_def: 0
-  base_speed: 5
-  base_vision: 2
-  capacity: 500   
+  base_hp: 800
+  base_stamina: 300
+  base_dmg: 6
+  dmg_range: 5
+  base_def: 8
+  base_speed: 6
+  base_vision: 4
+  capacity: 800   
 
 ##################
 #### VILLAGERS ###

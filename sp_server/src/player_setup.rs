@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::constants::*;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
-use crate::game::{Merchant, Monolith, ObjQuery};
+use crate::game::{Merchant, Monolith, ObjQuery, SpawnPositions};
 use crate::item::{Inventory, Slot};
 use crate::obj::{ActiveShelter, Campfire, NewObj};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
@@ -54,12 +54,22 @@ pub fn new(
     templates: &Res<Templates>,
     game_tick: &Res<GameTick>,
     monoliths: &Query<ObjQuery, With<Monolith>>,
+    spawn_positions: &mut ResMut<SpawnPositions>,
 ) -> Result<(), String> {
     // Select a start location and remove it from the list
     let start_location = match start_locations.get_start_location() {
         Ok(start_location) => start_location,
         Err(e) => return Err(e),
     };
+
+    // Record spawn position for crisis tracking
+    spawn_positions.insert(
+        player_id,
+        Position {
+            x: start_location.hero_pos[0],
+            y: start_location.hero_pos[1],
+        },
+    );
 
     // Find nearest monolith
     let (monolith_id, monolith_pos) =

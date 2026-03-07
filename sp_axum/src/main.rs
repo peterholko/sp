@@ -72,6 +72,7 @@ struct Score {
     hero_rank: String,
     total_xp: i32,
     fate: String,
+    crisis_tier: i32,
 }
 
 #[derive(Deserialize)]
@@ -1016,7 +1017,7 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
 
     let rows = conn
         .query(
-            "SELECT id, hero_name, hero_rank, total_xp, fate FROM scores",
+            "SELECT id, hero_name, hero_rank, total_xp, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores",
             &[],
         )
         .await;
@@ -1039,6 +1040,7 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
             hero_rank: row.get::<_, String>("hero_rank"),
             total_xp: row.get::<_, i32>("total_xp"),
             fate: row.get::<_, String>("fate"),
+            crisis_tier: row.get::<_, i32>("crisis_tier"),
         })
         .collect::<Vec<Score>>();
 

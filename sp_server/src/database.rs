@@ -7,5 +7,6 @@ pub enum DatabaseEvent {
         hero_rank: String,
         total_xp: i32,
         fate: String,
+        crisis_tier: i32,
     },
 }

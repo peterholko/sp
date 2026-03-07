@@ -466,7 +466,7 @@ impl Encounter {
         let mut npc = Obj {
             id: Id(npc_id),
             player_id: PlayerId(player_id),
-            position: Position { x: 6, y: 27 },
+            position: pos,
             name: Name(npc_template.template.clone()),
             template: Template(npc_template.template.clone()),
             class: Class(npc_template.class.clone()),
@@ -493,7 +493,7 @@ impl Encounter {
         };
 
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
-        
+
         let spoil_target = Steps::build()
             .label("Spoil Target")
             .step(SetSpoilTarget)
@@ -548,7 +548,7 @@ impl Encounter {
         let mut npc = Obj {
             id: Id(npc_id),
             player_id: PlayerId(player_id),
-            position: Position { x: 6, y: 27 },
+            position: pos,
             name: Name(npc_template.template.clone()),
             template: Template(npc_template.template.clone()),
             class: Class(npc_template.class.clone()),
@@ -633,7 +633,7 @@ impl Encounter {
         let mut npc = Obj {
             id: Id(npc_id),
             player_id: PlayerId(player_id),
-            position: Position { x: 6, y: 27 },
+            position: pos,
             name: Name(npc_template.template.clone()),
             template: Template(npc_template.template.clone()),
             class: Class(npc_template.class.clone()),

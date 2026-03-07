@@ -187,6 +187,23 @@ pub struct PlayerStat {
 #[reflect(Resource)]
 pub struct PlayerStats(HashMap<i32, PlayerStat>);
 
+// Tracks which crisis tiers have been triggered per player
+#[derive(Debug, Default, Clone)]
+pub struct PlayerCrisis {
+    pub rat_spoilage: bool,
+    pub wolf_pack: bool,
+    pub goblin_raid: bool,
+    pub undead_incursion: bool,
+    pub goblin_pillager: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct CrisisState(pub HashMap<i32, PlayerCrisis>);
+
+// Tracks where each player's hero originally spawned
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SpawnPositions(pub HashMap<i32, Position>);
+
 #[derive(Resource, Debug, Reflect, Default)]
 #[reflect(Resource)]
 pub struct DamageRecord {
@@ -628,6 +645,10 @@ impl Plugin for GamePlugin {
                 spell_raise_dead_event_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(Update, rat_event_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, wolf_pack_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, goblin_raid_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, undead_incursion_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, goblin_pillager_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
                 spell_damage_event_system.run_if(in_state(AppState::Running)),
@@ -828,6 +849,8 @@ impl Game {
         let encounter_probability = EncounterProbability(HashMap::new());
 
         let player_stats = PlayerStats(HashMap::new());
+        let crisis_state = CrisisState(HashMap::new());
+        let spawn_positions = SpawnPositions(HashMap::new());
 
         let debug_objs = DebugObjs(HashSet::new());
         let log_overrides = LogLevelOverrides::default();
@@ -847,6 +870,8 @@ impl Game {
         commands.insert_resource(prices);
         commands.insert_resource(encounter_probability);
         commands.insert_resource(player_stats);
+        commands.insert_resource(crisis_state);
+        commands.insert_resource(spawn_positions);
         commands.insert_resource(debug_objs);
         commands.insert_resource(log_overrides);
 
@@ -7349,7 +7374,7 @@ fn game_event_system(
     }
 }
 
-// Spawns rats when 50 food items are stored in a storage structure
+// Tier 1: Spawns Giant Rats when 20+ food items are stored in a storage structure
 fn rat_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -7358,10 +7383,9 @@ fn rat_event_system(
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     map: Res<Map>,
-    map_events: ResMut<MapEvents>,
-    player_stats: ResMut<PlayerStats>,
+    mut crisis_state: ResMut<CrisisState>,
 ) {
-    // only run this every 20 ticks
+    // only run this every 20 ticks (2 seconds)
     if game_tick.0 % 20 != 0 {
         return;
     }
@@ -7369,41 +7393,32 @@ fn rat_event_system(
     let mut food_items_stored = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
-        // Skip players who have completed the rat event
-        /*if let Some(player_stat) = player_stats.get(&player_id.0) {
-            if player_stat.rat_event {
+        // Skip players who have already triggered the rat crisis
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.rat_spoilage {
                 continue;
             }
-        }*/
+        }
 
         for item in inventory.items.iter() {
             if item.class == FOOD {
-                // Can you make the value of the hashmap a tuple of (id, pos, count)
                 food_items_stored
                     .entry(player_id.0)
-                    .and_modify(|(id, pos, count)| *count += item.quantity)
+                    .and_modify(|(_id, _pos, count)| *count += item.quantity)
                     .or_insert((id.0, pos.clone(), item.quantity));
             }
         }
     }
 
-    //debug!("Food items stored: {:?}", food_items_stored);
-
     for (player_id, (id, pos, count)) in food_items_stored.iter() {
-        //        debug!("Player {:?} has {:?} food items stored", player_id, count);
-        if *count >= 50 {
-            // Loop if no valid path is found between the player and the spawn pos
-
-            let mut valid_path = false;
-
-            while !valid_path {
+        if *count >= 20 {
+            // Try to find a valid spawn position with max attempts to prevent infinite loop
+            let mut spawned = false;
+            for _attempt in 0..10 {
                 let spawn_pos =
                     get_random_pos_at_range(*player_id, pos.x, pos.y, 5, Vec::new(), &map);
 
-                debug!("Spawn pos: {:?}", spawn_pos);
-
                 if let Some(spawn_pos) = spawn_pos {
-                    // Check if spawn pos and target pos have a valid path between them
                     let path = Map::find_path(
                         *pos,
                         spawn_pos,
@@ -7416,29 +7431,392 @@ fn rat_event_system(
                         true,
                     );
 
-                    debug!("Path: {:?}", path);
-
                     if let Some((path, _cost)) = path {
                         if path.len() < 20 {
-                            valid_path = true;
-                            for _ in 0..1 {
-                                let (_entity, npc_id, _player_id, _pos) =
-                                    Encounter::spawn_torch_crisis(
-                                        ids.new_obj_id(),
-                                        NPC_PLAYER_ID,
-                                        spawn_pos,
-                                        "Goblin Pillager".to_string(),
-                                        &mut commands,
-                                        &mut ids,
-                                        &mut entity_map,
-                                        &templates,
-                                        *id,
-                                    );
+                            // Spawn 2-3 Giant Rats
+                            let num_rats = rand::thread_rng().gen_range(2..=3);
+                            for _ in 0..num_rats {
+                                Encounter::spawn_spoil_crisis(
+                                    ids.new_obj_id(),
+                                    NPC_PLAYER_ID,
+                                    spawn_pos,
+                                    "Giant Rat".to_string(),
+                                    &mut commands,
+                                    &mut ids,
+                                    &mut entity_map,
+                                    &templates,
+                                    *id,
+                                );
                             }
+                            spawned = true;
+                            break;
                         }
                     }
                 }
             }
+
+            if spawned {
+                info!("Tier 1 Crisis: Rat Spoilage triggered for player {}", player_id);
+                crisis_state
+                    .entry(*player_id)
+                    .or_insert_with(PlayerCrisis::default)
+                    .rat_spoilage = true;
+            }
+        }
+    }
+}
+
+// Tier 2: Spawns Wolf Pack when hero moves 5+ tiles from spawn position
+fn wolf_pack_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    spawn_positions: Res<SpawnPositions>,
+    mut crisis_state: ResMut<CrisisState>,
+) {
+    // Check every 10 ticks (1 second)
+    if game_tick.0 % 10 != 0 {
+        return;
+    }
+
+    for (_id, player_id, pos) in hero_query.iter() {
+        // Skip players who have already triggered wolf pack
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.wolf_pack {
+                continue;
+            }
+        }
+
+        // Check distance from spawn
+        let Some(spawn_pos) = spawn_positions.get(&player_id.0) else {
+            continue;
+        };
+
+        let dx = (pos.x - spawn_pos.x) as f64;
+        let dy = (pos.y - spawn_pos.y) as f64;
+        let distance_sq = dx * dx + dy * dy;
+
+        // Trigger when 5+ tiles from spawn (distance_sq >= 25)
+        if distance_sq < 25.0 {
+            continue;
+        }
+
+        // Find spawn position near the hero
+        let mut spawned = false;
+        for _attempt in 0..10 {
+            let wolf_spawn =
+                get_random_pos_at_range(player_id.0, pos.x, pos.y, 4, Vec::new(), &map);
+
+            if let Some(wolf_spawn) = wolf_spawn {
+                let path = Map::find_path(
+                    *pos,
+                    wolf_spawn,
+                    &map,
+                    player_id.0,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+
+                if let Some((path, _cost)) = path {
+                    if path.len() < 15 {
+                        // Spawn 2-3 wolves
+                        let num_wolves = rand::thread_rng().gen_range(2..=3);
+                        for _ in 0..num_wolves {
+                            Encounter::spawn_npc(
+                                NPC_PLAYER_ID,
+                                wolf_spawn,
+                                "Wolf".to_string(),
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                            );
+                        }
+                        spawned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spawned {
+            info!("Tier 2 Crisis: Wolf Pack triggered for player {}", player_id.0);
+            crisis_state
+                .entry(player_id.0)
+                .or_insert_with(PlayerCrisis::default)
+                .wolf_pack = true;
+        }
+    }
+}
+
+// Tier 3: Spawns Goblin Wolf Riders when 30+ gold stored
+fn goblin_raid_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    storage_query: Query<(&Id, &PlayerId, &Position, &Inventory, &Storage)>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    mut crisis_state: ResMut<CrisisState>,
+) {
+    // Check every 30 ticks (3 seconds)
+    if game_tick.0 % 30 != 0 {
+        return;
+    }
+
+    let mut gold_stored: HashMap<i32, (i32, Position, i32)> = HashMap::new();
+
+    for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
+        // Skip players who have already triggered goblin raid
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.goblin_raid {
+                continue;
+            }
+        }
+
+        let gold = inventory.get_total_gold();
+        if gold > 0 {
+            gold_stored
+                .entry(player_id.0)
+                .and_modify(|(_id, _pos, count)| *count += gold)
+                .or_insert((id.0, pos.clone(), gold));
+        }
+    }
+
+    for (player_id, (id, pos, gold_count)) in gold_stored.iter() {
+        if *gold_count >= 30 {
+            let mut spawned = false;
+            for _attempt in 0..10 {
+                let spawn_pos =
+                    get_random_pos_at_range(*player_id, pos.x, pos.y, 6, Vec::new(), &map);
+
+                if let Some(spawn_pos) = spawn_pos {
+                    let path = Map::find_path(
+                        *pos,
+                        spawn_pos,
+                        &map,
+                        *player_id,
+                        Vec::new(),
+                        true,
+                        false,
+                        false,
+                        true,
+                    );
+
+                    if let Some((path, _cost)) = path {
+                        if path.len() < 20 {
+                            // Spawn 2 Wolf Riders that steal gold/weapons
+                            for _ in 0..2 {
+                                Encounter::spawn_steal_crisis(
+                                    ids.new_obj_id(),
+                                    NPC_PLAYER_ID,
+                                    spawn_pos,
+                                    "Wolf Rider".to_string(),
+                                    &mut commands,
+                                    &mut ids,
+                                    &mut entity_map,
+                                    &templates,
+                                    *id,
+                                );
+                            }
+                            spawned = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if spawned {
+                info!("Tier 3 Crisis: Goblin Wolf Rider Raid triggered for player {}", player_id);
+                crisis_state
+                    .entry(*player_id)
+                    .or_insert_with(PlayerCrisis::default)
+                    .goblin_raid = true;
+            }
+        }
+    }
+}
+
+// Tier 4: Undead Incursion - triggers after 3 in-game days (~12 min real-time)
+// 3 days = 3 * 2400 = 7200 ticks. Game starts at DAWN (500), so trigger at tick 7700.
+fn undead_incursion_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    mut crisis_state: ResMut<CrisisState>,
+) {
+    // Only check once at the trigger tick (7200 ticks from start = ~12 min)
+    if game_tick.0 != 7700 {
+        return;
+    }
+
+    for (_id, player_id, pos) in hero_query.iter() {
+        // Skip if already triggered
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.undead_incursion {
+                continue;
+            }
+        }
+
+        let mut spawned = false;
+        for _attempt in 0..10 {
+            let spawn_pos =
+                get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
+
+            if let Some(spawn_pos) = spawn_pos {
+                let path = Map::find_path(
+                    *pos,
+                    spawn_pos,
+                    &map,
+                    player_id.0,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+
+                if let Some((path, _cost)) = path {
+                    if path.len() < 20 {
+                        // Spawn 3 Zombies + 1 Skeleton + 1 Necromancer
+                        for _ in 0..3 {
+                            Encounter::spawn_npc(
+                                NPC_PLAYER_ID,
+                                spawn_pos,
+                                "Zombie".to_string(),
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                            );
+                        }
+                        Encounter::spawn_npc(
+                            NPC_PLAYER_ID,
+                            spawn_pos,
+                            "Skeleton".to_string(),
+                            &mut commands,
+                            &mut ids,
+                            &mut entity_map,
+                            &templates,
+                        );
+                        Encounter::spawn_necromancer(
+                            NPC_PLAYER_ID,
+                            spawn_pos,
+                            spawn_pos,
+                            &mut commands,
+                            &mut ids,
+                            &mut entity_map,
+                            &templates,
+                        );
+                        spawned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spawned {
+            info!("Tier 4 Crisis: Undead Incursion triggered for player {}", player_id.0);
+            crisis_state
+                .entry(player_id.0)
+                .or_insert_with(PlayerCrisis::default)
+                .undead_incursion = true;
+        }
+    }
+}
+
+// Tier 5: Goblin Pillagers - triggers after 5 in-game days (~20 min real-time)
+// 5 days = 5 * 2400 = 12000 ticks. Game starts at DAWN (500), so trigger at tick 12500.
+fn goblin_pillager_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    storage_query: Query<(&Id, &PlayerId, &Position), (With<Storage>, With<ClassStructure>)>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    mut crisis_state: ResMut<CrisisState>,
+) {
+    // Only check once at the trigger tick (12000 ticks from start = ~20 min)
+    if game_tick.0 != 12500 {
+        return;
+    }
+
+    // Collect one structure per player as the torch target
+    let mut player_targets: HashMap<i32, (i32, Position)> = HashMap::new();
+
+    for (id, player_id, pos) in storage_query.iter() {
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.goblin_pillager {
+                continue;
+            }
+        }
+
+        player_targets
+            .entry(player_id.0)
+            .or_insert((id.0, pos.clone()));
+    }
+
+    for (player_id, (target_id, pos)) in player_targets.iter() {
+        let mut spawned = false;
+        for _attempt in 0..10 {
+            let spawn_pos =
+                get_random_pos_at_range(*player_id, pos.x, pos.y, 7, Vec::new(), &map);
+
+            if let Some(spawn_pos) = spawn_pos {
+                let path = Map::find_path(
+                    *pos,
+                    spawn_pos,
+                    &map,
+                    *player_id,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+
+                if let Some((path, _cost)) = path {
+                    if path.len() < 25 {
+                        // Spawn 3 Goblin Pillagers that set structures on fire
+                        for _ in 0..3 {
+                            Encounter::spawn_torch_crisis(
+                                ids.new_obj_id(),
+                                NPC_PLAYER_ID,
+                                spawn_pos,
+                                "Goblin Pillager".to_string(),
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                                *target_id,
+                            );
+                        }
+                        spawned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spawned {
+            info!("Tier 5 Crisis: Goblin Pillager Raid triggered for player {}", player_id);
+            crisis_state
+                .entry(*player_id)
+                .or_insert_with(PlayerCrisis::default)
+                .goblin_pillager = true;
         }
     }
 }
@@ -8744,6 +9122,8 @@ fn true_death_system(
     mut explored_map: ResMut<ExploredMap>,
     mut map_events: ResMut<MapEvents>,
     player_stats: Res<PlayerStats>,
+    mut crisis_state: ResMut<CrisisState>,
+    mut spawn_positions: ResMut<SpawnPositions>,
     mut hero_query: Query<
         (
             Entity,
@@ -8765,7 +9145,21 @@ fn true_death_system(
         if (game_tick.0 - true_death.true_death_at) > 10 * TICKS_PER_SEC {
             info!("Hero true death: {:?}", id.0);
 
-            let total_xp = skills.get_total_xp();
+            // Calculate highest crisis tier survived (+1000 XP per tier)
+            let crisis_tier = if let Some(crisis) = crisis_state.get(&player_id.0) {
+                let mut tier = 0;
+                if crisis.rat_spoilage { tier = 1; }
+                if crisis.wolf_pack { tier = 2; }
+                if crisis.goblin_raid { tier = 3; }
+                if crisis.undead_incursion { tier = 4; }
+                if crisis.goblin_pillager { tier = 5; }
+                tier
+            } else {
+                0
+            };
+
+            let crisis_bonus_xp = crisis_tier * 1000;
+            let total_xp = skills.get_total_xp() + crisis_bonus_xp;
 
             let killer = state_dead.killer.clone();
 
@@ -8784,6 +9178,7 @@ fn true_death_system(
                 hero_rank: template.0.clone(),
                 total_xp: total_xp,
                 fate: fate.clone(),
+                crisis_tier: crisis_tier,
             };
 
             send_to_database(database_event, &database_managers);
@@ -8793,8 +9188,13 @@ fn true_death_system(
                 hero_rank: template.0.clone(),
                 total_xp: total_xp,
                 fate: fate.clone(),
+                crisis_tier: crisis_tier,
             };
             send_to_client(player_id.0, packet, &clients);
+
+            // Clean up crisis state and spawn position for this player
+            crisis_state.remove(&player_id.0);
+            spawn_positions.remove(&player_id.0);
 
             // Transfer villagers to merchant player
             for (villager_entity, villager_player_id, villager_id) in villager_query.iter() {
