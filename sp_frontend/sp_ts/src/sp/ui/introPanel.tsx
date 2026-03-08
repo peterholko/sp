@@ -9,6 +9,7 @@ interface IntroProps {
 
 interface IntroState {
   windowHeight: number;
+  currentPanel: number;
 }
 
 export default class IntroPanel extends React.Component<IntroProps, IntroState> {
@@ -17,6 +18,7 @@ export default class IntroPanel extends React.Component<IntroProps, IntroState> 
 
     this.state = {
       windowHeight: window.innerHeight,
+      currentPanel: 0,
     };
 
     this.handleOkClick = this.handleOkClick.bind(this);
@@ -36,15 +38,26 @@ export default class IntroPanel extends React.Component<IntroProps, IntroState> 
   }
 
   handleOkClick() {
-    Global.gameEmitter.emit(GameEvent.INTRO_OK_CLICK, {});
+    if (this.state.currentPanel < 1) {
+      this.setState({ currentPanel: this.state.currentPanel + 1 });
+    } else {
+      Global.gameEmitter.emit(GameEvent.INTRO_OK_CLICK, {});
+    }
   }
 
   render() {
-    const introText = `Tasked by the Empire to explore the mystical lands of the East, disaster struck as your ship neared the shores. Violent winds and rising seas wrecked your vessel, leaving you stranded with only salvaged supplies and one villager.
+    const panels = [
+      `Your ship broke apart on the rocks. You crawled ashore with what you could carry. Two of your crew were not so fortunate.
 
-In this untamed land of peril and opportunity, survival is your first challenge. Rebuild, endure, and carve your place in history.
+In this untamed land of peril and opportunity, survival is your first challenge.
 
-Welcome to Perilous.`;
+Welcome to Perilous.`,
+      `Search the shipwreck for salvaged supplies. Build a campfire before nightfall.
+
+The wilderness here is unforgiving.`,
+    ];
+
+    const introText = panels[this.state.currentPanel];
 
     const introStyle = {
       top: "50%",
@@ -79,16 +92,16 @@ Welcome to Perilous.`;
     } as React.CSSProperties;
 
 
-    let okButtonStyle; 
+    let okButtonStyle;
 
     if (this.state.windowHeight < 400) {
       okButtonStyle = {
-        transform: `translate(425px, 310px)`, 
+        transform: `translate(425px, 310px)`,
         position: "fixed",
       } as React.CSSProperties;
     } else {
       okButtonStyle = {
-      transform: `translate(307px, 350px)`, 
+      transform: `translate(307px, 350px)`,
       position: "fixed",
     } as React.CSSProperties;
   }

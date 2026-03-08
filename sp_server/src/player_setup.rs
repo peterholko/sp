@@ -82,6 +82,60 @@ pub fn new(
     let structure_name = "Burrow".to_string();
     let structure_template = templates.obj_templates.get(structure_name.clone());
 
+    let mut burrow_inventory = Inventory {
+        owner: burrow_id,
+        items: Vec::new(),
+    };
+
+    // Burrow starting items (reward for checking storage)
+    let mut feed_attrs = HashMap::new();
+    feed_attrs.insert(item::AttrKey::Feed, item::AttrVal::Num(100.0));
+
+    burrow_inventory.new_with_attrs(
+        ids.new_item_id(),
+        burrow_id,
+        "Honeybell Berries".to_string(),
+        5,
+        feed_attrs,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Gold Coins".to_string(),
+        50,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Valleyrun Copper Ingot".to_string(),
+        3,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Cragroot Maple Timber".to_string(),
+        3,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Springbranch Maple Log".to_string(),
+        5,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Yurt Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        FISHING_ROD.to_string(),
+        1,
+        &templates.item_templates,
+    );
+
     let structure: Obj = Obj {
         id: Id(burrow_id),
         player_id: PlayerId(player_id),
@@ -111,10 +165,7 @@ pub fn new(
             base_vision: None,
         },
         effects: Effects(HashMap::new()),
-        inventory: Inventory {
-            owner: burrow_id,
-            items: Vec::new(),
-        },
+        inventory: burrow_inventory,
         last_combat_tick: LastCombatTick::default(),
     };
 
@@ -201,12 +252,7 @@ pub fn new(
         owner: hero_id,
     };
 
-    inventory.new(
-        ids.new_item_id(),
-        "Training Pick Axe".to_string(),
-        1,
-        &templates.item_templates,
-    );
+    // Hero starting inventory (immediate essentials only)
     inventory.new(
         ids.new_item_id(),
         "Firewood".to_string(),
@@ -233,26 +279,14 @@ pub fn new(
     );
     inventory.new(
         ids.new_item_id(),
-        "Bedroll".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
         "Waterskin (Filled)".to_string(),
-        10,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Felled Bristleback Boar".to_string(),
-        1,
+        5,
         &templates.item_templates,
     );
     inventory.new(
         ids.new_item_id(),
         "Salted Meat Strip".to_string(),
-        10,
+        5,
         &templates.item_templates,
     );
     inventory.new(
@@ -273,85 +307,7 @@ pub fn new(
         1,
         &templates.item_templates,
     );
-    inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Log".to_string(),
-        20,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Springbranch Maple Log".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Log".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Windstride Raw Hide".to_string(),
-        25,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Valleyrun Copper Ingot".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Timber".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Gold Coins".to_string(),
-        100,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Seeds".to_string(),
-        50,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Sickle".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Windstride Deer Carcass".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Bucket".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Yurt Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        FISHING_ROD.to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
+    let torch = inventory.new(
         ids.new_item_id(),
         "Crude Torch".to_string(),
         1,
@@ -360,6 +316,14 @@ pub fn new(
 
     inventory.equip(shirt.id, Some(Slot::Chest));
     inventory.equip(pants.id, Some(Slot::Pants));
+
+    // Equip torch for night spawns so the hero has visibility
+    let time_of_day = get_time_of_day(game_tick.0);
+    if time_of_day == crate::world::TimeOfDay::Dusk
+        || time_of_day == crate::world::TimeOfDay::Night
+    {
+        inventory.equip(torch.id, Some(Slot::OffHand));
+    }
 
     let mut item_attrs = HashMap::new();
     item_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
@@ -382,18 +346,6 @@ pub fn new(
         hero_id,
         "Copper Helm".to_string(),
         1,
-        item_attrs.clone(),
-        &templates.item_templates,
-    );
-
-    let mut item_attrs = HashMap::new();
-    item_attrs.insert(item::AttrKey::Feed, item::AttrVal::Num(100.0));
-
-    inventory.new_with_attrs(
-        ids.new_item_id(),
-        burrow_id,
-        "Honeybell Berries".to_string(),
-        5,
         item_attrs.clone(),
         &templates.item_templates,
     );
@@ -495,7 +447,6 @@ pub fn new(
     debug!("map_events: {:?}", map_events);
 
     // Create campfire at hero's location only if it's dusk or night
-    let time_of_day = get_time_of_day(game_tick.0);
     if time_of_day == crate::world::TimeOfDay::Dusk
         || time_of_day == crate::world::TimeOfDay::Night
     {
@@ -1050,8 +1001,65 @@ pub fn new(
     ids.new_obj(villager_id2, merchant_player_id);
     entity_map.new_obj(villager_id2, villager_entity_id2);*/
 
-    // Create shipwreck
-    let (shipwreck_id, _shipwreck_entity_id) = Obj::create(
+    // Create shipwreck with salvageable supplies
+    let shipwreck_id = ids.new_obj_id();
+    let mut shipwreck_inventory = Inventory {
+        owner: shipwreck_id,
+        items: Vec::new(),
+    };
+
+    // Shipwreck items (reward for exploring the wreck)
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Training Pick Axe".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Bedroll".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Sickle".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Bucket".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Cragroot Maple Log".to_string(),
+        10,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Windstride Raw Hide".to_string(),
+        10,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Seeds".to_string(),
+        25,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Felled Bristleback Boar".to_string(),
+        1,
+        &templates.item_templates,
+    );
+
+    let shipwreck = Obj::create_nospawn(
+        shipwreck_id,
         MERCHANT_PLAYER_ID,
         "Shipwreck".to_string(),
         Position {
@@ -1059,17 +1067,18 @@ pub fn new(
             y: start_location.shipwreck_pos[1],
         },
         State::None,
-        commands,
-        ids,
-        entity_map,
-        map_events,
-        &game_tick,
+        shipwreck_inventory,
         &templates,
     );
 
-    //shipwreck.inventory.new(shipwreck_id, "Salted Meat Strip".to_string(), 2, &templates.item_templates);
-    //shipwreck.inventory.new_with_attrs(shipwreck_id, "Amitanian Grape".to_string(), 50, feed_attr, &templates.item_templates);
-    //shipwreck.inventory.new(shipwreck_id, "Cragroot Maple Log".to_string(), 10, &templates.item_templates);
+    let shipwreck_entity_id = commands.spawn(shipwreck).id();
+
+    ids.new_obj(shipwreck_id, MERCHANT_PLAYER_ID);
+    entity_map.new_obj(shipwreck_id, shipwreck_entity_id);
+
+    commands.trigger(NewObj {
+        entity: shipwreck_entity_id,
+    });
 
     // Create human corpse
     Obj::create(
@@ -1119,8 +1128,15 @@ pub fn new(
         &templates,
     );*/
 
-    // The NecroEvent should start at Evening
-    /*let event_tick = game_tick.0 + (EVENING - game_tick.0);
+    // Schedule the necromancer event for the next evening
+    let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
+    let event_tick = if ticks_in_day < EVENING {
+        // Player joined before evening - trigger this same evening
+        game_tick.0 + (EVENING - ticks_in_day)
+    } else {
+        // Player joined at/after evening - trigger next day's evening
+        game_tick.0 + (GAME_TICKS_PER_DAY - ticks_in_day + EVENING)
+    };
 
     let event_type = GameEventType::NecroEvent {
         pos: Position {
@@ -1136,11 +1152,12 @@ pub fn new(
 
     let event = GameEvent {
         event_id: event_id,
+        start_tick: game_tick.0,
         run_tick: event_tick,
         event_type: event_type,
     };
 
-    game_events.insert(event.event_id, event);*/
+    game_events.insert(event.event_id, event);
 
     /*Encounter::spawn_tax_collector(
         MERCHANT_PLAYER_ID,

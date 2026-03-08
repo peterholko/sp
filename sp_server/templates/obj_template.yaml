@@ -177,6 +177,24 @@
   kill_xp: 100
   order: wander
 
+- name: Shipwreck Zombie
+  class: unit
+  subclass: npc
+  template: Shipwreck Zombie
+  image: zombie
+  family: Undead
+  base_hp: 20
+  base_stamina: 150
+  base_dmg: 2
+  dmg_range: 2
+  base_def: 1
+  base_speed: 2
+  base_vision: 2
+  int: mindless
+  aggression: frenzied
+  kill_xp: 50
+  order: wander
+
 - name: Elite Zombie
   class: unit
   subclass: npc

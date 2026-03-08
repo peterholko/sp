@@ -4930,7 +4930,7 @@ fn spell_raise_dead_event_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
-    pos_query: Query<&Position>,
+    pos_query: Query<(&Position, &Template)>,
     mut caster_query: Query<(&mut State, &mut Minions)>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -4952,7 +4952,7 @@ fn spell_raise_dead_event_system(
                         continue;
                     };
 
-                    let Ok(corpse_pos) = pos_query.get(corpse_entity) else {
+                    let Ok((corpse_pos, corpse_template)) = pos_query.get(corpse_entity) else {
                         error!("Cannot find corpse position {:?}", corpse_entity);
                         continue;
                     };
@@ -4993,8 +4993,15 @@ fn spell_raise_dead_event_system(
                     // Add to list of minions
                     caster_minions.ids.push(minion_id);
 
+                    // Spawn weaker Shipwreck Zombie for Human Corpses (shipwreck sailors)
+                    let zombie_type = if corpse_template.0 == "Human Corpse" {
+                        "Shipwreck Zombie".to_string()
+                    } else {
+                        "Zombie".to_string()
+                    };
+
                     let event_type = GameEventType::SpawnNPC {
-                        npc_type: "Zombie".to_string(),
+                        npc_type: zombie_type,
                         pos: *corpse_pos,
                         npc_id: Some(minion_id),
                     };
@@ -7182,6 +7189,14 @@ fn game_event_system(
                     commands.trigger(NewObj {
                         entity: necro_entity,
                     });
+
+                    // Necromancer announces arrival
+                    let speech_event = VisibleEvent::SpeechEvent {
+                        speech: "Rise... serve me...".to_string(),
+                        intensity: 2,
+                    };
+
+                    map_events.new(npc_id.0, game_tick.0 + 10, speech_event);
                 }
 
                 GameEventType::CancelAllMapEvents { obj_id } => {
