@@ -47,6 +47,9 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     const hpRatio = this.props.heroStats.hp / Global.heroMaxHp;
     const hpBarWidth = hpRatio * STAT_BAR_WIDTH;
 
+    const staRatio = Global.heroMaxStamina > 0 ? this.props.heroStats.stamina / Global.heroMaxStamina : 0;
+    const staBarWidth = staRatio * STAT_BAR_WIDTH;
+
     if(Global.heroId in Global.objectStates) {
       let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
       imagePath = '/static/art/' + imageName  + '_single.png';
@@ -92,7 +95,7 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
  
     const staBarStyle  = {
       transform: 'translate(97px, 37px)',
-      width: this.props.heroStats.stamina + 'px',
+      width: staBarWidth + 'px',
       height: STAT_BAR_HEIGHT + 'px',
       zIndex: 4,
       position: 'fixed' 

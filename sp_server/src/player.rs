@@ -2189,8 +2189,6 @@ fn info_hero_system(
     let mut attributes: HashMap<String, i32> = HashMap::new();
     let mut skills_packet = None;
 
-    let stamina = None;
-
     let total_weight = Some(obj.inventory.get_total_weight());
     let capacity = Some(Obj::get_capacity(
         &obj.template.0.to_string(),
@@ -2252,7 +2250,7 @@ fn info_hero_system(
         attributes: Some(attributes),
         effects: effects,
         hp: Some(stats.hp),
-        stamina: stamina,
+        stamina: stats.stamina,
         thirst: thirst.num_to_string(),
         hunger: hunger.num_to_string(),
         tiredness: tired.num_to_string(),

@@ -585,6 +585,7 @@ impl Plugin for GamePlugin {
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(Update, stamina_recovery_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, stamina_update_system.after(stamina_recovery_system).run_if(in_state(AppState::Running)))
             .add_systems(Update, snapshot_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
@@ -9564,6 +9565,28 @@ fn stamina_recovery_system(
                 let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
                 let recovery = if in_combat { 1 } else { 5 };
                 stats.stamina = Some((stamina + recovery).min(base_stamina));
+            }
+        }
+    }
+}
+
+fn stamina_update_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    hero_query: Query<(&Id, &PlayerId, &Stats), (With<SubclassHero>, Without<StateDead>)>,
+) {
+    if game_tick.0 % TICKS_PER_SEC != 0 {
+        return;
+    }
+
+    for (id, player_id, stats) in hero_query.iter() {
+        if let (Some(stamina), Some(base_stamina)) = (stats.stamina, stats.base_stamina) {
+            if stamina < base_stamina {
+                let packet = ResponsePacket::InfoStaminaUpdate {
+                    id: id.0,
+                    stamina: stamina,
+                };
+                send_to_client(player_id.0, packet, &clients);
             }
         }
     }

@@ -1517,6 +1517,9 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.INFO_ACTIVITY_UPDATE, jsonData);
       } else if (jsonData.packet == "info_needs_update") {
         Global.gameEmitter.emit(NetworkEvent.INFO_NEEDS_UPDATE, jsonData);
+      } else if (jsonData.packet == "info_stamina_update") {
+        Global.heroStamina = jsonData.stamina;
+        Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina });
       } else if (jsonData.packet == "info_hunger_update") {
         Global.gameEmitter.emit(NetworkEvent.INFO_HUNGER_UPDATE, jsonData);
       } else if (jsonData.packet == "info_thirst_update") {

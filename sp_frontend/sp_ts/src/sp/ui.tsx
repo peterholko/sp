@@ -791,6 +791,8 @@ export default class UI extends React.Component<any, UIState> {
 
 
   handleAttack(message) {
+    Global.heroStamina = Math.max(0, Global.heroStamina - message.stamina_cost);
+    Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina });
   }
 
   handleAdvance(message) {

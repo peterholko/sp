@@ -598,6 +598,11 @@ pub enum ResponsePacket {
         hunger: String,
         tiredness: String,
     },
+    #[serde(rename = "info_stamina_update")]
+    InfoStaminaUpdate {
+        id: i32,
+        stamina: i32,
+    },
     #[serde(rename = "info_merchant")]
     InfoMerchant {
         source_id: i32,
