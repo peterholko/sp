@@ -530,7 +530,7 @@
   image: craftingtent
   base_hp: 100
   base_def: 0
-  build_cost: 500
+  build_cost: 250
   level: 0
   capacity: 200
   activity: Crafting
@@ -646,6 +646,22 @@
       quantity: 5
   upgrade_to: []     
 
+- name: Herb Garden
+  class: structure
+  subclass: farm
+  template: Herb Garden
+  image: farm
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  capacity: 100
+  level: 0
+  profession: the Herbalist
+  req:
+    - type: Log
+      quantity: 3
+  upgrade_to: [Farm]
+
 - name: Farm
   class: structure
   subclass: farm
@@ -657,9 +673,28 @@
   capacity: 500
   level: 0
   profession: the Farmer
-  req: 
+  req:
     - type: Log
       quantity: 5
+
+- name: Hunter's Stand
+  class: structure
+  subclass: resource
+  template: Hunter's Stand
+  image: trapper
+  base_hp: 100
+  base_def: 0
+  build_cost: 48
+  level: 0
+  profession: the Hunter
+  activity: Hunting
+  req:
+    - type: Log
+      quantity: 8
+  upgrade_to: [Trapper]
+  upgrade_req:
+    - type: Log
+      quantity: 20
 
 - name: Trapper
   class: structure
@@ -672,9 +707,9 @@
   level: 1
   profession: the Hunter
   activity: Hunting
-  req: 
+  req:
     - type: Log
-      quantity: 40
+      quantity: 20
 
 - name: Lumbercamp
   class: structure
@@ -837,6 +872,37 @@
     - type: Log
       quantity: 1
 
+- name: Log Rack
+  class: structure
+  subclass: storage
+  template: Log Rack
+  image: burrow
+  base_hp: 100
+  base_def: 0
+  build_cost: 24
+  level: 0
+  capacity: 100
+  req:
+    - type: Log
+      quantity: 2
+
+- name: Well
+  class: structure
+  subclass: resource
+  template: Well
+  image: burrow
+  base_hp: 200
+  base_def: 0
+  build_cost: 120
+  level: 0
+  capacity: 100
+  activity: Drawing Water
+  req:
+    - type: Log
+      quantity: 5
+    - type: Stone
+      quantity: 5
+
 - name: Burrow
   class: structure
   subclass: storage
@@ -847,9 +913,27 @@
   build_cost: 240
   level: 0
   capacity: 200
-  req: 
+  req:
     - type: Log
       quantity: 10
+
+- name: Smokehouse
+  class: structure
+  subclass: craft
+  template: Smokehouse
+  image: burrow
+  base_hp: 200
+  base_def: 0
+  build_cost: 120
+  level: 0
+  capacity: 100
+  profession: the Smoker
+  activity: Operating
+  req:
+    - type: Log
+      quantity: 10
+    - type: Stone
+      quantity: 5
 
 - name: Warehouse
   class: structure
@@ -892,6 +976,24 @@
     - type: Log
       quantity: 10
 
+- name: Guard Post
+  class: structure
+  subclass: watchtower
+  template: Guard Post
+  image: watchtower
+  base_hp: 50
+  base_def: 0
+  build_cost: 48
+  capacity: 50
+  level: 0
+  req:
+    - type: Log
+      quantity: 5
+  upgrade_to: [Watchtower]
+  upgrade_req:
+    - type: Log
+      quantity: 5
+
 - name: Watchtower
   class: structure
   subclass: watchtower
@@ -902,7 +1004,7 @@
   build_cost: 50
   capacity: 100
   level: 0
-  req: 
+  req:
     - type: Log
       quantity: 5
   upkeep:

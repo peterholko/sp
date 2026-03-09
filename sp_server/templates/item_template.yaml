@@ -866,6 +866,12 @@
 ##### DEEDS #####
 ##################
 
+- name: Small Tent Deed
+  class: Deed
+  subclass: Small Tent
+  image: deed
+  weight: 1
+
 - name: Yurt Deed
   class: Deed
   subclass: Yurt

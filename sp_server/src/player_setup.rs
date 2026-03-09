@@ -125,7 +125,7 @@ pub fn new(
     );
     burrow_inventory.new(
         ids.new_item_id(),
-        "Yurt Deed".to_string(),
+        "Small Tent Deed".to_string(),
         1,
         &templates.item_templates,
     );
@@ -797,14 +797,20 @@ pub fn new(
 
     //Starting plans
     plans.add(player_id, "Campfire".to_string(), 0, 0);
-    plans.add(player_id, "Watchtower".to_string(), 0, 0);
+    plans.add(player_id, "Guard Post".to_string(), 0, 0);
+    plans.add(player_id, "Stockade".to_string(), 0, 0);
+    plans.add(player_id, "Small Tent".to_string(), 0, 0);
+    plans.add(player_id, "Herb Garden".to_string(), 0, 0);
     plans.add(player_id, "Farm".to_string(), 0, 0);
     plans.add(player_id, "Crafting Tent".to_string(), 0, 0);
-    plans.add(player_id, "Blacksmith".to_string(), 0, 0);
-    plans.add(player_id, "Small Tent".to_string(), 0, 0);
+    plans.add(player_id, "Hunter's Stand".to_string(), 0, 0);
+    plans.add(player_id, "Log Rack".to_string(), 0, 0);
     plans.add(player_id, "Burrow".to_string(), 0, 0);
-    plans.add(player_id, "Stockade".to_string(), 0, 0);
+    plans.add(player_id, "Well".to_string(), 0, 0);
+    plans.add(player_id, "Smokehouse".to_string(), 0, 0);
     plans.add(player_id, "Mine".to_string(), 0, 0);
+    plans.add(player_id, "Watchtower".to_string(), 0, 0);
+    plans.add(player_id, "Blacksmith".to_string(), 0, 0);
 
     let mut thirst_attr = HashMap::new();
     thirst_attr.insert(item::AttrKey::Thirst, item::AttrVal::Num(90.0));
