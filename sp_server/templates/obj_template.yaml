@@ -125,6 +125,75 @@
   aggression: strategic
   kill_xp: 60
 
+- name: Giant Crab
+  class: unit
+  subclass: npc
+  template: Giant Crab
+  image: giantcrab
+  family: Animal
+  base_hp: 15
+  base_stamina: 100
+  base_dmg: 2
+  dmg_range: 2
+  base_def: 3
+  base_speed: 2
+  base_vision: 2
+  int: animal
+  aggression: frenzied
+  kill_xp: 40
+
+- name: Wild Boar
+  class: unit
+  subclass: npc
+  template: Wild Boar
+  image: wildboar
+  family: Animal
+  base_hp: 30
+  base_stamina: 200
+  base_dmg: 3
+  dmg_range: 3
+  base_def: 2
+  base_speed: 5
+  base_vision: 3
+  int: animal
+  aggression: strategic
+  kill_xp: 80
+
+- name: Mudcrawler
+  class: unit
+  subclass: npc
+  template: Mudcrawler
+  image: mudcrawler
+  family: Animal
+  base_hp: 15
+  base_stamina: 100
+  base_dmg: 1
+  dmg_range: 2
+  base_def: 1
+  base_speed: 2
+  base_vision: 2
+  int: animal
+  aggression: frenzied
+  kill_xp: 30
+
+- name: Ghost
+  class: unit
+  subclass: npc
+  template: Ghost
+  image: ghost
+  family: Undead
+  base_hp: 10
+  base_stamina: 100
+  base_dmg: 1
+  dmg_range: 1
+  base_def: 0
+  base_speed: 4
+  base_vision: 4
+  int: cunning
+  aggression: passive
+  kill_xp: 25
+  order: wander
+
 - name: Wose
   class: unit
   subclass: npc

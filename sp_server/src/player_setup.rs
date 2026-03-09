@@ -1128,6 +1128,90 @@ pub fn new(
         &templates,
     );*/
 
+    // Spawn giant rats from the shipwreck shortly after player arrives
+    let shipwreck_pos = Position {
+        x: start_location.shipwreck_pos[0],
+        y: start_location.shipwreck_pos[1],
+    };
+
+    for i in 0..2 {
+        let rat_event_id = ids.new_map_event_id();
+        let rat_event = GameEvent {
+            event_id: rat_event_id,
+            start_tick: game_tick.0,
+            run_tick: game_tick.0 + 200 + (i * 10), // Stagger spawns ~20 seconds in
+            event_type: GameEventType::SpawnNPC {
+                npc_type: "Giant Rat".to_string(),
+                pos: shipwreck_pos,
+                npc_id: None,
+            },
+        };
+        game_events.insert(rat_event.event_id, rat_event);
+    }
+
+    // Spawn a random creature (Giant Crab or Wild Boar) ~1 minute after player arrives
+    let random_creature = if rand::thread_rng().gen_range(0..2) == 0 {
+        "Giant Crab"
+    } else {
+        "Wild Boar"
+    };
+    let creature_event_id = ids.new_map_event_id();
+    let creature_event = GameEvent {
+        event_id: creature_event_id,
+        start_tick: game_tick.0,
+        run_tick: game_tick.0 + 600, // ~1 minute at 10 ticks/sec
+        event_type: GameEventType::SpawnNPC {
+            npc_type: random_creature.to_string(),
+            pos: shipwreck_pos,
+            npc_id: None,
+        },
+    };
+    game_events.insert(creature_event.event_id, creature_event);
+
+    // Spawn a spider from the shipwreck ~1.5 minutes after player arrives
+    let spider_event_id = ids.new_map_event_id();
+    let spider_event = GameEvent {
+        event_id: spider_event_id,
+        start_tick: game_tick.0,
+        run_tick: game_tick.0 + 900, // ~1.5 minutes at 10 ticks/sec
+        event_type: GameEventType::SpawnNPC {
+            npc_type: "Spider".to_string(),
+            pos: shipwreck_pos,
+            npc_id: None,
+        },
+    };
+    game_events.insert(spider_event.event_id, spider_event);
+
+    // Ghost appears near the sailor corpses ~2 minutes in (foreshadows necromancer)
+    let corpse_pos = Position {
+        x: start_location.corpse1_pos[0],
+        y: start_location.corpse1_pos[1],
+    };
+    let ghost_event_id = ids.new_map_event_id();
+    let ghost_event = GameEvent {
+        event_id: ghost_event_id,
+        start_tick: game_tick.0,
+        run_tick: game_tick.0 + 1200, // ~2 minutes at 10 ticks/sec
+        event_type: GameEventType::SpawnNPC {
+            npc_type: "Ghost".to_string(),
+            pos: corpse_pos,
+            npc_id: None,
+        },
+    };
+    game_events.insert(ghost_event.event_id, ghost_event);
+
+    // Wolf howl sound event ~3 minutes after player arrives (atmospheric, no wolf spawn)
+    let hero_pos = Position {
+        x: start_location.hero_pos[0],
+        y: start_location.hero_pos[1],
+    };
+    let wolf_howl_event = VisibleEvent::SoundEvent {
+        pos: hero_pos,
+        sound: "A wolf howls in the distance".to_string(),
+        intensity: 10,
+    };
+    map_events.new(hero_id, game_tick.0 + 1800, wolf_howl_event);
+
     // Schedule the necromancer event for the next evening
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
     let event_tick = if ticks_in_day < EVENING {

@@ -412,6 +412,12 @@ pub fn target_scorer_system(
         let int = npc_template.int.unwrap_or("mindless".to_string());
         let aggression = npc_template.aggression.unwrap_or("medium".to_string());
 
+        // Passive NPCs never target players
+        if is_passive(&aggression) {
+            score.set(0.0);
+            continue;
+        }
+
         for (
             target_id,
             target_player,
@@ -976,18 +982,24 @@ pub fn torch_target_scorer_system(
 pub fn nearby_corpses_scorer_system(
     game_tick: Res<GameTick>,
     mut npc_query: Query<
-        (&Position, &Viewshed, &mut TaskTarget),
-        (With<SubclassNPC>, Without<EventExecuting>),
+        (&Position, &Viewshed, &mut TaskTarget, &EventExecuting),
+        With<SubclassNPC>,
     >,
     target_query: Query<ObjQuery>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<VisibleCorpseScorer>>,
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
         for (Actor(actor), mut score, _span) in &mut query {
-            let Ok((npc_pos, npc_viewshed, mut npc_task_target)) = npc_query.get_mut(*actor) else {
+            let Ok((npc_pos, npc_viewshed, mut npc_task_target, event_executing)) = npc_query.get_mut(*actor) else {
                 error!("Nearby Corpses Scorer => Cannot find npc query for {:?}", *actor);
                 continue;
             };
+
+            // Skip if currently executing an event
+            if event_executing.state == EventExecutingState::Executing {
+                score.set(0.0);
+                continue;
+            }
 
             let mut min_distance = u32::MAX;
             let mut corpse_id = NO_TARGET;
