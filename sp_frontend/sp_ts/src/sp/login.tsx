@@ -208,6 +208,7 @@ export default class LoginControl extends React.Component<any, any> {
 
         if (result.account_name) {
           Global.accountName = result.account_name;
+          Global.accountSetupCompleted = true;
         }
 
         Global.network = new Network();

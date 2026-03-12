@@ -431,7 +431,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     const infoSmallY = '0px';
     const infoLargeY = '260px';
 
-    const zIndex = Global.zIndexManager.getTop() + 1;
+    const zIndex = Global.zIndexManager.getTop() + 3;
 
     const transferStyle = {
       top: '50%',

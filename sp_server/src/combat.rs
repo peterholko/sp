@@ -46,7 +46,7 @@ impl AttackType {
 pub enum Combo {
     Hamstring,
     Gouge,
-    ImtimidatingShout,
+    IntimidatingShout,
     ShroudedSlash,
     ShatterCleave,
     MassivePummel,

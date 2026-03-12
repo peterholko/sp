@@ -83,6 +83,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::constants::{CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_NPC, TICKS_PER_SEC};
+    use crate::event::{EventExecuting, EventExecutingState};
     use crate::templates::ObjTemplate;
 
     fn test_stats() -> Stats {
@@ -165,6 +166,10 @@ mod tests {
                 VisibleTarget::new(NO_TARGET),
                 SubclassNPC,
                 test_stats(),
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
             ))
             .id();
 
@@ -382,7 +387,7 @@ pub fn target_scorer_system(
         )) = npc_query.get_mut(*actor)
         else {
             span.span().in_scope(|| {
-                npc_warn!(*actor, obj_id, "Cannot find npc query");
+                npc_warn!(*actor, obj_id, None, "Cannot find npc query");
             });
             continue;
         };
@@ -392,6 +397,7 @@ pub fn target_scorer_system(
                 npc_debug!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "Currently executing event, skipping target scoring"
                 );
             });
@@ -436,6 +442,7 @@ pub fn target_scorer_system(
                 npc_debug!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "Evaluating target player={} id={} class={} subclass={:?} state={:?}",
                     target_player.0,
                     target_id.0,
@@ -468,6 +475,7 @@ pub fn target_scorer_system(
                 npc_trace!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "npc_strength={} target_strength={}",
                     npc_stats.get_strength(),
                     target_stats.get_strength()
@@ -482,6 +490,7 @@ pub fn target_scorer_system(
                 npc_trace!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "is_fortified={}",
                     target_effects.has(Effect::Fortified)
                 );
@@ -504,6 +513,7 @@ pub fn target_scorer_system(
                 npc_trace!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "viewshed_range={} distance={} min_distance={}",
                     npc_viewshed.range,
                     distance,
@@ -528,6 +538,7 @@ pub fn target_scorer_system(
             npc_debug!(
                 *actor,
                 obj_id,
+                Some(npc_template_name.0.as_str()),
                 "selected_target_fortified={}",
                 selected_target.fortified
             );
@@ -537,6 +548,7 @@ pub fn target_scorer_system(
                 npc_debug!(
                     *actor,
                     obj_id,
+                    Some(npc_template_name.0.as_str()),
                     "Nearest target is fortified, changing target to fortification"
                 );
             });
@@ -546,6 +558,7 @@ pub fn target_scorer_system(
                     npc_error!(
                         *actor,
                         obj_id,
+                        Some(npc_template_name.0.as_str()),
                         "Cannot find entity from id={}",
                         selected_target.id
                     );
@@ -558,6 +571,7 @@ pub fn target_scorer_system(
                     npc_error!(
                         *actor,
                         obj_id,
+                        Some(npc_template_name.0.as_str()),
                         "Cannot find fortified entity {:?}",
                         fortified_entity
                     );
@@ -569,13 +583,13 @@ pub fn target_scorer_system(
             score.set(NORMAL_SCORE / 100.0);
         } else if selected_target.id != NO_TARGET {
             span.span().in_scope(|| {
-                npc_info!(*actor, obj_id, "Selected target_id={}", selected_target.id);
+                npc_info!(*actor, obj_id, Some(npc_template_name.0.as_str()), "Selected target_id={}", selected_target.id);
             });
             npc_visible_target.target = selected_target.id;
             score.set(NORMAL_SCORE / 100.0);
         } else {
             span.span().in_scope(|| {
-                npc_debug!(*actor, obj_id, "No target found");
+                npc_debug!(*actor, obj_id, Some(npc_template_name.0.as_str()), "No target found");
             });
             npc_visible_target.target = NO_TARGET;
             score.set(0.0);
@@ -1088,12 +1102,12 @@ pub fn set_attack_target_system(
     for (Actor(actor), mut state, _set_attack_destination) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Setting attack target...");
+                npc_info!(*actor, None, None, "Setting attack target...");
                 let Ok(visible_target) = visible_target_query.get(*actor) else {
                     continue;
                 };
 
-                info!("Setting attack target to {:?}", visible_target.target);
+                npc_info!(*actor, None, None, "Setting attack target to {:?}", visible_target.target);
                 commands.entity(*actor).insert(Target {
                     id: visible_target.target,
                 });
@@ -1104,7 +1118,7 @@ pub fn set_attack_target_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Set Attack Destination action was cancelled. Considering this a failure.");
+                npc_debug!(*actor, None, None, "Set Attack Destination action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1120,9 +1134,9 @@ pub fn set_torch_target_system(
     for (Actor(actor), mut state, _set_attack_destination) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Setting torch target...");
+                npc_info!(*actor, None, None, "Setting torch target...");
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1136,7 +1150,7 @@ pub fn set_torch_target_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Set Torch Target action was cancelled. Considering this a failure.");
+                npc_debug!(*actor, None, None, "Set Torch Target action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1152,9 +1166,9 @@ pub fn set_spoil_target_system(
     for (Actor(actor), mut state, _set_spoil_target) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Setting spoil target...");
+                npc_info!(*actor, None, None, "Setting spoil target...");
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1168,7 +1182,7 @@ pub fn set_spoil_target_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Set Torch Target action was cancelled. Considering this a failure.");
+                npc_debug!(*actor, None, None, "Set Spoil Target action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1184,9 +1198,9 @@ pub fn set_steal_target_system(
     for (Actor(actor), mut state, _set_steal_target) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} Setting steal target...", *actor);
+                npc_info!(*actor, None, None, "Setting steal target...");
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1200,7 +1214,7 @@ pub fn set_steal_target_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Actor: {:?} Set Steal Target action was cancelled. Considering this a failure.", *actor);
+                npc_debug!(*actor, None, None, "Set Steal Target action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1216,9 +1230,9 @@ pub fn set_corpse_target_system(
     for (Actor(actor), mut state, _set_corpse_target) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Setting corpse target...");
+                npc_info!(*actor, None, None, "Setting corpse target...");
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1232,7 +1246,7 @@ pub fn set_corpse_target_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Set Corpse Target action was cancelled. Considering this a failure.");
+                npc_debug!(*actor, None, None, "Set Corpse Target action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1250,10 +1264,10 @@ pub fn set_home_system(
     for (Actor(actor), mut state, _set_home) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} Setting home destination...", *actor);
+                npc_info!(*actor, None, None, "Setting home destination...");
 
                 let Ok((obj_id, home)) = home_query.get(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1275,7 +1289,7 @@ pub fn set_home_system(
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
-                debug!("Actor: {:?} Set Steal Target action was cancelled. Considering this a failure.", *actor);
+                npc_debug!(*actor, None, None, "Set Home action was cancelled. Considering this a failure.");
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1303,11 +1317,11 @@ pub fn move_to_system(
         match *state {
             ActionState::Requested => {
                 span.span().in_scope(|| {
-                    npc_debug!(*actor, obj_id, "MoveTo requested");
+                    npc_debug!(*actor, obj_id, None, "MoveTo requested");
                 });
                 let Some(obj_id_val) = obj_id else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, None, "Cannot find obj id");
+                        npc_error!(*actor, None, None, "Cannot find obj id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1315,7 +1329,7 @@ pub fn move_to_system(
 
                 let Some(player_id) = ids.get_player(obj_id_val) else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, obj_id, "Cannot find player id");
+                        npc_error!(*actor, obj_id, None, "Cannot find player id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1325,7 +1339,7 @@ pub fn move_to_system(
 
                 let Ok(destination) = dest_query.get(*actor) else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, obj_id, "No Destination component");
+                        npc_error!(*actor, obj_id, None, "No Destination component");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1341,7 +1355,7 @@ pub fn move_to_system(
                 let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, obj_id, "Cannot get obj query");
+                        npc_error!(*actor, obj_id, None, "Cannot get obj query");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1363,6 +1377,7 @@ pub fn move_to_system(
                             npc_trace!(
                                 *actor,
                                 obj_id,
+                                None,
                                 "Path found, length={}",
                                 path_result.0.len()
                             );
@@ -1372,7 +1387,7 @@ pub fn move_to_system(
                         let next_pos = &path[1];
 
                         span.span().in_scope(|| {
-                            npc_trace!(*actor, obj_id, "Next pos=({}, {})", next_pos.0, next_pos.1);
+                            npc_trace!(*actor, obj_id, None, "Next pos=({}, {})", next_pos.0, next_pos.1);
                         });
 
                         commands.trigger(StateChange {
@@ -1401,7 +1416,7 @@ pub fn move_to_system(
                         event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
-                            npc_debug!(*actor, obj_id, "Cannot find path to destination");
+                            npc_debug!(*actor, obj_id, None, "Cannot find path to destination");
                         });
                         *state = ActionState::Failure
                     }
@@ -1411,25 +1426,25 @@ pub fn move_to_system(
             }
             ActionState::Executing => {
                 span.span().in_scope(|| {
-                    npc_trace!(*actor, obj_id, "MoveTo executing");
+                    npc_trace!(*actor, obj_id, None, "MoveTo executing");
                 });
                 let mut event_executing = event_executing_query
                     .get_mut(*actor)
                     .expect("Missing EventExecuting component");
 
                 span.span().in_scope(|| {
-                    npc_trace!(*actor, obj_id, "Event state={:?}", event_executing.state);
+                    npc_trace!(*actor, obj_id, None, "Event state={:?}", event_executing.state);
                 });
                 if !event_executing.state.is_finished() {
                     span.span().in_scope(|| {
-                        npc_trace!(*actor, obj_id, "MoveTo still executing");
+                        npc_trace!(*actor, obj_id, None, "MoveTo still executing");
                     });
                     continue;
                 }
 
                 let Some(obj_id_val) = obj_id else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, None, "Cannot find obj id");
+                        npc_error!(*actor, None, None, "Cannot find obj id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1437,7 +1452,7 @@ pub fn move_to_system(
 
                 let Some(player_id) = ids.get_player(obj_id_val) else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, obj_id, "Cannot find player id");
+                        npc_error!(*actor, obj_id, None, "Cannot find player id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1449,7 +1464,7 @@ pub fn move_to_system(
                 {
                     let Ok(destination) = dest_query.get(*actor) else {
                         span.span().in_scope(|| {
-                            npc_error!(*actor, obj_id, "No Destination component");
+                            npc_error!(*actor, obj_id, None, "No Destination component");
                         });
                         *state = ActionState::Failure;
                         continue;
@@ -1459,7 +1474,7 @@ pub fn move_to_system(
                         // Check if moving event failed
                         if event_executing.state.is_failed() {
                             span.span().in_scope(|| {
-                                npc_warn!(*actor, obj_id, "Moving event failed");
+                                npc_warn!(*actor, obj_id, None, "Moving event failed");
                             });
                             *state = ActionState::Failure;
                             continue;
@@ -1477,7 +1492,7 @@ pub fn move_to_system(
                             false,
                         ) else {
                             span.span().in_scope(|| {
-                                npc_trace!(*actor, obj_id, "Cannot find path to destination");
+                                npc_trace!(*actor, obj_id, None, "Cannot find path to destination");
                             });
                             *state = ActionState::Failure;
                             continue;
@@ -1487,6 +1502,7 @@ pub fn move_to_system(
                             npc_trace!(
                                 *actor,
                                 obj_id,
+                                None,
                                 "Path found, length={}",
                                 path_result.0.len()
                             );
@@ -1496,7 +1512,7 @@ pub fn move_to_system(
                         let next_pos = &path[1];
 
                         span.span().in_scope(|| {
-                            npc_trace!(*actor, obj_id, "Next pos=({}, {})", next_pos.0, next_pos.1);
+                            npc_trace!(*actor, obj_id, None, "Next pos=({}, {})", next_pos.0, next_pos.1);
                         });
 
                         commands.trigger(StateChange {
@@ -1527,7 +1543,7 @@ pub fn move_to_system(
                         event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
-                            npc_debug!(*actor, obj_id, "Adjacent to destination, success");
+                            npc_debug!(*actor, obj_id, None, "Adjacent to destination, success");
                         });
                         *state = ActionState::Success;
                     }
@@ -1535,12 +1551,12 @@ pub fn move_to_system(
             }
             ActionState::Cancelled => {
                 span.span().in_scope(|| {
-                    npc_debug!(*actor, obj_id, "Cancelling MoveTo");
+                    npc_debug!(*actor, obj_id, None, "Cancelling MoveTo");
                 });
 
                 let Some(npc_obj_id) = obj_id else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, None, "Cannot find obj id");
+                        npc_error!(*actor, None, None, "Cannot find obj id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1584,43 +1600,37 @@ pub fn move_to_target_system(
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} MoveToTarget action requested", *actor);
                 span.span().in_scope(|| {
-                    npc_debug!(*actor, obj_id, "MoveTo requested");
+                    npc_debug!(*actor, obj_id, None, "MoveToTarget action requested");
                 });
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(npc_player_id) = ids.get_player(npc_id) else {
-                    error!("Cannot find player id for entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Cannot find target for {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find target");
                     *state = ActionState::Failure;
                     continue;
                 };
 
-                info!("Actor: {:?} Target: {:?}", *actor, target.id);
+                npc_debug!(*actor, obj_id, None, "Target: {:?}", target.id);
 
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
-                    error!(
-                        "[{:?}] Actor: {:?} Cannot find entity for {:?}",
-                        line!(),
-                        *actor,
-                        target.id
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find entity for {:?}", target.id);
                     *state = ActionState::Failure;
                     continue;
                 };
 
-                info!("Actor: {:?} Target Entity: {:?}", *actor, target_entity);
+                npc_debug!(*actor, obj_id, None, "Target Entity: {:?}", target_entity);
 
                 // Have to get the list of collision positions before querying the npc and target
                 let collision_list = Obj::blocking_list_objstatquery(npc_player_id, &obj_query);
@@ -1628,12 +1638,7 @@ pub fn move_to_target_system(
                 let entities = [*actor, target_entity];
 
                 let Ok([mut npc, target]) = obj_query.get_many_mut(entities) else {
-                    error!(
-                        "[{:?}] Actor: {:?} Query failed to find entities {:?}",
-                        line!(),
-                        *actor,
-                        entities
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entities {:?}", entities);
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1643,7 +1648,7 @@ pub fn move_to_target_system(
                 if !reached_destination {
                     // Check if NPC is stunned and cannot move
                     if npc.effects.has(Effect::Stunned) {
-                        debug!("NPC is stunned");
+                        npc_debug!(*actor, obj_id, None, "NPC is stunned");
                         continue;
                     }
 
@@ -1674,17 +1679,17 @@ pub fn move_to_target_system(
                         false,
                         true, // Allow move onto position with transport
                     ) else {
-                        info!("No path found");
+                        npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
                         continue;
                     };
 
-                    info!("Follower path: {:?}", path_result);
+                    npc_trace!(*actor, obj_id, None, "Follower path: {:?}", path_result);
 
                     let (path, _c) = path_result;
                     let next_pos = &path[1];
 
-                    info!("Next pos: {:?}", next_pos);
+                    npc_trace!(*actor, obj_id, None, "Next pos: {:?}", next_pos);
 
                     // Add State Change Event to Moving
                     *npc.state = State::Moving;
@@ -1715,47 +1720,42 @@ pub fn move_to_target_system(
             }
             ActionState::Executing => {
                 span.span().in_scope(|| {
-                    npc_trace!(*actor, obj_id, "MoveToTarget executing");
+                    npc_trace!(*actor, obj_id, None, "MoveToTarget executing");
                 });
                 let mut event_executing = event_executing_query
                     .get_mut(*actor)
                     .expect("Missing EventExecuting component");
 
                 span.span().in_scope(|| {
-                    npc_trace!(*actor, obj_id, "Event state={:?}", event_executing.state);
+                    npc_trace!(*actor, obj_id, None, "Event state={:?}", event_executing.state);
                 });
                 if !event_executing.state.is_finished() {
                     span.span().in_scope(|| {
-                        npc_trace!(*actor, obj_id, "MoveToTarget still executing");
+                        npc_trace!(*actor, obj_id, None, "MoveToTarget still executing");
                     });
                     continue;
                 }
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(npc_player_id) = ids.get_player(npc_id) else {
-                    error!("Cannot find player id for entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Cannot find target for {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find target");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
-                    error!(
-                        "[{:?}] Actor: {:?} Cannot find entity for {:?}",
-                        line!(),
-                        *actor,
-                        target.id
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find entity for {:?}", target.id);
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1766,18 +1766,14 @@ pub fn move_to_target_system(
                 let entities = [*actor, target_entity];
 
                 let Ok([mut npc, target]) = obj_query.get_many_mut(entities) else {
-                    error!(
-                        "[{:?}] Query failed to find entities {:?}",
-                        line!(),
-                        entities
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entities {:?}", entities);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
@@ -1803,7 +1799,7 @@ pub fn move_to_target_system(
                     // Check if moving event failed
                     if event_executing.state.is_failed() {
                         span.span().in_scope(|| {
-                            npc_warn!(*actor, obj_id, "Moving event failed");
+                            npc_warn!(*actor, obj_id, None, "Moving event failed");
                         });
                         *state = ActionState::Failure;
                         continue;
@@ -1820,17 +1816,17 @@ pub fn move_to_target_system(
                         false,
                         true, // Allow move onto position with transport
                     ) else {
-                        info!("No path found");
+                        npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
                         continue;
                     };
 
-                    info!("Follower path: {:?}", path_result);
+                    npc_trace!(*actor, obj_id, None, "Follower path: {:?}", path_result);
 
                     let (path, _c) = path_result;
                     let next_pos = &path[1];
 
-                    info!("Next pos: {:?}", next_pos);
+                    npc_trace!(*actor, obj_id, None, "Next pos: {:?}", next_pos);
 
                     // Add State Change Event to Moving
                     *npc.state = State::Moving;
@@ -1855,20 +1851,20 @@ pub fn move_to_target_system(
                     event_executing.state = EventExecutingState::Executing;
                 } else {
                     span.span().in_scope(|| {
-                        npc_debug!(*actor, obj_id, "Adjacent to destination, success");
+                        npc_debug!(*actor, obj_id, None, "Adjacent to destination, success");
                     });
-                    *state = ActionState::Success;                
+                    *state = ActionState::Success;
                 }
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
                 span.span().in_scope(|| {
-                    npc_debug!(*actor, obj_id, "Cancelling MoveToTarget");
+                    npc_debug!(*actor, obj_id, None, "Cancelling MoveToTarget");
                 });
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
                     span.span().in_scope(|| {
-                        npc_error!(*actor, None, "Cannot find obj id");
+                        npc_error!(*actor, None, None, "Cannot find obj id");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1913,32 +1909,28 @@ pub fn move_near_target_system(
     for (Actor(actor), mut state, move_near_target) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} MoveNearTarget action requested", *actor);
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+                npc_info!(*actor, obj_id, None, "MoveNearTarget action requested");
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(npc_player_id) = ids.get_player(npc_id) else {
-                    error!("Cannot find player id for entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Cannot find target for {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find target");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
-                    error!(
-                        "[{:?}] Actor: {:?} Cannot find entity for {:?}",
-                        line!(),
-                        *actor,
-                        target.id
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find entity for {:?}", target.id);
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -1949,18 +1941,14 @@ pub fn move_near_target_system(
                 let entities = [*actor, target_entity];
 
                 let Ok([mut npc, target]) = obj_query.get_many_mut(entities) else {
-                    error!(
-                        "[{:?}] Query failed to find entities {:?}",
-                        line!(),
-                        entities
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entities {:?}", entities);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
@@ -1983,13 +1971,13 @@ pub fn move_near_target_system(
                 let target_dist = Map::dist(*npc.pos, *target.pos);
 
                 if target_dist == 2 {
-                    info!("NPC {:?} is in range of target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is in range of target {:?}", npc_id, target.id);
                     *state = ActionState::Success;
                 } else if target_dist > 2 {
-                    info!("NPC {:?} is too far from target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is too far from target {:?}", npc_id, target.id);
                     // Check if NPC is stunned and cannot move
                     if npc.effects.has(Effect::Stunned) {
-                        debug!("NPC is stunned");
+                        npc_debug!(*actor, obj_id, None, "NPC is stunned");
                         continue;
                     }
 
@@ -2004,17 +1992,17 @@ pub fn move_near_target_system(
                         false,
                         true, // Allow move onto position with transport
                     ) else {
-                        info!("No path found");
+                        npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
                         continue;
                     };
 
-                    info!("Follower path: {:?}", path_result);
+                    npc_trace!(*actor, obj_id, None, "Follower path: {:?}", path_result);
 
                     let (path, _c) = path_result;
                     let next_pos = &path[1];
 
-                    info!("Next pos: {:?}", next_pos);
+                    npc_trace!(*actor, obj_id, None, "Next pos: {:?}", next_pos);
 
                     // Add State Change Event to Moving
                     *npc.state = State::Moving;
@@ -2037,7 +2025,7 @@ pub fn move_near_target_system(
 
                     *state = ActionState::Executing;
                 } else {
-                    info!("NPC {:?} is too close to target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is too close to target {:?}", npc_id, target.id);
                     let neighbour_tiles = Map::get_neighbour_tiles(
                         npc.pos.x,
                         npc.pos.y,
@@ -2068,7 +2056,7 @@ pub fn move_near_target_system(
                     }
 
                     if !selected_pos_list.is_empty() {
-                        info!("Selected pos list: {:?}", selected_pos_list);
+                        npc_trace!(*actor, obj_id, None, "Selected pos list: {:?}", selected_pos_list);
 
                         // Randomly select a pos from list
                         let mut rng = rand::thread_rng();
@@ -2096,48 +2084,42 @@ pub fn move_near_target_system(
 
                         *state = ActionState::Executing;
                     } else {
-                        info!("No valid positions found");
+                        npc_debug!(*actor, obj_id, None, "No valid positions found");
                         *state = ActionState::Success;
                     }
                 }
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+
                 // Check if the moving event is still executing
                 let Ok(_event) = event_completed.get(*actor) else {
-                    info!(
-                        "Actor: {:?} Moving event still executing, waiting for completed component",
-                        *actor
-                    );
+                    npc_trace!(*actor, obj_id, None, "Moving event still executing, waiting for completed component");
                     continue;
                 };
 
                 // Remove EventExecuting & MovingEventCompleted
 
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(npc_player_id) = ids.get_player(npc_id) else {
-                    error!("Cannot find player id for entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Cannot find target for {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Cannot find target");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
-                    error!(
-                        "[{:?}] Actor: {:?} Cannot find entity for {:?}",
-                        line!(),
-                        *actor,
-                        target.id
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find entity for {:?}", target.id);
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -2148,18 +2130,14 @@ pub fn move_near_target_system(
                 let entities = [*actor, target_entity];
 
                 let Ok([mut npc, target]) = obj_query.get_many_mut(entities) else {
-                    error!(
-                        "[{:?}] Query failed to find entities {:?}",
-                        line!(),
-                        entities
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entities {:?}", entities);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
@@ -2182,18 +2160,18 @@ pub fn move_near_target_system(
                 let target_dist = Map::dist(*npc.pos, *target.pos);
 
                 if target_dist == 2 {
-                    info!("NPC {:?} is in range of target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is in range of target {:?}", npc_id, target.id);
                     *state = ActionState::Success;
                 } else if target_dist > 2 {
-                    info!("NPC {:?} is too far from target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is too far from target {:?}", npc_id, target.id);
                     let Ok(_event) = event_completed.get(*actor) else {
-                        info!("Actor: {:?} MovingNearTarget event still executing, waiting for completed component", *actor);
+                        npc_trace!(*actor, obj_id, None, "MovingNearTarget event still executing, waiting for completed component");
                         continue;
                     };
 
                     // Check if NPC is stunned and cannot move
                     if npc.effects.has(Effect::Stunned) {
-                        debug!("NPC is stunned");
+                        npc_debug!(*actor, obj_id, None, "NPC is stunned");
                         continue;
                     }
 
@@ -2208,17 +2186,17 @@ pub fn move_near_target_system(
                         false,
                         true, // Allow move onto position with transport
                     ) else {
-                        info!("No path found");
+                        npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
                         continue;
                     };
 
-                    info!("Follower path: {:?}", path_result);
+                    npc_trace!(*actor, obj_id, None, "Follower path: {:?}", path_result);
 
                     let (path, _c) = path_result;
                     let next_pos = &path[1];
 
-                    info!("Next pos: {:?}", next_pos);
+                    npc_trace!(*actor, obj_id, None, "Next pos: {:?}", next_pos);
 
                     // Add State Change Event to Moving
                     *npc.state = State::Moving;
@@ -2241,7 +2219,7 @@ pub fn move_near_target_system(
 
                     *state = ActionState::Executing;
                 } else {
-                    info!("NPC {:?} is too close to target {:?}", npc_id, target.id);
+                    npc_info!(*actor, obj_id, None, "NPC {:?} is too close to target {:?}", npc_id, target.id);
 
                     let neighbour_tiles = Map::get_neighbour_tiles(
                         npc.pos.x,
@@ -2273,7 +2251,7 @@ pub fn move_near_target_system(
                     }
 
                     if !selected_pos_list.is_empty() {
-                        info!("Selected pos list: {:?}", selected_pos_list);
+                        npc_trace!(*actor, obj_id, None, "Selected pos list: {:?}", selected_pos_list);
 
                         // Randomly select a pos from list
                         let mut rng = rand::thread_rng();
@@ -2301,20 +2279,20 @@ pub fn move_near_target_system(
 
                         *state = ActionState::Executing;
                     } else {
-                        info!("No valid positions found");
+                        npc_debug!(*actor, obj_id, None, "No valid positions found");
                         *state = ActionState::Success;
                     }
                 }
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!("MoveToTarget action was cancelled. Considering this a failure.");
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                npc_debug!(*actor, Some(npc_id), None, "MoveNearTarget action was cancelled. Considering this a failure.");
 
                 cancel_npc_events(npc_id, game_tick.0, &mut ids, &mut game_events);
 
@@ -2344,29 +2322,29 @@ pub fn attack_target_system(
     for (Actor(actor), mut state, _chase_attack) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Attacking executing...");
-
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
-                    error!("Query failed to find entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                let obj_id = Some(npc.id.0);
+                let npc_name = Some(npc.template.0.as_str());
+
+                npc_info!(*actor, obj_id, npc_name, "AttackTarget action requested");
 
                 let Ok(visible_target) = visible_target_query.get_mut(*actor) else {
                     continue;
                 };
 
                 let Some(target_entity) = entity_map.get_entity(visible_target.target) else {
-                    error!(
-                        "Query failed to find target entity {:?}",
-                        visible_target.target
-                    );
+                    npc_error!(*actor, obj_id, npc_name, "Cannot find target entity {:?}", visible_target.target);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 let Ok(mut target) = target_query.get_mut(target_entity) else {
-                    error!("Query failed to find target entity {:?}", target_entity);
+                    npc_error!(*actor, obj_id, npc_name, "Cannot find target entity {:?}", target_entity);
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -2377,26 +2355,29 @@ pub fn attack_target_system(
                 // Check if target is fortified
                 if target.effects.has(Effect::Fortified) {
                     /* let Ok(fortification) = fortified_query.get(target.entity) else {
-                        error!("Query failed to find entity: {:?}", target.entity);
+                        npc_error!(*actor, obj_id, npc_name, "Query failed to find entity: {:?}", target.entity);
                         continue;
                     };
 
-                    debug!("Updating target to {:?}", fortification.id);
+                    npc_debug!(*actor, obj_id, npc_name, "Updating target to {:?}", fortification.id);
                     visible_target.target = fortification.id;*/
-                    debug!("Cannot attack fortified obj");
+                    npc_debug!(*actor, obj_id, npc_name, "Cannot attack fortified obj");
                     *state = ActionState::Success;
                     continue;
                 }
 
-                if target.stats.hp <= 0 {
-                    debug!("Target is already dead");
-                    *state = ActionState::Success;
+                if target.stats.hp <= 0 || Obj::is_dead(&target.state) {
+                    npc_debug!(*actor, obj_id, npc_name, "Target is already dead");
+                    if let Ok(mut vt) = visible_target_query.get_mut(*actor) {
+                        vt.target = NO_TARGET;
+                    }
+                    *state = ActionState::Failure;
                     continue;
                 }
 
-                debug!("**** TARGET STATE ****  {:?}", target.state);
+                npc_debug!(*actor, obj_id, npc_name, "Target state={:?}", target.state);
 
-                debug!("Target is adjacent, time to attack");
+                npc_debug!(*actor, obj_id, npc_name, "Target is adjacent, time to attack");
                 let (damage, combo, _skill_gain) = Combat::process_attack(
                     AttackType::Quick,
                     &mut npc,
@@ -2460,13 +2441,13 @@ pub fn attack_target_system(
                     .expect("Missing EventExecuting component");
 
                 if !event_executing.state.is_finished() {
-                    //info!("Actor: {:?} AttackTarget action still executing, waiting for cooldown", *actor);
                     continue;
                 }
 
                 // Check if cooldown event failed
                 if event_executing.state.is_failed() {
-                    debug!("Cooldown event failed");
+                    let obj_id = entity_map.get_obj_by_entity(*actor);
+                    npc_debug!(*actor, obj_id, None, "Cooldown event failed");
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -2475,13 +2456,14 @@ pub fn attack_target_system(
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!("AttackTarget action was cancelled. Considering this a failure.");
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                let npc_name = npc_query.get(*actor).ok().map(|n| n.template.0.as_str());
+                npc_debug!(*actor, Some(npc_id), npc_name, "AttackTarget action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 
@@ -2777,53 +2759,53 @@ pub fn raise_dead_system(
     for (Actor(actor), mut state, raise_dead) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} RaiseDead action requested", *actor);
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     continue;
                 };
 
+                let obj_id = Some(npc.id.0);
+                let npc_name = Some(npc.template.0.as_str());
+
+                npc_info!(*actor, obj_id, npc_name, "RaiseDead action requested");
+
                 // If NPC state is not none, skip execution
                 if *npc.state != State::None {
-                    info!("[{:?}] NPC state is not none, skipping execution", line!());
+                    npc_info!(*actor, obj_id, npc_name, "NPC state is not none, skipping execution");
                     continue;
                 }
 
                 // NPC is stunned, skip execution
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, npc_name, "NPC is stunned");
                     continue;
                 }
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Query failed to find target entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, npc_name, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Get target entity
-                info!("Task target: {:?}", target.id);
+                npc_info!(*actor, obj_id, npc_name, "Task target: {:?}", target.id);
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
                     *state = ActionState::Failure;
-                    error!(
-                        "[{:?}] Cannot find target entity for {:?}",
-                        target.id,
-                        line!()
-                    );
+                    npc_error!(*actor, obj_id, npc_name, "Cannot find target entity for {:?}", target.id);
                     continue;
                 };
 
                 let Ok(corpse) = obj_query.get(target_entity) else {
                     *state = ActionState::Failure;
-                    error!("[{:?}] Cannot find target obj for {:?}", target.id, line!());
+                    npc_error!(*actor, obj_id, npc_name, "Cannot find target obj for {:?}", target.id);
                     continue;
                 };
 
-                info!("Corpse: {:?}", corpse);
+                npc_info!(*actor, obj_id, npc_name, "Corpse: {:?}", corpse);
 
                 // Check if target is adjacent to npc, this could happen if the home target scorer changes targets
                 if !Map::is_adjacent_including_source(*npc.pos, *corpse.pos) {
-                    info!("Target is not adjacent to npc, raise dead event failed.");
+                    npc_info!(*actor, obj_id, npc_name, "Target is not adjacent to npc, raise dead event failed.");
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -2854,28 +2836,28 @@ pub fn raise_dead_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+                let npc_name = npc_query.get(*actor).ok().map(|n| n.template.0.as_str());
+
                 let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} RaiseDead action still executing, waiting for completed component", *actor);
+                    npc_info!(*actor, obj_id, npc_name, "RaiseDead action still executing, waiting for completed component");
                     continue;
                 };
 
-                info!("Actor: {:?} RaiseDead action completed", *actor);
-
+                npc_info!(*actor, obj_id, npc_name, "RaiseDead action completed");
 
                 *state = ActionState::Success;
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!(
-                    "Actor: {:?} RaiseDead action was cancelled. Considering this a failure.",
-                    *actor
-                );
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                let npc_name = npc_query.get(*actor).ok().map(|n| n.template.0.as_str());
+                npc_debug!(*actor, Some(npc_id), npc_name, "RaiseDead action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 
@@ -3055,54 +3037,50 @@ pub fn spoil_target_action_system(
     for (Actor(actor), mut state, _spoil_target_action) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} SpoilTarget action requested", *actor);
                 let Ok(npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     continue;
                 };
 
+                let obj_id = Some(npc.id.0);
+
+                npc_info!(*actor, obj_id, None, "SpoilTarget action requested");
+
                 // If NPC state is not none, skip execution
                 if *npc.state != State::None {
-                    info!("[{:?}] NPC state is not none, skipping execution", line!());
+                    npc_info!(*actor, obj_id, None, "NPC state is not none, skipping execution");
                     continue;
                 }
 
                 // NPC is stunned, skip execution
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find target entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Get target entity
-                info!("Task target: {:?}", task_target.target);
+                npc_info!(*actor, obj_id, None, "Task target: {:?}", task_target.target);
                 let Some(target_entity) = entity_map.get_entity(task_target.target) else {
                     *state = ActionState::Failure;
-                    error!(
-                        "[{:?}] Cannot find target entity for {:?}",
-                        task_target.target,
-                        line!()
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find target entity for {:?}", task_target.target);
                     continue;
                 };
 
                 let Ok(target) = obj_query.get(target_entity) else {
-                    error!(
-                        "Query failed to find entity {:?} for target {:?}",
-                        target_entity, task_target.target
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entity {:?} for target {:?}", target_entity, task_target.target);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if target is adjacent to npc, this could happen if the torch target scorer changes targets
                 if !Map::is_adjacent_including_source(*npc.pos, *target.pos) {
-                    info!("Target is not adjacent to npc, spoil event failed.");
+                    npc_info!(*actor, obj_id, None, "Target is not adjacent to npc, spoil event failed.");
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -3112,7 +3090,7 @@ pub fn spoil_target_action_system(
                 let drink_item = target.inventory.get_by_class(DRINK.to_owned());
 
                 let Some(item) = food_item.or(drink_item) else {
-                    info!("Target does not have food or drink items, spoil event failed.");
+                    npc_info!(*actor, obj_id, None, "Target does not have food or drink items, spoil event failed.");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -3128,29 +3106,27 @@ pub fn spoil_target_action_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+
                 let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} Spoil target action still executing, waiting for completed component", *actor);
+                    npc_info!(*actor, obj_id, None, "Spoil target action still executing, waiting for completed component");
                     continue;
                 };
 
-                info!("Actor: {:?} Spoil target action completed", *actor);
-
+                npc_info!(*actor, obj_id, None, "Spoil target action completed");
 
                 *state = ActionState::Success;
             }
 
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!(
-                    "Actor: {:?} SpoilTarget action was cancelled. Considering this a failure.",
-                    *actor
-                );
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                npc_debug!(*actor, Some(npc_id), None, "SpoilTarget action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 
@@ -3189,60 +3165,56 @@ pub fn steal_target_action_system(
     for (Actor(actor), mut state, _steal_target_action) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} StealTarget action requested", *actor);
                 let Ok(npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     continue;
                 };
 
+                let obj_id = Some(npc.id.0);
+
+                npc_info!(*actor, obj_id, None, "StealTarget action requested");
+
                 // If NPC state is not none, skip execution
                 if *npc.state != State::None {
-                    info!("[{:?}] NPC state is not none, skipping execution", line!());
+                    npc_info!(*actor, obj_id, None, "NPC state is not none, skipping execution");
                     continue;
                 }
 
                 // NPC is stunned, skip execution
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find target entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Get target entity
-                info!("Task target: {:?}", task_target.target);
+                npc_info!(*actor, obj_id, None, "Task target: {:?}", task_target.target);
                 let Some(target_entity) = entity_map.get_entity(task_target.target) else {
                     *state = ActionState::Failure;
-                    error!(
-                        "[{:?}] Cannot find target entity for {:?}",
-                        task_target.target,
-                        line!()
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find target entity for {:?}", task_target.target);
                     continue;
                 };
 
                 let Ok(target) = obj_query.get(target_entity) else {
-                    error!(
-                        "Query failed to find entity {:?} for target {:?}",
-                        target_entity, task_target.target
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entity {:?} for target {:?}", target_entity, task_target.target);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if target is adjacent to npc, this could happen if the torch target scorer changes targets
                 if !Map::is_adjacent_including_source(*npc.pos, *target.pos) {
-                    info!("Target is not adjacent to npc, spoil event failed.");
+                    npc_info!(*actor, obj_id, None, "Target is not adjacent to npc, steal event failed.");
                     *state = ActionState::Failure;
                     continue;
                 }
 
                 let Ok(items_to_steal) = items_to_steal_query.get(*actor) else {
-                    info!("Target does not have defined items to steal, skipping");
+                    npc_info!(*actor, obj_id, None, "Target does not have defined items to steal, skipping");
                     *state = ActionState::Failure;
                     continue;
                 };
@@ -3265,29 +3237,27 @@ pub fn steal_target_action_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+
                 let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} Spoil target action still executing, waiting for completed component", *actor);
+                    npc_info!(*actor, obj_id, None, "Steal target action still executing, waiting for completed component");
                     continue;
                 };
 
-                info!("Actor: {:?} Spoil target action completed", *actor);
-
+                npc_info!(*actor, obj_id, None, "Steal target action completed");
 
                 *state = ActionState::Success;
             }
 
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!(
-                    "Actor: {:?} SpoilTarget action was cancelled. Considering this a failure.",
-                    *actor
-                );
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                npc_debug!(*actor, Some(npc_id), None, "StealTarget action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 
@@ -3325,54 +3295,50 @@ pub fn torch_target_action_system(
     for (Actor(actor), mut state, _rat_crisis_action) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} TorchTarget action requested", *actor);
                 let Ok(npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     continue;
                 };
 
+                let obj_id = Some(npc.id.0);
+
+                npc_info!(*actor, obj_id, None, "TorchTarget action requested");
+
                 // If NPC state is not none, skip execution
                 if *npc.state != State::None {
-                    info!("[{:?}] NPC state is not none, skipping execution", line!());
+                    npc_info!(*actor, obj_id, None, "NPC state is not none, skipping execution");
                     continue;
                 }
 
                 // NPC is stunned, skip execution
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
                     continue;
                 }
 
                 let Ok(task_target) = task_target_query.get(*actor) else {
-                    error!("Query failed to find target entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Get target entity
-                info!("Task target: {:?}", task_target.target);
+                npc_info!(*actor, obj_id, None, "Task target: {:?}", task_target.target);
                 let Some(target_entity) = entity_map.get_entity(task_target.target) else {
                     *state = ActionState::Failure;
-                    error!(
-                        "[{:?}] Cannot find target entity for {:?}",
-                        task_target.target,
-                        line!()
-                    );
+                    npc_error!(*actor, obj_id, None, "Cannot find target entity for {:?}", task_target.target);
                     continue;
                 };
 
                 let Ok(target) = obj_query.get(target_entity) else {
-                    error!(
-                        "Query failed to find entity {:?} for target {:?}",
-                        target_entity, task_target.target
-                    );
+                    npc_error!(*actor, obj_id, None, "Query failed to find entity {:?} for target {:?}", target_entity, task_target.target);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if target is adjacent to npc, this could happen if the torch target scorer changes targets
                 if !Map::is_adjacent_including_source(*npc.pos, *target.pos) {
-                    info!("Target is not adjacent to npc, torch event failed.");
+                    npc_info!(*actor, obj_id, None, "Target is not adjacent to npc, torch event failed.");
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -3387,29 +3353,27 @@ pub fn torch_target_action_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+
                 let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} Torch target action still executing, waiting for completed component", *actor);
+                    npc_info!(*actor, obj_id, None, "Torch target action still executing, waiting for completed component");
                     continue;
                 };
 
-                info!("Actor: {:?} Torch target action completed", *actor);
-
+                npc_info!(*actor, obj_id, None, "Torch target action completed");
 
                 *state = ActionState::Success;
             }
 
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!(
-                    "Actor: {:?} TorchTarget action was cancelled. Considering this a failure.",
-                    *actor
-                );
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                npc_debug!(*actor, Some(npc_id), None, "TorchTarget action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 
@@ -3447,54 +3411,51 @@ pub fn cast_spell_target_system(
     for (Actor(actor), mut state, _cast_spell_target) in &mut query {
         match *state {
             ActionState::Requested => {
-                info!("Actor: {:?} CastSpellTarget action requested", *actor);
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     continue;
                 };
 
+                let obj_id = Some(npc.id.0);
+                let npc_name = Some(npc.template.0.as_str());
+
+                npc_info!(*actor, obj_id, npc_name, "CastSpellTarget action requested");
+
                 // If NPC state is not none, skip execution
                 if *npc.state != State::None {
-                    info!("[{:?}] NPC state is not none, skipping execution", line!());
+                    npc_info!(*actor, obj_id, npc_name, "NPC state is not none, skipping execution");
                     continue;
                 }
 
                 // NPC is stunned, skip execution
                 if npc.effects.has(Effect::Stunned) {
-                    debug!("NPC is stunned");
+                    npc_debug!(*actor, obj_id, npc_name, "NPC is stunned");
                     continue;
                 }
 
                 let Ok(target) = target_query.get(*actor) else {
-                    error!("Query failed to find target entity {:?}", *actor);
+                    npc_error!(*actor, obj_id, npc_name, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Get target entity
-                info!("Task target: {:?}", target.id);
+                npc_info!(*actor, obj_id, npc_name, "Task target: {:?}", target.id);
                 let Some(target_entity) = entity_map.get_entity(target.id) else {
                     *state = ActionState::Failure;
-                    error!(
-                        "[{:?}] Cannot find target entity for {:?}",
-                        target.id,
-                        line!()
-                    );
+                    npc_error!(*actor, obj_id, npc_name, "Cannot find target entity for {:?}", target.id);
                     continue;
                 };
 
                 let Ok(target) = obj_query.get(target_entity) else {
-                    error!(
-                        "Query failed to find entity {:?} for target {:?}",
-                        target_entity, target.id
-                    );
+                    npc_error!(*actor, obj_id, npc_name, "Query failed to find entity {:?} for target", target_entity);
                     *state = ActionState::Failure;
                     continue;
                 };
 
                 // Check if target is within range
                 if Map::dist(*npc.pos, *target.pos) > 2 {
-                    info!("Target is not within range, spoil event failed.");
+                    npc_info!(*actor, obj_id, npc_name, "Target is not within range, cast spell failed.");
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -3524,29 +3485,29 @@ pub fn cast_spell_target_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                let obj_id = entity_map.get_obj_by_entity(*actor);
+                let npc_name = npc_query.get(*actor).ok().map(|n| n.template.0.as_str());
+
                 let Ok(_event) = completed_query.get(*actor) else {
-                    info!("Actor: {:?} Cast spell target action still executing, waiting for completed component", *actor);
+                    npc_info!(*actor, obj_id, npc_name, "Cast spell target action still executing, waiting for completed component");
                     continue;
                 };
 
-                info!("Actor: {:?} Cast spell target action completed", *actor);
-
+                npc_info!(*actor, obj_id, npc_name, "Cast spell target action completed");
 
                 *state = ActionState::Success;
             }
 
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                debug!(
-                    "Actor: {:?} CastSpellTarget action was cancelled. Considering this a failure.",
-                    *actor
-                );
-
                 let Some(npc_id) = entity_map.get_obj_by_entity(*actor) else {
-                    error!("Cannot find obj id for entity {:?}", *actor);
+                    npc_error!(*actor, None, None, "Cannot find obj id");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                let npc_name = npc_query.get(*actor).ok().map(|n| n.template.0.as_str());
+                npc_debug!(*actor, Some(npc_id), npc_name, "CastSpellTarget action was cancelled. Considering this a failure.");
 
                 let event_type = GameEventType::CancelAllMapEvents { obj_id: npc_id };
 

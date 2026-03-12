@@ -2,6 +2,7 @@
 pub const TICKS_PER_SEC: i32 = 10;
 
 pub const NO_TARGET: i32 = -1;
+pub const ATTACK_COOLDOWN_TICKS: i32 = 50; // 5 seconds at 10 ticks/sec
 pub const BASE_MOVE_TICKS: f32 = 100.0;
 pub const BASE_SPEED: f32 = 1.0;
 

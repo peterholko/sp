@@ -135,6 +135,12 @@ pub fn new(
         1,
         &templates.item_templates,
     );
+    burrow_inventory.new(
+        ids.new_item_id(),
+        "Mine Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
 
     let structure: Obj = Obj {
         id: Id(burrow_id),
@@ -795,16 +801,9 @@ pub fn new(
     recipes.create(player_id, "Firewood".to_string(), &templates);
     recipes.create(player_id, "Crude Torch".to_string(), &templates);
 
-    //Starting plans
+    // Starting plans (survival basics only — more plans acquired through exploration and villager)
     plans.add(player_id, "Campfire".to_string(), 0, 0);
-    plans.add(player_id, "Watchtower".to_string(), 0, 0);
-    plans.add(player_id, "Farm".to_string(), 0, 0);
-    plans.add(player_id, "Crafting Tent".to_string(), 0, 0);
-    plans.add(player_id, "Blacksmith".to_string(), 0, 0);
-    plans.add(player_id, "Small Tent".to_string(), 0, 0);
-    plans.add(player_id, "Burrow".to_string(), 0, 0);
     plans.add(player_id, "Stockade".to_string(), 0, 0);
-    plans.add(player_id, "Mine".to_string(), 0, 0);
 
     let mut thirst_attr = HashMap::new();
     thirst_attr.insert(item::AttrKey::Thirst, item::AttrVal::Num(90.0));
@@ -880,6 +879,24 @@ pub fn new(
     merchant.inventory.new(
         merchant_id,
         "Training Pick Axe".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    merchant.inventory.new(
+        merchant_id,
+        "Lumbercamp Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    merchant.inventory.new(
+        merchant_id,
+        "Quarry Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    merchant.inventory.new(
+        merchant_id,
+        "Trapper Deed".to_string(),
         1,
         &templates.item_templates,
     );
@@ -1057,6 +1074,18 @@ pub fn new(
         1,
         &templates.item_templates,
     );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Small Tent Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Farm Deed".to_string(),
+        1,
+        &templates.item_templates,
+    );
 
     let shipwreck = Obj::create_nospawn(
         shipwreck_id,
@@ -1149,7 +1178,7 @@ pub fn new(
         game_events.insert(rat_event.event_id, rat_event);
     }
 
-    // Spawn a random creature (Giant Crab or Wild Boar) ~1 minute after player arrives
+    // Spawn a random creature (Giant Crab or Wild Boar) ~2 minutes after player arrives
     let random_creature = if rand::thread_rng().gen_range(0..2) == 0 {
         "Giant Crab"
     } else {
@@ -1159,7 +1188,7 @@ pub fn new(
     let creature_event = GameEvent {
         event_id: creature_event_id,
         start_tick: game_tick.0,
-        run_tick: game_tick.0 + 600, // ~1 minute at 10 ticks/sec
+        run_tick: game_tick.0 + 1200, // ~2 minutes at 10 ticks/sec
         event_type: GameEventType::SpawnNPC {
             npc_type: random_creature.to_string(),
             pos: shipwreck_pos,
@@ -1168,12 +1197,12 @@ pub fn new(
     };
     game_events.insert(creature_event.event_id, creature_event);
 
-    // Spawn a spider from the shipwreck ~1.5 minutes after player arrives
+    // Spawn a spider from the shipwreck ~3.5 minutes after player arrives
     let spider_event_id = ids.new_map_event_id();
     let spider_event = GameEvent {
         event_id: spider_event_id,
         start_tick: game_tick.0,
-        run_tick: game_tick.0 + 900, // ~1.5 minutes at 10 ticks/sec
+        run_tick: game_tick.0 + 2100, // ~3.5 minutes at 10 ticks/sec
         event_type: GameEventType::SpawnNPC {
             npc_type: "Spider".to_string(),
             pos: shipwreck_pos,
@@ -1182,25 +1211,27 @@ pub fn new(
     };
     game_events.insert(spider_event.event_id, spider_event);
 
-    // Ghost appears near the sailor corpses ~2 minutes in (foreshadows necromancer)
-    let corpse_pos = Position {
-        x: start_location.corpse1_pos[0],
-        y: start_location.corpse1_pos[1],
+    // Distress sound from the shipwreck ~2:30 min after player arrives
+    let distress_event = VisibleEvent::SoundEvent {
+        pos: shipwreck_pos,
+        sound: "A desperate voice calls from the shipwreck: \"Is anyone out there?!\"".to_string(),
+        intensity: 5,
     };
-    let ghost_event_id = ids.new_map_event_id();
-    let ghost_event = GameEvent {
-        event_id: ghost_event_id,
+    map_events.new(hero_id, game_tick.0 + 1500, distress_event);
+
+    // Castaway villager emerges from the shipwreck ~3:20 min after player arrives
+    let villager_event = GameEvent {
+        event_id: ids.new_map_event_id(),
         start_tick: game_tick.0,
-        run_tick: game_tick.0 + 1200, // ~2 minutes at 10 ticks/sec
-        event_type: GameEventType::SpawnNPC {
-            npc_type: "Ghost".to_string(),
-            pos: corpse_pos,
-            npc_id: None,
+        run_tick: game_tick.0 + 2000,
+        event_type: GameEventType::SpawnVillager {
+            pos: shipwreck_pos,
+            player_id,
         },
     };
-    game_events.insert(ghost_event.event_id, ghost_event);
+    game_events.insert(villager_event.event_id, villager_event);
 
-    // Wolf howl sound event ~3 minutes after player arrives (atmospheric, no wolf spawn)
+    // Wolf howl sound event ~4 minutes after player arrives (atmospheric, no wolf spawn)
     let hero_pos = Position {
         x: start_location.hero_pos[0],
         y: start_location.hero_pos[1],
@@ -1210,7 +1241,7 @@ pub fn new(
         sound: "A wolf howls in the distance".to_string(),
         intensity: 10,
     };
-    map_events.new(hero_id, game_tick.0 + 1800, wolf_howl_event);
+    map_events.new(hero_id, game_tick.0 + 2400, wolf_howl_event);
 
     // Schedule the necromancer event for the next evening
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;

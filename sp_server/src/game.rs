@@ -1291,8 +1291,8 @@ fn move_event_completed_system(
             }
         }
 
-        // Check if player spawns an encounter
-        if player::is_player(mover_player_id.0) {
+        // Check if player spawns an encounter (not near monolith)
+        if player::is_player(mover_player_id.0) && in_range_sanctuary.is_none() {
             let mut encounter_moves = encounter_moves_query
                 .get_mut(mover_entity)
                 .expect("Encounter moves not found");
@@ -5344,7 +5344,7 @@ fn use_item_system(
                             }
                         }
                         (item::DEED, _) => {
-                            plans.add(item.owner, item.subclass, 0, 0);
+                            plans.add(item_owner.player_id.0, item.subclass, 0, 0);
 
                             item_owner.inventory.remove_item(item.id);
 
@@ -7072,6 +7072,7 @@ fn game_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     mut query: Query<ObjQueryMut>,
     mut perception_updates: ResMut<PerceptionUpdates>,
+    mut plans: ResMut<Plans>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -7197,6 +7198,40 @@ fn game_event_system(
                     };
 
                     map_events.new(npc_id.0, game_tick.0 + 10, speech_event);
+                }
+
+                GameEventType::SpawnVillager { pos, player_id } => {
+                    debug!("Processing SpawnVillager event");
+                    events_to_remove.push(*event_id);
+
+                    let (villager_entity, villager_id) = Encounter::spawn_villager(
+                        *player_id,
+                        *pos,
+                        &mut commands,
+                        &mut ids,
+                        &mut entity_map,
+                        &templates,
+                        &game_tick,
+                    );
+
+                    commands.trigger(NewObj { entity: villager_entity });
+
+                    let speech_event = VisibleEvent::SpeechEvent {
+                        speech: "Thank the gods! I thought I was going to die in that wreck...".to_string(),
+                        intensity: 3,
+                    };
+                    map_events.new(villager_id.0, game_tick.0 + 10, speech_event);
+
+                    // Villager teaches construction plans
+                    plans.add(*player_id, "Crafting Tent".to_string(), 0, 0);
+                    plans.add(*player_id, "Burrow".to_string(), 0, 0);
+                    plans.add(*player_id, "Watchtower".to_string(), 0, 0);
+
+                    let plan_speech = VisibleEvent::SpeechEvent {
+                        speech: "I know how to build a few things. Let me share what I know.".to_string(),
+                        intensity: 3,
+                    };
+                    map_events.new(villager_id.0, game_tick.0 + 50, plan_speech);
                 }
 
                 GameEventType::CancelAllMapEvents { obj_id } => {

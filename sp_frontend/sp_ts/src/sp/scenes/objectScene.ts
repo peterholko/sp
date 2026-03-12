@@ -1660,7 +1660,7 @@ export class ObjectScene extends Phaser.Scene {
         75,
         5);
 
-      if (message.text.length < 5) {
+      if (message.sound.length < 5) {
         graphics.setVisible(false);
       }
 

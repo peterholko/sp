@@ -14,7 +14,7 @@
   precise_damage: 1.0
   fierce_damage: 1.0
 
-- name: Imtimidating Shout
+- name: Intimidating Shout
   attacks: [fierce, fierce]
   effects: [Fear]
   quick_damage: 1.0

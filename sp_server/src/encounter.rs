@@ -7,23 +7,31 @@ use big_brain::prelude::{Highest, Thinker};
 
 use rand::Rng;
 
-use crate::common::{Destination, MoveTo, Hide, Idle, TaskTarget, AttackTarget, SetAttackTarget, Transport};
+use crate::common::{Destination, Drink, Eat, Heat, Hunger, MoveTo, Hide, Idle, Sleep, TaskTarget, AttackTarget, SetAttackTarget, Thirst, Tired, Transport};
 use crate::constants::*;
 use crate::effect::Effects;
 use crate::event::{EventExecuting, EventExecutingState, MapEvents, VisibleEvent};
 use crate::game::{
-    GameTick, Home, HunterBehavior, Minions, SpoilTargetBehavior, WanderingBehavior,
+    EncounterMoves, GameTick, Home, HunterBehavior, Minions, SpoilTargetBehavior, WanderingBehavior,
 };
 use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, Inventory};
 use crate::map::{Map, TileType};
 use crate::npc::{CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, NpcMoveNearTarget, NpcMoveTo, NpcMoveToTarget, RaiseDead, SetCorpseTarget, SetHome, SetSpoilTarget, SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer, TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget, VisibleTargetScorer};
 use crate::tax_collector::{AtLanding, Forfeiture, IsAboard, IsTaxCollected, MoveToEmpire, MoveToPos, MoveToTarget, NoTaxesToCollect, OverdueTaxScorer, TaxCollector, TaxCollectorTransport, TaxesToCollect};
-use crate::obj::{NewObj, Obj};
+use crate::obj::{ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, SubclassVillager};
 use crate::obj::{
     Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassNPC, Template,
     Viewshed,
 };
+use crate::skill::Skills;
+use crate::villager::{
+    CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer, FindDrink, FindFood,
+    FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer, LoadItems, Morale,
+    ProcessOrder, SetFleeDestination, SetOrderDestination, SetStorageDestination,
+    StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood, UnloadItems,
+};
+use crate::villager_util::VillagerUtil;
 
 use crate::templates::{ObjTemplate, Templates};
 
@@ -276,6 +284,189 @@ impl Encounter {
 
 
         return (necro_entity, necro_obj.id, PlayerId(player_id), pos);
+    }
+
+    pub fn spawn_villager(
+        player_id: i32,
+        pos: Position,
+        commands: &mut Commands,
+        ids: &mut ResMut<Ids>,
+        entity_map: &mut ResMut<EntityObjMap>,
+        templates: &Res<Templates>,
+        game_tick: &Res<GameTick>,
+    ) -> (Entity, Id) {
+        let villager_id = ids.new_obj_id();
+
+        let villager_template_name = "Human Villager".to_string();
+        let villager_template =
+            templates.obj_templates.get(villager_template_name.clone());
+
+        let image: String;
+        if let Some(template_images) = villager_template.images {
+            let random_image = rand::thread_rng().gen_range(0..template_images.len());
+            image = template_images[random_image].clone();
+        } else {
+            image = Obj::template_to_image(&villager_template.template);
+        }
+
+        let mut villager = Obj {
+            id: Id(villager_id),
+            player_id: PlayerId(player_id),
+            position: pos,
+            name: Name(VillagerUtil::generate_name()),
+            template: Template("Human Villager".into()),
+            class: Class("unit".into()),
+            subclass: Subclass::Villager,
+            state: State::None,
+            misc: Misc {
+                image: image,
+                hsl: Vec::new(),
+                groups: Vec::new(),
+            },
+            stats: Stats {
+                hp: villager_template.base_hp.unwrap(),
+                base_hp: villager_template.base_hp.unwrap(),
+                stamina: villager_template.base_stamina,
+                base_stamina: villager_template.base_stamina,
+                base_def: villager_template.base_def.unwrap(),
+                base_damage: villager_template.base_dmg,
+                damage_range: villager_template.dmg_range,
+                base_speed: villager_template.base_speed,
+                base_vision: villager_template.base_vision,
+            },
+            effects: Effects(HashMap::new()),
+            inventory: Inventory {
+                owner: villager_id,
+                items: Vec::new(),
+            },
+            last_combat_tick: LastCombatTick::default(),
+        };
+
+        let villager_skills =
+            VillagerUtil::generate_skills(villager_id, &templates.skill_templates);
+        let base_attrs = VillagerUtil::generate_attributes(1);
+
+        villager.inventory.new(
+            ids.new_item_id(),
+            "Crude Torch".to_string(),
+            1,
+            &templates.item_templates,
+        );
+
+        let flee = Steps::build()
+            .label("Flee")
+            .step(SetFleeDestination)
+            .step(MoveTo);
+
+        let find_move_to_and_drink = Steps::build()
+            .label("FindMoveToAndDrink")
+            .step(FindDrink)
+            .step(MoveTo)
+            .step(TransferDrink)
+            .step(Drink);
+
+        let find_move_to_and_eat = Steps::build()
+            .label("FindMoveToAndEat")
+            .step(FindFood)
+            .step(MoveTo)
+            .step(TransferFood)
+            .step(Eat);
+
+        let find_move_to_and_sleep = Steps::build()
+            .label("FindMoveToAndSleep")
+            .step(FindShelter {
+                trigger_event: "Sleep".to_string(),
+            })
+            .step(MoveTo)
+            .step(Sleep);
+
+        let find_move_to_and_shelter = Steps::build()
+            .label("FindMoveToAndShelter")
+            .step(FindShelter {
+                trigger_event: "Shelter".to_string(),
+            })
+            .step(MoveTo)
+            .step(Idle {
+                start_time: 0,
+                duration: 100,
+            });
+
+        let process_order = Steps::build()
+            .label("ProcessOrder")
+            .step(SetOrderDestination)
+            .step(MoveTo)
+            .step(ProcessOrder);
+
+        let unload_items = Steps::build()
+            .label("UnloadItems")
+            .step(SetStorageDestination)
+            .step(MoveTo)
+            .step(UnloadItems);
+
+        let load_items = Steps::build()
+            .label("LoadItems")
+            .step(LoadItems);
+
+        let villager_inventory = villager.inventory.clone();
+
+        let villager_entity = commands
+            .spawn((
+                villager,
+                Viewshed {
+                    range: Obj::set_viewshed_range(
+                        villager_id,
+                        villager_template_name,
+                        game_tick.0,
+                        &villager_inventory,
+                        &templates,
+                        0.0,
+                    ),
+                },
+                SubclassVillager,
+                EncounterMoves(0),
+                base_attrs,
+                villager_skills,
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
+                ActiveTask::None,
+                Order::None,
+                ActiveShelter(NO_SHELTER),
+            ))
+            .id();
+
+        commands.entity(villager_entity).insert((
+            Thirst::new(10.0, 0.02),
+            Hunger::new(10.0, 0.02),
+            Tired::new(0.0, 0.02),
+            Heat::new(50.0),
+            Morale::new(50.0),
+            Thinker::build()
+                .label("Villager")
+                .picker(Highest)
+                .when(EnemyDistanceScorer, flee)
+                .when(ThirstyScorer, find_move_to_and_drink)
+                .when(HungryScorer, find_move_to_and_eat)
+                .when(DrowsyScorer, find_move_to_and_sleep)
+                .when(ExhaustedScorer, Sleep)
+                .when(HeatScorer, find_move_to_and_shelter)
+                .when(StructureCapacityScorer, load_items)
+                .when(CapacityScorer, unload_items)
+                .when(
+                    IdleScorer,
+                    Idle {
+                        start_time: 0,
+                        duration: 100,
+                    },
+                )
+                .when(GoodMorale, process_order),
+        ));
+
+        ids.new_obj(villager_id, player_id);
+        entity_map.new_obj(villager_id, villager_entity);
+
+        return (villager_entity, Id(villager_id));
     }
 
     pub fn spawn_tax_collector(

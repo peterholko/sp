@@ -523,6 +523,10 @@
 
 #### CRAFTING ####
 
+############################
+###### CRAFTING ############
+############################
+
 - name: Crafting Tent
   class: structure
   subclass: craft
@@ -530,239 +534,18 @@
   image: craftingtent
   base_hp: 100
   base_def: 0
-  build_cost: 500
+  build_cost: 100
   level: 0
   capacity: 200
   activity: Crafting
   workspaces: 2
   refine: [Log, Ore, Game Animal]
-  req: 
+  req:
     - type: Log
       quantity: 5
     - type: Hide
       quantity: 5
-  upgrade_to: [Blacksmith, Workshop]
-
-- name: Mine
-  class: structure
-  subclass: resource
-  template: Mine
-  image: mine
-  base_hp: 250
-  base_def: 0
-  build_cost: 24 #480
-  level: 0
-  capacity: 200
-  activity: Mining
-  workspaces: 2
-  profession: the Miner
-  operate_skill: Mining
-  req: 
-    - type: Timber
-      quantity: 5
-    - type: Ingot
-      quantity: 5
-
-- name: Small Tent
-  class: structure
-  subclass: shelter
-  template: Small Tent
-  image: tent
-  base_hp: 100
-  base_def: 0
-  build_cost: 24
-  capacity: 50
-  max_residents: 1
-  campfire: true
-  level: 0  
-  req: 
-    - type: Log
-      quantity: 5
-    - type: Hide
-      quantity: 5
-  upgrade_to: [Large Tent]
-  upgrade_req:
-    - type: Log
-      quantity: 10
-    - type: Hide
-      quantity: 10  
-
-- name: Large Tent
-  class: structure
-  subclass: shelter
-  template: Large Tent
-  image: tent
-  base_hp: 100
-  base_def: 0
-  build_cost: 24
-  capacity: 0
-  max_residents: 2
-  level: 1  
-  req: 
-    - type: Log
-      quantity: 5
-    - type: Hide
-      quantity: 5
-  upgrade_to: []     
-
-- name: Yurt
-  class: structure
-  subclass: shelter
-  template: Yurt
-  image: tent
-  base_hp: 100
-  base_def: 0
-  build_cost: 24
-  capacity: 0
-  max_residents: 1
-  level: 1
-  req: 
-    - type: Log
-      quantity: 25
-    - type: Hide
-      quantity: 25
-  upgrade_to: [Large Yurt]
-  upgrade_req:
-    - type: Log
-      quantity: 50
-    - type: Hide
-      quantity: 50 
-
-- name: Large Yurt
-  class: structure
-  subclass: shelter
-  template: Large Yurt
-  image: tent
-  base_hp: 100
-  base_def: 0
-  build_cost: 24
-  capacity: 0
-  max_residents: 3
-  level: 2
-  req: 
-    - type: Log
-      quantity: 5
-    - type: Hide
-      quantity: 5
-  upgrade_to: []     
-
-- name: Farm
-  class: structure
-  subclass: farm
-  template: Farm
-  image: farm
-  base_hp: 250
-  base_def: 0
-  build_cost: 24
-  capacity: 500
-  level: 0
-  profession: the Farmer
-  req: 
-    - type: Log
-      quantity: 5
-
-- name: Trapper
-  class: structure
-  subclass: resource
-  template: Trapper
-  image: trapper
-  base_hp: 250
-  base_def: 0
-  build_cost: 240
-  level: 1
-  profession: the Hunter
-  activity: Hunting
-  req: 
-    - type: Log
-      quantity: 40
-
-- name: Lumbercamp
-  class: structure
-  subclass: resource
-  template: Lumbercamp
-  image: lumbercamp
-  base_hp: 250
-  base_def: 0
-  build_cost: 480
-  capacity: 200
-  level: 0
-  profession: the Forester
-  activity: Logging
-  req: 
-    - type: Timber
-      quantity: 25
-    - type: Ingot
-      quantity: 30
-
-- name: Quarry
-  class: structure
-  subclass: resource
-  template: Quarry
-  image: quarry
-  base_hp: 250
-  base_def: 0
-  build_cost: 480
-  level: 0
-  profession: the Stonecutter
-  activity: Stonecutting
-  req: 
-    - type: Timber
-      quantity: 30
-    - type: Ingot
-      quantity: 30
-
-- name: Tavern
-  class: structure
-  subclass: craft
-  template: Tavern
-  image: tavern
-  base_hp: 250
-  base_def: 0
-  build_cost: 5
-  level: 1
-  capacity: 21
-  profession: the Innkeeper
-  req: 
-    - type: Log
-      quantity: 1
-
-- name: Workshop
-  class: structure
-  subclass: craft
-  template: Workshop
-  image: workshop
-  base_hp: 250
-  base_def: 0
-  build_cost: 5
-  level: 1
-  capacity: 50
-  profession: the Carpenter
-  activity: Operating
-  req: 
-    - type: Log
-      quantity: 1
-  upgrade_req:
-    - type: Log
-      quantity: 10
-    - type: Hide
-      quantity: 10           
-
-- name: Mason
-  class: structure
-  subclass: craft
-  template: Mason
-  image: mason
-  base_hp: 250
-  base_def: 0
-  build_cost: 5
-  level: 1
-  capacity: 50
-  profession: the Mason
-  activity: Operating
-  refine: [Stone]
-  req: 
-    - type: Log
-      quantity: 1
+  upgrade_to: [Blacksmith, Workshop, Mason, Butchery]
 
 - name: Blacksmith
   class: structure
@@ -771,23 +554,187 @@
   image: blacksmith
   base_hp: 250
   base_def: 0
-  build_cost: 500
-  upgrade_cost: 750
-  level: 0
+  build_cost: 600
+  level: 2
   capacity: 300
   profession: the Blacksmith
   activity: Operating
   refine: [Ore]
-  req: 
-    - type: Log
-      quantity: 50
-    - type: Hide
-      quantity: 50
+  req:
+    - type: Timber
+      quantity: 15
+    - type: Ingot
+      quantity: 10
+    - type: Stone
+      quantity: 5
   upgrade_req:
-    - type: Log
+    - type: Timber
       quantity: 10
-    - type: Hide
+    - type: Ingot
       quantity: 10
+
+- name: Workshop
+  class: structure
+  subclass: craft
+  template: Workshop
+  image: workshop
+  base_hp: 250
+  base_def: 0
+  build_cost: 600
+  level: 2
+  capacity: 50
+  profession: the Carpenter
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 15
+    - type: Ingot
+      quantity: 5
+  upgrade_req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+
+- name: Mason
+  class: structure
+  subclass: craft
+  template: Mason
+  image: mason
+  base_hp: 250
+  base_def: 0
+  build_cost: 600
+  level: 2
+  capacity: 50
+  profession: the Mason
+  activity: Operating
+  refine: [Stone]
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Stone
+      quantity: 10
+  upgrade_req:
+    - type: Timber
+      quantity: 10
+    - type: Stone
+      quantity: 10
+
+- name: Butchery
+  class: structure
+  subclass: craft
+  template: Butchery
+  image: butchery
+  base_hp: 250
+  base_def: 0
+  build_cost: 400
+  level: 2
+  capacity: 100
+  profession: the Butcher
+  activity: Operating
+  refine: [Game Animal]
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+  upgrade_req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+
+- name: Smokehouse
+  class: structure
+  subclass: craft
+  template: Smokehouse
+  image: smokehouse
+  base_hp: 250
+  base_def: 0
+  build_cost: 400
+  level: 2
+  capacity: 100
+  profession: the Smoker
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Stone
+      quantity: 5
+
+- name: Tannery
+  class: structure
+  subclass: craft
+  template: Tannery
+  image: tannery
+  base_hp: 250
+  base_def: 0
+  build_cost: 500
+  level: 2
+  capacity: 100
+  profession: the Tanner
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+
+- name: Millhouse
+  class: structure
+  subclass: craft
+  template: Millhouse
+  image: millhouse
+  base_hp: 250
+  base_def: 0
+  build_cost: 500
+  level: 2
+  capacity: 100
+  profession: the Miller
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 15
+    - type: Stone
+      quantity: 5
+
+- name: Textile Mill
+  class: structure
+  subclass: craft
+  template: Textile Mill
+  image: textilemill
+  base_hp: 250
+  base_def: 0
+  build_cost: 500
+  level: 2
+  capacity: 100
+  profession: the Spinner
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+
+- name: Bakery
+  class: structure
+  subclass: craft
+  template: Bakery
+  image: bakery
+  base_hp: 250
+  base_def: 0
+  build_cost: 500
+  level: 3
+  capacity: 100
+  profession: the Baker
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Stone
+      quantity: 5
+    - type: Ingot
+      quantity: 5
 
 - name: Tailor
   class: structure
@@ -796,31 +743,16 @@
   image: tailor
   base_hp: 250
   base_def: 0
-  build_cost: 5
-  level: 2
+  build_cost: 500
+  level: 3
   capacity: 50
   profession: the Tailor
   activity: Operating
-  refine: [Ore]
-  req: 
-    - type: Log
-      quantity: 1
-
-- name: Alchemist
-  class: structure
-  subclass: craft
-  template: Alchemist
-  image: alchemist
-  base_hp: 250
-  base_def: 0
-  build_cost: 5
-  level: 3
-  capacity: 21
-  profession: the Alchemist
-  activity: Operating
-  req: 
-    - type: Log
-      quantity: 1
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Hide
+      quantity: 10
 
 - name: Herbalist
   class: structure
@@ -829,13 +761,231 @@
   image: herbalist
   base_hp: 250
   base_def: 0
-  build_cost: 5
+  build_cost: 500
   level: 3
   capacity: 21
   profession: the Herbalist
-  req: 
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+
+- name: Alchemist
+  class: structure
+  subclass: craft
+  template: Alchemist
+  image: alchemist
+  base_hp: 250
+  base_def: 0
+  build_cost: 600
+  level: 3
+  capacity: 21
+  profession: the Alchemist
+  activity: Operating
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 10
+
+- name: Tavern
+  class: structure
+  subclass: craft
+  template: Tavern
+  image: tavern
+  base_hp: 250
+  base_def: 0
+  build_cost: 300
+  level: 2
+  capacity: 21
+  profession: the Innkeeper
+  req:
     - type: Log
-      quantity: 1
+      quantity: 10
+    - type: Hide
+      quantity: 5
+
+############################
+###### RESOURCE ############
+############################
+
+- name: Mine
+  class: structure
+  subclass: resource
+  template: Mine
+  image: mine
+  base_hp: 250
+  base_def: 0
+  build_cost: 100
+  level: 0
+  capacity: 200
+  activity: Mining
+  workspaces: 2
+  profession: the Miner
+  operate_skill: Mining
+  req:
+    - type: Log
+      quantity: 5
+    - type: Ingot
+      quantity: 3
+
+- name: Lumbercamp
+  class: structure
+  subclass: resource
+  template: Lumbercamp
+  image: lumbercamp
+  base_hp: 250
+  base_def: 0
+  build_cost: 100
+  capacity: 200
+  level: 0
+  profession: the Forester
+  activity: Logging
+  req:
+    - type: Log
+      quantity: 5
+
+- name: Quarry
+  class: structure
+  subclass: resource
+  template: Quarry
+  image: quarry
+  base_hp: 250
+  base_def: 0
+  build_cost: 100
+  level: 0
+  profession: the Stonecutter
+  activity: Stonecutting
+  req:
+    - type: Log
+      quantity: 5
+    - type: Ingot
+      quantity: 3
+
+- name: Trapper
+  class: structure
+  subclass: resource
+  template: Trapper
+  image: trapper
+  base_hp: 250
+  base_def: 0
+  build_cost: 100
+  level: 0
+  profession: the Hunter
+  activity: Hunting
+  req:
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 3
+
+- name: Farm
+  class: structure
+  subclass: farm
+  template: Farm
+  image: farm
+  base_hp: 250
+  base_def: 0
+  build_cost: 50
+  capacity: 500
+  level: 0
+  profession: the Farmer
+  req:
+    - type: Log
+      quantity: 5
+
+############################
+###### SHELTER #############
+############################
+
+- name: Small Tent
+  class: structure
+  subclass: shelter
+  template: Small Tent
+  image: tent
+  base_hp: 100
+  base_def: 0
+  build_cost: 50
+  capacity: 50
+  max_residents: 1
+  campfire: true
+  level: 0
+  req:
+    - type: Log
+      quantity: 5
+    - type: Hide
+      quantity: 3
+  upgrade_to: [Large Tent]
+  upgrade_req:
+    - type: Log
+      quantity: 10
+    - type: Hide
+      quantity: 8
+
+- name: Large Tent
+  class: structure
+  subclass: shelter
+  template: Large Tent
+  image: tent
+  base_hp: 150
+  base_def: 0
+  build_cost: 200
+  capacity: 0
+  max_residents: 2
+  level: 1
+  req:
+    - type: Log
+      quantity: 10
+    - type: Hide
+      quantity: 8
+  upgrade_to: []
+
+- name: Yurt
+  class: structure
+  subclass: shelter
+  template: Yurt
+  image: tent
+  base_hp: 150
+  base_def: 0
+  build_cost: 300
+  capacity: 0
+  max_residents: 1
+  level: 1
+  req:
+    - type: Log
+      quantity: 15
+    - type: Hide
+      quantity: 10
+  upgrade_to: [Large Yurt]
+  upgrade_req:
+    - type: Timber
+      quantity: 10
+    - type: Hide
+      quantity: 15
+
+- name: Large Yurt
+  class: structure
+  subclass: shelter
+  template: Large Yurt
+  image: tent
+  base_hp: 200
+  base_def: 0
+  build_cost: 500
+  capacity: 0
+  max_residents: 3
+  level: 2
+  req:
+    - type: Timber
+      quantity: 10
+    - type: Hide
+      quantity: 15
+  upgrade_to: []
+
+############################
+###### STORAGE #############
+############################
 
 - name: Burrow
   class: structure
@@ -844,12 +994,28 @@
   image: burrow
   base_hp: 250
   base_def: 0
-  build_cost: 240
+  build_cost: 50
   level: 0
   capacity: 200
-  req: 
+  req:
     - type: Log
+      quantity: 5
+
+- name: Cache
+  class: structure
+  subclass: storage
+  template: Cache
+  image: cache
+  base_hp: 250
+  base_def: 0
+  build_cost: 300
+  level: 1
+  capacity: 500
+  req:
+    - type: Timber
       quantity: 10
+    - type: Ingot
+      quantity: 5
 
 - name: Warehouse
   class: structure
@@ -858,14 +1024,14 @@
   image: warehouse
   base_hp: 250
   base_def: 0
-  build_cost: 960
-  level: 1
+  build_cost: 800
+  level: 2
   capacity: 1000
-  req: 
+  req:
     - type: Timber
-      quantity: 50
+      quantity: 25
     - type: Ingot
-      quantity: 50
+      quantity: 15
 
 ##################
 ###### WALLS #####
@@ -878,78 +1044,80 @@
   image: stockade
   base_hp: 20
   base_def: 0
-  build_cost: 50
+  build_cost: 30
   capacity: 100
   level: 0
-  req: 
+  req:
     - type: Log
-      quantity: 5
+      quantity: 3
   upkeep:
     - type: Log
       quantity: 1
-  upgrade_to: [Fieldstone Walls]
+  upgrade_to: [Palisade]
   upgrade_req:
-    - type: Log
-      quantity: 10
+    - type: Timber
+      quantity: 5
 
 - name: Watchtower
   class: structure
   subclass: watchtower
   template: Watchtower
   image: watchtower
-  base_hp: 20
+  base_hp: 50
   base_def: 0
-  build_cost: 50
+  build_cost: 100
   capacity: 100
   level: 0
-  req: 
+  req:
     - type: Log
       quantity: 5
+    - type: Ingot
+      quantity: 3
   upkeep:
     - type: Log
       quantity: 1
-  upgrade_to: [Fieldstone Walls]
-  upgrade_req:
-    - type: Log
-      quantity: 10
 
-- name: Palisade 
+- name: Palisade
   class: structure
   subclass: wall
   template: Palisade
   image: palisade
   base_hp: 200
   base_def: 0
-  build_cost: 120
+  build_cost: 80
   capacity: 100
   level: 1
-  req: 
-    - type: Log
+  req:
+    - type: Timber
       quantity: 5
   upkeep:
     - type: Log
       quantity: 1
+  upgrade_to: [Fieldstone Walls]
+  upgrade_req:
+    - type: Stone
+      quantity: 5
+    - type: Timber
+      quantity: 3
 
-- name: Fieldstone Walls 
+- name: Fieldstone Walls
   class: structure
   subclass: wall
   template: Fieldstone Walls
   image: fieldstonewalls
-  base_hp: 200
+  base_hp: 400
   base_def: 0
-  build_cost: 50
-  upgrade_cost: 50
+  build_cost: 150
   capacity: 100
-  level: 1
-  req: 
-    - type: Log
+  level: 2
+  req:
+    - type: Stone
       quantity: 5
-  upgrade_req:
-    - type: Log
-      quantity: 10
+    - type: Timber
+      quantity: 3
   upkeep:
-    - type: Log
-      quantity: 1   
+    - type: Stone
+      quantity: 1
 
 ##################
 ###### POI #######

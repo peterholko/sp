@@ -39,11 +39,15 @@ impl Plans {
         level: i32,
         tier: i32
     ) {
+        if self.iter().any(|p| p.player_id == player_id && p.structure == structure) {
+            return;
+        }
+
         let plan = Plan {
-            player_id: player_id,
-            structure: structure,
-            level: level,
-            tier: tier,
+            player_id,
+            structure,
+            level,
+            tier,
         };
 
         self.push(plan);

@@ -878,6 +878,42 @@
   image: deed
   weight: 1
 
+- name: Small Tent Deed
+  class: Deed
+  subclass: Small Tent
+  image: deed
+  weight: 1
+
+- name: Farm Deed
+  class: Deed
+  subclass: Farm
+  image: deed
+  weight: 1
+
+- name: Mine Deed
+  class: Deed
+  subclass: Mine
+  image: deed
+  weight: 1
+
+- name: Lumbercamp Deed
+  class: Deed
+  subclass: Lumbercamp
+  image: deed
+  weight: 1
+
+- name: Quarry Deed
+  class: Deed
+  subclass: Quarry
+  image: deed
+  weight: 1
+
+- name: Trapper Deed
+  class: Deed
+  subclass: Trapper
+  image: deed
+  weight: 1
+
 ##################
 ###### CARCASS ######
 ##################

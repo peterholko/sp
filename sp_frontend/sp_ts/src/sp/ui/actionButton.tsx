@@ -36,10 +36,8 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
   }
 
   handleAttack(message) {
-    if(message.attack_type == this.props.type) {
-      this.setState({cooldown: message.cooldown})
-      this.startTimer();
-    }
+    this.setState({cooldown: message.cooldown})
+    this.startTimer();
   }
   
    startTimer() {

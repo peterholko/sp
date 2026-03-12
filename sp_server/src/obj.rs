@@ -798,6 +798,7 @@ pub struct BaseQueryMutState {
     pub subclass: &'static Subclass,
     pub state: &'static mut State,
     pub effects: &'static Effects,
+    pub template: &'static Template,
 }
 
 #[derive(QueryData)]

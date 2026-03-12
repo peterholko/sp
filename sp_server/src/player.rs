@@ -1022,6 +1022,16 @@ fn attack_system(
                     continue;
                 }
 
+                // Check global attack cooldown
+                let last_combat = attacker.last_combat_tick.0;
+                if last_combat > 0 && (game_tick.0 - last_combat) < ATTACK_COOLDOWN_TICKS {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Attack is on cooldown.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Calculate and process damage
                 let (damage, combo, skill_updated) = Combat::process_attack(
                     Combat::attack_type_to_enum(attack_type.to_string()),
@@ -1137,6 +1147,16 @@ fn attack_system(
                 if attacker_stamina < 5 {
                     let packet = ResponsePacket::Error {
                         errmsg: "Not enough stamina to attack.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                // Check global attack cooldown
+                let last_combat = attacker.last_combat_tick.0;
+                if last_combat > 0 && (game_tick.0 - last_combat) < ATTACK_COOLDOWN_TICKS {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Attack is on cooldown.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;

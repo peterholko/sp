@@ -499,6 +499,10 @@ pub enum GameEventType {
         pos: Position,
         home: Position,
     },
+    SpawnVillager {
+        pos: Position,
+        player_id: i32,
+    },
     RemoveEntity {
         entity: Entity,
     },

@@ -108,6 +108,8 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       zIndex: Global.zIndexManager.getTop() + 3 // 3 layers above top due to multiple panels in this component
     } as React.CSSProperties
 
+    const itemNameZIndex = Global.zIndexManager.getTop() + 2;
+
     const leftItemNameStyle = {
       transform: 'translate(-323px, 0px)',
       position: 'fixed',
@@ -116,7 +118,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       fontFamily: 'Verdana',
       fontSize: '12px',
       width: '323px',
-      zIndex: 6,
+      zIndex: itemNameZIndex,
       top: '50%',
       left: '50%',
       marginTop: isLargeWindow ? itemNameLargeY : itemNameSmallY
@@ -129,7 +131,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       fontFamily: 'Verdana',
       fontSize: '12px',
       width: '323px',
-      zIndex: 6,
+      zIndex: itemNameZIndex,
       top: '50%',
       left: '50%',
       marginTop: isLargeWindow ? itemNameLargeY : itemNameSmallY
