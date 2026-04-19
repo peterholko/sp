@@ -7,7 +7,7 @@ use crate::resource::Resource;
 use crate::game::{EventInProgress, VillagerQuery};
 
 use crate::map::MapPos;
-use crate::obj::{ActiveTask, BaseAttrs, Obj, Order, State, SubclassNPC};
+use crate::obj::{ActiveTask, BaseAttrs, Obj, Order, Personality, State, SubclassNPC};
 use crate::skill::{self, SkillData, Skills};
 use crate::skill_defs::Skill;
 use crate::templates::{SkillTemplates};
@@ -20,17 +20,42 @@ impl VillagerUtil {
     pub fn generate() {}
 
     pub fn generate_name() -> String {
-        let names = vec![
-            "Geoffry Holte",
-            "Roderich Denholm",
-            "Warder Folcey",
-            "Andes Bardaye",
+        let first_names = vec![
+            "Geoffry", "Roderich", "Warder", "Andes", "Aldric", "Bram",
+            "Cedric", "Dunstan", "Edric", "Gareth", "Hadwin", "Ivar",
+            "Jorik", "Leofric", "Marden", "Oswin", "Percival", "Roderic",
+            "Sigmund", "Theron", "Ulric", "Wulfric", "Elara", "Brynn",
+            "Isolde", "Maren", "Rowena", "Seren", "Thyra", "Wren",
+            "Astrid", "Dagny", "Freya", "Hild", "Kenna", "Lirael",
+        ];
+
+        let last_names = vec![
+            "Holte", "Denholm", "Folcey", "Bardaye", "Ashford", "Blackwood",
+            "Crestfall", "Dunmore", "Fairholm", "Greystone", "Hawkridge",
+            "Ironside", "Kettleworth", "Lindwell", "Moorfield", "Northgate",
+            "Oakvale", "Pinehurst", "Ravencroft", "Stonebridge", "Thornwall",
+            "Underhill", "Whitmore", "Yarrow",
         ];
 
         let mut rng = rand::thread_rng();
-        let index = rng.gen_range(0..names.len());
+        let first = first_names[rng.gen_range(0..first_names.len())];
+        let last = last_names[rng.gen_range(0..last_names.len())];
 
-        return names[index].to_string();
+        format!("{} {}", first, last)
+    }
+
+    pub fn generate_personality() -> Personality {
+        let traits = vec![
+            Personality::Brave,
+            Personality::Diligent,
+            Personality::Lazy,
+            Personality::Greedy,
+            Personality::Loyal,
+            Personality::Curious,
+        ];
+
+        let mut rng = rand::thread_rng();
+        traits[rng.gen_range(0..traits.len())].clone()
     }
 
     pub fn generate_attributes(level: i32) -> BaseAttrs {

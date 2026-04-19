@@ -76,7 +76,7 @@ use crate::tax_collector::TaxCollectorPlugin;
 use crate::templates::{self, ObjTemplate, Templates, TemplatesPlugin};
 use crate::terrain_feature::{TerrainFeature, TerrainFeaturePlugin, TerrainFeatures};
 use crate::trade::{Prices, TradePorts, WantedItem};
-use crate::villager::VillagerPlugin;
+use crate::villager::{Morale, VillagerPlugin};
 use crate::world::{Weather, WeatherAreas, WorldPlugin};
 use crate::{villager_util, AppState};
 
@@ -195,6 +195,8 @@ pub struct PlayerCrisis {
     pub goblin_raid: bool,
     pub undead_incursion: bool,
     pub goblin_pillager: bool,
+    pub initial_encounter: bool, // boar/crab spawned after rats killed
+    pub spider_encounter: bool,  // spider spawned after boar/crab killed
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -203,6 +205,32 @@ pub struct CrisisState(pub HashMap<i32, PlayerCrisis>);
 // Tracks where each player's hero originally spawned
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SpawnPositions(pub HashMap<i32, Position>);
+
+// Tracks the initial shipwreck encounter chain: rats → boar/crab → spider
+#[derive(Debug, Clone)]
+pub struct InitialEncounterEntry {
+    pub rat_ids: Vec<i32>,           // IDs of the two starting rats
+    pub phase1_spawn: String,        // "Giant Crab" or "Wild Boar"
+    pub phase1_npc_id: Option<i32>,  // set when phase1 creature spawns
+    pub spawn_pos: Position,
+    pub start_tick: i32,             // when the player joined (for grace period)
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct InitialEncounterState(pub HashMap<i32, InitialEncounterEntry>);
+
+// Tracks objective completion per player
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct PlayerObjectives {
+    pub build_campfire: bool,
+    pub build_3_structures: bool,
+    pub recruit_villager: bool,
+    pub explore_poi: bool,
+    pub survive_5_nights: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct Objectives(pub HashMap<i32, PlayerObjectives>);
 
 #[derive(Resource, Debug, Reflect, Default)]
 #[reflect(Resource)]
@@ -646,10 +674,18 @@ impl Plugin for GamePlugin {
                 spell_raise_dead_event_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(Update, rat_event_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, initial_encounter_system.run_if(in_state(AppState::Running)))
             .add_systems(Update, wolf_pack_system.run_if(in_state(AppState::Running)))
             .add_systems(Update, goblin_raid_system.run_if(in_state(AppState::Running)))
             .add_systems(Update, undead_incursion_system.run_if(in_state(AppState::Running)))
             .add_systems(Update, goblin_pillager_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, nightly_threat_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, objectives_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, map_event_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, weather_cycle_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, weather_effects_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, morale_system.run_if(in_state(AppState::Running)))
+            .add_systems(Update, victory_check_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
                 spell_damage_event_system.run_if(in_state(AppState::Running)),
@@ -852,6 +888,10 @@ impl Game {
         let player_stats = PlayerStats(HashMap::new());
         let crisis_state = CrisisState(HashMap::new());
         let spawn_positions = SpawnPositions(HashMap::new());
+        let initial_encounter_state = InitialEncounterState(HashMap::new());
+        let objectives = Objectives(HashMap::new());
+        let monolith_investigation = MonolithInvestigation(HashMap::new());
+        let victory_state = VictoryState(HashMap::new());
 
         let debug_objs = DebugObjs(HashSet::new());
         let log_overrides = LogLevelOverrides::default();
@@ -873,6 +913,10 @@ impl Game {
         commands.insert_resource(player_stats);
         commands.insert_resource(crisis_state);
         commands.insert_resource(spawn_positions);
+        commands.insert_resource(initial_encounter_state);
+        commands.insert_resource(objectives);
+        commands.insert_resource(monolith_investigation);
+        commands.insert_resource(victory_state);
         commands.insert_resource(debug_objs);
         commands.insert_resource(log_overrides);
 
@@ -1230,6 +1274,7 @@ fn move_event_completed_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
+    initial_encounter_state: Res<InitialEncounterState>,
     (
         mover_query,
         map_obj_query,
@@ -1293,11 +1338,17 @@ fn move_event_completed_system(
 
         // Check if player spawns an encounter (not near monolith)
         if player::is_player(mover_player_id.0) && in_range_sanctuary.is_none() {
+            // Grace period: no random encounters in the first 3 minutes (1800 ticks)
+            let in_grace_period = initial_encounter_state
+                .get(&mover_player_id.0)
+                .map(|entry| game_tick.0 < entry.start_tick + 1800)
+                .unwrap_or(false);
+
             let mut encounter_moves = encounter_moves_query
                 .get_mut(mover_entity)
                 .expect("Encounter moves not found");
             encounter_moves.0 = encounter_moves.0 + 1;
-            let wildness = map.get_wildness(mover_pos.x, mover_pos.y);
+            let wildness = if in_grace_period { 0 } else { map.get_wildness(mover_pos.x, mover_pos.y) };
 
             info!(
                 "Encounter moves: {:?}, wildness: {:?}",
@@ -7525,7 +7576,69 @@ fn rat_event_system(
     }
 }
 
-// Tier 2: Spawns Wolf Pack when hero moves 5+ tiles from spawn position
+// Watches for the initial rat kills and chains boar/crab → spider spawns
+fn initial_encounter_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
+    mut crisis_state: ResMut<CrisisState>,
+    dead_query: Query<&Id, With<StateDead>>,
+) {
+    if game_tick.0 % 10 != 0 {
+        return;
+    }
+
+    let dead_ids: std::collections::HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
+
+    for (player_id, entry) in initial_encounter_state.iter_mut() {
+        let crisis = crisis_state.entry(*player_id).or_insert_with(PlayerCrisis::default);
+
+        // Phase 0: waiting for both rats to die → spawn boar/crab
+        if !crisis.initial_encounter {
+            if entry.rat_ids.iter().all(|id| dead_ids.contains(id)) {
+                let npc_id = ids.new_obj_id();
+                Encounter::spawn_npc_with_id(
+                    npc_id,
+                    NPC_PLAYER_ID,
+                    entry.spawn_pos,
+                    entry.phase1_spawn.clone(),
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
+                );
+                entry.phase1_npc_id = Some(npc_id);
+                crisis.initial_encounter = true;
+                info!("Initial Encounter: spawning {} after rats killed for player {}", entry.phase1_spawn, player_id);
+            }
+            continue;
+        }
+
+        // Phase 1: waiting for the boar/crab to die → spawn spider
+        if !crisis.spider_encounter {
+            if let Some(phase1_id) = entry.phase1_npc_id {
+                if dead_ids.contains(&phase1_id) {
+                    Encounter::spawn_npc(
+                        NPC_PLAYER_ID,
+                        entry.spawn_pos,
+                        "Spider".to_string(),
+                        &mut commands,
+                        &mut ids,
+                        &mut entity_map,
+                        &templates,
+                    );
+                    crisis.spider_encounter = true;
+                    info!("Initial Encounter: spawning Spider after {} killed for player {}", entry.phase1_spawn, player_id);
+                }
+            }
+        }
+    }
+}
+
+// Tier 2: Spawns Wolf Pack when hero moves 8+ tiles from spawn position
 fn wolf_pack_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -7559,8 +7672,8 @@ fn wolf_pack_system(
         let dy = (pos.y - spawn_pos.y) as f64;
         let distance_sq = dx * dx + dy * dy;
 
-        // Trigger when 5+ tiles from spawn (distance_sq >= 25)
-        if distance_sq < 25.0 {
+        // Trigger when 8+ tiles from spawn (distance_sq >= 64)
+        if distance_sq < 64.0 {
             continue;
         }
 
@@ -7876,6 +7989,648 @@ fn goblin_pillager_system(
                 .entry(*player_id)
                 .or_insert_with(PlayerCrisis::default)
                 .goblin_pillager = true;
+        }
+    }
+}
+
+// Nightly threat: spawns enemies near the hero at dusk each day, scaling with day count
+fn nightly_threat_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    clients: Res<Clients>,
+    mut last_threat_day: Local<HashMap<i32, i32>>,
+) {
+    let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
+
+    // Trigger at DUSK (tick 2000 within the day)
+    if ticks_in_day != DUSK {
+        return;
+    }
+
+    let current_day = game_tick.day();
+
+    // Skip day 1 — let the player settle in
+    if current_day <= 1 {
+        return;
+    }
+
+    for (_id, player_id, pos) in hero_query.iter() {
+        // Only trigger once per day per player
+        if let Some(&last_day) = last_threat_day.get(&player_id.0) {
+            if last_day >= current_day {
+                continue;
+            }
+        }
+
+        // Determine threat composition based on day count
+        let (creatures, warning) = match current_day {
+            2 => (vec!["Wolf"; 2], "Wolves howl nearby as darkness falls..."),
+            3 => (vec!["Wolf", "Wolf", "Giant Rat", "Giant Rat"], "The pack grows bolder tonight..."),
+            4 => (vec!["Wolf", "Wolf", "Wolf", "Spider"], "A chill wind carries the sound of many creatures..."),
+            5 => (vec!["Skeleton", "Skeleton", "Zombie"], "The dead stir as night approaches..."),
+            6 => (vec!["Skeleton", "Skeleton", "Zombie", "Zombie", "Shadow"], "An unnatural darkness gathers..."),
+            _ => {
+                // Day 7+: stronger undead waves, scaling
+                let num_zombies = std::cmp::min((current_day - 4) as usize, 5);
+                let num_skeletons = std::cmp::min((current_day - 3) as usize, 4);
+                let mut creatures: Vec<&str> = Vec::new();
+                for _ in 0..num_zombies {
+                    creatures.push("Zombie");
+                }
+                for _ in 0..num_skeletons {
+                    creatures.push("Skeleton");
+                }
+                creatures.push("Shadow");
+                (creatures, "The horde descends upon your settlement!")
+            }
+        };
+
+        // Send warning notice to player
+        let packet = ResponsePacket::Notice {
+            noticemsg: warning.to_string(),
+            expiry: Some(8000),
+        };
+        send_to_client(player_id.0, packet, &clients);
+
+        // Find spawn position 5-7 tiles from hero
+        let mut spawned = false;
+        for _attempt in 0..10 {
+            let spawn_pos =
+                get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
+
+            if let Some(spawn_pos) = spawn_pos {
+                let path = Map::find_path(
+                    *pos,
+                    spawn_pos,
+                    &map,
+                    player_id.0,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+
+                if let Some((path, _cost)) = path {
+                    if path.len() < 20 {
+                        for creature_type in &creatures {
+                            Encounter::spawn_npc(
+                                NPC_PLAYER_ID,
+                                spawn_pos,
+                                creature_type.to_string(),
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                            );
+                        }
+                        spawned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spawned {
+            info!("Nightly threat: Day {} spawned {} creatures for player {}",
+                current_day, creatures.len(), player_id.0);
+            last_threat_day.insert(player_id.0, current_day);
+        }
+    }
+}
+
+// Periodic map events: atmospheric discoveries and world events
+fn map_event_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
+    mut last_event_tick: Local<HashMap<i32, i32>>,
+) {
+    // Check every 100 ticks (10 seconds)
+    if game_tick.0 % 100 != 0 {
+        return;
+    }
+
+    let current_day = game_tick.day();
+    let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
+
+    for (player_id, _pos) in hero_query.iter() {
+        let last_tick = last_event_tick.get(&player_id.0).copied().unwrap_or(0);
+
+        // Don't send events too frequently — at least 600 ticks (1 minute) between events
+        if game_tick.0 - last_tick < 600 {
+            continue;
+        }
+
+        // Time-of-day atmospheric events
+        let event_message = match (current_day, ticks_in_day) {
+            // Day 1 morning hints
+            (1, 700..=800) => Some("The shipwreck groans as waves crash against the hull. There may be supplies worth salvaging."),
+            // Day 1 afternoon
+            (1, 1400..=1500) => Some("Smoke rises from somewhere in the distance. You are not alone on this island."),
+            // Day 2 morning
+            (2, 600..=700) => Some("Strange markings on the rocks point toward the interior of the island."),
+            // Day 2 afternoon
+            (2, 1300..=1400) => Some("The Monolith pulses faintly. Its power draws the attention of the dead."),
+            // Day 3 morning
+            (3, 600..=700) => Some("A cold wind blows from the mountains. The creatures grow bolder each night."),
+            // Day 3 evening
+            (3, 1700..=1800) => Some("The ground near the graveyard trembles. Something stirs beneath."),
+            // Day 4
+            (4, 600..=700) => Some("Footprints in the mud suggest scouts have been watching your settlement."),
+            // Day 5
+            (5, 600..=700) => Some("The island's dangers grow. Your settlement must be strong to survive."),
+            // Day 7+, every morning
+            (d, 600..=700) if d >= 7 && d % 2 == 1 => Some("The darkness beyond your walls grows deeper. Fortify your defenses."),
+            _ => None,
+        };
+
+        if let Some(message) = event_message {
+            let packet = ResponsePacket::Notice {
+                noticemsg: message.to_string(),
+                expiry: Some(10000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+            last_event_tick.insert(player_id.0, game_tick.0);
+        }
+    }
+}
+
+// Checks objective completion and sends updates to players
+fn objectives_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
+    structure_query: Query<(&PlayerId, &Template), With<ClassStructure>>,
+    villager_query: Query<&PlayerId, With<SubclassVillager>>,
+    mut objectives: ResMut<Objectives>,
+) {
+    // Check every 50 ticks (5 seconds)
+    if game_tick.0 % 50 != 0 {
+        return;
+    }
+
+    for (player_id, _pos) in hero_query.iter() {
+        let obj = objectives
+            .entry(player_id.0)
+            .or_insert_with(PlayerObjectives::default);
+
+        // Check: Build a Campfire
+        if !obj.build_campfire {
+            for (struct_player_id, template) in structure_query.iter() {
+                if struct_player_id.0 == player_id.0 && template.0 == "Campfire" {
+                    obj.build_campfire = true;
+                    break;
+                }
+            }
+        }
+
+        // Check: Build 3 Structures
+        if !obj.build_3_structures {
+            let count = structure_query
+                .iter()
+                .filter(|(pid, _)| pid.0 == player_id.0)
+                .count();
+            if count >= 3 {
+                obj.build_3_structures = true;
+            }
+        }
+
+        // Check: Recruit a Villager
+        if !obj.recruit_villager {
+            for villager_pid in villager_query.iter() {
+                if villager_pid.0 == player_id.0 {
+                    obj.recruit_villager = true;
+                    break;
+                }
+            }
+        }
+
+        // Check: Survive 5 Nights (day >= 6 means survived 5 nights)
+        if !obj.survive_5_nights && game_tick.day() >= 6 {
+            obj.survive_5_nights = true;
+        }
+
+        // Always send current state — ensures reconnecting clients get objectives
+        let packet = ResponsePacket::Objectives {
+            build_campfire: obj.build_campfire,
+            build_3_structures: obj.build_3_structures,
+            recruit_villager: obj.recruit_villager,
+            explore_poi: obj.explore_poi,
+            survive_5_nights: obj.survive_5_nights,
+        };
+        send_to_client(player_id.0, packet, &clients);
+    }
+}
+
+// Weather cycling: generates weather areas each day at DAWN, clears old weather
+fn weather_cycle_system(
+    game_tick: Res<GameTick>,
+    mut weather_areas: ResMut<WeatherAreas>,
+    map: Res<Map>,
+    clients: Res<Clients>,
+    hero_query: Query<&PlayerId, With<SubclassHero>>,
+) {
+    let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
+
+    // Generate new weather at DAWN each day
+    if ticks_in_day != DAWN {
+        return;
+    }
+
+    let current_day = game_tick.day();
+
+    // Clear old weather
+    weather_areas.clear();
+
+    let mut rng = rand::thread_rng();
+
+    // Day 1: mild weather only
+    // Day 2-3: rain/fog possible
+    // Day 4+: full range including cold/heat/storms
+    let possible_weathers: Vec<Weather> = match current_day {
+        1 => vec![Weather::ClearSunny, Weather::Fog],
+        2..=3 => vec![Weather::ClearSunny, Weather::HeavyRain, Weather::Fog],
+        4..=6 => vec![
+            Weather::ClearSunny, Weather::HeavyRain, Weather::Fog,
+            Weather::ColdSnap, Weather::Snow, Weather::Heatwave,
+            Weather::Thunderstorm,
+        ],
+        _ => vec![
+            Weather::ClearSunny, Weather::HeavyRain, Weather::Fog,
+            Weather::ColdSnap, Weather::Snow, Weather::Blizzard,
+            Weather::Heatwave, Weather::Thunderstorm,
+        ],
+    };
+
+    // Generate 1-3 weather areas
+    let num_areas = rng.gen_range(1..=3);
+    for _ in 0..num_areas {
+        let weather = possible_weathers[rng.gen_range(0..possible_weathers.len())].clone();
+
+        // Skip clear weather — no area needed
+        if matches!(weather, Weather::ClearSunny) {
+            continue;
+        }
+
+        let x = rng.gen_range(2..map.width - 2);
+        let y = rng.gen_range(2..map.height - 2);
+
+        let area = crate::world::create_weather_area(x, y, weather);
+        weather_areas.push(area);
+    }
+
+    // Notify players about weather conditions
+    if !weather_areas.is_empty() {
+        let weather_names: Vec<String> = weather_areas.iter().map(|w| w.weather.to_string()).collect();
+        let unique_names: Vec<String> = weather_names.into_iter().collect::<std::collections::HashSet<_>>().into_iter().collect();
+        let weather_msg = format!("Weather report: {} observed on the island.", unique_names.join(", "));
+
+        for player_id in hero_query.iter() {
+            let packet = ResponsePacket::Notice {
+                noticemsg: weather_msg.clone(),
+                expiry: Some(8000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+        }
+    }
+}
+
+// Weather effects: applies gameplay effects based on weather at entity positions
+fn weather_effects_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    weather_areas: Res<WeatherAreas>,
+    clients: Res<Clients>,
+    mut hero_query: Query<
+        (&Id, &PlayerId, &Position, &mut Stats, Option<&Sheltered>),
+        With<SubclassHero>,
+    >,
+    campfire_query: Query<(&Position, &Campfire)>,
+    mut structure_query: Query<
+        (&Id, &PlayerId, &Position, &mut Stats, &Template),
+        (With<ClassStructure>, Without<SubclassHero>),
+    >,
+    mut crops: ResMut<Crops>,
+    mut last_weather_notice: Local<HashMap<i32, i32>>,
+) {
+    // Check every 50 ticks (5 seconds)
+    if game_tick.0 % 50 != 0 {
+        return;
+    }
+
+    if weather_areas.is_empty() {
+        return;
+    }
+
+    // Process hero weather effects
+    for (id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
+        let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
+            continue;
+        };
+
+        let is_sheltered = sheltered.is_some();
+        let near_campfire = campfire_query.iter().any(|(cf_pos, cf)| {
+            cf.is_lit && Map::distance((pos.x, pos.y), (cf_pos.x, cf_pos.y)) <= 2
+        });
+
+        // Cold weather: damage if not sheltered and not near campfire
+        if weather.is_cold() && !is_sheltered && !near_campfire {
+            let cold_damage = match weather {
+                Weather::Blizzard | Weather::PolarVortex => 3,
+                Weather::Snow | Weather::IceStorm => 2,
+                _ => 1,
+            };
+            stats.hp = (stats.hp - cold_damage).max(0);
+
+            let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
+            if game_tick.0 - last_tick >= 300 {
+                let packet = ResponsePacket::Notice {
+                    noticemsg: format!("The {} chills you to the bone! Seek shelter or warmth.", weather.to_string()),
+                    expiry: Some(5000),
+                };
+                send_to_client(player_id.0, packet, &clients);
+                last_weather_notice.insert(player_id.0, game_tick.0);
+            }
+        }
+
+        // Heatwave: notice about increased thirst (actual thirst is handled per-tick elsewhere)
+        if weather.is_hot() {
+            let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
+            if game_tick.0 - last_tick >= 600 {
+                let packet = ResponsePacket::Notice {
+                    noticemsg: "The oppressive heat drains your energy. Stay hydrated!".to_string(),
+                    expiry: Some(5000),
+                };
+                send_to_client(player_id.0, packet, &clients);
+                last_weather_notice.insert(player_id.0, game_tick.0);
+            }
+        }
+
+        // Fog: reduced vision notice
+        if weather.is_fog() {
+            let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
+            if game_tick.0 - last_tick >= 600 {
+                let packet = ResponsePacket::Notice {
+                    noticemsg: "A thick fog rolls in, obscuring your vision.".to_string(),
+                    expiry: Some(5000),
+                };
+                send_to_client(player_id.0, packet, &clients);
+                last_weather_notice.insert(player_id.0, game_tick.0);
+            }
+        }
+
+        // Rain: can extinguish campfires (small chance per check)
+        if weather.is_rainy() {
+            let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
+            if game_tick.0 - last_tick >= 600 {
+                let packet = ResponsePacket::Notice {
+                    noticemsg: "Rain pounds the ground. Fires may be extinguished!".to_string(),
+                    expiry: Some(5000),
+                };
+                send_to_client(player_id.0, packet, &clients);
+                last_weather_notice.insert(player_id.0, game_tick.0);
+            }
+        }
+    }
+
+    // Storm damage to structures
+    for (_id, _player_id, pos, mut stats, _template) in structure_query.iter_mut() {
+        let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
+            continue;
+        };
+
+        if weather.is_storm() {
+            let storm_damage = match weather {
+                Weather::Hurricane | Weather::SuperTyphoon | Weather::Tornado => 5,
+                Weather::Thunderstorm | Weather::Moonsoon => 2,
+                _ => 1,
+            };
+            // Only damage structures with HP < 500 (low-HP structures)
+            if stats.base_hp < 500 {
+                stats.hp = (stats.hp - storm_damage).max(0);
+            }
+        }
+    }
+
+    // Rain boosts crop growth: reduce remaining growth time
+    if weather_areas.iter().any(|w| w.weather.is_rainy()) {
+        for (_structure_id, crop) in crops.iter_mut() {
+            // Boost growth by reducing stage_end (effectively 50% faster when checked every 50 ticks)
+            if crop.stage != CropStages::Mature && crop.stage != CropStages::Dead {
+                // Shave 25 ticks off remaining time per check (50% boost over natural 50-tick intervals)
+                if crop.stage_end > game_tick.0 + 1 {
+                    crop.stage_end -= 25;
+                }
+            }
+        }
+    }
+}
+
+// Villager morale system: updates morale based on conditions and triggers dialogue
+fn morale_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    templates: Res<Templates>,
+    mut map_events: ResMut<MapEvents>,
+    weather_areas: Res<WeatherAreas>,
+    mut villager_query: Query<
+        (&Id, &PlayerId, &Position, &mut Morale, Option<&Sheltered>),
+        With<SubclassVillager>,
+    >,
+    shelter_query: Query<Entity, With<Shelter>>,
+    structure_query: Query<(&PlayerId, &Inventory), With<ClassStructure>>,
+    dead_query: Query<(&PlayerId, &StateDead)>,
+    hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
+    mut last_dialogue_tick: Local<HashMap<i32, i32>>,
+) {
+    // Update morale every 200 ticks (20 seconds)
+    if game_tick.0 % 200 != 0 {
+        return;
+    }
+
+    for (id, player_id, pos, mut morale, sheltered) in villager_query.iter_mut() {
+        let mut new_morale: f32 = 50.0; // Base morale
+
+        // +20 if sheltered
+        if sheltered.is_some() {
+            new_morale += 20.0;
+        } else {
+            new_morale -= 20.0;
+        }
+
+        // +10 if food available in player's structures
+        let has_food = structure_query.iter().any(|(pid, inv)| {
+            pid.0 == player_id.0 && inv.get_by_class(FOOD.to_string()).is_some()
+        });
+        if has_food {
+            new_morale += 10.0;
+        } else {
+            new_morale -= 10.0;
+        }
+
+        // -15 if any ally died recently (within last 600 ticks / 1 min)
+        let recent_death = dead_query.iter().any(|(pid, dead)| {
+            pid.0 == player_id.0 && (game_tick.0 - dead.dead_at) < 600
+        });
+        if recent_death {
+            new_morale -= 15.0;
+        }
+
+        // Weather affects morale
+        if let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) {
+            if weather.is_cold() { new_morale -= 10.0; }
+            if weather.is_hot() { new_morale -= 5.0; }
+            if weather.is_rainy() { new_morale -= 5.0; }
+        }
+
+        // Clamp morale to 0-100
+        new_morale = new_morale.clamp(0.0, 100.0);
+        morale.morale = new_morale;
+
+        // Trigger dialogue based on morale and world state
+        let last_tick = last_dialogue_tick.get(&id.0).copied().unwrap_or(0);
+        if game_tick.0 - last_tick < 1200 {
+            continue; // Don't spam dialogue — at most once per 2 minutes
+        }
+
+        let dialogue = if new_morale >= 75.0 {
+            // Happy villager comments
+            let options = vec![
+                "This settlement grows stronger every day!",
+                "Fine weather for working!",
+                "I feel safe here. Good leadership.",
+                "Another good day at the settlement.",
+            ];
+            Some(options[game_tick.0 as usize % options.len()])
+        } else if new_morale <= 25.0 {
+            // Miserable villager complaints
+            let options = vec![
+                "I'm cold and hungry...",
+                "When will this nightmare end?",
+                "We need better shelter...",
+                "I don't know how much longer I can take this.",
+            ];
+            Some(options[game_tick.0 as usize % options.len()])
+        } else if let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) {
+            // Weather comments at medium morale
+            if weather.is_cold() {
+                Some("Brrr... this cold is unbearable.")
+            } else if weather.is_rainy() {
+                Some("This rain won't let up!")
+            } else if weather.is_fog() {
+                Some("Can barely see my hand in this fog...")
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(speech) = dialogue {
+            Obj::add_speech_event(game_tick.0, speech.to_string(), id, &mut map_events);
+            last_dialogue_tick.insert(id.0, game_tick.0);
+        }
+    }
+}
+
+// Monolith investigation stages per player
+#[derive(Debug, Clone, Default)]
+pub struct MonolithProgress {
+    pub stage: i32, // 0 = unvisited, 1 = observed, 2 = offering made, 3 = sealed/empowered
+    pub sealed: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct MonolithInvestigation(pub HashMap<i32, MonolithProgress>);
+
+// Victory tracking per player
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PlayerVictory {
+    pub rescue_progress: i32,   // Ticks survived (for day counting)
+    pub prosperity: bool,
+    pub conquest: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct VictoryState(pub HashMap<i32, PlayerVictory>);
+
+// Victory condition check system
+fn victory_check_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
+    structure_query: Query<(&PlayerId, &Template), With<ClassStructure>>,
+    villager_query: Query<&PlayerId, With<SubclassVillager>>,
+    objectives: Res<Objectives>,
+    monolith_investigation: Res<MonolithInvestigation>,
+    mut victory_state: ResMut<VictoryState>,
+) {
+    // Check every 200 ticks (20 seconds)
+    if game_tick.0 % 200 != 0 {
+        return;
+    }
+
+    for (player_id, _pos) in hero_query.iter() {
+        let victory = victory_state
+            .entry(player_id.0)
+            .or_insert_with(PlayerVictory::default);
+
+        // Skip if already achieved a victory
+        if victory.prosperity || victory.conquest {
+            continue;
+        }
+
+        // Rescue: Survive 10 days
+        if game_tick.day() >= 11 && victory.rescue_progress == 0 {
+            victory.rescue_progress = 1;
+            let packet = ResponsePacket::Notice {
+                noticemsg: "VICTORY! You have survived 10 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),
+                expiry: Some(30000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+        }
+
+        // Prosperity: 10+ structures, 3+ villagers
+        let structure_count = structure_query
+            .iter()
+            .filter(|(pid, _)| pid.0 == player_id.0)
+            .count();
+        let villager_count = villager_query
+            .iter()
+            .filter(|pid| pid.0 == player_id.0)
+            .count();
+
+        if structure_count >= 10 && villager_count >= 3 && !victory.prosperity {
+            victory.prosperity = true;
+            let packet = ResponsePacket::Notice {
+                noticemsg: "VICTORY — PROSPERITY! Your thriving settlement of {:} structures and {:} villagers stands as a testament to your leadership! You may continue playing.".to_string()
+                    .replace("{:}", &structure_count.to_string())
+                    .replace("{:}", &villager_count.to_string()),
+                expiry: Some(30000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+        }
+
+        // Conquest: All POIs explored + Monolith sealed
+        if let Some(obj) = objectives.get(&player_id.0) {
+            if obj.explore_poi {
+                if let Some(monolith) = monolith_investigation.get(&player_id.0) {
+                    if monolith.sealed && !victory.conquest {
+                        victory.conquest = true;
+                        let packet = ResponsePacket::Notice {
+                            noticemsg: "VICTORY — CONQUEST! You have explored the island's secrets and sealed the Monolith. The darkness recedes! You may continue playing.".to_string(),
+                            expiry: Some(30000),
+                        };
+                        send_to_client(player_id.0, packet, &clients);
+                    }
+                }
+            }
         }
     }
 }

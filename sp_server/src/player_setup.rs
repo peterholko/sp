@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use crate::constants::*;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
-use crate::game::{Merchant, Monolith, ObjQuery, SpawnPositions};
+use crate::game::{InitialEncounterEntry, InitialEncounterState, Merchant, Monolith, ObjQuery, SpawnPositions};
 use crate::item::{Inventory, Slot};
-use crate::obj::{ActiveShelter, Campfire, LastCombatTick, NewObj};
+use crate::effect::Effect;
+use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
 use crate::world::get_time_of_day;
@@ -55,6 +56,7 @@ pub fn new(
     game_tick: &Res<GameTick>,
     monoliths: &Query<ObjQuery, With<Monolith>>,
     spawn_positions: &mut ResMut<SpawnPositions>,
+    initial_encounter_state: &mut ResMut<InitialEncounterState>,
 ) -> Result<(), String> {
     // Select a start location and remove it from the list
     let start_location = match start_locations.get_start_location() {
@@ -506,6 +508,18 @@ pub fn new(
         // Create a new object event
         commands.trigger(NewObj {
             entity: campfire_entity_id,
+        });
+
+        // Swap to lit image
+        commands.trigger(UpdateObj {
+            entity: campfire_entity_id,
+            attrs: vec![(IMAGE.to_string(), "campfirelit".to_string())],
+        });
+
+        // Apply campfire light effect so nearby heroes get vision
+        commands.trigger(AddLightEffect {
+            entity: campfire_entity_id,
+            effect: Effect::CampfireLight,
         });
     }
 
@@ -1157,59 +1171,47 @@ pub fn new(
         &templates,
     );*/
 
-    // Spawn giant rats from the shipwreck shortly after player arrives
+    // Spawn giant rats from the shipwreck ~1 minute after player arrives
     let shipwreck_pos = Position {
         x: start_location.shipwreck_pos[0],
         y: start_location.shipwreck_pos[1],
     };
 
+    let mut rat_ids = Vec::new();
     for i in 0..2 {
+        let rat_npc_id = ids.new_obj_id();
+        rat_ids.push(rat_npc_id);
         let rat_event_id = ids.new_map_event_id();
         let rat_event = GameEvent {
             event_id: rat_event_id,
             start_tick: game_tick.0,
-            run_tick: game_tick.0 + 200 + (i * 10), // Stagger spawns ~20 seconds in
+            run_tick: game_tick.0 + 600 + (i * 30), // Stagger spawns ~1 minute in
             event_type: GameEventType::SpawnNPC {
                 npc_type: "Giant Rat".to_string(),
                 pos: shipwreck_pos,
-                npc_id: None,
+                npc_id: Some(rat_npc_id),
             },
         };
         game_events.insert(rat_event.event_id, rat_event);
     }
 
-    // Spawn a random creature (Giant Crab or Wild Boar) ~2 minutes after player arrives
-    let random_creature = if rand::thread_rng().gen_range(0..2) == 0 {
-        "Giant Crab"
+    // Register the initial encounter chain: rats → boar/crab → spider
+    // The boar/crab and spider spawn when the previous enemy is killed (see initial_encounter_system)
+    let phase1_spawn = if rand::thread_rng().gen_range(0..2) == 0 {
+        "Giant Crab".to_string()
     } else {
-        "Wild Boar"
+        "Wild Boar".to_string()
     };
-    let creature_event_id = ids.new_map_event_id();
-    let creature_event = GameEvent {
-        event_id: creature_event_id,
-        start_tick: game_tick.0,
-        run_tick: game_tick.0 + 1200, // ~2 minutes at 10 ticks/sec
-        event_type: GameEventType::SpawnNPC {
-            npc_type: random_creature.to_string(),
-            pos: shipwreck_pos,
-            npc_id: None,
+    initial_encounter_state.insert(
+        player_id,
+        InitialEncounterEntry {
+            rat_ids,
+            phase1_spawn,
+            phase1_npc_id: None,
+            spawn_pos: shipwreck_pos,
+            start_tick: game_tick.0,
         },
-    };
-    game_events.insert(creature_event.event_id, creature_event);
-
-    // Spawn a spider from the shipwreck ~3.5 minutes after player arrives
-    let spider_event_id = ids.new_map_event_id();
-    let spider_event = GameEvent {
-        event_id: spider_event_id,
-        start_tick: game_tick.0,
-        run_tick: game_tick.0 + 2100, // ~3.5 minutes at 10 ticks/sec
-        event_type: GameEventType::SpawnNPC {
-            npc_type: "Spider".to_string(),
-            pos: shipwreck_pos,
-            npc_id: None,
-        },
-    };
-    game_events.insert(spider_event.event_id, spider_event);
+    );
 
     // Distress sound from the shipwreck ~2:30 min after player arrives
     let distress_event = VisibleEvent::SoundEvent {
@@ -1220,12 +1222,17 @@ pub fn new(
     map_events.new(hero_id, game_tick.0 + 1500, distress_event);
 
     // Castaway villager emerges from the shipwreck ~3:20 min after player arrives
+    // Spawn at villager_pos (land tile) not shipwreck_pos (water tile) so they can pathfind
+    let villager_spawn_pos = Position {
+        x: start_location.villager_pos[0],
+        y: start_location.villager_pos[1],
+    };
     let villager_event = GameEvent {
         event_id: ids.new_map_event_id(),
         start_tick: game_tick.0,
         run_tick: game_tick.0 + 2000,
         event_type: GameEventType::SpawnVillager {
-            pos: shipwreck_pos,
+            pos: villager_spawn_pos,
             player_id,
         },
     };
@@ -1273,6 +1280,183 @@ pub fn new(
     };
 
     game_events.insert(event.event_id, event);
+
+    // Spawn POIs around the player's starting area
+    // Burned House - contains loot, guarded by undead
+    if let Some(ref pos) = start_location.burned_house_pos {
+        let poi_id = ids.new_obj_id();
+        let mut poi_inventory = Inventory {
+            owner: poi_id,
+            items: Vec::new(),
+        };
+        poi_inventory.new(ids.new_item_id(), "Health Potion".to_string(), 3, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Gold Coins".to_string(), 25, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Copper Broad Axe".to_string(), 1, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Resin Torch".to_string(), 2, &templates.item_templates);
+
+        let poi = Obj::create_nospawn(
+            poi_id,
+            MERCHANT_PLAYER_ID,
+            "Burned House".to_string(),
+            Position { x: pos[0], y: pos[1] },
+            State::None,
+            poi_inventory,
+            &templates,
+        );
+        let poi_entity = commands.spawn(poi).id();
+        ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
+        entity_map.new_obj(poi_id, poi_entity);
+        commands.trigger(NewObj { entity: poi_entity });
+
+        // Spawn skeletons guarding the burned house after 1 minute
+        let poi_pos = Position { x: pos[0], y: pos[1] };
+        for i in 0..2 {
+            let event_id = ids.new_map_event_id();
+            let spawn_event = GameEvent {
+                event_id,
+                start_tick: game_tick.0,
+                run_tick: game_tick.0 + 600 + (i * 10),
+                event_type: GameEventType::SpawnNPC {
+                    npc_type: "Skeleton".to_string(),
+                    pos: poi_pos,
+                    npc_id: None,
+                },
+            };
+            game_events.insert(spawn_event.event_id, spawn_event);
+        }
+    }
+
+    // Graveyard - contains soulshards, heavily guarded by undead
+    if let Some(ref pos) = start_location.graveyard_pos {
+        let poi_id = ids.new_obj_id();
+        let mut poi_inventory = Inventory {
+            owner: poi_id,
+            items: Vec::new(),
+        };
+        poi_inventory.new(ids.new_item_id(), "Soulshard".to_string(), 3, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Health Potion".to_string(), 2, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Yurt Deed".to_string(), 1, &templates.item_templates);
+
+        let poi = Obj::create_nospawn(
+            poi_id,
+            MERCHANT_PLAYER_ID,
+            "Graveyard".to_string(),
+            Position { x: pos[0], y: pos[1] },
+            State::None,
+            poi_inventory,
+            &templates,
+        );
+        let poi_entity = commands.spawn(poi).id();
+        ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
+        entity_map.new_obj(poi_id, poi_entity);
+        commands.trigger(NewObj { entity: poi_entity });
+
+        // Spawn zombies at the graveyard after 2 minutes
+        let poi_pos = Position { x: pos[0], y: pos[1] };
+        for i in 0..3 {
+            let event_id = ids.new_map_event_id();
+            let spawn_event = GameEvent {
+                event_id,
+                start_tick: game_tick.0,
+                run_tick: game_tick.0 + 1200 + (i * 10),
+                event_type: GameEventType::SpawnNPC {
+                    npc_type: "Zombie".to_string(),
+                    pos: poi_pos,
+                    npc_id: None,
+                },
+            };
+            game_events.insert(spawn_event.event_id, spawn_event);
+        }
+    }
+
+    // Sealed Cavern - contains rare materials, guarded by spiders
+    if let Some(ref pos) = start_location.sealed_cavern_pos {
+        let poi_id = ids.new_obj_id();
+        let mut poi_inventory = Inventory {
+            owner: poi_id,
+            items: Vec::new(),
+        };
+        poi_inventory.new(ids.new_item_id(), "Quickforge Iron Ore".to_string(), 5, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Valleyrun Copper Ingot".to_string(), 5, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Gold Coins".to_string(), 50, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Mine Deed".to_string(), 1, &templates.item_templates);
+
+        let poi = Obj::create_nospawn(
+            poi_id,
+            MERCHANT_PLAYER_ID,
+            "Sealed Cavern".to_string(),
+            Position { x: pos[0], y: pos[1] },
+            State::None,
+            poi_inventory,
+            &templates,
+        );
+        let poi_entity = commands.spawn(poi).id();
+        ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
+        entity_map.new_obj(poi_id, poi_entity);
+        commands.trigger(NewObj { entity: poi_entity });
+
+        // Spawn spiders guarding the cavern after 3 minutes
+        let poi_pos = Position { x: pos[0], y: pos[1] };
+        for i in 0..2 {
+            let event_id = ids.new_map_event_id();
+            let spawn_event = GameEvent {
+                event_id,
+                start_tick: game_tick.0,
+                run_tick: game_tick.0 + 1800 + (i * 10),
+                event_type: GameEventType::SpawnNPC {
+                    npc_type: "Spider".to_string(),
+                    pos: poi_pos,
+                    npc_id: None,
+                },
+            };
+            game_events.insert(spawn_event.event_id, spawn_event);
+        }
+    }
+
+    // Abandoned Mine - contains ore and mining supplies
+    if let Some(ref pos) = start_location.abandoned_mine_pos {
+        let poi_id = ids.new_obj_id();
+        let mut poi_inventory = Inventory {
+            owner: poi_id,
+            items: Vec::new(),
+        };
+        poi_inventory.new(ids.new_item_id(), "Valleyrun Copper Ore".to_string(), 10, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Flameforge Copper Ore".to_string(), 5, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Training Pick Axe".to_string(), 1, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Firewood".to_string(), 5, &templates.item_templates);
+        poi_inventory.new(ids.new_item_id(), "Quarry Deed".to_string(), 1, &templates.item_templates);
+
+        let poi = Obj::create_nospawn(
+            poi_id,
+            MERCHANT_PLAYER_ID,
+            "Abandoned Mine".to_string(),
+            Position { x: pos[0], y: pos[1] },
+            State::None,
+            poi_inventory,
+            &templates,
+        );
+        let poi_entity = commands.spawn(poi).id();
+        ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
+        entity_map.new_obj(poi_id, poi_entity);
+        commands.trigger(NewObj { entity: poi_entity });
+
+        // Spawn giant rats in the mine after 90 seconds
+        let poi_pos = Position { x: pos[0], y: pos[1] };
+        for i in 0..3 {
+            let event_id = ids.new_map_event_id();
+            let spawn_event = GameEvent {
+                event_id,
+                start_tick: game_tick.0,
+                run_tick: game_tick.0 + 900 + (i * 10),
+                event_type: GameEventType::SpawnNPC {
+                    npc_type: "Giant Rat".to_string(),
+                    pos: poi_pos,
+                    npc_id: None,
+                },
+            };
+            game_events.insert(spawn_event.event_id, spawn_event);
+        }
+    }
 
     /*Encounter::spawn_tax_collector(
         MERCHANT_PLAYER_ID,
@@ -1329,6 +1513,14 @@ pub struct StartLocation {
     pub necromancer_pos: Vec<i32>,
     pub mausoleum_pos: Vec<i32>,
     pub merchant_pos: Vec<i32>,
+    #[serde(default)]
+    pub burned_house_pos: Option<Vec<i32>>,
+    #[serde(default)]
+    pub graveyard_pos: Option<Vec<i32>>,
+    #[serde(default)]
+    pub sealed_cavern_pos: Option<Vec<i32>>,
+    #[serde(default)]
+    pub abandoned_mine_pos: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Resource, Deref, DerefMut)]

@@ -907,6 +907,15 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
+  public sendBlock(sourceId) {
+    var m = {
+      cmd: "block",
+      source_id: sourceId
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
   public sendGather() {
     var m = {
       cmd: "gather",
@@ -1639,6 +1648,8 @@ export class Network {
             console.log(`  ${target} = ${level}`);
           });
         }
+      } else if (jsonData.packet == 'objectives') {
+        Global.gameEmitter.emit(NetworkEvent.OBJECTIVES, jsonData);
       }
     }
   }

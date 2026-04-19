@@ -78,6 +78,7 @@ import TrueDeathPanel from './ui/trueDeathPanel';
 import RefinePanel from './ui/refinePanel';
 import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
+import ObjectivesPanel from './ui/objectivesPanel';
 
 interface UIState {
   selectBoxes: [],
@@ -763,6 +764,10 @@ export default class UI extends React.Component<any, UIState> {
 
   handleFierceAttack(event: React.MouseEvent) {
     Global.network.sendAttack('fierce', Global.heroId, Global.selectedKey.id);
+  }
+
+  handleBrace() {
+    Global.network.sendBlock(Global.heroId);
   }
 
   handleDamage(message) {
@@ -1666,7 +1671,8 @@ export default class UI extends React.Component<any, UIState> {
 
         <img src={bracebutton}
           id="bracebutton"
-          className={styles.bracebutton} />
+          className={styles.bracebutton}
+          onClick={this.handleBrace} />
 
         <img src={parrybutton}
           id="parrybutton"
@@ -1688,6 +1694,8 @@ export default class UI extends React.Component<any, UIState> {
         <HeroFrame heroStats={this.state.heroStats} hungerStatus={this.state.hungerStatus} thirstStatus={this.state.thirstStatus} fatigueStatus={this.state.fatigueStatus}></HeroFrame>
 
         <WorldPanel worldData={this.state.worldData} />
+
+        <ObjectivesPanel />
 
         {!this.state.hideSelectPanel &&
           <SelectPanel selectedTile={this.state.selectedTile}

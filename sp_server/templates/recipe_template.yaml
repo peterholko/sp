@@ -262,3 +262,20 @@
   req:
     - type: Raw Meat
       quantity: 1
+
+# Monolith Investigation
+- name: Seal Stone
+  class: Material
+  subclass: Quest
+  image: sealstone
+  weight: 5
+  crafting_time: 200
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Soulshard
+      quantity: 5
+    - type: Stone
+      quantity: 10
+    - type: Copper Ingot
+      quantity: 3

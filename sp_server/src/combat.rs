@@ -142,6 +142,9 @@ impl Combat {
         // 6 Get damage mod from items
         let damage_from_items = attacker.inventory.get_items_value_by_attr(&item::AttrKey::Damage, true);
            
+        // 6b Get weapon skill damage bonus (+5% per skill level)
+        let skill_damage_mod = Self::get_skill_damage_mod(attacker, &attacker_weapons);
+
         // 7 Get attack type damage from
         let attack_type_damage_mod = Self::attack_type_damage_mod(attack_type.clone());
 
@@ -177,7 +180,7 @@ impl Combat {
 
         // 18 Calculate total damage
         let total_damage =
-            (roll_damage + damage_from_items) * damage_effects_mod * attack_type_damage_mod;
+            (roll_damage + damage_from_items) * damage_effects_mod * attack_type_damage_mod * skill_damage_mod;
 
         // 19 Calculate total defense
         let total_defense = (base_defense * defense_from_items) * defense_effects_mod * sanctuary_defense;
@@ -208,7 +211,7 @@ impl Combat {
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
         attacker.stats.stamina = Some(attacker_stamina - 5);
 
-        // Update last combat tick for both attacker and target
+        // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
 
@@ -359,7 +362,7 @@ impl Combat {
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
         attacker.stats.stamina = Some(attacker_stamina - 5);
 
-        // Update last combat tick for both attacker and target
+        // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
 
@@ -696,6 +699,20 @@ impl Combat {
             AttackType::Precise => 1.0,
             AttackType::Fierce => 1.5,
         }
+    }
+
+    /// Returns a damage multiplier based on the attacker's weapon skill level.
+    /// +5% damage per skill level (e.g., Axe level 4 = 1.20x damage).
+    fn get_skill_damage_mod(attacker: &CombatQueryItem, weapons: &Vec<Item>) -> f32 {
+        if let Some(ref skills) = attacker.skills {
+            for weapon in weapons.iter() {
+                if let Some(skill) = crate::skill_defs::Skill::from_str(&weapon.subclass) {
+                    let level = skills.get_level_by_name(skill);
+                    return 1.0 + (level as f32 * 0.05);
+                }
+            }
+        }
+        1.0
     }
 
     pub fn attack_type_to_enum(attack_type: String) -> AttackType {

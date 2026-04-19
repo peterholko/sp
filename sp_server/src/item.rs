@@ -1259,6 +1259,10 @@ impl Inventory {
         self.items.iter().find(|item| item.class == class).cloned()
     }
 
+    pub fn get_by_name(&self, name: String) -> Option<Item> {
+        self.items.iter().find(|item| item.name == name).cloned()
+    }
+
     pub fn has_by_class(&self, class: String) -> bool {
         self.items.iter().any(|item| item.class == class)
     }

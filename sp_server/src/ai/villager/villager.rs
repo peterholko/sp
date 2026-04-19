@@ -254,6 +254,12 @@ pub fn enemy_distance_scorer_system(
     for (Actor(actor), mut score, span) in &mut query {
         let obj_id = entity_map.get_obj_by_entity(*actor);
         if let Ok(villager) = obj_query.get(*actor) {
+            // Merchant-owned and NPC-owned villagers have no hero — skip silently
+            if villager.player_id.0 >= MAX_PLAYER_ID {
+                score.set(0.0);
+                continue;
+            }
+
             let Some(hero_id) = ids.get_hero(villager.player_id.0) else {
                 span.span().in_scope(|| {
                     villager_error!(*actor, obj_id, None, "Cannot find hero for player={}", villager.player_id.0);
@@ -886,6 +892,10 @@ pub fn process_order_system(
                 match villager_order {
                     Order::Follow { target: _ } => {
                         *active_task = ActiveTask::Following;
+                        // Follow has no event to wait for — succeed immediately
+                        // so the behavior tree loops (SetOrderDestination → MoveTo → ProcessOrder)
+                        *state = ActionState::Success;
+                        continue;
                     }
                     Order::Gather {
                         res_type,

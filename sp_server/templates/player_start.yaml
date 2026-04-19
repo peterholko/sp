@@ -12,6 +12,10 @@
   necromancer_pos: [17,34]
   mausoleum_pos: [16,32]
   merchant_pos: [15,36]
+  burned_house_pos: [22,34]
+  graveyard_pos: [13,31]
+  sealed_cavern_pos: [20,40]
+  abandoned_mine_pos: [10,38]
 
 # - name: startpos2
 #  hero_pos: [5,21]
@@ -48,6 +52,10 @@
   necromancer_pos: [4,29]
   mausoleum_pos: [5,25]
   merchant_pos: [3,30]
+  burned_house_pos: [11,28]
+  graveyard_pos: [3,24]
+  sealed_cavern_pos: [9,35]
+  abandoned_mine_pos: [2,36]
 
 #- name: startpos5
 #  hero_pos: [18,5]

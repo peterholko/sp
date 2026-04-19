@@ -318,6 +318,29 @@ pub struct BaseAttrs {
     pub toughness: i32,
 }
 
+#[derive(Debug, Component, Clone, PartialEq)]
+pub enum Personality {
+    Brave,
+    Diligent,
+    Lazy,
+    Greedy,
+    Loyal,
+    Curious,
+}
+
+impl Personality {
+    pub fn to_str(&self) -> &str {
+        match self {
+            Personality::Brave => "Brave",
+            Personality::Diligent => "Diligent",
+            Personality::Lazy => "Lazy",
+            Personality::Greedy => "Greedy",
+            Personality::Loyal => "Loyal",
+            Personality::Curious => "Curious",
+        }
+    }
+}
+
 #[derive(Debug, Component, Clone)]
 pub struct LastCombatTick(pub i32);
 

@@ -36,10 +36,11 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
   }
 
   handleAttack(message) {
+    this.stopTimer();
     this.setState({cooldown: message.cooldown})
     this.startTimer();
   }
-  
+
    startTimer() {
     var timerId = setInterval(this.timer, 1000);
     this.setState({timerId: timerId});
@@ -85,7 +86,9 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
       width: '50px',
       height: '50px',
       color: 'white',
-      WebkitTextStroke: '1px black'
+      WebkitTextStroke: '1px black',
+      userSelect: 'none',
+      pointerEvents: 'none',
     } as React.CSSProperties
 
     const cooldownBgStyle = {

@@ -123,6 +123,48 @@ impl WeatherAreas {
 
         return visible_weather_tiles;
     }
+
+    /// Returns the weather type at a given position, if any
+    pub fn get_weather_at(&self, x: i32, y: i32) -> Option<&Weather> {
+        for weather_area in self.iter() {
+            if weather_area.area.contains(&(x, y)) {
+                return Some(&weather_area.weather);
+            }
+        }
+        None
+    }
+}
+
+impl Weather {
+    /// Returns true if this weather is cold (ColdSnap, Snow, Blizzard, PolarVortex, IceStorm)
+    pub fn is_cold(&self) -> bool {
+        matches!(self, Weather::ColdSnap | Weather::Snow | Weather::Blizzard | Weather::PolarVortex | Weather::IceStorm)
+    }
+
+    /// Returns true if this weather is hot (Heatwave, Drought)
+    pub fn is_hot(&self) -> bool {
+        matches!(self, Weather::Heatwave | Weather::Drought)
+    }
+
+    /// Returns true if this weather is rainy (HeavyRain, Thunderstorm, Moonsoon)
+    pub fn is_rainy(&self) -> bool {
+        matches!(self, Weather::HeavyRain | Weather::Thunderstorm | Weather::Moonsoon)
+    }
+
+    /// Returns true if this weather is a storm that damages structures
+    pub fn is_storm(&self) -> bool {
+        matches!(self, Weather::Thunderstorm | Weather::Hurricane | Weather::Moonsoon | Weather::SuperTyphoon | Weather::Tornado)
+    }
+
+    /// Returns true if this weather is fog
+    pub fn is_fog(&self) -> bool {
+        matches!(self, Weather::Fog)
+    }
+
+    /// Returns true if this weather is snowy (reduces speed)
+    pub fn is_snowy(&self) -> bool {
+        matches!(self, Weather::Snow | Weather::Blizzard | Weather::PolarVortex | Weather::IceStorm)
+    }
 }
 
 pub fn create_weather_area(center_x: i32, center_y: i32, weather: Weather) -> WeatherArea {

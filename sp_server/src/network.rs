@@ -111,6 +111,10 @@ enum NetworkPacket {
         target_id: i32,
         combo_type: String,
     },
+    #[serde(rename = "block")]
+    Block {
+        source_id: i32,
+    },
     #[serde(rename = "info_obj")]
     InfoObj { id: i32 },
     #[serde(rename = "info_skills")]
@@ -407,6 +411,7 @@ pub enum ResponsePacket {
         order: Option<String>,
         capacity: Option<i32>,
         total_weight: Option<i32>,
+        personality: Option<String>,
     },
     #[serde(rename = "info_structure")]
     InfoStructure {
@@ -875,6 +880,14 @@ pub enum ResponsePacket {
         total_xp: i32,
         fate: String,
         crisis_tier: i32,
+    },
+    #[serde(rename = "objectives")]
+    Objectives {
+        build_campfire: bool,
+        build_3_structures: bool,
+        recruit_villager: bool,
+        explore_poi: bool,
+        survive_5_nights: bool,
     },
 }
 
@@ -1952,6 +1965,9 @@ async fn handle_connection(
                                             NetworkPacket::Combo{source_id, target_id, combo_type} => {
                                                 handle_combo(player_id, source_id, target_id, combo_type, client_to_game_sender.clone())
                                             }
+                                            NetworkPacket::Block{source_id} => {
+                                                handle_block(player_id, source_id, client_to_game_sender.clone())
+                                            }
                                             NetworkPacket::InfoObj{id} => {
                                                 handle_info_obj(player_id, id, client_to_game_sender.clone())
                                             }
@@ -2432,6 +2448,21 @@ fn handle_combo(
             source_id: source_id,
             target_id: target_id,
             combo_type: combo_type,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::Ok
+}
+
+fn handle_block(
+    player_id: i32,
+    source_id: i32,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::Block {
+            player_id,
+            source_id,
         })
         .expect("Could not send message");
 

@@ -50,3 +50,45 @@
 
 - name: Wolf
   text: "A wolf howls in the distance"
+
+# Morale dialogues
+- name: MoraleHigh1
+  text: "This settlement grows stronger every day!"
+
+- name: MoraleHigh2
+  text: "Fine weather for working!"
+
+- name: MoraleHigh3
+  text: "I feel safe here. Good leadership."
+
+- name: MoraleLow1
+  text: "I'm cold and hungry..."
+
+- name: MoraleLow2
+  text: "When will this nightmare end?"
+
+- name: MoraleLow3
+  text: "We need better shelter..."
+
+# Weather dialogues
+- name: WeatherCold
+  text: "Brrr... this cold is unbearable."
+
+- name: WeatherRain
+  text: "This rain won't let up!"
+
+- name: WeatherFog
+  text: "Can barely see my hand in this fog..."
+
+- name: WeatherHot
+  text: "This heat is draining..."
+
+# World state dialogues
+- name: WolvesNear
+  text: "The wolves are getting closer..."
+
+- name: WishShelter
+  text: "I wish we had better shelter."
+
+- name: Milestone
+  text: "We've come a long way. This settlement is something to be proud of."

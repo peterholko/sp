@@ -82,6 +82,10 @@
   stamina: -0.5
   duration: 500
 
+- name: Bracing
+  defense: 3.0
+  duration: 50
+
 ######################
 ## Positive Effects ##
 ######################

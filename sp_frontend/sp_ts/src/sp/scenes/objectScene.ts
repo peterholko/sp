@@ -616,10 +616,11 @@ export class ObjectScene extends Phaser.Scene {
 
     var pixel = Util.hex_to_pixel(objectState.x, objectState.y);
 
+    // Guard against destroyed sprites still present in objectList (scene is undefined after destroy)
+    const spriteReady = sprite != null && sprite.scene != null;
+
     if (objectState.state == 'moving') {
-      // Race condition, bug exists right now if the Update network packet is received prior to the object being drawn
-      // temporary fix to check if sprite is not null
-      if (sprite != null) {
+      if (spriteReady) {
         sprite.play(objectState.image + '_moving');
         sprite.x = pixel.x;
         sprite.y = pixel.y;
@@ -650,7 +651,7 @@ export class ObjectScene extends Phaser.Scene {
 
         console.log("Playing animation: " + anim);
         console.log(anim);
-        if (typeof sprite !== 'undefined') {
+        if (spriteReady) {
           console.log(typeof sprite);
           console.log(sprite)
           sprite.play(anim);
@@ -660,7 +661,7 @@ export class ObjectScene extends Phaser.Scene {
               this.processTextState(sprite, animState);
 
               //TODO reconsider if sprite isn't available yet
-              // Repeat this every 3 seconds 
+              // Repeat this every 3 seconds
               var timer = setInterval(() => {
                 this.processTextState(sprite, animState)
               }, 3000);
@@ -673,11 +674,11 @@ export class ObjectScene extends Phaser.Scene {
         }
       } else {
         console.log('Animation ' + anim + ' does not exist');
-        if (objectState.state == DEAD) {
+        if (objectState.state == DEAD && spriteReady) {
           sprite.setTexture('gravestone');
           sprite.setDepth(2);
         }
-        else if (!(objectState.id in this.stateTimerList)) {
+        else if (spriteReady && !(objectState.id in this.stateTimerList)) {
           this.processTextState(sprite, animState);
 
           //TODO reconsider if sprite isn't available yet
@@ -1099,7 +1100,7 @@ export class ObjectScene extends Phaser.Scene {
           dmgMsg = message.dmg;
         }
 
-        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FF0000' });
+        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FF0000', stroke: '#000000', strokeThickness: 4 });
         dmgText.setDepth(10);
         dmgText.setOrigin(0.5, 0.5);
 
@@ -1329,7 +1330,7 @@ export class ObjectScene extends Phaser.Scene {
 
     var dmgMsg = message.itemquantity + ' food';
 
-    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FFA500' });
+    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFA500', stroke: '#000000', strokeThickness: 4 });
     dmgText.setDepth(10);
     dmgText.setOrigin(0.5, 0.5);
 
@@ -1386,7 +1387,7 @@ export class ObjectScene extends Phaser.Scene {
 
     var dmgMsg = 'Steal';
 
-    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FFCC33' });
+    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFCC33', stroke: '#000000', strokeThickness: 4 });
     dmgText.setDepth(10);
     dmgText.setOrigin(0.5, 0.5);
 
@@ -1468,6 +1469,32 @@ export class ObjectScene extends Phaser.Scene {
 
     // Possible that object has been removed or not visible, so check if it exists
     if (!objectState) {
+      return;
+    }
+
+    // Special case: "!" alert — floats upward from same position as damage numbers
+    if (message.speech === '!') {
+      var npcSprite = this.objectList[message.source];
+      if (!npcSprite) return;
+      var alertText = this.add.text(npcSprite.x + 36, npcSprite.y - 5, '!', {
+        fontFamily: 'Verdana',
+        fontSize: 21,
+        fontStyle: 'bold',
+        color: '#FFD700',
+        stroke: '#000000',
+        strokeThickness: 4,
+      });
+      alertText.setOrigin(0.5, 0.5);
+      alertText.setDepth(25);
+      this.tweens.add({
+        targets: alertText,
+        y: npcSprite.y - 50,
+        alpha: 0,
+        ease: 'Power1',
+        delay: 400,
+        duration: 700,
+        onComplete: (_tween, targets) => { targets[0].destroy(); },
+      });
       return;
     }
 

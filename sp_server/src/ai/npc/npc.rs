@@ -1096,14 +1096,24 @@ pub fn no_target_scorer_system(
 
 pub fn set_attack_target_system(
     mut commands: Commands,
-    visible_target_query: Query<&VisibleTarget>,
+    game_tick: Res<GameTick>,
+    mut map_events: ResMut<MapEvents>,
+    visible_target_query: Query<(&VisibleTarget, &Id), With<SubclassNPC>>,
     mut query: Query<(&Actor, &mut ActionState, &SetAttackTarget)>,
+    mut alerted_npcs: Local<std::collections::HashSet<Entity>>,
 ) {
+    // Clear alert state for any NPC that has lost its target since last tick
+    alerted_npcs.retain(|entity| {
+        visible_target_query
+            .get(*entity)
+            .map_or(false, |(vt, _)| vt.target != NO_TARGET)
+    });
+
     for (Actor(actor), mut state, _set_attack_destination) in &mut query {
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting attack target...");
-                let Ok(visible_target) = visible_target_query.get(*actor) else {
+                let Ok((visible_target, npc_id)) = visible_target_query.get(*actor) else {
                     continue;
                 };
 
@@ -1111,6 +1121,19 @@ pub fn set_attack_target_system(
                 commands.entity(*actor).insert(Target {
                     id: visible_target.target,
                 });
+
+                // Emit alert "!" once per engagement
+                if !alerted_npcs.contains(actor) {
+                    alerted_npcs.insert(*actor);
+                    map_events.new(
+                        npc_id.0,
+                        game_tick.0,
+                        VisibleEvent::SpeechEvent {
+                            speech: "!".to_string(),
+                            intensity: 3,
+                        },
+                    );
+                }
 
                 *state = ActionState::Executing;
             }

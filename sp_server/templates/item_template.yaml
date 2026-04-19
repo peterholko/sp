@@ -1110,3 +1110,13 @@
   image: flintshard
   weight: 1
   durability: 20
+
+##################
+### QUEST ITEMS
+##################
+
+- name: Seal Stone
+  class: Material
+  subclass: Quest
+  image: sealstone
+  weight: 5

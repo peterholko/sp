@@ -19,8 +19,9 @@ use crate::combat::{Combat, CombatQuery};
 use crate::effect::Effects;
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, LogLevelOverrides, Merchant, Monolith, NetworkReceiver, ObjQuery,
-    PlayerStat, PlayerStats, SpawnPositions,
+    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith,
+    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery,
+    Objectives, PlayerObjectives, PlayerStat, PlayerStats, SpawnPositions,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -29,10 +30,10 @@ use crate::network::{
 };
 use crate::obj::{
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire, Class,
-    ClassStructure, EndRepeatAction, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId,
-    Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
-    StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj, Viewshed,
-    WorkEntry, WorkQueue, WorkStatus, WorkType,
+    ClassStructure, EndRepeatAction, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, Personality,
+    PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State,
+    StateBuilding, StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
+    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::StartLocations;
 use crate::recipe::Recipes;
@@ -115,6 +116,10 @@ pub enum PlayerEvent {
         source_id: i32,
         target_id: i32,
         combo_type: String,
+    },
+    Block {
+        player_id: i32,
+        source_id: i32,
     },
     Gather {
         player_id: i32,
@@ -701,6 +706,7 @@ fn new_player_system(
     templates: Res<Templates>,
     mut player_stats: ResMut<PlayerStats>,
     mut spawn_positions: ResMut<SpawnPositions>,
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
     monoliths: Query<ObjQuery, With<Monolith>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -730,6 +736,7 @@ fn new_player_system(
                     &game_tick,
                     &monoliths,
                     &mut spawn_positions,
+                    &mut initial_encounter_state,
                 ) {
                     Ok(_) => {
                         let event_type = GameEventType::Login {
@@ -944,6 +951,7 @@ fn attack_system(
     map: Res<Map>,
     player_stats: ResMut<PlayerStats>,
     mut query: Query<CombatQuery>,
+    mut last_player_attack: Local<HashMap<i32, i32>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -1022,9 +1030,9 @@ fn attack_system(
                     continue;
                 }
 
-                // Check global attack cooldown
-                let last_combat = attacker.last_combat_tick.0;
-                if last_combat > 0 && (game_tick.0 - last_combat) < ATTACK_COOLDOWN_TICKS {
+                // Check global attack cooldown (per-player, not affected by being attacked)
+                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
+                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
                     let packet = ResponsePacket::Error {
                         errmsg: "Attack is on cooldown.".to_string(),
                     };
@@ -1055,6 +1063,9 @@ fn attack_system(
                     &target,
                     &mut map_events,
                 );
+
+                // Track player attack cooldown
+                last_player_attack.insert(*player_id, game_tick.0);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {
@@ -1152,9 +1163,9 @@ fn attack_system(
                     continue;
                 }
 
-                // Check global attack cooldown
-                let last_combat = attacker.last_combat_tick.0;
-                if last_combat > 0 && (game_tick.0 - last_combat) < ATTACK_COOLDOWN_TICKS {
+                // Check global attack cooldown (per-player, not affected by being attacked)
+                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
+                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
                     let packet = ResponsePacket::Error {
                         errmsg: "Attack is on cooldown.".to_string(),
                     };
@@ -1186,6 +1197,9 @@ fn attack_system(
                     &target,
                     &mut map_events,
                 );
+
+                // Track player attack cooldown
+                last_player_attack.insert(*player_id, game_tick.0);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {
@@ -1235,6 +1249,55 @@ fn attack_system(
                     combo_tracker.attacks.clear();
                     combo_tracker.target_id = -1;
                 }*/
+            }
+            PlayerEvent::Block {
+                player_id,
+                source_id,
+            } => {
+                events_to_remove.push(*event_id);
+
+                let Some(attacker_entity) = entity_map.get_entity(*source_id) else {
+                    continue;
+                };
+
+                let Ok(mut attacker) = query.get_mut(attacker_entity) else {
+                    continue;
+                };
+
+                if attacker.player_id.0 != *player_id {
+                    continue;
+                }
+
+                if Obj::is_dead(&attacker.state) {
+                    continue;
+                }
+
+                // Check cooldown
+                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
+                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Attack is on cooldown.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                // Apply Bracing effect (3.0x defense for 50 ticks)
+                attacker.effects.0.insert(
+                    crate::effect::Effect::Bracing,
+                    (50, 1.0, 1),
+                );
+
+                last_player_attack.insert(*player_id, game_tick.0);
+
+                let packet = ResponsePacket::Attack {
+                    source_id: *source_id,
+                    attack_type: "block".to_string(),
+                    cooldown: 5,
+                    stamina_cost: 0,
+                };
+
+                send_to_client(*player_id, packet, &clients);
             }
             _ => {}
         }
@@ -2300,6 +2363,7 @@ fn info_villager_system(
     attrs_query: Query<(&Thirst, &Hunger, &Tired, &Heat)>,
     order_query: Query<&Order>,
     assignment_query: Query<&Assignment>,
+    personality_query: Query<&Personality>,
 ) {
     let Ok(obj) = query.get(info_villager_event.entity) else {
         error!("Cannot find obj for {:?}", info_villager_event.entity);
@@ -2419,6 +2483,7 @@ fn info_villager_system(
         order: order,
         capacity: capacity,
         total_weight: total_weight,
+        personality: personality_query.get(obj.entity).ok().map(|p| p.to_str().to_string()),
     };
 
     send_to_client(info_villager_event.player_id, response_packet, &clients);
@@ -2583,36 +2648,141 @@ fn info_structure_system(
 fn info_monolith_system(
     info_monolith_event: On<InfoMonolithEvent>,
     clients: Res<Clients>,
-    query: Query<CoreQuery>,
+    mut queries: ParamSet<(
+        Query<CoreQuery>,
+        Query<&mut Inventory, With<SubclassHero>>,
+    )>,
     monolith_query: Query<&Monolith>,
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut monolith_investigation: ResMut<MonolithInvestigation>,
 ) {
-    let Ok(obj) = query.get(info_monolith_event.entity) else {
-        error!("Cannot find obj for {:?}", info_monolith_event.entity);
-        return;
-    };
+    // First pass: read monolith info via CoreQuery
+    let (monolith_id, monolith_name, monolith_class, monolith_subclass, monolith_template, monolith_image, soulshards) = {
+        let query = queries.p0();
+        let Ok(obj) = query.get(info_monolith_event.entity) else {
+            error!("Cannot find obj for {:?}", info_monolith_event.entity);
+            return;
+        };
 
-    let Ok(monolith) = monolith_query.get(obj.entity) else {
-        error!("Cannot find monolith component for {:?}", obj.entity);
-        return;
+        let Ok(monolith) = monolith_query.get(obj.entity) else {
+            error!("Cannot find monolith component for {:?}", obj.entity);
+            return;
+        };
+
+        (obj.id.0, obj.name.0.to_string(), obj.class.0.to_string(), obj.subclass.to_string(), obj.template.0.to_string(), obj.misc.image.clone(), monolith.soulshards)
     };
 
     let response_packet = ResponsePacket::InfoMonolith {
-        id: obj.id.0,
-        name: obj.name.0.to_string(),
-        class: obj.class.0.to_string(),
-        subclass: obj.subclass.to_string(),
-        template: obj.template.0.to_string(),
-        image: obj.misc.image.clone(),
-        soulshards: monolith.soulshards,
+        id: monolith_id,
+        name: monolith_name,
+        class: monolith_class,
+        subclass: monolith_subclass,
+        template: monolith_template,
+        image: monolith_image,
+        soulshards,
     };
 
     send_to_client(info_monolith_event.player_id, response_packet, &clients);
+
+    // Monolith investigation chain
+    let progress = monolith_investigation
+        .entry(info_monolith_event.player_id)
+        .or_insert_with(MonolithProgress::default);
+
+    match progress.stage {
+        0 => {
+            // Stage 0 → 1: First observation
+            progress.stage = 1;
+            let lore_packet = ResponsePacket::Notice {
+                noticemsg: "The Monolith hums with ancient power. Strange runes glow faintly on its surface. You sense it could be investigated further... perhaps with Soulshards.".to_string(),
+                expiry: Some(15000),
+            };
+            send_to_client(info_monolith_event.player_id, lore_packet, &clients);
+        }
+        1 => {
+            // Stage 1 → 2: Requires 3 Soulshards in hero inventory
+            let hero_id = ids.get_hero(info_monolith_event.player_id);
+            if let Some(hero_id) = hero_id {
+                if let Some(hero_entity) = entity_map.get_entity(hero_id) {
+                    let mut hero_query = queries.p1();
+                    if let Ok(mut inventory) = hero_query.get_mut(hero_entity) {
+                        let soulshards = inventory.get_by_name(item::SOULSHARD.to_string());
+                        if let Some(shard_item) = soulshards {
+                            if shard_item.quantity >= 3 {
+                                // Consume 3 soulshards
+                                inventory.remove_quantity(shard_item.id, 3);
+                                progress.stage = 2;
+
+                                let lore_packet = ResponsePacket::Notice {
+                                    noticemsg: "You press the Soulshards into the Monolith's surface. The runes flare to life! Visions flood your mind — this island was once a great kingdom, destroyed by dark magic. The Monolith is the source of the undead plague. It can be sealed... but you must bring a powerful offering. Craft a Seal Stone and return.".to_string(),
+                                    expiry: Some(20000),
+                                };
+                                send_to_client(info_monolith_event.player_id, lore_packet, &clients);
+                            } else {
+                                let hint_packet = ResponsePacket::Notice {
+                                    noticemsg: format!("The Monolith resonates with your Soulshards ({}/3 needed). Gather more to proceed.", shard_item.quantity),
+                                    expiry: Some(8000),
+                                };
+                                send_to_client(info_monolith_event.player_id, hint_packet, &clients);
+                            }
+                        } else {
+                            let hint_packet = ResponsePacket::Notice {
+                                noticemsg: "The Monolith's runes pulse weakly. You need 3 Soulshards to proceed with the investigation.".to_string(),
+                                expiry: Some(8000),
+                            };
+                            send_to_client(info_monolith_event.player_id, hint_packet, &clients);
+                        }
+                    }
+                }
+            }
+        }
+        2 => {
+            // Stage 2 → 3: Requires Seal Stone in hero inventory
+            let hero_id = ids.get_hero(info_monolith_event.player_id);
+            if let Some(hero_id) = hero_id {
+                if let Some(hero_entity) = entity_map.get_entity(hero_id) {
+                    let mut hero_query = queries.p1();
+                    if let Ok(mut inventory) = hero_query.get_mut(hero_entity) {
+                        let seal_stone = inventory.get_by_name("Seal Stone".to_string());
+                        if let Some(seal_item) = seal_stone {
+                            // Consume the Seal Stone
+                            inventory.remove_quantity(seal_item.id, 1);
+                            progress.stage = 3;
+                            progress.sealed = true;
+
+                            let lore_packet = ResponsePacket::Notice {
+                                noticemsg: "You place the Seal Stone upon the Monolith. A brilliant light erupts from within! The dark energy dissipates and the sanctuary expands. The undead hordes weaken across the island. You have sealed the Monolith!".to_string(),
+                                expiry: Some(25000),
+                            };
+                            send_to_client(info_monolith_event.player_id, lore_packet, &clients);
+                        } else {
+                            let hint_packet = ResponsePacket::Notice {
+                                noticemsg: "The Monolith awaits its seal. Craft a Seal Stone and bring it here to complete the ritual.".to_string(),
+                                expiry: Some(8000),
+                            };
+                            send_to_client(info_monolith_event.player_id, hint_packet, &clients);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            // Already sealed
+            let packet = ResponsePacket::Notice {
+                noticemsg: "The Monolith stands sealed. Its sanctuary protects the island.".to_string(),
+                expiry: Some(5000),
+            };
+            send_to_client(info_monolith_event.player_id, packet, &clients);
+        }
+    }
 }
 
 fn info_poi_system(
     info_poi_event: On<InfoPOIEvent>,
     clients: Res<Clients>,
     query: Query<CoreQuery>,
+    mut objectives: ResMut<Objectives>,
 ) {
     let Ok(obj) = query.get(info_poi_event.entity) else {
         error!("Cannot find obj for {:?}", info_poi_event.entity);
@@ -2632,6 +2802,22 @@ fn info_poi_system(
     };
 
     send_to_client(info_poi_event.player_id, response_packet, &clients);
+
+    // Mark explore_poi objective as completed
+    let player_obj = objectives
+        .entry(info_poi_event.player_id)
+        .or_insert_with(PlayerObjectives::default);
+    if !player_obj.explore_poi {
+        player_obj.explore_poi = true;
+        let objectives_packet = ResponsePacket::Objectives {
+            build_campfire: player_obj.build_campfire,
+            build_3_structures: player_obj.build_3_structures,
+            recruit_villager: player_obj.recruit_villager,
+            explore_poi: player_obj.explore_poi,
+            survive_5_nights: player_obj.survive_5_nights,
+        };
+        send_to_client(info_poi_event.player_id, objectives_packet, &clients);
+    }
 }
 
 fn info_npc_system(

@@ -1173,6 +1173,22 @@
   image: sealedcavern
   base_hp: 10000000
 
+- name: Abandoned Mine
+  class: poi
+  subclass: poi
+  template: Abandoned Mine
+  image: mine-abandoned
+  base_hp: 10000000
+  capacity: 50
+
+- name: Ancient Well
+  class: poi
+  subclass: poi
+  template: Ancient Well
+  image: well
+  base_hp: 10000000
+  capacity: 25
+
 ##################
 ###### MISC ######
 ##################

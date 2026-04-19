@@ -23,6 +23,7 @@ pub const BURNING: &str = "Burning";
 pub const CAMPFIRE_LIGHT: &str = "Campfire Light";
 pub const WATCHTOWER_LIGHT: &str = "Watchtower Light";
 pub const FOOD_POISONING: &str = "Food Poisoning";
+pub const BRACING: &str = "Bracing";
 
 #[derive(Debug, Reflect, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInfo {
@@ -69,6 +70,7 @@ pub enum Effect {
     CampfireLight,
     WatchtowerLight,
     FoodPoisoning,
+    Bracing,
 }
 
 impl Effect {
@@ -93,6 +95,7 @@ impl Effect {
             Effect::CampfireLight => CAMPFIRE_LIGHT.to_string(),
             Effect::WatchtowerLight => WATCHTOWER_LIGHT.to_string(),
             Effect::FoodPoisoning => FOOD_POISONING.to_string(),
+            Effect::Bracing => BRACING.to_string(),
         }
     }
 
@@ -116,6 +119,7 @@ impl Effect {
             BURNING => Effect::Burning,
             CAMPFIRE_LIGHT => Effect::CampfireLight,
             WATCHTOWER_LIGHT => Effect::WatchtowerLight,
+            BRACING => Effect::Bracing,
             _ => panic!("Invalid Effect"),
         }
     }

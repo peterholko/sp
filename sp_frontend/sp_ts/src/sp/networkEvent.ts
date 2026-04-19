@@ -80,4 +80,5 @@ export namespace NetworkEvent {
     export const LOST_EFFECT: string = 'LOST_EFFECT';
     export const REDUCED_EFFECT: string = 'REDUCED_EFFECT';
     export const INCREASED_EFFECT: string = 'INCREASED_EFFECT';
+    export const OBJECTIVES: string = 'OBJECTIVES';
 }

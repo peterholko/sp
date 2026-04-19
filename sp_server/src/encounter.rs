@@ -19,7 +19,7 @@ use crate::item::{self, Inventory};
 use crate::map::{Map, TileType};
 use crate::npc::{CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, NpcMoveNearTarget, NpcMoveTo, NpcMoveToTarget, RaiseDead, SetCorpseTarget, SetHome, SetSpoilTarget, SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer, TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget, VisibleTargetScorer};
 use crate::tax_collector::{AtLanding, Forfeiture, IsAboard, IsTaxCollected, MoveToEmpire, MoveToPos, MoveToTarget, NoTaxesToCollect, OverdueTaxScorer, TaxCollector, TaxCollectorTransport, TaxesToCollect};
-use crate::obj::{ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, SubclassVillager};
+use crate::obj::{ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager};
 use crate::obj::{
     Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassNPC, Template,
     Viewshed,
@@ -433,6 +433,7 @@ impl Encounter {
                 ActiveTask::None,
                 Order::None,
                 ActiveShelter(NO_SHELTER),
+                VillagerUtil::generate_personality(),
             ))
             .id();
 
