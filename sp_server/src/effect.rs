@@ -28,7 +28,7 @@ pub const BRACING: &str = "Bracing";
 #[derive(Debug, Reflect, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInfo {
     pub effect: Effect,
-    pub attrs: HashMap<EffectAttr, EffectVal>
+    pub attrs: HashMap<EffectAttr, EffectVal>,
 }
 
 #[derive(Debug, Reflect, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,10 +135,8 @@ pub struct Effects(pub HashMap<Effect, (Duration, Amplifier, Stacks)>);
 impl Effects {
     pub fn get_info_list(&self, effect_templates: &EffectTemplates) -> Vec<EffectInfo> {
         let mut effect_info_list = Vec::new();
-        
 
         for (effect, (duration, amplifier, stacks)) in self.0.iter() {
-
             let mut effect_attrs = HashMap::new();
 
             let effect_template = effect_templates
@@ -146,32 +144,50 @@ impl Effects {
                 .expect("Effect missing from templates");
 
             match effect {
-                Effect::Sanctuary => { 
+                Effect::Sanctuary => {
                     let defense = *amplifier * effect_template.defense.unwrap();
 
                     effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(defense));
-                    effect_attrs.insert(EffectAttr::Duration, EffectVal::Num(effect_template.duration as f32));
+                    effect_attrs.insert(
+                        EffectAttr::Duration,
+                        EffectVal::Num(effect_template.duration as f32),
+                    );
                 }
-                Effect::WeakSanctuary => { 
+                Effect::WeakSanctuary => {
                     let defense = *amplifier * effect_template.defense.unwrap();
 
                     effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(defense));
-                    effect_attrs.insert(EffectAttr::Duration, EffectVal::Num(effect_template.duration as f32));
+                    effect_attrs.insert(
+                        EffectAttr::Duration,
+                        EffectVal::Num(effect_template.duration as f32),
+                    );
                 }
                 Effect::Fortified => {
-                    effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(effect_template.defense.unwrap()));
-                    effect_attrs.insert(EffectAttr::Duration, EffectVal::Num(effect_template.duration as f32));
+                    effect_attrs.insert(
+                        EffectAttr::Defense,
+                        EffectVal::Num(effect_template.defense.unwrap()),
+                    );
+                    effect_attrs.insert(
+                        EffectAttr::Duration,
+                        EffectVal::Num(effect_template.duration as f32),
+                    );
                 }
                 Effect::CampfireLight | Effect::WatchtowerLight => {
-                    effect_attrs.insert(EffectAttr::Vision, EffectVal::Num(effect_template.vision.unwrap()));
-                    effect_attrs.insert(EffectAttr::Duration, EffectVal::Num(effect_template.duration as f32));
+                    effect_attrs.insert(
+                        EffectAttr::Vision,
+                        EffectVal::Num(effect_template.vision.unwrap()),
+                    );
+                    effect_attrs.insert(
+                        EffectAttr::Duration,
+                        EffectVal::Num(effect_template.duration as f32),
+                    );
                 }
                 _ => {}
             }
 
             let effect_info = EffectInfo {
                 effect: effect.clone(),
-                attrs: effect_attrs
+                attrs: effect_attrs,
             };
 
             effect_info_list.push(effect_info);
@@ -190,7 +206,10 @@ impl Effects {
         for (effect, (_duration, _amplifier, _stacks)) in self.0.iter() {
             match effect {
                 Effect::CampfireLight | Effect::WatchtowerLight => {
-                    let effect_template = templates.effect_templates.get(&effect.clone().to_str()).expect("Effect missing from templates");
+                    let effect_template = templates
+                        .effect_templates
+                        .get(&effect.clone().to_str())
+                        .expect("Effect missing from templates");
                     modifier += effect_template.vision.unwrap();
                 }
                 _ => {}

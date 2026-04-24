@@ -439,6 +439,11 @@ pub enum GameEventType {
     Login {
         player_id: i32,
     },
+    PlayerNotice {
+        player_id: i32,
+        message: String,
+        expiry: Option<i32>,
+    },
     SpawnNPC {
         npc_type: String,
         pos: Position,
@@ -552,6 +557,7 @@ pub struct GameOperateEvent {
 #[derive(Clone, Reflect, Debug)]
 pub enum Spell {
     ShadowBolt,
+    ArcaneBolt,
 }
 
 #[derive(Clone, Reflect, Debug)]

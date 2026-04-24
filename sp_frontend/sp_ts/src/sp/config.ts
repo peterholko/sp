@@ -47,16 +47,6 @@ export const PRECISE = 'precise';
 export const FIERCE = 'fierce';
 export const BLOCK = 'block';
 
-export const COMBO_LIST = [
-  { name: 'Hamstring', attacks: ['quick', 'quick'], effect: 'Hamstrung' },
-  { name: 'Gouge', attacks: ['precise', 'quick'], effect: 'Stunned' },
-  { name: 'Intimidating Shout', attacks: ['fierce', 'fierce'], effect: 'Fear' },
-  { name: 'Shrouded Slash', attacks: ['precise', 'fierce', 'quick'], effect: 'Expose Armor' },
-  { name: 'Shatter Cleave', attacks: ['quick', 'fierce', 'fierce'], effect: 'Bleed' },
-  { name: 'Massive Pummel', attacks: ['quick', 'precise', 'fierce', 'precise'], effect: 'Concussed' },
-  { name: 'Nightmare Strike', attacks: ['fierce', 'precise', 'quick', 'fierce'], effect: '' },
-];
-
 export const EXP_RECIPE_NONE = -1;
 
 export const FALSE = 'false';

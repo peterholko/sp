@@ -79,10 +79,7 @@ impl Skills {
         if let Some(obj_skill) = self.0.get_mut(&skill_name) {
             levelup = obj_skill.update_xp_level(value, skill_template);
         } else {
-            let mut new_skill = SkillData {
-                level: 0,
-                xp: 0,
-            };
+            let mut new_skill = SkillData { level: 0, xp: 0 };
 
             levelup = new_skill.update_xp_level(value, skill_template);
 
@@ -177,7 +174,11 @@ impl Skills {
     }
 
     pub fn get_level_by_name(&self, skill_name: Skill) -> i32 {
-        return self.0.get(&skill_name).map(|skill| skill.level).unwrap_or(0);
+        return self
+            .0
+            .get(&skill_name)
+            .map(|skill| skill.level)
+            .unwrap_or(0);
     }
 
     pub fn get_templates_by_class(
@@ -197,7 +198,6 @@ impl Skills {
 }
 
 impl SkillData {
-
     pub fn update_xp_level(&mut self, value: i32, skill_template: &SkillTemplate) -> Option<i32> {
         let xp_level_list = &skill_template.xp;
         let mut remaining = value;
@@ -273,6 +273,5 @@ impl SkillData {
 pub struct SkillPlugin;
 
 impl Plugin for SkillPlugin {
-    fn build(&self, app: &mut App) {
-    }
+    fn build(&self, app: &mut App) {}
 }

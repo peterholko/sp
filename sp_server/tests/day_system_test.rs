@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use siege_perilous::{
-    world::{WorldPlugin},
-    obj::{Viewshed, Id, Template},
-    game::{GameTick},
-    item::Inventory,
     constants::*,
     event::MapEvents,
+    game::GameTick,
+    item::Inventory,
+    obj::{Id, Template, Viewshed},
+    world::WorldPlugin,
     AppState,
 };
 
@@ -29,10 +29,11 @@ fn test_day_system_night() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -59,10 +60,11 @@ fn test_day_system_first_light() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -89,10 +91,11 @@ fn test_day_system_dawn() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -119,10 +122,11 @@ fn test_day_system_morning() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -149,10 +153,11 @@ fn test_day_system_evening() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -179,10 +184,11 @@ fn test_day_system_dusk() {
         .spawn((
             Id(1),
             Template("player".to_string()),
-            Viewshed {
-                range: 10
+            Viewshed { range: 10 },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
             },
-            Inventory { owner: 1, items: Vec::new() },
         ))
         .id();
 
@@ -191,4 +197,3 @@ fn test_day_system_dusk() {
     app.update();
     assert_eq!(app.world().get::<Viewshed>(player_id).unwrap().range, 5);
 }
-

@@ -410,11 +410,12 @@
   subclass: hero
   template: Novice Warrior
   image: novicewarrior
-  base_hp: 100
-  base_stamina: 100
+  base_hp: 110
+  base_stamina: 110
+  base_mana: 0
   base_dmg: 2
   dmg_range: 2
-  base_def: 2
+  base_def: 4
   base_speed: 5
   base_vision: 3
   capacity: 500
@@ -424,13 +425,14 @@
   subclass: hero
   template: Novice Ranger
   image: noviceranger
-  base_hp: 75
-  base_stamina: 100
+  base_hp: 80
+  base_stamina: 120
+  base_mana: 0
   base_dmg: 1
   dmg_range: 3
   base_def: 1
-  base_speed: 6
-  base_vision: 4
+  base_speed: 7
+  base_vision: 5
   capacity: 750
 
 - name: Novice Mage
@@ -439,12 +441,13 @@
   template: Novice Mage
   image: novicemage
   base_hp: 60
-  base_stamina: 150
+  base_stamina: 100
+  base_mana: 100
   base_dmg: 1
   dmg_range: 2
-  base_def: 1
+  base_def: 0
   base_speed: 5
-  base_vision: 3
+  base_vision: 4
   capacity: 500
 
 - name: Skilled Warrior
@@ -454,12 +457,43 @@
   image: skilledwarrior
   base_hp: 200
   base_stamina: 150
+  base_mana: 0
   base_dmg: 3
   dmg_range: 3
   base_def: 4
   base_speed: 5
   base_vision: 3
   capacity: 600 
+
+- name: Skilled Ranger
+  class: unit
+  subclass: hero
+  template: Skilled Ranger
+  image: skilledranger
+  base_hp: 150
+  base_stamina: 175
+  base_mana: 0
+  base_dmg: 2
+  dmg_range: 4
+  base_def: 2
+  base_speed: 8
+  base_vision: 6
+  capacity: 850
+
+- name: Skilled Mage
+  class: unit
+  subclass: hero
+  template: Skilled Mage
+  image: skilledmage
+  base_hp: 110
+  base_stamina: 140
+  base_mana: 150
+  base_dmg: 2
+  dmg_range: 3
+  base_def: 1
+  base_speed: 5
+  base_vision: 5
+  capacity: 600
 
 - name: Great Warrior
   class: unit
@@ -468,11 +502,42 @@
   image: greatwarrior
   base_hp: 400
   base_stamina: 200
+  base_mana: 0
   base_dmg: 4
   dmg_range: 4
   base_def: 6
   base_speed: 5
   base_vision: 3
+  capacity: 700
+
+- name: Great Ranger
+  class: unit
+  subclass: hero
+  template: Great Ranger
+  image: greatranger
+  base_hp: 300
+  base_stamina: 240
+  base_mana: 0
+  base_dmg: 3
+  dmg_range: 5
+  base_def: 3
+  base_speed: 8
+  base_vision: 7
+  capacity: 950
+
+- name: Great Mage
+  class: unit
+  subclass: hero
+  template: Great Mage
+  image: greatmage
+  base_hp: 220
+  base_stamina: 190
+  base_mana: 225
+  base_dmg: 3
+  dmg_range: 4
+  base_def: 2
+  base_speed: 6
+  base_vision: 6
   capacity: 700
 
 - name: Legendary Warrior
@@ -482,11 +547,42 @@
   image: legendarywarrior
   base_hp: 800
   base_stamina: 300
+  base_mana: 0
   base_dmg: 6
   dmg_range: 5
   base_def: 8
   base_speed: 6
   base_vision: 4
+  capacity: 800   
+
+- name: Legendary Ranger
+  class: unit
+  subclass: hero
+  template: Legendary Ranger
+  image: legendaryranger
+  base_hp: 600
+  base_stamina: 340
+  base_mana: 0
+  base_dmg: 4
+  dmg_range: 6
+  base_def: 4
+  base_speed: 9
+  base_vision: 8
+  capacity: 1100
+
+- name: Legendary Mage
+  class: unit
+  subclass: hero
+  template: Legendary Mage
+  image: legendarymage
+  base_hp: 450
+  base_stamina: 260
+  base_mana: 325
+  base_dmg: 4
+  dmg_range: 5
+  base_def: 3
+  base_speed: 6
+  base_vision: 7
   capacity: 800   
 
 ##################
@@ -1173,6 +1269,14 @@
   image: sealedcavern
   base_hp: 10000000
 
+- name: Warlord Hideout
+  class: poi
+  subclass: poi
+  template: Warlord Hideout
+  image: mausoleum
+  base_hp: 10000000
+  capacity: 100
+
 - name: Abandoned Mine
   class: poi
   subclass: poi
@@ -1217,6 +1321,474 @@
       quantity: 1
 
  
+##################
+## NEW CREATURES #
+##################
+# 25 new unit templates based on available unit images.
+# Balanced to slot alongside the existing obj_template.yaml roster,
+# scaling from mid-tier threats up to legendary-tier encounters.
 
+############################
+##### LEGENDARY BEAST ######
+############################
+- name: Fire Dragon
+  class: unit
+  subclass: npc
+  template: Fire Dragon
+  image: firedragon
+  family: Creature
+  base_hp: 600
+  base_stamina: 500
+  base_dmg: 15
+  dmg_range: 8
+  base_def: 12
+  base_speed: 5
+  base_vision: 7
+  int: cunning
+  aggression: frenzied
+  kill_xp: 4000
+  order: move_to_pos
+  waterwalk: 1
 
+############################
+######### DRAKES ###########
+############################
+- name: Drake Armageddon
+  class: unit
+  subclass: npc
+  template: Drake Armageddon
+  image: armageddon
+  family: Drake
+  base_hp: 350
+  base_stamina: 400
+  base_dmg: 12
+  dmg_range: 6
+  base_def: 10
+  base_speed: 5
+  base_vision: 5
+  int: cunning
+  aggression: frenzied
+  kill_xp: 1800
+  order: move_to_pos
+  waterwalk: 1
+- name: Drake Flameheart
+  class: unit
+  subclass: npc
+  template: Drake Flameheart
+  image: flameheart
+  family: Drake
+  base_hp: 280
+  base_stamina: 380
+  base_dmg: 10
+  dmg_range: 6
+  base_def: 8
+  base_speed: 5
+  base_vision: 5
+  int: cunning
+  aggression: strategic
+  kill_xp: 1300
+  order: move_to_pos
+  waterwalk: 1
+- name: Drake Hurricane
+  class: unit
+  subclass: npc
+  template: Drake Hurricane
+  image: hurricane
+  family: Drake
+  base_hp: 180
+  base_stamina: 320
+  base_dmg: 8
+  dmg_range: 6
+  base_def: 6
+  base_speed: 8
+  base_vision: 6
+  int: cunning
+  aggression: strategic
+  kill_xp: 800
+  order: move_to_pos
+  waterwalk: 1
 
+############################
+###### NECROMANCERS ########
+############################
+- name: Ancient Lich
+  class: unit
+  subclass: npc
+  template: Ancient Lich
+  image: ancientlich
+  family: Undead
+  base_hp: 300
+  base_stamina: 400
+  base_dmg: 12
+  dmg_range: 7
+  base_def: 7
+  base_speed: 3
+  base_vision: 6
+  int: cunning
+  aggression: strategic
+  kill_xp: 2000
+  order: necro_event
+- name: Lich
+  class: unit
+  subclass: npc
+  template: Lich
+  image: lich
+  family: Undead
+  base_hp: 180
+  base_stamina: 300
+  base_dmg: 9
+  dmg_range: 6
+  base_def: 5
+  base_speed: 3
+  base_vision: 5
+  int: cunning
+  aggression: strategic
+  kill_xp: 900
+  order: necro_event
+- name: Dark Sorcerer
+  class: unit
+  subclass: npc
+  template: Dark Sorcerer
+  image: darksorcerer
+  family: Undead
+  base_hp: 130
+  base_stamina: 250
+  base_dmg: 7
+  dmg_range: 5
+  base_def: 4
+  base_speed: 3
+  base_vision: 5
+  int: cunning
+  aggression: strategic
+  kill_xp: 500
+  order: necro_event
+
+############################
+###### SKELETAL ELITE ######
+############################
+- name: Death Knight
+  class: unit
+  subclass: npc
+  template: Death Knight
+  image: deathknight
+  family: Undead
+  base_hp: 220
+  base_stamina: 300
+  base_dmg: 9
+  dmg_range: 5
+  base_def: 9
+  base_speed: 4
+  base_vision: 4
+  int: cunning
+  aggression: strategic
+  kill_xp: 900
+  order: move_to_pos
+- name: Bone Knight
+  class: unit
+  subclass: npc
+  template: Bone Knight
+  image: boneknight
+  family: Undead
+  base_hp: 160
+  base_stamina: 280
+  base_dmg: 7
+  dmg_range: 5
+  base_def: 7
+  base_speed: 6
+  base_vision: 4
+  int: mindless
+  aggression: frenzied
+  kill_xp: 600
+  order: move_to_pos
+- name: Chocobone
+  class: unit
+  subclass: npc
+  template: Chocobone
+  image: chocobone
+  family: Undead
+  base_hp: 140
+  base_stamina: 280
+  base_dmg: 6
+  dmg_range: 4
+  base_def: 5
+  base_speed: 7
+  base_vision: 4
+  int: mindless
+  aggression: frenzied
+  kill_xp: 500
+  order: move_to_pos
+- name: Draug
+  class: unit
+  subclass: npc
+  template: Draug
+  image: draug
+  family: Undead
+  base_hp: 200
+  base_stamina: 300
+  base_dmg: 8
+  dmg_range: 5
+  base_def: 8
+  base_speed: 3
+  base_vision: 4
+  int: mindless
+  aggression: frenzied
+  kill_xp: 800
+  order: wander
+
+############################
+######## SPIRITS ###########
+############################
+- name: Wraith
+  class: unit
+  subclass: npc
+  template: Wraith
+  image: wraith
+  family: Undead
+  base_hp: 140
+  base_stamina: 300
+  base_dmg: 8
+  dmg_range: 5
+  base_def: 5
+  base_speed: 5
+  base_vision: 5
+  int: cunning
+  aggression: frenzied
+  kill_xp: 600
+  order: wander
+  waterwalk: 1
+- name: Spectre
+  class: unit
+  subclass: npc
+  template: Spectre
+  image: spectre
+  family: Undead
+  base_hp: 110
+  base_stamina: 280
+  base_dmg: 7
+  dmg_range: 5
+  base_def: 4
+  base_speed: 5
+  base_vision: 5
+  int: cunning
+  aggression: frenzied
+  kill_xp: 450
+  order: wander
+  waterwalk: 1
+############################
+####### FLESH UNDEAD #######
+############################
+- name: Ghast
+  class: unit
+  subclass: npc
+  template: Ghast
+  image: ghast
+  family: Undead
+  base_hp: 80
+  base_stamina: 220
+  base_dmg: 5
+  dmg_range: 4
+  base_def: 3
+  base_speed: 4
+  base_vision: 3
+  int: mindless
+  aggression: frenzied
+  kill_xp: 300
+  order: wander
+- name: Ghoul
+  class: unit
+  subclass: npc
+  template: Ghoul
+  image: ghoul
+  family: Undead
+  base_hp: 55
+  base_stamina: 200
+  base_dmg: 4
+  dmg_range: 3
+  base_def: 2
+  base_speed: 4
+  base_vision: 3
+  int: mindless
+  aggression: frenzied
+  kill_xp: 175
+  order: wander
+
+############################
+########## WOSES ###########
+############################
+- name: Ancient Wose
+  class: unit
+  subclass: npc
+  template: Ancient Wose
+  image: ancientwose
+  family: Wose
+  base_hp: 250
+  base_stamina: 350
+  base_dmg: 10
+  dmg_range: 5
+  base_def: 10
+  base_speed: 2
+  base_vision: 4
+  int: cunning
+  aggression: strategic
+  kill_xp: 1200
+- name: Elder Wose
+  class: unit
+  subclass: npc
+  template: Elder Wose
+  image: elderwose
+  family: Wose
+  base_hp: 180
+  base_stamina: 320
+  base_dmg: 8
+  dmg_range: 5
+  base_def: 9
+  base_speed: 2
+  base_vision: 4
+  int: cunning
+  aggression: strategic
+  kill_xp: 700
+- name: Wose Shaman
+  class: unit
+  subclass: npc
+  template: Wose Shaman
+  image: woseshaman
+  family: Wose
+  base_hp: 140
+  base_stamina: 300
+  base_dmg: 6
+  dmg_range: 5
+  base_def: 7
+  base_speed: 2
+  base_vision: 5
+  int: cunning
+  aggression: strategic
+  kill_xp: 500
+
+############################
+####### BIG BRUTES #########
+############################
+- name: Great Troll
+  class: unit
+  subclass: npc
+  template: Great Troll
+  image: greattroll
+  family: Troll
+  base_hp: 250
+  base_stamina: 350
+  base_dmg: 10
+  dmg_range: 5
+  base_def: 6
+  base_speed: 4
+  base_vision: 3
+  int: cunning
+  aggression: frenzied
+  kill_xp: 1000
+  order: move_to_pos
+- name: Ogre
+  class: unit
+  subclass: npc
+  template: Ogre
+  image: ogre
+  family: Ogre
+  base_hp: 120
+  base_stamina: 280
+  base_dmg: 8
+  dmg_range: 4
+  base_def: 4
+  base_speed: 3
+  base_vision: 3
+  int: mindless
+  aggression: frenzied
+  kill_xp: 400
+  order: wander
+
+############################
+######### BEASTS ###########
+############################
+- name: Gryphon
+  class: unit
+  subclass: npc
+  template: Gryphon
+  image: gryphon
+  family: Creature
+  base_hp: 90
+  base_stamina: 250
+  base_dmg: 6
+  dmg_range: 4
+  base_def: 4
+  base_speed: 8
+  base_vision: 6
+  int: animal
+  aggression: strategic
+  kill_xp: 350
+  waterwalk: 1
+- name: Direwolf
+  class: unit
+  subclass: npc
+  template: Direwolf
+  image: direwolf
+  family: Animal
+  base_hp: 70
+  base_stamina: 250
+  base_dmg: 6
+  dmg_range: 4
+  base_def: 4
+  base_speed: 7
+  base_vision: 5
+  int: animal
+  aggression: strategic
+  kill_xp: 275
+- name: Roc
+  class: unit
+  subclass: npc
+  template: Roc
+  image: roc
+  family: Creature
+  base_hp: 200
+  base_stamina: 350
+  base_dmg: 9
+  dmg_range: 5
+  base_def: 5
+  base_speed: 9
+  base_vision: 7
+  int: animal
+  aggression: frenzied
+  kill_xp: 900
+  order: move_to_pos
+  waterwalk: 1
+- name: Sea Serpent
+  class: unit
+  subclass: npc
+  template: Sea Serpent
+  image: seaserpent
+  family: Creature
+  base_hp: 220
+  base_stamina: 350
+  base_dmg: 9
+  dmg_range: 5
+  base_def: 7
+  base_speed: 5
+  base_vision: 4
+  int: animal
+  aggression: frenzied
+  kill_xp: 950
+  waterwalk: 1
+  landwalk: 0
+- name: Wyvern Rider
+  class: unit
+  subclass: npc
+  template: Wyvern Rider
+  image: wyvernrider
+  family: Warlord
+  base_hp: 160
+  base_stamina: 300
+  base_dmg: 8
+  dmg_range: 5
+  base_def: 6
+  base_speed: 8
+  base_vision: 6
+  int: cunning
+  aggression: strategic
+  kill_xp: 750
+  order: move_to_pos
+  waterwalk: 1

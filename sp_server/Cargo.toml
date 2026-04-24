@@ -35,8 +35,7 @@ tiled = "0.11.2"
 glob = "0.3.0"
 lazy_static = "1.4.0"
 itertools = "0.10.5"
-# big-brain = { version = "0.21.1", features = ["trace"] }
-big-brain = {git = "https://codeberg.org/zkat/big-brain.git", rev = "12ffd46498f4703dd80b0121c9b964b413f887ee"}
+big-brain = {git = "https://codeberg.org/zkat/big-brain.git", rev = "12ffd46498f4703dd80b0121c9b964b413f887ee", features = ["trace"]}
 pathfinding = "4.1.1"
 rand = "0.8.5"
 argon2 = "0.5.1"
@@ -64,4 +63,3 @@ debug = 1
 assert_cmd = "2.0"
 predicates = "2.1"
 tungstenite = "0.17.3"
-

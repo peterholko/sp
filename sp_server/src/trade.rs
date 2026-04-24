@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     constants::MAX_PRICE,
-    obj::Position,
     item::{Item, ItemSubclass},
+    obj::Position,
     templates::PriceTemplates,
 };
 
@@ -91,7 +91,7 @@ impl Prices {
         } else {
             return None;
         }
-    } 
+    }
 
     pub fn get_buy_quantity(&self, item_name: String) -> Option<i32> {
         if let Some(price) = self.0.get(&item_name) {

@@ -1,39 +1,12 @@
 
 import * as React from "react";
 import attackspanel from "ui_comp/attacksframe.png"
-import { COMBO_LIST } from "../config";
 
 const MAX_ATTACKS = 6;
 
 interface AttacksProp {
-  attacks
-}
-
-function getMatchingCombos(attacks: string[]) {
-  if (attacks.length === 0) return [];
-
-  const matches = [];
-
-  for (const combo of COMBO_LIST) {
-    const seq = combo.attacks;
-
-    // Check if current attacks match the start of this combo
-    if (attacks.length < seq.length) {
-      let isPrefix = true;
-      for (let i = 0; i < attacks.length; i++) {
-        if (attacks[i] !== seq[i]) {
-          isPrefix = false;
-          break;
-        }
-      }
-      if (isPrefix) {
-        const remaining = seq.slice(attacks.length);
-        matches.push({ name: combo.name, remaining, effect: combo.effect });
-      }
-    }
-  }
-
-  return matches;
+  attacks,
+  combatState?: any,
 }
 
 export default class AttacksPanel extends React.Component<AttacksProp, any> {
@@ -44,14 +17,20 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
   render() {
     var attacks = [];
     var startingIndex = 0;
+    const combatState = this.props.combatState || {};
+    const attackHistory = combatState.attack_history || this.props.attacks || [];
+    const combos = combatState.matching_combos || [];
+    const availableFinisher = combatState.available_finisher;
+    const counterHint = combatState.counter_hint;
+    const enemyIntent = combatState.enemy_intent;
 
-    if (this.props.attacks.length > MAX_ATTACKS) {
-      startingIndex = this.props.attacks.length - MAX_ATTACKS;
+    if (attackHistory.length > MAX_ATTACKS) {
+      startingIndex = attackHistory.length - MAX_ATTACKS;
     }
 
     var renderingIndex = 0;
 
-    for (var i = startingIndex; i < this.props.attacks.length; i++) {
+    for (var i = startingIndex; i < attackHistory.length; i++) {
       var xPos = 3 + renderingIndex * 17;
       renderingIndex++;
 
@@ -60,11 +39,9 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
         position: 'fixed'
       } as React.CSSProperties
 
-      attacks.push(<img key={i} src={'/static/art/ui/small_' + this.props.attacks[i] + '.png'}
+      attacks.push(<img key={i} src={'/static/art/ui/small_' + attackHistory[i] + '.png'}
         style={style} />)
     }
-
-    const combos = getMatchingCombos(this.props.attacks);
 
     const attacksStyle = {
       bottom: '85px',
@@ -89,6 +66,11 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       gap: '2px',
     } as React.CSSProperties
 
+    const intentStyle = {
+      ...hintsStyle,
+      bottom: '145px',
+    } as React.CSSProperties
+
     const hintRowStyle = {
       display: 'flex',
       alignItems: 'center',
@@ -103,6 +85,13 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       color: '#ffd700',
       fontFamily: 'Verdana',
       fontSize: '11px',
+      userSelect: 'none',
+    } as React.CSSProperties
+
+    const hintLabelStyle = {
+      color: '#d4d4d4',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
       userSelect: 'none',
     } as React.CSSProperties
 
@@ -123,12 +112,32 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
 
     return (
       <div>
-        {combos.length > 0 &&
+        {(enemyIntent || counterHint) &&
+          <div style={intentStyle}>
+            {enemyIntent &&
+              <div style={hintRowStyle}>
+                <span style={hintNameStyle}>Enemy:</span>
+                <span style={hintLabelStyle}>{enemyIntent}</span>
+              </div>}
+            {counterHint &&
+              <div style={hintRowStyle}>
+                <span style={hintNameStyle}>Counter:</span>
+                <span style={hintLabelStyle}>{counterHint}</span>
+              </div>}
+          </div>
+        }
+        {(combos.length > 0 || availableFinisher) &&
           <div style={hintsStyle}>
+            {availableFinisher &&
+              <div style={hintRowStyle}>
+                <span style={hintNameStyle}>Combo ready</span>
+                <span style={arrowStyle}>=</span>
+                <span style={hintEffectStyle}>{availableFinisher}</span>
+              </div>}
             {combos.map((combo, idx) => (
               <div key={idx} style={hintRowStyle}>
-                <span style={arrowStyle}>→</span>
-                {combo.remaining.map((atk, j) => (
+                <span style={arrowStyle}>-&gt;</span>
+                {(combo.remaining_attacks || []).map((atk, j) => (
                   <img key={j} src={'/static/art/ui/small_' + atk + '.png'}
                     style={{ width: '14px', height: '14px' }} />
                 ))}

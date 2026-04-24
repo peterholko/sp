@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use crate::network;
 use crate::{
-    obj::Position,
     map::Map,
+    obj::Position,
     templates::{Templates, TerrainFeatureTemplate},
 };
 
@@ -77,14 +77,17 @@ impl TerrainFeature {
         //debug!("TerrainFeatures: {:?}", terrain_features);
     }
 
-    pub fn get_by_tile(position: Position, terrain_features: &TerrainFeatures) -> Vec<network::TileTerrainFeature> {
+    pub fn get_by_tile(
+        position: Position,
+        terrain_features: &TerrainFeatures,
+    ) -> Vec<network::TileTerrainFeature> {
         let mut tile_terrain_features = Vec::new();
 
         if let Some(terrain_features_on_tile) = terrain_features.get(&position) {
             let tile_resource = network::TileTerrainFeature {
                 name: terrain_features_on_tile.name.clone(),
                 image: terrain_features_on_tile.image.clone(),
-                bonus: terrain_features_on_tile.bonus.clone()
+                bonus: terrain_features_on_tile.bonus.clone(),
             };
 
             tile_terrain_features.push(tile_resource);

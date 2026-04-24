@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::{
     ai_logging::entity_display,
+    combat::{AttackType, Combat, CombatQuery},
     common::{
         Dehydrated, Destination, Drink, Eat, Exhausted, Heat, Hunger, Idle, MoveTo, Sleep,
         Starving, Thirst, Tired,
@@ -18,18 +19,26 @@ use crate::{
     game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
     item::{Inventory, Item, ItemLocation},
-    map::Map,
+    map::{Map, MapPos},
     network::{send_to_client, ResponsePacket},
     obj::{Name, StartBuild, State, *},
     player::{ActiveInfoType, ActiveInfos},
     recipe::Recipes,
     templates::Templates,
+    villager_debug, villager_error, villager_info, villager_trace,
     villager_util::VillagerUtil,
-    villager_info, villager_debug, villager_error, villager_trace, villager_warn, with_span,
-    AppState,
+    villager_warn, with_span, AppState,
 };
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct EnemyDistanceScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct ArmedRetaliationScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct FightBack;
+
+const RETALIATION_MEMORY_TICKS: i32 = 5 * TICKS_PER_SEC;
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct IdleScorer;
@@ -192,6 +201,27 @@ pub struct VillagerBaseQuery {
     pub active_task: &'static ActiveTask,
 }
 
+#[derive(QueryData)]
+#[query_data(derive(Debug))]
+pub struct ActiveTaskActionQuery {
+    actor: &'static Actor,
+    state: &'static ActionState,
+    find_drink: Option<&'static FindDrink>,
+    drink: Option<&'static Drink>,
+    transfer_drink: Option<&'static TransferDrink>,
+    find_food: Option<&'static FindFood>,
+    transfer_food: Option<&'static TransferFood>,
+    eat: Option<&'static Eat>,
+    move_to: Option<&'static MoveTo>,
+    sleep: Option<&'static Sleep>,
+    find_shelter: Option<&'static FindShelter>,
+    unload_items: Option<&'static UnloadItems>,
+    idle: Option<&'static Idle>,
+    process_order: Option<&'static ProcessOrder>,
+    flee: Option<&'static Flee>,
+    fight_back: Option<&'static FightBack>,
+}
+
 pub struct VillagerPlugin;
 
 impl Plugin for VillagerPlugin {
@@ -199,6 +229,7 @@ impl Plugin for VillagerPlugin {
         app.add_systems(
             Update,
             (
+                fight_back_system.in_set(BigBrainSet::Actions),
                 move_to_system.in_set(BigBrainSet::Actions),
                 find_drink_system.in_set(BigBrainSet::Actions),
                 transfer_drink_system.in_set(BigBrainSet::Actions),
@@ -220,12 +251,19 @@ impl Plugin for VillagerPlugin {
         .add_systems(
             Update,
             (
+                armed_retaliation_scorer_system.in_set(BigBrainSet::Scorers),
                 enemy_distance_scorer_system.in_set(BigBrainSet::Scorers),
                 idle_scorer_system.in_set(BigBrainSet::Scorers),
                 thirsty_scorer_system.in_set(BigBrainSet::Scorers),
                 hungry_scorer_system.in_set(BigBrainSet::Scorers),
                 drowsy_scorer_system.in_set(BigBrainSet::Scorers),
                 exhausted_scorer_system.in_set(BigBrainSet::Scorers),
+            )
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
                 heat_scorer_system.in_set(BigBrainSet::Scorers),
                 morale_scorer_system.in_set(BigBrainSet::Scorers),
                 structure_capacity_scorer_system.in_set(BigBrainSet::Scorers),
@@ -237,10 +275,100 @@ impl Plugin for VillagerPlugin {
             )
                 .run_if(in_state(AppState::Running)),
         )
-        .add_systems(
-            Update,
-            clear_event_executing.after(BigBrainSet::Actions),
-        );
+        .add_systems(Update, clear_event_executing.after(BigBrainSet::Actions));
+    }
+}
+
+pub fn armed_retaliation_scorer_system(
+    game_tick: Res<GameTick>,
+    entity_map: Res<EntityObjMap>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ArmedRetaliationScorer>>,
+    villager_query: Query<
+        (&PlayerId, &Position, &Inventory, Option<&LastAttacker>, &State),
+        With<SubclassVillager>,
+    >,
+    target_query: Query<(&PlayerId, &Position, &State)>,
+) {
+    for (Actor(actor), mut score, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        score.set(0.0);
+
+        let Ok((villager_player_id, villager_pos, inventory, last_attacker_opt, villager_state)) =
+            villager_query.get(*actor)
+        else {
+            span.span().in_scope(|| {
+                villager_error!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "Cannot find villager for armed retaliation scorer"
+                );
+            });
+            continue;
+        };
+
+        if Obj::is_dead(villager_state) {
+            continue;
+        }
+
+        let Some(last_attacker) = last_attacker_opt else {
+            continue;
+        };
+
+        if game_tick.0.saturating_sub(last_attacker.tick) > RETALIATION_MEMORY_TICKS {
+            continue;
+        }
+
+        if inventory.get_equipped_weapons().is_empty() {
+            continue;
+        }
+
+        let Some(attacker_entity) = entity_map.get_entity(last_attacker.id) else {
+            span.span().in_scope(|| {
+                villager_warn!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "Cannot find last attacker entity id={}",
+                    last_attacker.id
+                );
+            });
+            continue;
+        };
+
+        let Ok((attacker_player_id, attacker_pos, attacker_state)) =
+            target_query.get(attacker_entity)
+        else {
+            span.span().in_scope(|| {
+                villager_warn!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "Cannot query last attacker entity={:?}",
+                    attacker_entity
+                );
+            });
+            continue;
+        };
+
+        if attacker_player_id.0 == villager_player_id.0
+            || attacker_player_id.0 == MERCHANT_PLAYER_ID
+            || Obj::is_dead(attacker_state)
+            || Map::dist(*villager_pos, *attacker_pos) > 1
+        {
+            continue;
+        }
+
+        span.span().in_scope(|| {
+            villager_debug!(
+                *actor,
+                obj_id,
+                None,
+                "Armed retaliation ready against obj_id={}",
+                last_attacker.id
+            );
+        });
+        score.set(1.0);
     }
 }
 
@@ -262,21 +390,39 @@ pub fn enemy_distance_scorer_system(
 
             let Some(hero_id) = ids.get_hero(villager.player_id.0) else {
                 span.span().in_scope(|| {
-                    villager_error!(*actor, obj_id, None, "Cannot find hero for player={}", villager.player_id.0);
+                    villager_error!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Cannot find hero for player={}",
+                        villager.player_id.0
+                    );
                 });
                 continue;
             };
 
             let Some(hero_entity) = entity_map.get_entity(hero_id) else {
                 span.span().in_scope(|| {
-                    villager_error!(*actor, obj_id, None, "Cannot find hero entity for hero_id={}", hero_id);
+                    villager_error!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Cannot find hero entity for hero_id={}",
+                        hero_id
+                    );
                 });
                 continue;
             };
 
             let Ok(_hero) = hero_query.get(hero_entity) else {
                 span.span().in_scope(|| {
-                    villager_error!(*actor, obj_id, None, "Cannot find hero for entity={:?}", hero_entity);
+                    villager_error!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Cannot find hero for entity={:?}",
+                        hero_entity
+                    );
                 });
                 continue;
             };
@@ -379,7 +525,14 @@ pub fn thirsty_scorer_system(
                 final_score = 0.0;
             }
             span.span().in_scope(|| {
-                villager_debug!(*actor, obj_id, None, "Thirst score={:.2} state={:?}", final_score, event_executing.state);
+                villager_debug!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "Thirst score={:.2} state={:?}",
+                    final_score,
+                    event_executing.state
+                );
             });
             score.set(final_score);
         }
@@ -442,7 +595,14 @@ pub fn hungry_scorer_system(
             }
 
             span.span().in_scope(|| {
-                villager_debug!(*actor, obj_id, None, "Hunger score={:.2} state={:?}", final_score, event_executing.state);
+                villager_debug!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "Hunger score={:.2} state={:?}",
+                    final_score,
+                    event_executing.state
+                );
             });
             score.set(final_score);
         }
@@ -608,16 +768,29 @@ pub fn structure_capacity_scorer_system(
 
         let Some(structure_entity) = entity_map.get_entity(assignment.structure_id) else {
             span.span().in_scope(|| {
-                villager_error!(*actor, obj_id, None, "No structure entity for structure_id={}", assignment.structure_id);
+                villager_error!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "No structure entity for structure_id={}",
+                    assignment.structure_id
+                );
             });
             score.set(0.0);
             continue;
         };
 
-
-        let Ok((structure_id, structure_template, inventory)) = structure_query.get(structure_entity) else {
+        let Ok((structure_id, structure_template, inventory)) =
+            structure_query.get(structure_entity)
+        else {
             span.span().in_scope(|| {
-                villager_error!(*actor, obj_id, None, "No inventory component for structure_id={}", assignment.structure_id);
+                villager_error!(
+                    *actor,
+                    obj_id,
+                    None,
+                    "No inventory component for structure_id={}",
+                    assignment.structure_id
+                );
             });
             score.set(0.0);
             continue;
@@ -628,7 +801,14 @@ pub fn structure_capacity_scorer_system(
         let structure_capacity = Obj::get_capacity(&structure_template.0, &templates.obj_templates);
 
         span.span().in_scope(|| {
-            villager_trace!(*actor, obj_id, None, "weight={} capacity={}", current_weight, structure_capacity);
+            villager_trace!(
+                *actor,
+                obj_id,
+                None,
+                "weight={} capacity={}",
+                current_weight,
+                structure_capacity
+            );
         });
 
         if current_weight >= (structure_capacity as f32 * 0.9) as i32 {
@@ -734,7 +914,12 @@ pub fn set_order_destination_system(
                             obj_query.get(*target)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No target position for follow order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No target position for follow order"
+                                );
                             });
                             *state = ActionState::Failure;
                             continue;
@@ -753,7 +938,12 @@ pub fn set_order_destination_system(
                             Some(assignment.structure_pos)
                         } else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for work queue order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for work queue order"
+                                );
                             });
                             *state = ActionState::Failure;
                             continue;
@@ -777,7 +967,12 @@ pub fn set_order_destination_system(
 
                         let Some(nearest_structure) = nearest_structure else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No nearest structure for repair order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No nearest structure for repair order"
+                                );
                             });
                             *state = ActionState::Failure;
                             continue;
@@ -796,11 +991,23 @@ pub fn set_order_destination_system(
                     // Only log error for non-idle orders that should have a position
                     if !matches!(order, Order::None | Order::Explore) {
                         span.span().in_scope(|| {
-                            villager_error!(*actor, obj_id, None, "No order position for order={:?}", order);
+                            villager_error!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "No order position for order={:?}",
+                                order
+                            );
                         });
                     } else {
                         span.span().in_scope(|| {
-                            villager_debug!(*actor, obj_id, None, "No order position for idle order={:?}", order);
+                            villager_debug!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "No order position for idle order={:?}",
+                                order
+                            );
                         });
                     }
                     *state = ActionState::Failure;
@@ -859,7 +1066,12 @@ pub fn process_order_system(
                     villager_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
-                        villager_debug!(*actor, obj_id, None, "No order to execute or villager is busy");
+                        villager_debug!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "No order to execute or villager is busy"
+                        );
                     });
                     continue;
                 };
@@ -880,13 +1092,24 @@ pub fn process_order_system(
 
                 if *villager_state != State::None {
                     span.span().in_scope(|| {
-                        villager_debug!(*actor, obj_id, None, "Process order called but villager is not idle");
+                        villager_debug!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Process order called but villager is not idle"
+                        );
                     });
                     continue;
                 }
 
                 span.span().in_scope(|| {
-                    villager_debug!(*actor, obj_id, None, "Processing order={:?}", villager_order);
+                    villager_debug!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Processing order={:?}",
+                        villager_order
+                    );
                 });
 
                 match villager_order {
@@ -925,7 +1148,12 @@ pub fn process_order_system(
 
                         let Some(assignment) = villager_assignment else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for build order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for build order"
+                                );
                             });
                             continue;
                         };
@@ -934,14 +1162,26 @@ pub fn process_order_system(
                         let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No structure entity for structure_id={}", assignment.structure_id);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No structure entity for structure_id={}",
+                                    assignment.structure_id
+                                );
                             });
                             continue;
                         };
 
                         let Ok(structure_state) = state_query.get(structure_entity) else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No structure state component for entity={:?}", structure_entity);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No structure state component for entity={:?}",
+                                    structure_entity
+                                );
                             });
                             continue;
                         };
@@ -949,7 +1189,12 @@ pub fn process_order_system(
                         // If structure is already completed don't add trigger
                         if *structure_state == State::None {
                             span.span().in_scope(|| {
-                                villager_debug!(*actor, obj_id, None, "Structure is already completed");
+                                villager_debug!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "Structure is already completed"
+                                );
                             });
                             continue;
                         }
@@ -970,7 +1215,12 @@ pub fn process_order_system(
                         // Unwrap assignment
                         let Some(assignment) = villager_assignment else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for work queue order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for work queue order"
+                                );
                             });
                             continue;
                         };
@@ -979,7 +1229,13 @@ pub fn process_order_system(
                         let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No structure entity for structure_id={}", assignment.structure_id);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No structure entity for structure_id={}",
+                                    assignment.structure_id
+                                );
                             });
                             continue;
                         };
@@ -988,14 +1244,26 @@ pub fn process_order_system(
                             template_query.get(structure_entity)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No template for structure entity={:?}", structure_entity);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No template for structure entity={:?}",
+                                    structure_entity
+                                );
                             });
                             continue;
                         };
 
                         let Ok(mut work_queue) = work_queue_query.get_mut(structure_entity) else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No work queue for structure entity={:?}", structure_entity);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No work queue for structure entity={:?}",
+                                    structure_entity
+                                );
                             });
                             continue;
                         };
@@ -1003,7 +1271,13 @@ pub fn process_order_system(
                         // Check if there is an available work entry
                         if work_queue.0.iter().all(|entry| entry.worker_id != -1) {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No available work entry for structure_id={}", assignment.structure_id);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No available work entry for structure_id={}",
+                                    assignment.structure_id
+                                );
                             });
                             continue;
                         }
@@ -1032,7 +1306,12 @@ pub fn process_order_system(
                         // Unwrap assignment
                         let Some(assignment) = villager_assignment else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for operate order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for operate order"
+                                );
                             });
                             continue;
                         };
@@ -1041,7 +1320,13 @@ pub fn process_order_system(
                         let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No structure entity for structure_id={}", assignment.structure_id);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No structure entity for structure_id={}",
+                                    assignment.structure_id
+                                );
                             });
                             continue;
                         };
@@ -1050,7 +1335,13 @@ pub fn process_order_system(
                             template_query.get(structure_entity)
                         else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No template for structure entity={:?}", structure_entity);
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No template for structure entity={:?}",
+                                    structure_entity
+                                );
                             });
                             continue;
                         };
@@ -1065,7 +1356,12 @@ pub fn process_order_system(
 
                         if current_total_weight >= capacity {
                             span.span().in_scope(|| {
-                                villager_debug!(*actor, obj_id, None, "Structure is full, transferring resources");
+                                villager_debug!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "Structure is full, transferring resources"
+                                );
                             });
                             commands.trigger(TransferAllResources {
                                 entity: structure_entity,
@@ -1090,7 +1386,12 @@ pub fn process_order_system(
                         // Unwrap assignment
                         let Some(assignment) = villager_assignment else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for plant order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for plant order"
+                                );
                             });
                             continue;
                         };
@@ -1117,7 +1418,12 @@ pub fn process_order_system(
                         // Unwrap assignment
                         let Some(assignment) = villager_assignment else {
                             span.span().in_scope(|| {
-                                villager_error!(*actor, obj_id, None, "No assignment for harvest order");
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for harvest order"
+                                );
                             });
                             continue;
                         };
@@ -1205,7 +1511,12 @@ pub fn process_order_system(
                     *state = ActionState::Success;
                 } else {
                     span.span().in_scope(|| {
-                        villager_trace!(*actor, obj_id, None, "Process Order still executing, waiting for completed");
+                        villager_trace!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Process Order still executing, waiting for completed"
+                        );
                     });
                 }
             }
@@ -1222,10 +1533,234 @@ pub fn process_order_system(
                 event_executing.state = EventExecutingState::Completed;
                 commands.entity(*actor).remove::<EventCompleted>(); // TODO is this needed?
 
-                commands.trigger(CancelEvents {
-                    entity: *actor,
+                commands.trigger(CancelEvents { entity: *actor });
+
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn fight_back_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
+    mut map_events: ResMut<MapEvents>,
+    templates: Res<Templates>,
+    mut game_events: ResMut<GameEvents>,
+    last_attacker_query: Query<&LastAttacker>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut combat_query: Query<CombatQuery>,
+    mut action_query: Query<(&Actor, &mut ActionState, &FightBack, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _fight_back, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, None, "FightBack requested");
                 });
 
+                let Ok(last_attacker) = last_attacker_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_warn!(*actor, obj_id, None, "FightBack had no LastAttacker");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if game_tick.0.saturating_sub(last_attacker.tick) > RETALIATION_MEMORY_TICKS {
+                    span.span().in_scope(|| {
+                        villager_warn!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "LastAttacker id={} expired",
+                            last_attacker.id
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                let Some(attacker_entity) = entity_map.get_entity(last_attacker.id) else {
+                    span.span().in_scope(|| {
+                        villager_warn!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find LastAttacker entity id={}",
+                            last_attacker.id
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok([mut villager, mut attacker]) =
+                    combat_query.get_many_mut([*actor, attacker_entity])
+                else {
+                    span.span().in_scope(|| {
+                        villager_warn!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot query villager or attacker for FightBack"
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if Obj::is_dead(&villager.state) {
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                if villager.inventory.get_equipped_weapons().is_empty() {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager.id.0),
+                            None,
+                            "Cannot fight back without an equipped weapon"
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                let villager_stamina = villager.stats.stamina.unwrap_or(0);
+                if villager_stamina < 5 {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager.id.0),
+                            None,
+                            "Cannot fight back with stamina={}",
+                            villager_stamina
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                if attacker.player_id.0 == villager.player_id.0
+                    || attacker.player_id.0 == MERCHANT_PLAYER_ID
+                    || Obj::is_dead(&attacker.state)
+                    || Map::dist(*villager.pos, *attacker.pos) > 1
+                {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager.id.0),
+                            None,
+                            "LastAttacker id={} is no longer a valid adjacent enemy",
+                            last_attacker.id
+                        );
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                span.span().in_scope(|| {
+                    villager_info!(
+                        *actor,
+                        Some(villager.id.0),
+                        None,
+                        "Fighting back against obj_id={}",
+                        attacker.id.0
+                    );
+                });
+
+                let (damage, combo, _skill_updated) = Combat::process_attack(
+                    AttackType::Quick,
+                    &mut villager,
+                    &mut attacker,
+                    &mut commands,
+                    &templates,
+                    &map,
+                    &mut ids,
+                    &game_tick,
+                    &mut map_events,
+                );
+
+                Combat::add_damage_event(
+                    game_tick.0,
+                    "quick".to_string(),
+                    damage,
+                    combo,
+                    &villager,
+                    &attacker,
+                    &mut map_events,
+                );
+
+                commands.entity(*actor).remove::<LastAttacker>();
+
+                let cooldown = villager.stats.base_speed.unwrap_or(1) * TICKS_PER_SEC;
+                map_events.new(
+                    villager.id.0,
+                    game_tick.0 + cooldown,
+                    VisibleEvent::CooldownEvent { duration: cooldown },
+                );
+
+                let mut event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+                event_executing.state = EventExecutingState::Executing;
+
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let event_executing = event_executing_query
+                    .get_mut(*actor)
+                    .expect("Missing EventExecuting component");
+
+                if !event_executing.state.is_finished() {
+                    continue;
+                }
+
+                if event_executing.state.is_failed() {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "FightBack cooldown event failed");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, None, "FightBack cancelled");
+                });
+
+                if let Some(villager_id) = obj_id {
+                    let event_id = ids.new_map_event_id();
+                    game_events.insert(
+                        event_id,
+                        GameEvent {
+                            event_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + 1,
+                            event_type: GameEventType::CancelAllMapEvents {
+                                obj_id: villager_id,
+                            },
+                        },
+                    );
+                }
+
+                commands.entity(*actor).remove::<LastAttacker>();
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -1236,103 +1771,231 @@ pub fn process_order_system(
 pub fn set_flee_destination_system(
     mut commands: Commands,
     map: Res<Map>,
-    ids: ResMut<Ids>,
+    ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
-    hero_query: Query<BaseQuery, (With<SubclassHero>, Without<SubclassVillager>)>,
-    villager_query: Query<BaseQuery, With<SubclassVillager>>,
-    shelter_query: Query<BaseQuery, (With<Shelter>, Without<SubclassVillager>)>,
+    hero_query: Query<&Position, (With<SubclassHero>, Without<SubclassVillager>)>,
+    villager_query: Query<
+        (&Id, &PlayerId, &Position, Option<&ActiveShelter>),
+        With<SubclassVillager>,
+    >,
+    shelter_query: Query<&Position, (With<Shelter>, Without<SubclassVillager>)>,
     blocking_query: Query<BaseQuery>,
     mut action_query: Query<(&Actor, &mut ActionState, &SetFleeDestination, &ActionSpan)>,
 ) {
-    /*for (Actor(actor), mut state, _set_flee_destination, _span) in &mut action_query {
+    for (Actor(actor), mut state, _set_flee_destination, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
-                debug!("Set Flee Destination");
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, None, "SetFleeDestination requested");
+                });
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok(villager) = villager_query.get(*actor) else {
-                    error!("[{:?}] Cannot find villager {:?}", line!(), *actor);
+                let Ok((villager_id, villager_player_id, villager_pos, active_shelter)) =
+                    villager_query.get(*actor)
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, None, "Cannot find villager");
+                    });
+                    *state = ActionState::Failure;
                     continue;
                 };
 
-                let Some(hero_id) = ids.get_hero(villager.player_id.0) else {
-                    error!(
-                        "[{:?}] Cannot find hero for player {:?}",
-                        line!(),
-                        villager.player_id
-                    );
+                if let Some(active_shelter) = active_shelter {
+                    if active_shelter.0 != NO_SHELTER {
+                        if let Some(shelter_entity) = entity_map.get_entity(active_shelter.0) {
+                            if let Ok(shelter_pos) = shelter_query.get(shelter_entity) {
+                                span.span().in_scope(|| {
+                                    villager_debug!(
+                                        *actor,
+                                        Some(villager_id.0),
+                                        None,
+                                        "Fleeing to shelter id={}",
+                                        active_shelter.0
+                                    );
+                                });
+                                commands
+                                    .entity(*actor)
+                                    .insert(Destination { pos: *shelter_pos });
+                                *state = ActionState::Success;
+                                continue;
+                            }
+                        }
+
+                        span.span().in_scope(|| {
+                            villager_warn!(
+                                *actor,
+                                Some(villager_id.0),
+                                None,
+                                "Active shelter id={} was not reachable for fleeing",
+                                active_shelter.0
+                            );
+                        });
+                    }
+                }
+
+                let blocking_list =
+                    Obj::blocking_list_basequery(villager_player_id.0, &blocking_query);
+
+                let Some(hero_id) = ids.get_hero(villager_player_id.0) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Cannot find hero for player_id={}",
+                            villager_player_id.0
+                        );
+                    });
+                    *state = ActionState::Failure;
                     continue;
                 };
 
                 let Some(hero_entity) = entity_map.get_entity(hero_id) else {
-                    error!("Cannot find hero entity for hero {:?}", hero_id);
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Cannot find hero entity for hero_id={}",
+                            hero_id
+                        );
+                    });
+                    *state = ActionState::Failure;
                     continue;
                 };
 
-                let Ok(hero) = hero_query.get(hero_entity) else {
-                    error!("Cannot find hero for {:?}", hero_entity);
+                let Ok(hero_pos) = hero_query.get(hero_entity) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Cannot find hero for entity={:?}",
+                            hero_entity
+                        );
+                    });
+                    *state = ActionState::Failure;
                     continue;
                 };
 
-                let Some(shelter_entity) = entity_map.get_entity(villager.shelter) else {
-                    error!(
-                        "Cannot find shelter entity for shelter {:?}",
-                        villager.shelter
-                    );
-                    continue;
-                };
-
-                if let Ok(shelter) = shelter_query.get(shelter_entity) {
-                    // If villager has a shelter, set destination to shelter
-                    commands
-                        .entity(*actor)
-                        .insert(Destination { pos: *shelter.pos });
-                } else if hero.pos != villager.pos {
-                    let blocking_list =
-                        Obj::blocking_list_basequery(villager.player_id.0, &blocking_query);
-
+                if hero_pos != villager_pos {
                     if let Some(path_result) = Map::find_fast_path(
-                        *villager.pos,
-                        *hero.pos,
+                        *villager_pos,
+                        *hero_pos,
                         &map,
-                        villager.player_id.0,
-                        blocking_list,
+                        villager_player_id.0,
+                        blocking_list.clone(),
                         true,
                         false,
                         false,
                         false,
                     ) {
-                        debug!("Path to structure: {:?}", path_result);
+                        let (path, _cost) = path_result;
+                        if path.len() > 1 {
+                            let next_pos = &path[1];
+                            let flee_pos = Position {
+                                x: next_pos.0,
+                                y: next_pos.1,
+                            };
 
-                        let (path, _c) = path_result;
-                        let next_pos = &path[1];
-
-                        debug!("Next pos: {:?}", next_pos);
-
-                        let flee_pos = Position {
-                            x: next_pos.0,
-                            y: next_pos.1,
-                        };
-
-                        commands
-                            .entity(*actor)
-                            .insert(Destination { pos: flee_pos });
-                        *state = ActionState::Success;
-                    } else {
-                        *state = ActionState::Failure;
+                            span.span().in_scope(|| {
+                                villager_debug!(
+                                    *actor,
+                                    Some(villager_id.0),
+                                    None,
+                                    "Fleeing toward hero via ({}, {})",
+                                    flee_pos.x,
+                                    flee_pos.y
+                                );
+                            });
+                            commands
+                                .entity(*actor)
+                                .insert(Destination { pos: flee_pos });
+                            *state = ActionState::Success;
+                            continue;
+                        }
                     }
-                } else {
+
+                    span.span().in_scope(|| {
+                        villager_warn!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Could not path toward hero while fleeing"
+                        );
+                    });
+                }
+
+                let fallback = Map::get_neighbour_tiles(
+                    villager_pos.x,
+                    villager_pos.y,
+                    &map,
+                    villager_player_id.0,
+                    &blocking_list,
+                    true,
+                    false,
+                    false,
+                    false,
+                    MapPos(villager_pos.x, villager_pos.y),
+                )
+                .into_iter()
+                .filter(|(pos, _cost)| {
+                    !blocking_list
+                        .iter()
+                        .any(|blocker| blocker.pos.x == pos.0 && blocker.pos.y == pos.1)
+                })
+                .max_by_key(|(pos, _cost)| {
+                    blocking_list
+                        .iter()
+                        .map(|blocker| {
+                            Map::distance((pos.0, pos.1), (blocker.pos.x, blocker.pos.y))
+                        })
+                        .min()
+                        .unwrap_or(u32::MAX)
+                });
+
+                if let Some((fallback_pos, _cost)) = fallback {
+                    let flee_pos = Position {
+                        x: fallback_pos.0,
+                        y: fallback_pos.1,
+                    };
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Fleeing to fallback tile ({}, {})",
+                            flee_pos.x,
+                            flee_pos.y
+                        );
+                    });
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: flee_pos });
                     *state = ActionState::Success;
+                } else {
+                    span.span().in_scope(|| {
+                        villager_warn!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "No valid flee destination"
+                        );
+                    });
+                    *state = ActionState::Failure;
                 }
             }
             ActionState::Cancelled => {
-                debug!("Flee cancelled...");
+                span.span().in_scope(|| {
+                    villager_debug!(*actor, obj_id, None, "SetFleeDestination cancelled");
+                });
                 *state = ActionState::Failure;
             }
             _ => {}
         }
-    }*/
+    }
 }
 
 pub fn find_drink_system(
@@ -1451,9 +2114,7 @@ pub fn find_drink_system(
                     .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::None;
 
-                commands.trigger(CancelEvents {
-                    entity: *actor,
-                });
+                commands.trigger(CancelEvents { entity: *actor });
 
                 *state = ActionState::Failure
             }
@@ -1519,59 +2180,88 @@ pub fn move_to_system(
                     continue;
                 };
 
-                if *pos != destination.pos {
-                    if let Some(path_result) = Map::find_fast_path(
-                        *pos,
-                        destination.pos,
-                        &map,
-                        villager_player_id,
-                        blocking_list,
-                        true,
-                        false,
-                        false,
-                        false,
-                    ) {
-                        span.span().in_scope(|| {
-                            villager_trace!(*actor, obj_id, None, "Path found, length={}", path_result.0.len());
-                        });
-
-                        let (path, _c) = path_result;
-                        let next_pos = &path[1];
-
-                        span.span().in_scope(|| {
-                            villager_trace!(*actor, obj_id, None, "Next pos=({}, {})", next_pos.0, next_pos.1);
-                        });
-
-                        commands.trigger(StateChange {
-                            entity: *actor,
-                            new_state: State::Moving,
-                        });
-
-                        // Add Move Event
-                        let move_event = VisibleEvent::MoveEvent {
-                            src: *pos,
-                            dst: Position {
-                                x: next_pos.0,
-                                y: next_pos.1,
-                            },
-                        };
-
-                        map_events.new(
-                            id.0,
-                            game_tick.0 + 48, // in the future
-                            move_event,
+                if *pos == destination.pos {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Already at destination, success"
                         );
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
 
-                        let mut event_executing = event_executing_query
-                            .get_mut(*actor)
-                            .expect("Missing EventExecuting component");
-                        event_executing.state = EventExecutingState::Executing;
-                    } else {
-                        span.span().in_scope(|| {
-                            villager_debug!(*actor, obj_id, None, "Cannot find path to destination");
-                        });
-                        *state = ActionState::Failure
-                    }
+                if let Some(path_result) = Map::find_fast_path(
+                    *pos,
+                    destination.pos,
+                    &map,
+                    villager_player_id,
+                    blocking_list,
+                    true,
+                    false,
+                    false,
+                    false,
+                ) {
+                    span.span().in_scope(|| {
+                        villager_trace!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Path found, length={}",
+                            path_result.0.len()
+                        );
+                    });
+
+                    let (path, _c) = path_result;
+                    let next_pos = &path[1];
+
+                    span.span().in_scope(|| {
+                        villager_trace!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Next pos=({}, {})",
+                            next_pos.0,
+                            next_pos.1
+                        );
+                    });
+
+                    commands.trigger(StateChange {
+                        entity: *actor,
+                        new_state: State::Moving,
+                    });
+
+                    // Add Move Event
+                    let move_event = VisibleEvent::MoveEvent {
+                        src: *pos,
+                        dst: Position {
+                            x: next_pos.0,
+                            y: next_pos.1,
+                        },
+                    };
+
+                    map_events.new(
+                        id.0,
+                        game_tick.0 + 48, // in the future
+                        move_event,
+                    );
+
+                    let mut event_executing = event_executing_query
+                        .get_mut(*actor)
+                        .expect("Missing EventExecuting component");
+                    event_executing.state = EventExecutingState::Executing;
+                } else {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find path to destination"
+                        );
+                    });
+                    *state = ActionState::Failure
                 }
 
                 *state = ActionState::Executing;
@@ -1585,7 +2275,13 @@ pub fn move_to_system(
                     .expect("Missing EventExecuting component");
 
                 span.span().in_scope(|| {
-                    villager_trace!(*actor, obj_id, None, "Event state={:?}", event_executing.state);
+                    villager_trace!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Event state={:?}",
+                        event_executing.state
+                    );
                 });
                 if !event_executing.state.is_finished() {
                     span.span().in_scope(|| {
@@ -1645,21 +2341,39 @@ pub fn move_to_system(
                             false,
                         ) else {
                             span.span().in_scope(|| {
-                                villager_trace!(*actor, obj_id, None, "Cannot find path to destination");
+                                villager_trace!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "Cannot find path to destination"
+                                );
                             });
                             *state = ActionState::Failure;
                             continue;
                         };
 
                         span.span().in_scope(|| {
-                            villager_trace!(*actor, obj_id, None, "Path found, length={}", path_result.0.len());
+                            villager_trace!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Path found, length={}",
+                                path_result.0.len()
+                            );
                         });
 
                         let (path, _c) = path_result;
                         let next_pos = &path[1];
 
                         span.span().in_scope(|| {
-                            villager_trace!(*actor, obj_id, None, "Next pos=({}, {})", next_pos.0, next_pos.1);
+                            villager_trace!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Next pos=({}, {})",
+                                next_pos.0,
+                                next_pos.1
+                            );
                         });
 
                         commands.trigger(StateChange {
@@ -1686,7 +2400,12 @@ pub fn move_to_system(
                         event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
-                            villager_debug!(*actor, obj_id, None, "Adjacent to destination, success");
+                            villager_debug!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Adjacent to destination, success"
+                            );
                         });
                         *state = ActionState::Success;
                     }
@@ -1757,7 +2476,13 @@ pub fn transfer_drink_system(
                 };
 
                 span.span().in_scope(|| {
-                    villager_trace!(*actor, obj_id, None, "Target item owner={}", target_item.0.owner);
+                    villager_trace!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Target item owner={}",
+                        target_item.0.owner
+                    );
                 });
 
                 // Check if target item owner is the villager
@@ -1773,7 +2498,13 @@ pub fn transfer_drink_system(
                 // Get target item owner entity
                 let Some(target_entity) = entity_map.get_entity(target_item.0.owner) else {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Cannot find target item owner entity for owner={}", target_item.0.owner);
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find target item owner entity for owner={}",
+                            target_item.0.owner
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1792,11 +2523,24 @@ pub fn transfer_drink_system(
 
                 // Check if villager and target are on the same position
                 span.span().in_scope(|| {
-                    villager_trace!(*actor, obj_id, None, "Villager pos={:?} target_id={} target_pos={:?}", villager_pos, target_id.0, target_pos);
+                    villager_trace!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Villager pos={:?} target_id={} target_pos={:?}",
+                        villager_pos,
+                        target_id.0,
+                        target_pos
+                    );
                 });
                 if villager_pos != target_pos {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Villager and target not on same position");
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Villager and target not on same position"
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -1876,11 +2620,11 @@ pub fn drink_action_system(
                     obj_id: villager.id.0,
                 };
 
-                map_events.new(
-                    villager.id.0,
-                    game_tick.0 + TICKS_PER_SEC * 20, // in the future
-                    drink_event,
-                );
+	                map_events.new(
+	                    villager.id.0,
+	                    game_tick.0 + TICKS_PER_SEC * 3, // in the future
+	                    drink_event,
+	                );
 
                 let mut event_executing = event_executing_query
                     .get_mut(*actor)
@@ -1901,6 +2645,7 @@ pub fn drink_action_system(
                     continue;
                 }
 
+                event_executing.state = EventExecutingState::None;
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
@@ -2114,7 +2859,13 @@ pub fn transfer_food_system(
                 };
 
                 span.span().in_scope(|| {
-                    villager_trace!(*actor, obj_id, None, "Target item owner={}", target_item.0.owner);
+                    villager_trace!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Target item owner={}",
+                        target_item.0.owner
+                    );
                 });
 
                 // Check if target item owner is the villager
@@ -2130,7 +2881,13 @@ pub fn transfer_food_system(
                 // Get target item owner entity
                 let Some(target_entity) = entity_map.get_entity(target_item.0.owner) else {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Cannot find target item owner entity for owner={}", target_item.0.owner);
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find target item owner entity for owner={}",
+                            target_item.0.owner
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -2149,11 +2906,24 @@ pub fn transfer_food_system(
 
                 // Check if villager and target are on the same position
                 span.span().in_scope(|| {
-                    villager_trace!(*actor, obj_id, None, "Villager pos={:?} target_id={} target_pos={:?}", villager_pos, target_id.0, target_pos);
+                    villager_trace!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Villager pos={:?} target_id={} target_pos={:?}",
+                        villager_pos,
+                        target_id.0,
+                        target_pos
+                    );
                 });
                 if villager_pos != target_pos {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Villager and target not on same position");
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Villager and target not on same position"
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -2230,11 +3000,11 @@ pub fn eat_action_system(
                     obj_id: villager.id.0,
                 };
 
-                map_events.new(
-                    villager.id.0,
-                    game_tick.0 + TICKS_PER_SEC * 5, // in the future
-                    eat_event,
-                );
+	                map_events.new(
+	                    villager.id.0,
+	                    game_tick.0 + TICKS_PER_SEC * 3, // in the future
+	                    eat_event,
+	                );
 
                 let mut event_executing = event_executing_query
                     .get_mut(*actor)
@@ -2255,6 +3025,7 @@ pub fn eat_action_system(
                     continue;
                 }
 
+                event_executing.state = EventExecutingState::None;
                 *state = ActionState::Success;
             }
             ActionState::Cancelled => {
@@ -2367,12 +3138,18 @@ pub fn find_shelter_system(
                 } else {
                     let Some(shelter_entity) = entity_map.get_entity(active_shelter.0) else {
                         span.span().in_scope(|| {
-                            villager_error!(*actor, obj_id, None, "Cannot find shelter entity for shelter_id={}", active_shelter.0);
+                            villager_error!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Cannot find shelter entity for shelter_id={}",
+                                active_shelter.0
+                            );
                         });
                         continue;
                     };
 
-                    if let Ok((shelter_pos)) = structure_query.get(shelter_entity) {
+                    if let Ok(shelter_pos) = structure_query.get(shelter_entity) {
                         commands
                             .entity(*actor)
                             .insert(Destination { pos: *shelter_pos });
@@ -2380,7 +3157,13 @@ pub fn find_shelter_system(
                         *state = ActionState::Success;
                     } else {
                         span.span().in_scope(|| {
-                            villager_error!(*actor, obj_id, None, "Cannot find shelter {:?}", shelter_entity);
+                            villager_error!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Cannot find shelter {:?}",
+                                shelter_entity
+                            );
                         });
                         *state = ActionState::Failure;
                     }
@@ -2619,7 +3402,13 @@ pub fn set_storage_destination_system(
                     };
 
                     span.span().in_scope(|| {
-                        villager_trace!(*actor, obj_id, None, "Path to structure, cost={}", path_result.1);
+                        villager_trace!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Path to structure, cost={}",
+                            path_result.1
+                        );
                     });
 
                     let (path, c) = path_result;
@@ -2632,7 +3421,14 @@ pub fn set_storage_destination_system(
                 }
 
                 span.span().in_scope(|| {
-                    villager_debug!(*actor, obj_id, None, "Nearest storage id={:?} pos={:?}", nearest_storage_id, nearest_storage_pos);
+                    villager_debug!(
+                        *actor,
+                        obj_id,
+                        None,
+                        "Nearest storage id={:?} pos={:?}",
+                        nearest_storage_id,
+                        nearest_storage_pos
+                    );
                 });
 
                 if let (Some(storage_id), Some(storage_pos)) =
@@ -2659,7 +3455,6 @@ pub fn set_storage_destination_system(
         }
     }
 }
-
 
 pub fn load_items_system(
     mut commands: Commands,
@@ -2691,7 +3486,13 @@ pub fn load_items_system(
 
                 let Some(structure_entity) = entity_map.get_entity(assignment.structure_id) else {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Cannot find structure entity for structure_id={}", assignment.structure_id);
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find structure entity for structure_id={}",
+                            assignment.structure_id
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -2743,7 +3544,13 @@ pub fn unload_items_system(
                 // Get storage entity
                 let Some(storage_entity) = entity_map.get_entity(storage.id) else {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Cannot find storage entity for storage_id={}", storage.id);
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find storage entity for storage_id={}",
+                            storage.id
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -2763,7 +3570,12 @@ pub fn unload_items_system(
                 // Check if villager and storage player_id are matching
                 if villager_player_id.0 != storage_player_id.0 {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Villager and storage player_id not matching");
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Villager and storage player_id not matching"
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -2772,7 +3584,12 @@ pub fn unload_items_system(
                 // Check if villager and storage are on the same position
                 if villager_pos != storage_pos {
                     span.span().in_scope(|| {
-                        villager_error!(*actor, obj_id, None, "Villager and storage not on same position");
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Villager and storage not on same position"
+                        );
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -3035,50 +3852,18 @@ pub fn remove_no_food_system(
 }
 
 pub fn active_task_system(
-    mut villager_query: Query<&mut ActiveTask, With<SubclassVillager>>,
+    mut villager_query: Query<(Entity, &mut ActiveTask), With<SubclassVillager>>,
     order_query: Query<(&State, &Order), With<SubclassVillager>>,
-    actions: Query<(
-        &Actor,
-        &ActionState,
-        // === Your action marker components ===
-        Option<&FindDrink>,
-        Option<&Drink>,
-        Option<&TransferDrink>,
-        Option<&FindFood>,
-        Option<&TransferFood>,
-        Option<&Eat>,
-        Option<&MoveTo>,
-        Option<&Sleep>,
-        Option<&FindShelter>,
-        Option<&UnloadItems>,
-        Option<&Idle>,
-        Option<&ProcessOrder>,
-        Option<&Flee>,
-    )>,
+    actions: Query<ActiveTaskActionQuery>,
 ) {
     // Best task per villager: (rank, task)
     let mut best: HashMap<Entity, (i32, ActiveTask)> = HashMap::new();
 
-    for (
-        Actor(actor),
-        state,
-        find_drink,
-        drink,
-        transfer_drink,
-        find_food,
-        transfer_food,
-        eat,
-        move_to,
-        sleep,
-        find_shelter,
-        unload_items,
-        idle,
-        process_order,
-        flee,
-    ) in &actions
-    {
+    for action in &actions {
+        let actor = action.actor.0;
+
         // Inline ranking: Executing > Requested > everything else
-        let rank = match *state {
+        let rank = match *action.state {
             ActionState::Executing => 2,
             ActionState::Requested => 1,
             _ => 0,
@@ -3089,22 +3874,36 @@ pub fn active_task_system(
         }
 
         // Map action component -> ActiveTask
-        let task = if flee.is_some() {
+        let task = if action.fight_back.is_some() {
+            ActiveTask::FightingBack
+        } else if action.flee.is_some() {
             ActiveTask::Fleeing
-        } else if find_drink.is_some() || drink.is_some() || transfer_drink.is_some() {
+        } else if action.find_drink.is_some()
+            || action.drink.is_some()
+            || action.transfer_drink.is_some()
+        {
             ActiveTask::GettingDrink
-        } else if find_food.is_some() || eat.is_some() || transfer_food.is_some() {
+        } else if action.find_food.is_some()
+            || action.eat.is_some()
+            || action.transfer_food.is_some()
+        {
             ActiveTask::GettingFood
-        } else if sleep.is_some() {
+        } else if action.sleep.is_some() {
             ActiveTask::Sleeping
-        } else if find_shelter.is_some() {
+        } else if action.find_shelter.is_some() {
             ActiveTask::FindingShelter
-        } else if unload_items.is_some() {
+        } else if action.unload_items.is_some() {
             ActiveTask::Unloading
-        } else if process_order.is_some() {
-            if let Ok((state, order)) = order_query.get(*actor) {
+        } else if action.process_order.is_some() {
+            if let Ok((state, order)) = order_query.get(actor) {
                 match order {
                     Order::Follow { .. } => ActiveTask::Following,
+                    Order::Gather { res_type, .. } => match res_type.as_str() {
+                        ORE => ActiveTask::Mining,
+                        LOG => ActiveTask::Woodcutting,
+                        STONE => ActiveTask::Stonecutting,
+                        _ => ActiveTask::Gathering,
+                    },
                     Order::Build => ActiveTask::Building,
                     Order::WorkQueue => {
                         if *state == State::Crafting {
@@ -3125,30 +3924,32 @@ pub fn active_task_system(
             } else {
                 ActiveTask::Operating
             }
-        } else if idle.is_some() {
+        } else if action.idle.is_some() {
             ActiveTask::Idle
         } else {
             continue;
         };
 
-        match best.get(actor) {
+        match best.get(&actor) {
             Some((best_rank, _)) if *best_rank >= rank => {}
             _ => {
-                best.insert(*actor, (rank, task));
+                best.insert(actor, (rank, task));
             }
         }
     }
 
-    // Default everyone to None
-    for mut active_task in &mut villager_query {
-        *active_task = ActiveTask::None;
-    }
+    for (villager_entity, mut active_task) in &mut villager_query {
+        let next_task = best
+            .remove(&villager_entity)
+            .map(|(_rank, task)| task)
+            .unwrap_or(ActiveTask::None);
 
-    // Apply best task per villager
-    for (villager_entity, (_rank, task)) in best {
-        if let Ok(mut active_task) = villager_query.get_mut(villager_entity) {
-            info!("Active Task: {:?}", task);
-            *active_task = task;
+        if *active_task != next_task {
+            debug!(
+                "Active Task for {:?}: {:?} -> {:?}",
+                villager_entity, *active_task, next_task
+            );
+            *active_task = next_task;
         }
     }
 }
@@ -3157,18 +3958,30 @@ pub fn clear_event_executing(
     mut event_executing_query: Query<&mut EventExecuting>,
     actions: Query<(&Actor, &ActionState)>,
 ) {
+    let mut actor_actions: HashMap<Entity, (bool, bool)> = HashMap::new();
+
     for (Actor(actor), action_state) in &actions {
         match *action_state {
+            ActionState::Requested | ActionState::Executing => {
+                actor_actions.entry(*actor).or_insert((false, false)).1 = true;
+            }
             ActionState::Failure | ActionState::Cancelled | ActionState::Success => {
-
-                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
-                    if event_executing.state != EventExecutingState::None {
-                        info!("Clearing EventExecuting for {:?}", *actor);
-                        event_executing.state = EventExecutingState::None;
-                    }
-                }
+                actor_actions.entry(*actor).or_insert((false, false)).0 = true;
             }
             _ => {}
+        }
+    }
+
+    for (actor, (has_terminal_action, has_active_action)) in actor_actions {
+        if !has_terminal_action || has_active_action {
+            continue;
+        }
+
+        if let Ok(mut event_executing) = event_executing_query.get_mut(actor) {
+            if event_executing.state != EventExecutingState::None {
+                debug!("Clearing EventExecuting for {:?}", actor);
+                event_executing.state = EventExecutingState::None;
+            }
         }
     }
 }

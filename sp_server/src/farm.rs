@@ -6,7 +6,8 @@ use crate::{
     game::{Clients, GameTick},
     ids::Ids,
     network::{self, ResponsePacket},
-    player::{self, ActiveInfoType, ActiveInfos}, AppState,
+    player::{self, ActiveInfoType, ActiveInfos},
+    AppState,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -47,7 +48,10 @@ pub struct Crops(HashMap<i32, Crop>);
 
 impl Crops {
     pub fn plant(&mut self, game_tick: i32, structure: i32, seed: String, quantity: i32) {
-        info!("Plant Crop seed: {:?} quantity: {:?} structure: {:?}", seed, quantity, structure);
+        info!(
+            "Plant Crop seed: {:?} quantity: {:?} structure: {:?}",
+            seed, quantity, structure
+        );
         if let Some(crop) = self.get_mut(&structure) {
             info!("Found Crop: {:?}", crop);
 
@@ -132,7 +136,6 @@ fn crop_system(
                 }
                 CropStages::Mature => {
                     crop.stage = CropStages::Dead;
-                    
                 }
                 CropStages::Dead => {
                     crop.stage_end = i32::MAX;
@@ -143,12 +146,14 @@ fn crop_system(
             let player_id = ids.get_player(crop.structure).unwrap();
 
             // Check if crop is being observed
-            if let Some(_active_info) = active_infos.get(&(crop.structure, ActiveInfoType::Structure)) {
+            if let Some(_active_info) =
+                active_infos.get(&(crop.structure, ActiveInfoType::Structure))
+            {
                 let info_crop = ResponsePacket::InfoCrop {
                     id: crop.structure,
                     crop_type: crop.crop_type.clone(),
                     crop_quantity: crop.quantity,
-                    crop_stage: crop.stage.to_string()
+                    crop_stage: crop.stage.to_string(),
                 };
 
                 info!("info_crop: {:?}", info_crop);

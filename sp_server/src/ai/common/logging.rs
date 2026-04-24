@@ -2,7 +2,6 @@
 ///
 /// This module provides structured logging macros for NPC and AI systems.
 /// All logs include entity identification for easier debugging and filtering.
-
 use bevy::prelude::*;
 
 /// Extracts a display-friendly identifier from an entity, optional ID, and optional template name.

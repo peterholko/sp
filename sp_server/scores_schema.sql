@@ -29,7 +29,20 @@ CREATE TABLE public.scores (
     hero_name text NOT NULL,
     hero_rank text NOT NULL,
     total_xp integer NOT NULL,
+    total_score integer DEFAULT 0 NOT NULL,
+    score_survival integer DEFAULT 0 NOT NULL,
+    score_progression integer DEFAULT 0 NOT NULL,
+    score_wealth integer DEFAULT 0 NOT NULL,
+    score_defense integer DEFAULT 0 NOT NULL,
+    score_valor integer DEFAULT 0 NOT NULL,
+    score_legacy integer DEFAULT 0 NOT NULL,
+    days_survived integer DEFAULT 0 NOT NULL,
+    highest_pressure_level integer DEFAULT 0 NOT NULL,
+    waves_survived integer DEFAULT 0 NOT NULL,
+    legendary_kills integer DEFAULT 0 NOT NULL,
+    hideouts_cleared integer DEFAULT 0 NOT NULL,
     fate text NOT NULL,
+    crisis_tier integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     player_id integer NOT NULL
 );
@@ -77,4 +90,3 @@ ALTER TABLE ONLY public.scores
 --
 -- PostgreSQL database dump complete
 --
-

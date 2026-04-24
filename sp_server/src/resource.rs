@@ -376,77 +376,81 @@ impl Resource {
         return Vec::new();
     }
 
-    pub fn forage(forager_id: i32, tile_type: TileType, new_item_id: i32, inventory: &mut Inventory, templates: &Templates) -> Result<Vec<network::Item>, ResourceGatherError> {
+    pub fn forage(
+        forager_id: i32,
+        tile_type: TileType,
+        new_item_id: i32,
+        inventory: &mut Inventory,
+        templates: &Templates,
+    ) -> Result<Vec<network::Item>, ResourceGatherError> {
         let mut rng = rand::thread_rng();
 
         let mut items_to_update: Vec<network::Item> = Vec::new();
 
         /* ##################
-            ### FORAGE TIER 0
-            ##################
+        ### FORAGE TIER 0
+        ##################
 
-            Grasslands:
-            - Stick
-            - Plant Fibers
-            - Pebble
-            - Edible Berries
+        Grasslands:
+        - Stick
+        - Plant Fibers
+        - Pebble
+        - Edible Berries
 
-            Plains:
-            - Stick
-            - Pebble
-            - Plant Fibers
-            - Mushrooms (rare)
+        Plains:
+        - Stick
+        - Pebble
+        - Plant Fibers
+        - Mushrooms (rare)
 
-            Deciduous Forest:
-            - Stick
-            - Resin
-            - Edible Berries
-            - Mushrooms
+        Deciduous Forest:
+        - Stick
+        - Resin
+        - Edible Berries
+        - Mushrooms
 
-            Pine Forest:
-            - Stick
-            - Resin
-            - Pine Nuts (edible)
-            - Pebble
+        Pine Forest:
+        - Stick
+        - Resin
+        - Pine Nuts (edible)
+        - Pebble
 
-            Rainforest:
-            - Stick
-            - Resin
-            - Exotic Fruit (edible)
-            - Mushrooms (poison risk)
+        Rainforest:
+        - Stick
+        - Resin
+        - Exotic Fruit (edible)
+        - Mushrooms (poison risk)
 
-            Jungle:
-            - Stick
-            - Resin
-            - Fruit
-            - Mushrooms (higher poison risk)
+        Jungle:
+        - Stick
+        - Resin
+        - Fruit
+        - Mushrooms (higher poison risk)
 
-            Frozen Forest:
-            - Stick
-            - Resin (low chance)
-            - Pebble
-            - Edible Bark (emergency food)
+        Frozen Forest:
+        - Stick
+        - Resin (low chance)
+        - Pebble
+        - Edible Bark (emergency food)
 
-            Snow Hills:
-            - Pebble
-            - Stick (low chance)
-            - Lichen (low Feed)
-            - Resin (very rare)
+        Snow Hills:
+        - Pebble
+        - Stick (low chance)
+        - Lichen (low Feed)
+        - Resin (very rare)
 
-            Desert:
-            - Pebble
-            - Stick (very rare)
-            - Cactus Fruit (hydration)
-            - Dry Fiber (rope precursor)
+        Desert:
+        - Pebble
+        - Stick (very rare)
+        - Cactus Fruit (hydration)
+        - Dry Fiber (rope precursor)
 
-            Rivers / Wetlands:
-            - Reed
-            - Stick
-            - Mushrooms
-            - Plant Fibers
-            */
-
-
+        Rivers / Wetlands:
+        - Reed
+        - Stick
+        - Mushrooms
+        - Plant Fibers
+        */
 
         match tile_type {
             TileType::Grasslands => {
@@ -469,7 +473,12 @@ impl Resource {
                 info!("Foraged item template: {:?}", item_template);
 
                 // Create item
-                let item = inventory.new(new_item_id, item_template.name.clone(), 1, &templates.item_templates);
+                let item = inventory.new(
+                    new_item_id,
+                    item_template.name.clone(),
+                    1,
+                    &templates.item_templates,
+                );
                 info!("Foraged item: {:?}", item);
                 items_to_update.push(item.packet());
             }
@@ -615,7 +624,7 @@ impl Resource {
                     } else {
                         return Err(ResourceGatherError::NoInventoryRoom);
                     }
-                } 
+                }
             } else {
                 return Err(ResourceGatherError::CannotFindResourceTemplate);
             }
@@ -768,7 +777,7 @@ impl Resource {
                     } else {
                         return Err(ResourceGatherError::NoInventoryRoom);
                     }
-                } 
+                }
             } else {
                 return Err(ResourceGatherError::CannotFindResourceTemplate);
             }

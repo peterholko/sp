@@ -360,7 +360,10 @@ impl Inventory {
         quantity: i32,
         item_templates: &Vec<ItemTemplate>,
     ) -> Option<Item> {
-        info!("Transferring quantity from {:?} to {:?}", source_inventory.owner, target_inventory.owner);
+        info!(
+            "Transferring quantity from {:?} to {:?}",
+            source_inventory.owner, target_inventory.owner
+        );
         info!("Item id: {:?}", item_id);
         info!("New item id: {:?}", new_item_id);
         info!("Quantity: {:?}", quantity);
@@ -372,12 +375,8 @@ impl Inventory {
         {
             let item_to_transfer = source_inventory.items[transfer_index].clone();
 
-            let result = source_inventory.split(
-                item_to_transfer.id,
-                new_item_id,
-                quantity,
-                item_templates,
-            );
+            let result =
+                source_inventory.split(item_to_transfer.id, new_item_id, quantity, item_templates);
 
             if let Some((new_item, source_item)) = result {
                 Inventory::transfer(new_item.id, source_inventory, target_inventory);
@@ -447,7 +446,10 @@ impl Inventory {
         target_capacity: i32,
         item_templates: &Vec<ItemTemplate>,
     ) {
-        info!("Transferring partial resources from {:?} to {:?}", source_inventory.owner, target_inventory.owner);
+        info!(
+            "Transferring partial resources from {:?} to {:?}",
+            source_inventory.owner, target_inventory.owner
+        );
         let resource_items: Vec<(i32, i32, f32)> = source_inventory
             .items
             .iter()
@@ -456,7 +458,7 @@ impl Inventory {
             })
             .map(|item| (item.id, item.quantity, item.weight))
             .collect();
-        
+
         let mut target_total_weight = target_inventory.get_total_weight();
         info!("Target total weight: {:?}", target_total_weight);
 
@@ -1477,7 +1479,6 @@ impl Inventory {
         return equipped;
     }
 
-
     pub fn get_equipped_weapons(&self) -> Vec<Item> {
         let mut equipped_weapons = Vec::new();
 
@@ -1540,7 +1541,6 @@ impl Inventory {
     }
 
     pub fn has_reqs(&self, source_req_items: Vec<ResReq>) -> bool {
-
         let mut req_items = source_req_items.clone();
 
         for req_item in req_items.iter_mut() {
@@ -1577,10 +1577,7 @@ impl Inventory {
     }
 
     fn find_by_class(&self, class: String) -> Option<usize> {
-        let index = self
-            .items
-            .iter()
-            .position(|item| item.class == class);
+        let index = self.items.iter().position(|item| item.class == class);
         return index;
     }
 }
@@ -1887,8 +1884,6 @@ impl Items {
 
         return equipped;
     }
-
-
 
     pub fn get_equipped_main_hand(&self, owner: i32) -> Option<Item> {
         for item in self.items.iter() {
@@ -2493,25 +2488,23 @@ mod tests {
     fn test_transfer_partial_resources_full_transfer_when_capacity_available() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Copper Ore".to_string(),
-                    quantity: 10,
-                    durability: None,
-                    class: ORE.to_string(),
-                    subclass: "Ore".to_string(),
-                    slot: None,
-                    image: "copper_ore.png".to_string(),
-                    weight: 2.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Copper Ore".to_string(),
+                quantity: 10,
+                durability: None,
+                class: ORE.to_string(),
+                subclass: "Ore".to_string(),
+                slot: None,
+                image: "copper_ore.png".to_string(),
+                weight: 2.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2545,25 +2538,23 @@ mod tests {
     fn test_transfer_partial_resources_partial_transfer_when_limited_capacity() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Maple Log".to_string(),
-                    quantity: 20,
-                    durability: None,
-                    class: LOG.to_string(),
-                    subclass: "Log".to_string(),
-                    slot: None,
-                    image: "maple_log.png".to_string(),
-                    weight: 3.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Maple Log".to_string(),
+                quantity: 20,
+                durability: None,
+                class: LOG.to_string(),
+                subclass: "Log".to_string(),
+                slot: None,
+                image: "maple_log.png".to_string(),
+                weight: 3.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2571,23 +2562,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Maple Log".to_string(),
-                class: LOG.to_string(),
-                subclass: "Log".to_string(),
-                image: "maple_log.png".to_string(),
-                weight: 3.0,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Maple Log".to_string(),
+            class: LOG.to_string(),
+            subclass: "Log".to_string(),
+            image: "maple_log.png".to_string(),
+            weight: 3.0,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let target_capacity = 15; // Only fits 5 items (5 * 3.0 = 15)
         let mut ids = Ids::default();
@@ -2659,23 +2648,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Stone".to_string(),
-                class: STONE.to_string(),
-                subclass: "Stone".to_string(),
-                image: "stone.png".to_string(),
-                weight: 1.0,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Stone".to_string(),
+            class: STONE.to_string(),
+            subclass: "Stone".to_string(),
+            image: "stone.png".to_string(),
+            weight: 1.0,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let target_capacity = 15; // Fits all ore (10) + 5 stone
         let mut ids = Ids::default();
@@ -2702,25 +2689,23 @@ mod tests {
     fn test_transfer_partial_resources_no_transfer_when_no_capacity() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Hide".to_string(),
-                    quantity: 10,
-                    durability: None,
-                    class: HIDE.to_string(),
-                    subclass: "Hide".to_string(),
-                    slot: None,
-                    image: "hide.png".to_string(),
-                    weight: 1.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Hide".to_string(),
+                quantity: 10,
+                durability: None,
+                class: HIDE.to_string(),
+                subclass: "Hide".to_string(),
+                slot: None,
+                image: "hide.png".to_string(),
+                weight: 1.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2823,48 +2808,44 @@ mod tests {
     fn test_transfer_stackable_item_merges_with_existing() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Maple Log".to_string(),
-                    quantity: 5,
-                    durability: None,
-                    class: LOG.to_string(),
-                    subclass: "Log".to_string(),
-                    slot: None,
-                    image: "maple_log.png".to_string(),
-                    weight: 1.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Maple Log".to_string(),
+                quantity: 5,
+                durability: None,
+                class: LOG.to_string(),
+                subclass: "Log".to_string(),
+                slot: None,
+                image: "maple_log.png".to_string(),
+                weight: 1.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
             owner: 2,
-            items: vec![
-                Item {
-                    id: 2,
-                    owner: 2,
-                    name: "Maple Log".to_string(),
-                    quantity: 3,
-                    durability: None,
-                    class: LOG.to_string(),
-                    subclass: "Log".to_string(),
-                    slot: None,
-                    image: "maple_log.png".to_string(),
-                    weight: 1.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 2,
+                owner: 2,
+                name: "Maple Log".to_string(),
+                quantity: 3,
+                durability: None,
+                class: LOG.to_string(),
+                subclass: "Log".to_string(),
+                slot: None,
+                image: "maple_log.png".to_string(),
+                weight: 1.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         Inventory::transfer(1, &mut source_inventory, &mut target_inventory);
@@ -2882,25 +2863,23 @@ mod tests {
     fn test_transfer_stackable_item_creates_new_stack() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Iron Ore".to_string(),
-                    quantity: 10,
-                    durability: None,
-                    class: ORE.to_string(),
-                    subclass: "Ore".to_string(),
-                    slot: None,
-                    image: "iron_ore.png".to_string(),
-                    weight: 2.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Iron Ore".to_string(),
+                quantity: 10,
+                durability: None,
+                class: ORE.to_string(),
+                subclass: "Ore".to_string(),
+                slot: None,
+                image: "iron_ore.png".to_string(),
+                weight: 2.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2923,25 +2902,23 @@ mod tests {
     fn test_transfer_non_stackable_item_updates_owner() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Iron Sword".to_string(),
-                    quantity: 1,
-                    durability: Some(100),
-                    class: WEAPON.to_string(),
-                    subclass: "Sword".to_string(),
-                    slot: Some(Slot::MainHand),
-                    image: "iron_sword.png".to_string(),
-                    weight: 5.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Iron Sword".to_string(),
+                quantity: 1,
+                durability: Some(100),
+                class: WEAPON.to_string(),
+                subclass: "Sword".to_string(),
+                slot: Some(Slot::MainHand),
+                image: "iron_sword.png".to_string(),
+                weight: 5.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2964,25 +2941,23 @@ mod tests {
     fn test_transfer_quantity_partial_transfer() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Copper Ore".to_string(),
-                    quantity: 20,
-                    durability: None,
-                    class: ORE.to_string(),
-                    subclass: "Ore".to_string(),
-                    slot: None,
-                    image: "copper_ore.png".to_string(),
-                    weight: 2.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Copper Ore".to_string(),
+                quantity: 20,
+                durability: None,
+                class: ORE.to_string(),
+                subclass: "Ore".to_string(),
+                slot: None,
+                image: "copper_ore.png".to_string(),
+                weight: 2.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -2990,23 +2965,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Copper Ore".to_string(),
-                class: ORE.to_string(),
-                subclass: "Ore".to_string(),
-                image: "copper_ore.png".to_string(),
-                weight: 2.0,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Copper Ore".to_string(),
+            class: ORE.to_string(),
+            subclass: "Ore".to_string(),
+            image: "copper_ore.png".to_string(),
+            weight: 2.0,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let result = Inventory::transfer_quantity(
             1,
@@ -3036,25 +3009,23 @@ mod tests {
     fn test_transfer_quantity_full_transfer_when_exact_amount() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Stone".to_string(),
-                    quantity: 10,
-                    durability: None,
-                    class: STONE.to_string(),
-                    subclass: "Stone".to_string(),
-                    slot: None,
-                    image: "stone.png".to_string(),
-                    weight: 1.0,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Stone".to_string(),
+                quantity: 10,
+                durability: None,
+                class: STONE.to_string(),
+                subclass: "Stone".to_string(),
+                slot: None,
+                image: "stone.png".to_string(),
+                weight: 1.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -3347,9 +3318,10 @@ mod tests {
 
         // Target should have all resources (ore, log, stone, hide)
         assert_eq!(target_inventory.items.len(), 4);
-        assert!(target_inventory.items.iter().all(|item|
-            item.class == ORE || item.class == LOG || item.class == STONE || item.class == HIDE
-        ));
+        assert!(target_inventory.items.iter().all(|item| item.class == ORE
+            || item.class == LOG
+            || item.class == STONE
+            || item.class == HIDE));
     }
 
     // Tests for transfer_all_refined function
@@ -3442,9 +3414,10 @@ mod tests {
 
         // Target should have all refined items (ingot, timber, dust)
         assert_eq!(target_inventory.items.len(), 3);
-        assert!(target_inventory.items.iter().all(|item|
-            item.class == INGOT || item.class == TIMBER || item.class == DUST
-        ));
+        assert!(target_inventory
+            .items
+            .iter()
+            .all(|item| item.class == INGOT || item.class == TIMBER || item.class == DUST));
     }
 
     // Tests for transfer_gold function
@@ -3452,25 +3425,23 @@ mod tests {
     fn test_transfer_gold_partial_from_single_stack() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Gold".to_string(),
-                    quantity: 100,
-                    durability: None,
-                    class: GOLD.to_string(),
-                    subclass: "Currency".to_string(),
-                    slot: None,
-                    image: "gold.png".to_string(),
-                    weight: 0.01,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Gold".to_string(),
+                quantity: 100,
+                durability: None,
+                class: GOLD.to_string(),
+                subclass: "Currency".to_string(),
+                slot: None,
+                image: "gold.png".to_string(),
+                weight: 0.01,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -3478,23 +3449,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Gold".to_string(),
-                class: GOLD.to_string(),
-                subclass: "Currency".to_string(),
-                image: "gold.png".to_string(),
-                weight: 0.01,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Gold".to_string(),
+            class: GOLD.to_string(),
+            subclass: "Currency".to_string(),
+            image: "gold.png".to_string(),
+            weight: 0.01,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let mut next_item_id = 100;
 
@@ -3563,23 +3532,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Gold".to_string(),
-                class: GOLD.to_string(),
-                subclass: "Currency".to_string(),
-                image: "gold.png".to_string(),
-                weight: 0.01,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Gold".to_string(),
+            class: GOLD.to_string(),
+            subclass: "Currency".to_string(),
+            image: "gold.png".to_string(),
+            weight: 0.01,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let mut next_item_id = 100;
 
@@ -3592,14 +3559,18 @@ mod tests {
         );
 
         // Source should have remaining gold (total 125 - 100 = 25)
-        let source_total: i32 = source_inventory.items.iter()
+        let source_total: i32 = source_inventory
+            .items
+            .iter()
             .filter(|item| item.class == GOLD)
             .map(|item| item.quantity)
             .sum();
         assert_eq!(source_total, 25);
 
         // Target should have transferred gold
-        let target_total: i32 = target_inventory.items.iter()
+        let target_total: i32 = target_inventory
+            .items
+            .iter()
             .map(|item| item.quantity)
             .sum();
         assert_eq!(target_total, 100);
@@ -3609,25 +3580,23 @@ mod tests {
     fn test_transfer_gold_exact_amount() {
         let mut source_inventory = Inventory {
             owner: 1,
-            items: vec![
-                Item {
-                    id: 1,
-                    owner: 1,
-                    name: "Gold".to_string(),
-                    quantity: 50,
-                    durability: None,
-                    class: GOLD.to_string(),
-                    subclass: "Currency".to_string(),
-                    slot: None,
-                    image: "gold.png".to_string(),
-                    weight: 0.01,
-                    equipped: false,
-                    experiment: None,
-                    start_time: 0,
-                    attrs: HashMap::new(),
-                    produces: Vec::new(),
-                },
-            ],
+            items: vec![Item {
+                id: 1,
+                owner: 1,
+                name: "Gold".to_string(),
+                quantity: 50,
+                durability: None,
+                class: GOLD.to_string(),
+                subclass: "Currency".to_string(),
+                slot: None,
+                image: "gold.png".to_string(),
+                weight: 0.01,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
         };
 
         let mut target_inventory = Inventory {
@@ -3635,23 +3604,21 @@ mod tests {
             items: vec![],
         };
 
-        let item_templates = vec![
-            ItemTemplate {
-                name: "Gold".to_string(),
-                class: GOLD.to_string(),
-                subclass: "Currency".to_string(),
-                image: "gold.png".to_string(),
-                weight: 0.01,
-                slot: None,
-                durability: None,
-                refine_skill: None,
-                refine_skill_req: None,
-                refine_time: None,
-                produces: None,
-                duration: None,
-                attrs: None,
-            },
-        ];
+        let item_templates = vec![ItemTemplate {
+            name: "Gold".to_string(),
+            class: GOLD.to_string(),
+            subclass: "Currency".to_string(),
+            image: "gold.png".to_string(),
+            weight: 0.01,
+            slot: None,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            duration: None,
+            attrs: None,
+        }];
 
         let mut next_item_id = 100;
 

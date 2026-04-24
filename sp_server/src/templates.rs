@@ -92,7 +92,6 @@ impl Templates {
 pub struct ObjTemplates(Vec<ObjTemplate>);
 
 impl ObjTemplates {
-
     pub fn get(&self, template: String) -> ObjTemplate {
         for obj_template in self.iter() {
             if template == obj_template.template {
@@ -168,6 +167,8 @@ pub struct ObjTemplate {
     pub groups: Option<Vec<String>>,
     pub base_hp: Option<i32>,
     pub base_stamina: Option<i32>,
+    #[serde(default)]
+    pub base_mana: Option<i32>,
     pub base_dmg: Option<i32>,
     pub dmg_range: Option<i32>,
     pub base_def: Option<i32>,
@@ -621,19 +622,19 @@ impl Plugin for TemplatesPlugin {
         /*let skills_file =
             fs::File::open("templates/skills.yaml").expect("Could not open file.");
         let skills_list: Vec<String> = serde_yaml::from_reader(skills_file).expect("Could not read values.");
-    
+
         let variants: Vec<String> = skills_list
             .iter()
             .map(|name| format!("    {},", name))
             .collect();
-    
+
         let enum_code = format!(
             "use bevy::prelude::*;\n\
              #[derive(Debug, Reflect, Clone, Hash, PartialEq, Eq)]\n\
              pub enum SkillDef {{\n{}\n}}",
             variants.join("\n")
         );
-    
+
         fs::write("src/skill/skill_defs.rs", enum_code).unwrap();*/
 
         app.insert_resource(templates);

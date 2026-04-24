@@ -14,7 +14,9 @@ export type NetworkPacket =
   | { cmd: 'image_def'; name: string }
   | { cmd: 'move_unit'; x: number; y: number }
   | { cmd: 'attack'; attack_type: string; source_id: number; target_id: number }
+  | { cmd: 'ability'; ability_id: string; source_id: number; target_id?: number }
   | { cmd: 'combo'; source_id: number; target_id: number; combo_type: string }
+  | { cmd: 'block'; source_id: number }
   | { cmd: 'info_obj'; id: number }
   | { cmd: 'info_skills'; id: number }
   | { cmd: 'info_attrs'; id: number }
@@ -151,6 +153,7 @@ export type ResponsePacket =
   | { packet: 'explore'; explore_time: number }
   | { packet: 'gather'; gather_time: number }
   | { packet: 'attack'; source_id: number; attack_type: string; cooldown: number; stamina_cost: number }
+  | { packet: 'ability'; source_id: number; ability_id: string; cooldown: number; stamina_cost?: number; mana_cost?: number }
   | { packet: 'info_assign'; structure_id: number; assignments: Assignment[] }
   | { packet: 'assign'; result: string }
   | { packet: 'equip'; result: string }
@@ -174,16 +177,86 @@ export type ResponsePacket =
   | { packet: 'Pong' }
   | { packet: 'Error'; errmsg: string }
   | { packet: 'Notice'; noticemsg: string; expiry?: number | null }
-  | { packet: 'info_true_death'; hero_name: string; hero_rank: string; total_xp: number; fate: string }
+  | { packet: 'info_true_death'; hero_name: string; hero_rank: string; total_xp: number; score_total: number; score_breakdown: ScoreBreakdown; days_survived: number; waves_survived: number; highest_pressure_level: number; legendary_kills: number; hideouts_cleared: number; fate: string; crisis_tier: number }
   | { packet: 'debug_obj'; obj_id: number; enabled: boolean }
   | { packet: 'log_level_set'; target: string; level: string; success: boolean }
-  | { packet: 'log_levels'; overrides: Array<[string, string]> };
+  | { packet: 'log_levels'; overrides: Array<[string, string]> }
+  | { packet: 'objective_state'; version: number; current_id: string; objectives: ObjectiveProgress[] }
+  | { packet: 'threat_state'; version: number; day: number; phase: string; pressure_level: string; next_night_warning: string; known_risks: ThreatRisk[]; legendary_threats: LegendaryThreat[] }
+  | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
+  | { packet: 'discovery_event'; version: number; discovery_type: string; title: string; unlock_source: string; location?: string; result: string };
 
 export interface PerceptionData {
   map: MapTile[];
   observers: MapObj[];
   visible_objs: MapObj[];
   weather: MapWeather[];
+}
+
+export interface ObjectiveProgress {
+  id: string;
+  title: string;
+  state: string;
+  category: string;
+  target?: string;
+  action_hint: string;
+  lesson: string;
+  reward: string;
+  progress?: number;
+  goal?: number;
+}
+
+export interface ThreatRisk {
+  id: string;
+  label: string;
+  severity: string;
+  trigger_hint: string;
+  counter_hint: string;
+  current?: number;
+  threshold?: number;
+}
+
+export interface LegendaryThreat {
+  name: string;
+  status: string;
+  days_active: number;
+  hideout_known: boolean;
+  hideout_location?: string;
+  next_attack_eta?: number;
+  followers_defeated: number;
+  captains_defeated: number;
+}
+
+export interface ScoreBreakdown {
+  survival: number;
+  progression: number;
+  wealth: number;
+  defense: number;
+  valor: number;
+  legacy: number;
+}
+
+export interface ComboHint {
+  name: string;
+  remaining_attacks: string[];
+  effect?: string;
+}
+
+export interface StaminaCosts {
+  quick: number;
+  precise: number;
+  fierce: number;
+  block: number;
+}
+
+export interface AbilityHint {
+  id: string;
+  label: string;
+  cost_type: string;
+  cost: number;
+  range: number;
+  disabled_reason?: string;
+  hint: string;
 }
 
 export type ChangeEvents =
@@ -198,6 +271,8 @@ export interface StatsData {
   base_hp: number;
   stamina: number;
   base_stamina: number;
+  mana: number;
+  base_mana: number;
   thirst?: string;
   hunger?: string;
   tiredness?: string;
@@ -442,11 +517,14 @@ export interface InfoHeroPacket {
   effects: EffectInfo[];
   hp?: number;
   stamina?: number;
+  mana?: number;
   thirst: string;
   hunger: string;
   tiredness: string;
   base_hp?: number;
   base_stamina?: number;
+  base_mana?: number;
+  hero_class?: string;
   base_def?: number;
   base_vision?: number;
   base_speed?: number;
@@ -900,6 +978,17 @@ export class Network {
     var m = {
       cmd: "attack",
       attack_type: attackType,
+      source_id: sourceId,
+      target_id: targetId
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendAbility(abilityId, sourceId, targetId?) {
+    var m = {
+      cmd: "ability",
+      ability_id: abilityId,
       source_id: sourceId,
       target_id: targetId
     };
@@ -1528,7 +1617,10 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.INFO_NEEDS_UPDATE, jsonData);
       } else if (jsonData.packet == "info_stamina_update") {
         Global.heroStamina = jsonData.stamina;
-        Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina });
+        Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
+      } else if (jsonData.packet == "info_mana_update") {
+        Global.heroMana = jsonData.mana;
+        Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
       } else if (jsonData.packet == "info_hunger_update") {
         Global.gameEmitter.emit(NetworkEvent.INFO_HUNGER_UPDATE, jsonData);
       } else if (jsonData.packet == "info_thirst_update") {
@@ -1583,6 +1675,8 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.GATHER, jsonData);
       } else if (jsonData.packet == 'attack') {
         Global.gameEmitter.emit(NetworkEvent.ATTACK, jsonData);
+      } else if (jsonData.packet == 'ability') {
+        Global.gameEmitter.emit(NetworkEvent.ABILITY, jsonData);
       } else if (jsonData.packet == 'dmg') {
         this.processDmg(jsonData);
         Global.gameEmitter.emit(NetworkEvent.DMG, jsonData);
@@ -1650,6 +1744,15 @@ export class Network {
         }
       } else if (jsonData.packet == 'objectives') {
         Global.gameEmitter.emit(NetworkEvent.OBJECTIVES, jsonData);
+      } else if (jsonData.packet == 'objective_state') {
+        Global.gameEmitter.emit(NetworkEvent.OBJECTIVE_STATE, jsonData);
+      } else if (jsonData.packet == 'threat_state') {
+        Global.gameEmitter.emit(NetworkEvent.THREAT_STATE, jsonData);
+      } else if (jsonData.packet == 'combat_state') {
+        Global.combatState = jsonData;
+        Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);
+      } else if (jsonData.packet == 'discovery_event') {
+        Global.gameEmitter.emit(NetworkEvent.DISCOVERY_EVENT, jsonData);
       }
     }
   }
@@ -1725,6 +1828,8 @@ export class Network {
         Global.objectStates[observer.id].y = observer.y;
         Global.objectStates[observer.id].image = observer.image;
         Global.objectStates[observer.id].op = 'updated';
+        Global.objectStates[observer.id].updateAttr = undefined;
+        Global.objectStates[observer.id].eventType = undefined;
 
       } else {
         var objectState: ObjectState = {
@@ -1741,7 +1846,8 @@ export class Network {
           y: observer.y,
           vision: observer.vision,
           image: observer.image,
-          op: 'added'
+          op: 'added',
+          eventType: undefined
         };
         Global.objectStates[objectState.id] = objectState;
       }
@@ -1753,6 +1859,7 @@ export class Network {
     for (var objectId in Global.objectStates) {
       var objectState = Global.objectStates[objectId];
       objectState.op = 'deleted';
+      objectState.eventType = 'perception';
     }
 
     for (var index in visibleObjs) {
@@ -1773,6 +1880,8 @@ export class Network {
         Global.objectStates[visibleObj.id].y = visibleObj.y;
         Global.objectStates[visibleObj.id].image = visibleObj.image;
         Global.objectStates[visibleObj.id].op = 'updated';
+        Global.objectStates[visibleObj.id].updateAttr = undefined;
+        Global.objectStates[visibleObj.id].eventType = undefined;
 
       } else {
         var objectState: ObjectState = {
@@ -1789,7 +1898,8 @@ export class Network {
           y: visibleObj.y,
           vision: visibleObj.vision,
           image: visibleObj.image,
-          op: 'added'
+          op: 'added',
+          eventType: undefined
         };
         Global.objectStates[objectState.id] = objectState;
       }
@@ -1844,12 +1954,19 @@ export class Network {
         Global.objectStates[obj.id] = obj;
         Global.objectStates[obj.id].prevstate = obj.state;
         Global.objectStates[obj.id].op = 'added';
+        Global.objectStates[obj.id].updateAttr = undefined;
+        Global.objectStates[obj.id].eventType = 'obj_create';
 
         Global.gameEmitter.emit(GameEvent.OBJ_CREATED, obj.id);
       } else if (eventType == "obj_update") {
         var obj_id = events[i].obj_id;
         var attrs = events[i].attrs;
         console.log("attrs: " + JSON.stringify(attrs));
+
+        if (!(obj_id in Global.objectStates)) {
+          console.warn("Ignoring obj_update for unknown object: " + obj_id);
+          continue;
+        }
 
         for (const objAttr of attrs) {
 
@@ -1858,12 +1975,7 @@ export class Network {
           console.log("attr: " + attr + " value: " + value);
 
           if (attr == 'state') {
-            // During re-login, the objectState of the current obj could be unknown 
-            if (Global.objectStates[obj_id]) {
-              Global.objectStates[obj_id].prevstate = Global.objectStates[obj_id].state;
-            } else {
-              Global.objectStates[obj_id].prevstate = NONE;
-            }
+            Global.objectStates[obj_id].prevstate = Global.objectStates[obj_id].state || NONE;
             Global.objectStates[obj_id].state = value;
             Global.objectStates[obj_id].updateAttr = 'state';
 
@@ -1890,6 +2002,7 @@ export class Network {
           }
 
           Global.objectStates[obj_id].op = 'updated';
+          Global.objectStates[obj_id].eventType = 'obj_update';
           console.log("Emitting obj update: " + obj_id);
           Global.gameEmitter.emit(GameEvent.OBJ_UPDATE, obj_id);
         }
@@ -1907,6 +2020,8 @@ export class Network {
           Global.objectStates[obj.id].x = obj.x;
           Global.objectStates[obj.id].y = obj.y;
           Global.objectStates[obj.id].op = 'updated';
+          Global.objectStates[obj.id].updateAttr = undefined;
+          Global.objectStates[obj.id].eventType = 'obj_move';
         } else {
           Global.objectStates[obj.id] = obj;
           Global.objectStates[obj.id].prevstate = obj.state;
@@ -1920,7 +2035,14 @@ export class Network {
       } else if (eventType == "obj_delete") {
         var obj_id = events[i].obj_id;
 
+        if (!(obj_id in Global.objectStates)) {
+          console.warn("Ignoring obj_delete for unknown object: " + obj_id);
+          continue;
+        }
+
         Global.objectStates[obj_id].op = 'deleted';
+        Global.objectStates[obj_id].updateAttr = undefined;
+        Global.objectStates[obj_id].eventType = 'obj_delete';
         Global.gameEmitter.emit(GameEvent.OBJ_DELETED, obj_id);
       }
     }
@@ -1933,6 +2055,8 @@ export class Network {
     Global.heroMaxHp = data.base_hp;
     Global.heroStamina = data.stamina;
     Global.heroMaxStamina = data.base_stamina;
+    Global.heroMana = data.mana || 0;
+    Global.heroMaxMana = data.base_mana || 0;
   }
 
 
@@ -1956,7 +2080,7 @@ export class Network {
         Global.heroHp -= data.dmg;
       }
 
-      Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina });
+      Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
     } else if (data.source_id == Global.heroId) {
 
       if (data.attack_type == 'combo') {

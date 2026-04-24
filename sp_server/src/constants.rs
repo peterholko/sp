@@ -49,7 +49,7 @@ pub const GAME_HOUR: i32 = 100;
 pub const GAME_TICKS_PER_DAY: i32 = 2400;
 
 pub const FIRST_LIGHT: i32 = 400;
-pub const DAWN: i32 = 500; 
+pub const DAWN: i32 = 500;
 pub const MORNING: i32 = 600;
 pub const AFTERNOON: i32 = 1200;
 pub const EVENING: i32 = 1800;
@@ -190,7 +190,7 @@ pub const INGOT: &str = "Ingot";
 pub const TIMBER: &str = "Timber";
 pub const BLOCK: &str = "Block";
 
-// Items 
+// Items
 pub const FISH: &str = "Fish";
 
 pub const GOLD_COINS: &str = "Gold Coins";
@@ -220,7 +220,6 @@ pub const RESIN_TORCH: &str = "Resin Torch";
 pub const LANTERN_TORCH: &str = "Lantern Torch";
 
 pub const IGNITION_TOOL: &str = "Ignition Tool";
-
 
 // Skills
 pub const FISHING: &str = "Fishing";

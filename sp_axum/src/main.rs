@@ -71,6 +71,18 @@ struct Score {
     hero_name: String,
     hero_rank: String,
     total_xp: i32,
+    total_score: i32,
+    score_survival: i32,
+    score_progression: i32,
+    score_wealth: i32,
+    score_defense: i32,
+    score_valor: i32,
+    score_legacy: i32,
+    days_survived: i32,
+    highest_pressure_level: i32,
+    waves_survived: i32,
+    legendary_kills: i32,
+    hideouts_cleared: i32,
     fate: String,
     crisis_tier: i32,
 }
@@ -276,7 +288,14 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
                         println!("Error storing device token: {}", e);
                     }
 
-                    return (StatusCode::OK, Json(SessionResponse { account_name, device_token })).into_response();
+                    return (
+                        StatusCode::OK,
+                        Json(SessionResponse {
+                            account_name,
+                            device_token,
+                        }),
+                    )
+                        .into_response();
                 }
             }
             Err(_) => {
@@ -650,7 +669,10 @@ async fn fingerprint_auth_handler(
         let password: Option<String> = row.get("password");
 
         if password.is_some() {
-            println!("Fingerprint auth denied: player {} has password set, must use account login", player_id);
+            println!(
+                "Fingerprint auth denied: player {} has password set, must use account login",
+                player_id
+            );
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(PasswordRequiredResponse {
@@ -691,7 +713,10 @@ async fn fingerprint_auth_handler(
 
                     if password.is_some() {
                         let acct_name: Option<String> = account_row.get("account_name");
-                        println!("Device token auth denied: player {} has password set", player_id);
+                        println!(
+                            "Device token auth denied: player {} has password set",
+                            player_id
+                        );
                         return (
                             StatusCode::UNAUTHORIZED,
                             Json(PasswordRequiredResponse {
@@ -835,7 +860,10 @@ async fn fingerprint_auth_handler(
     let mut headers = HeaderMap::new();
     headers.insert("Set-Cookie", HeaderValue::from_str(&cookie_value).unwrap());
 
-    println!("Fingerprint auth successful: player_id={}, has_account={}, new_player={}", player_id, has_account, new_player);
+    println!(
+        "Fingerprint auth successful: player_id={}, has_account={}, new_player={}",
+        player_id, has_account, new_player
+    );
     (
         StatusCode::OK,
         headers,
@@ -898,11 +926,12 @@ async fn register_handler(
     let account = Account::new(account_name, password);
 
     // Update the existing account row for this player_id
-    let result = conn.execute(
-        "UPDATE accounts SET account_name = $1, password = $2 WHERE player_id = $3",
-        &[&account.account_name, &account.password, &player_id],
-    )
-    .await;
+    let result = conn
+        .execute(
+            "UPDATE accounts SET account_name = $1, password = $2 WHERE player_id = $3",
+            &[&account.account_name, &account.password, &player_id],
+        )
+        .await;
 
     let Ok(_result) = result else {
         return (
@@ -954,29 +983,57 @@ async fn set_display_name_handler(
     Json(payload): Json<SetDisplayNameRequest>,
 ) -> Response {
     let Some(cookie) = jar.get("session") else {
-        return (StatusCode::UNAUTHORIZED, Json(AuthError { msg: "Session not found".to_string() })).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthError {
+                msg: "Session not found".to_string(),
+            }),
+        )
+            .into_response();
     };
 
-    let conn = state.pool.get().await.expect("Error getting connection from pool");
+    let conn = state
+        .pool
+        .get()
+        .await
+        .expect("Error getting connection from pool");
 
     // Get player_id from session
     let session_row = conn
-        .query_one("SELECT player_id FROM sessions WHERE session = $1", &[&cookie.value()])
+        .query_one(
+            "SELECT player_id FROM sessions WHERE session = $1",
+            &[&cookie.value()],
+        )
         .await;
 
     let Ok(session_row) = session_row else {
-        return (StatusCode::UNAUTHORIZED, Json(AuthError { msg: "Session not found".to_string() })).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthError {
+                msg: "Session not found".to_string(),
+            }),
+        )
+            .into_response();
     };
 
     let player_id: i32 = session_row.get("player_id");
 
     // Only update if account has no password (guest account)
     let account_row = conn
-        .query_one("SELECT password FROM accounts WHERE player_id = $1", &[&player_id])
+        .query_one(
+            "SELECT password FROM accounts WHERE player_id = $1",
+            &[&player_id],
+        )
         .await;
 
     let Ok(account_row) = account_row else {
-        return (StatusCode::NOT_FOUND, Json(AuthError { msg: "Account not found".to_string() })).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(AuthError {
+                msg: "Account not found".to_string(),
+            }),
+        )
+            .into_response();
     };
 
     let password: Option<String> = account_row.get("password");
@@ -986,8 +1043,16 @@ async fn set_display_name_handler(
     }
 
     // Sanitize hero name: keep only alphanumeric chars
-    let sanitized: String = payload.hero_name.chars().filter(|c| c.is_alphanumeric()).collect();
-    let hero_name = if sanitized.is_empty() { "Player".to_string() } else { sanitized };
+    let sanitized: String = payload
+        .hero_name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    let hero_name = if sanitized.is_empty() {
+        "Player".to_string()
+    } else {
+        sanitized
+    };
 
     // Generate random number 1-1000
     let random_num: u32 = {
@@ -1004,7 +1069,13 @@ async fn set_display_name_handler(
         )
         .await;
 
-    (StatusCode::OK, Json(SetDisplayNameResponse { account_name: display_name })).into_response()
+    (
+        StatusCode::OK,
+        Json(SetDisplayNameResponse {
+            account_name: display_name,
+        }),
+    )
+        .into_response()
 }
 
 #[debug_handler]
@@ -1015,9 +1086,32 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
         .await
         .expect("Error getting connection from pool");
 
+    let score_migrations = [
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS total_score INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_survival INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_progression INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_wealth INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_defense INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_valor INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_legacy INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS days_survived INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS highest_pressure_level INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS waves_survived INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS legendary_kills INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS hideouts_cleared INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE scores ADD COLUMN IF NOT EXISTS crisis_tier INTEGER NOT NULL DEFAULT 0",
+        "UPDATE scores SET total_score = total_xp WHERE total_score = 0",
+    ];
+
+    for statement in score_migrations {
+        if let Err(err) = conn.execute(statement, &[]).await {
+            println!("Score schema migration failed: {:?}", err);
+        }
+    }
+
     let rows = conn
         .query(
-            "SELECT id, hero_name, hero_rank, total_xp, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores",
+            "SELECT id, hero_name, hero_rank, total_xp, COALESCE(total_score, total_xp) as total_score, COALESCE(score_survival, 0) as score_survival, COALESCE(score_progression, 0) as score_progression, COALESCE(score_wealth, 0) as score_wealth, COALESCE(score_defense, 0) as score_defense, COALESCE(score_valor, 0) as score_valor, COALESCE(score_legacy, 0) as score_legacy, COALESCE(days_survived, 0) as days_survived, COALESCE(highest_pressure_level, 0) as highest_pressure_level, COALESCE(waves_survived, 0) as waves_survived, COALESCE(legendary_kills, 0) as legendary_kills, COALESCE(hideouts_cleared, 0) as hideouts_cleared, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores ORDER BY COALESCE(total_score, total_xp) DESC",
             &[],
         )
         .await;
@@ -1039,6 +1133,18 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
             hero_name: row.get::<_, String>("hero_name"),
             hero_rank: row.get::<_, String>("hero_rank"),
             total_xp: row.get::<_, i32>("total_xp"),
+            total_score: row.get::<_, i32>("total_score"),
+            score_survival: row.get::<_, i32>("score_survival"),
+            score_progression: row.get::<_, i32>("score_progression"),
+            score_wealth: row.get::<_, i32>("score_wealth"),
+            score_defense: row.get::<_, i32>("score_defense"),
+            score_valor: row.get::<_, i32>("score_valor"),
+            score_legacy: row.get::<_, i32>("score_legacy"),
+            days_survived: row.get::<_, i32>("days_survived"),
+            highest_pressure_level: row.get::<_, i32>("highest_pressure_level"),
+            waves_survived: row.get::<_, i32>("waves_survived"),
+            legendary_kills: row.get::<_, i32>("legendary_kills"),
+            hideouts_cleared: row.get::<_, i32>("hideouts_cleared"),
             fate: row.get::<_, String>("fate"),
             crisis_tier: row.get::<_, i32>("crisis_tier"),
         })

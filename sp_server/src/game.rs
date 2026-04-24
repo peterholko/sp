@@ -44,12 +44,12 @@ use crate::event::{self, EventExecutingState};
 use crate::event::{
     EatEventCompleted, EventCompleted, EventExecuting, FindEventCompleted, GameEvent,
     GameEventType, GameEvents, MapEvent, MapEvents, MoveEvent, MoveEventCompleted,
-    MoveEventPrecheck, MoveEventUpdate, SleepEventCompleted, VisibleEvent, VisibleEvents,
+    MoveEventPrecheck, MoveEventUpdate, SleepEventCompleted, Spell, VisibleEvent, VisibleEvents,
 };
 use crate::experiment::{Experiment, ExperimentPlugin, ExperimentState, Experiments};
 use crate::farm::{Crop, CropStages, Crops, FarmPlugin};
 use crate::ids::{EntityObjMap, Ids};
-use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, SOULSHARD};
+use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, SOULSHARD};
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
     self, send_to_client, send_to_database, BroadcastEvents, ObjAttr, RefiningItem,
@@ -59,12 +59,12 @@ use crate::npc::NPCPlugin;
 use crate::obj::{
     ActiveShelter, ActiveTask, AddLightEffect, Assignment, Assignments, BaseAttrs,
     BuildProgressUpdate, BuildUpgradeState, Campfire, CancelEvents, Class, ClassStructure,
-    EndRepeatAction, FoodPoisoningEffect, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId, Position,
-    RemoveLightEffect, RemoveObj, UpdateObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild,
-    StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
-    StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassVillager, Template,
-    TemplateChange, TransferAllResources, TrueDeath, Viewshed, Watchtower, WorkEntry, WorkQueue,
-    WorkStatus, WorkType,
+    EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker, LastCombatTick, Misc, Name, NewObj,
+    Obj, Order, PlayerId, Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade,
+    Shelter, Sheltered, StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding,
+    StateChange, StateDead, StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC,
+    SubclassVillager, Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj,
+    Viewshed, Watchtower, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerPlugin};
 use crate::recipe::{RecipePlugin, Recipes};
@@ -146,11 +146,20 @@ pub struct ExploredMap(pub HashMap<i32, Vec<(i32, i32)>>);
 #[reflect(Resource)]
 pub struct DebugObjs(pub HashSet<i32>);
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug)]
 pub struct LogLevelOverrides {
     pub overrides: HashMap<String, String>,
     #[allow(clippy::type_complexity)]
     pub reload_handle: Option<Arc<Mutex<reload::Handle<EnvFilter, Registry>>>>,
+}
+
+impl Default for LogLevelOverrides {
+    fn default() -> Self {
+        Self {
+            overrides: HashMap::from([("big_brain".to_string(), "DEBUG".to_string())]),
+            reload_handle: None,
+        }
+    }
 }
 
 // Enum for the different two type types of perception updates (init and update)
@@ -206,14 +215,31 @@ pub struct CrisisState(pub HashMap<i32, PlayerCrisis>);
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SpawnPositions(pub HashMap<i32, Position>);
 
+#[derive(Debug, Clone)]
+pub struct PlayerIntroEntry {
+    pub start_tick: i32,
+    pub shipwreck_chain_started: bool,
+    pub villager_spawned: bool,
+    pub danger_unlocked: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct PlayerIntroState(pub HashMap<i32, PlayerIntroEntry>);
+
 // Tracks the initial shipwreck encounter chain: rats → boar/crab → spider
 #[derive(Debug, Clone)]
 pub struct InitialEncounterEntry {
-    pub rat_ids: Vec<i32>,           // IDs of the two starting rats
-    pub phase1_spawn: String,        // "Giant Crab" or "Wild Boar"
-    pub phase1_npc_id: Option<i32>,  // set when phase1 creature spawns
+    pub rat_ids: Vec<i32>,          // IDs of the two starting rats
+    pub phase1_spawn: String,       // "Giant Crab" or "Wild Boar"
+    pub phase1_npc_id: Option<i32>, // set when phase1 creature spawns
     pub spawn_pos: Position,
-    pub start_tick: i32,             // when the player joined (for grace period)
+    pub villager_spawn_pos: Position,
+    pub first_rat_spawn_tick: i32,
+    pub second_rat_spawn_tick: i32,
+    pub villager_ready_tick: i32,
+    pub phase1_unlock_tick: i32,
+    pub spider_unlock_tick: i32,
+    pub villager_event_scheduled: bool,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -222,15 +248,330 @@ pub struct InitialEncounterState(pub HashMap<i32, InitialEncounterEntry>);
 // Tracks objective completion per player
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct PlayerObjectives {
+    pub scavenge_shipwreck: bool,
     pub build_campfire: bool,
+    pub win_first_fight: bool,
     pub build_3_structures: bool,
     pub recruit_villager: bool,
     pub explore_poi: bool,
+    pub choose_expansion: bool,
     pub survive_5_nights: bool,
+    pub find_legendary_hideout: bool,
+    pub defeat_ashen_warlord: bool,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct Objectives(pub HashMap<i32, PlayerObjectives>);
+
+#[derive(Debug, Default, Clone)]
+pub struct PlayerRunScore {
+    pub start_tick: i32,
+    pub waves_survived: i32,
+    pub enemies_killed: i32,
+    pub elites_killed: i32,
+    pub captains_killed: i32,
+    pub legendary_kills: i32,
+    pub hideouts_cleared: i32,
+    pub repairs: i32,
+    pub highest_pressure_level: i32,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct RunScoreState(pub HashMap<i32, PlayerRunScore>);
+
+#[derive(Debug, Clone)]
+pub struct LegendaryFollowerWave {
+    pub ids: Vec<i32>,
+    pub defeated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegendaryThreat {
+    pub name: String,
+    pub hideout_pos: Position,
+    pub hideout_id: Option<i32>,
+    pub boss_id: Option<i32>,
+    pub rumor_sent: bool,
+    pub active: bool,
+    pub defeated: bool,
+    pub hideout_revealed: bool,
+    pub active_since_tick: Option<i32>,
+    pub defeated_at_tick: Option<i32>,
+    pub next_follower_tick: i32,
+    pub waves_sent: i32,
+    pub follower_waves: Vec<LegendaryFollowerWave>,
+    pub followers_defeated: i32,
+    pub captains_defeated: i32,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct LegendaryThreatState(pub HashMap<i32, LegendaryThreat>);
+
+#[derive(Debug, Component)]
+pub struct LegendaryHideout {
+    pub player_id: i32,
+}
+
+#[derive(Debug, Component)]
+pub struct LegendaryBoss {
+    pub player_id: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegendaryFollowerRole {
+    Raider,
+    Torchbearer,
+    Thief,
+    Captain,
+}
+
+#[derive(Debug, Component)]
+pub struct LegendaryFollower {
+    pub player_id: i32,
+    pub role: LegendaryFollowerRole,
+}
+
+fn intro_age(
+    game_tick: &GameTick,
+    player_id: i32,
+    player_intro_state: &PlayerIntroState,
+) -> Option<i32> {
+    player_intro_state
+        .get(&player_id)
+        .map(|entry| game_tick.0 - entry.start_tick)
+}
+
+fn intro_is_younger_than(
+    game_tick: &GameTick,
+    player_id: i32,
+    player_intro_state: &PlayerIntroState,
+    threshold: i32,
+) -> bool {
+    intro_age(game_tick, player_id, player_intro_state)
+        .map(|age| age < threshold)
+        .unwrap_or(false)
+}
+
+const LEGENDARY_BOSS: &str = "Fire Dragon";
+const LEGENDARY_RAIDER: &str = "Wyvern Rider";
+const LEGENDARY_TORCHBEARER: &str = "Great Troll";
+const LEGENDARY_THIEF: &str = "Gryphon";
+const LEGENDARY_CAPTAIN: &str = "Death Knight";
+const LEGENDARY_HIDEOUT: &str = "Warlord Hideout";
+const LEGENDARY_RUMOR_DAY: i32 = 6;
+const LEGENDARY_ACTIVE_DAY: i32 = 7;
+const LEGENDARY_STANDARD_WAVE_TICKS: i32 = 600;
+const LEGENDARY_FAST_WAVE_TICKS: i32 = 300;
+const LEGENDARY_FAST_AFTER_TICKS: i32 = GAME_TICKS_PER_DAY * 3;
+const LEGENDARY_HIDEOUT_REVEAL_CAPTAINS: i32 = 2;
+const LEGENDARY_HIDEOUT_REVEAL_WAVES: i32 = 4;
+const LEGENDARY_HIDEOUT_REVEAL_RANGE: u32 = 5;
+
+pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
+    let mut tier = 0;
+    if crisis.rat_spoilage {
+        tier = 1;
+    }
+    if crisis.wolf_pack {
+        tier = 2;
+    }
+    if crisis.goblin_raid {
+        tier = 3;
+    }
+    if crisis.undead_incursion {
+        tier = 4;
+    }
+    if crisis.goblin_pillager {
+        tier = 5;
+    }
+    tier
+}
+
+pub fn survival_director_active(day: i32, objectives: Option<&PlayerObjectives>) -> bool {
+    day >= 6 || objectives.map(|obj| obj.survive_5_nights).unwrap_or(false)
+}
+
+pub fn survival_horde_size(day: i32, crisis_tier: i32, active_legendary_count: i32) -> usize {
+    let day_pressure = ((day - 6).max(0)) / 2;
+    (2 + day_pressure + crisis_tier + active_legendary_count * 2).clamp(2, 12) as usize
+}
+
+pub fn score_total_from_breakdown(
+    breakdown: &network::ScoreBreakdown,
+    highest_pressure_level: i32,
+) -> i32 {
+    let components_sum = breakdown.survival
+        + breakdown.progression
+        + breakdown.wealth
+        + breakdown.defense
+        + breakdown.valor
+        + breakdown.legacy;
+    ((components_sum as f32) * (1.0 + highest_pressure_level as f32 * 0.05)).floor() as i32
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunScoreInputs {
+    pub days_survived: i32,
+    pub nights_survived: i32,
+    pub waves_survived: i32,
+    pub active_legendary_days: i32,
+    pub hero_rank: String,
+    pub total_skill_levels: i32,
+    pub total_xp: i32,
+    pub total_wealth_value: i32,
+    pub structures_alive: i32,
+    pub upgrades: i32,
+    pub repairs: i32,
+    pub villagers_alive: i32,
+    pub crisis_tier: i32,
+    pub enemies_killed: i32,
+    pub elites_killed: i32,
+    pub captains_killed: i32,
+    pub legendary_kills: i32,
+    pub hideouts_cleared: i32,
+    pub completed_objectives: i32,
+    pub monolith_sealed: bool,
+}
+
+pub fn calculate_run_score_breakdown(inputs: &RunScoreInputs) -> network::ScoreBreakdown {
+    network::ScoreBreakdown {
+        survival: inputs.days_survived * 500
+            + inputs.nights_survived * 250
+            + inputs.waves_survived * 400
+            + inputs.active_legendary_days * 200,
+        progression: rank_score(&inputs.hero_rank)
+            + inputs.total_skill_levels * 100
+            + (inputs.total_xp / 5).min(8000),
+        wealth: (((inputs.total_wealth_value.max(0) as f64).sqrt() * 100.0).floor() as i32)
+            .min(10000),
+        defense: inputs.structures_alive * 150
+            + inputs.upgrades * 300
+            + inputs.repairs * 50
+            + inputs.villagers_alive * 250
+            + inputs.crisis_tier * 1000,
+        valor: inputs.enemies_killed * 25
+            + inputs.elites_killed * 500
+            + inputs.captains_killed * 1500
+            + inputs.legendary_kills * 10000
+            + inputs.hideouts_cleared * 3000,
+        legacy: inputs.completed_objectives * 250 + if inputs.monolith_sealed { 5000 } else { 0 },
+    }
+}
+
+fn pressure_level_value(level: &str) -> i32 {
+    match level {
+        "Crisis" => 3,
+        "High" => 2,
+        "Building" => 1,
+        _ => 0,
+    }
+}
+
+fn completed_objectives_count(obj: Option<&PlayerObjectives>) -> i32 {
+    let Some(obj) = obj else {
+        return 0;
+    };
+
+    [
+        obj.scavenge_shipwreck,
+        obj.build_campfire,
+        obj.win_first_fight,
+        obj.build_3_structures,
+        obj.recruit_villager,
+        obj.explore_poi,
+        obj.choose_expansion,
+        obj.survive_5_nights,
+        obj.find_legendary_hideout,
+        obj.defeat_ashen_warlord,
+    ]
+    .iter()
+    .filter(|done| **done)
+    .count() as i32
+}
+
+fn rank_score(template_name: &str) -> i32 {
+    if template_name.starts_with("Legendary ") {
+        12000
+    } else if template_name.starts_with("Great ") {
+        6000
+    } else if template_name.starts_with("Skilled ") {
+        2000
+    } else {
+        0
+    }
+}
+
+fn survival_horde_composition(size: usize, day: i32) -> Vec<&'static str> {
+    let mut rotation = vec!["Ghoul", "Ghast", "Direwolf", "Gryphon"];
+    if day >= 8 {
+        rotation.extend(["Spectre", "Wraith", "Ogre"]);
+    }
+    if day >= 10 {
+        rotation.extend(["Bone Knight", "Chocobone", "Dark Sorcerer"]);
+    }
+    if day >= 12 {
+        rotation.extend(["Death Knight", "Draug", "Great Troll", "Roc"]);
+    }
+    if day >= 14 {
+        rotation.extend(["Lich", "Drake Hurricane", "Wose Shaman"]);
+    }
+    if day >= 16 {
+        rotation.extend([
+            "Ancient Lich",
+            "Drake Flameheart",
+            "Ancient Wose",
+            "Elder Wose",
+        ]);
+    }
+    if day >= 18 {
+        rotation.extend(["Drake Armageddon", "Wyvern Rider"]);
+    }
+
+    (0..size)
+        .map(|index| rotation[(index + day as usize) % rotation.len()])
+        .collect()
+}
+
+fn shipwreck_inspection_can_spawn_villager(
+    game_tick: i32,
+    entry: &InitialEncounterEntry,
+    objectives: Option<&PlayerObjectives>,
+) -> bool {
+    game_tick >= entry.villager_ready_tick
+        && objectives
+            .map(|obj| obj.scavenge_shipwreck)
+            .unwrap_or(false)
+}
+
+fn is_elite_enemy_template(template: &str) -> bool {
+    matches!(
+        template,
+        "Elite Zombie"
+            | "Necromancer"
+            | "Goblin Pillager"
+            | "Wolf Rider"
+            | "Dark Sorcerer"
+            | "Lich"
+            | "Ancient Lich"
+            | "Death Knight"
+            | "Bone Knight"
+            | "Draug"
+            | "Wraith"
+            | "Spectre"
+            | "Ancient Wose"
+            | "Elder Wose"
+            | "Wose Shaman"
+            | "Great Troll"
+            | "Ogre"
+            | "Gryphon"
+            | "Roc"
+            | "Wyvern Rider"
+            | "Drake Hurricane"
+            | "Drake Flameheart"
+            | "Drake Armageddon"
+            | "Fire Dragon"
+    )
+}
 
 #[derive(Resource, Debug, Reflect, Default)]
 #[reflect(Resource)]
@@ -612,8 +953,22 @@ impl Plugin for GamePlugin {
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
-            .add_systems(Update, stamina_recovery_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, stamina_update_system.after(stamina_recovery_system).run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                stamina_recovery_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                stamina_update_system
+                    .after(stamina_recovery_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                mana_update_system
+                    .after(stamina_recovery_system)
+                    .run_if(in_state(AppState::Running)),
+            )
             .add_systems(Update, snapshot_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
@@ -673,19 +1028,62 @@ impl Plugin for GamePlugin {
                 Update,
                 spell_raise_dead_event_system.run_if(in_state(AppState::Running)),
             )
+            .add_systems(
+                Update,
+                player_intro_state_system.run_if(in_state(AppState::Running)),
+            )
             .add_systems(Update, rat_event_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, initial_encounter_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                initial_encounter_system.run_if(in_state(AppState::Running)),
+            )
             .add_systems(Update, wolf_pack_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, goblin_raid_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, undead_incursion_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, goblin_pillager_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, nightly_threat_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, objectives_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                goblin_raid_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                undead_incursion_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                goblin_pillager_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                nightly_threat_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                legendary_threat_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                legendary_death_tracking_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                run_score_kill_tracking_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                objectives_system.run_if(in_state(AppState::Running)),
+            )
             .add_systems(Update, map_event_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, weather_cycle_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, weather_effects_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                weather_cycle_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                weather_effects_system.run_if(in_state(AppState::Running)),
+            )
             .add_systems(Update, morale_system.run_if(in_state(AppState::Running)))
-            .add_systems(Update, victory_check_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                victory_check_system.run_if(in_state(AppState::Running)),
+            )
             .add_systems(
                 Update,
                 spell_damage_event_system.run_if(in_state(AppState::Running)),
@@ -888,8 +1286,11 @@ impl Game {
         let player_stats = PlayerStats(HashMap::new());
         let crisis_state = CrisisState(HashMap::new());
         let spawn_positions = SpawnPositions(HashMap::new());
+        let player_intro_state = PlayerIntroState(HashMap::new());
         let initial_encounter_state = InitialEncounterState(HashMap::new());
         let objectives = Objectives(HashMap::new());
+        let run_score_state = RunScoreState(HashMap::new());
+        let legendary_threat_state = LegendaryThreatState(HashMap::new());
         let monolith_investigation = MonolithInvestigation(HashMap::new());
         let victory_state = VictoryState(HashMap::new());
 
@@ -913,8 +1314,11 @@ impl Game {
         commands.insert_resource(player_stats);
         commands.insert_resource(crisis_state);
         commands.insert_resource(spawn_positions);
+        commands.insert_resource(player_intro_state);
         commands.insert_resource(initial_encounter_state);
         commands.insert_resource(objectives);
+        commands.insert_resource(run_score_state);
+        commands.insert_resource(legendary_threat_state);
         commands.insert_resource(monolith_investigation);
         commands.insert_resource(victory_state);
         commands.insert_resource(debug_objs);
@@ -977,6 +1381,8 @@ impl Game {
         commands.insert_resource(network_receiver);
         commands.insert_resource(processed_map_events);
         commands.insert_resource(perception_updates);
+        commands.insert_resource(RunScoreState(HashMap::new()));
+        commands.insert_resource(LegendaryThreatState(HashMap::new()));
         commands.insert_resource(debug_objs);
         commands.insert_resource(log_overrides);
         println!("Inserting resources complete...");
@@ -1274,7 +1680,7 @@ fn move_event_completed_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
-    initial_encounter_state: Res<InitialEncounterState>,
+    player_intro_state: Res<PlayerIntroState>,
     (
         mover_query,
         map_obj_query,
@@ -1338,17 +1744,19 @@ fn move_event_completed_system(
 
         // Check if player spawns an encounter (not near monolith)
         if player::is_player(mover_player_id.0) && in_range_sanctuary.is_none() {
-            // Grace period: no random encounters in the first 3 minutes (1800 ticks)
-            let in_grace_period = initial_encounter_state
-                .get(&mover_player_id.0)
-                .map(|entry| game_tick.0 < entry.start_tick + 1800)
-                .unwrap_or(false);
+            // Grace period: no random encounters in the first 6 minutes (3600 ticks)
+            let in_grace_period =
+                intro_is_younger_than(&game_tick, mover_player_id.0, &player_intro_state, 3600);
 
             let mut encounter_moves = encounter_moves_query
                 .get_mut(mover_entity)
                 .expect("Encounter moves not found");
             encounter_moves.0 = encounter_moves.0 + 1;
-            let wildness = if in_grace_period { 0 } else { map.get_wildness(mover_pos.x, mover_pos.y) };
+            let wildness = if in_grace_period {
+                0
+            } else {
+                map.get_wildness(mover_pos.x, mover_pos.y)
+            };
 
             info!(
                 "Encounter moves: {:?}, wildness: {:?}",
@@ -1763,8 +2171,6 @@ fn hide_event_system(
         map_events.remove(event_id);
     }
 }
-
-
 
 fn update_obj_event_system(
     game_tick: Res<GameTick>,
@@ -2333,8 +2739,14 @@ fn add_light_effect_system(
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     source_query: Query<(&PlayerId, &Position, &State)>,
-    mut query_with_effects: Query<(Entity, &PlayerId, &Id, &Position, &State, &mut Effects), With<Viewshed>>,
-    query_without_effects: Query<(Entity, &PlayerId, &Id, &Position, &State), (Without<Effects>, With<Viewshed>)>,
+    mut query_with_effects: Query<
+        (Entity, &PlayerId, &Id, &Position, &State, &mut Effects),
+        With<Viewshed>,
+    >,
+    query_without_effects: Query<
+        (Entity, &PlayerId, &Id, &Position, &State),
+        (Without<Effects>, With<Viewshed>),
+    >,
 ) {
     // Get source player id and position
     let Ok((source_player_id, source_pos, source_state)) = source_query.get(light_effect.entity)
@@ -2344,7 +2756,9 @@ fn add_light_effect_system(
     };
 
     // Add light effect to all objects on the same tile that already have Effects
-    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query_with_effects.iter_mut() {
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in
+        query_with_effects.iter_mut()
+    {
         if obj_pos.x == source_pos.x
             && obj_pos.y == source_pos.y
             && obj_player_id.0 == source_player_id.0
@@ -2401,7 +2815,8 @@ fn remove_light_effect_system(
     };
 
     // Remove watchtower light effect from all objects on the same tile
-    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut() {
+    for (obj_entity, obj_player_id, obj_id, obj_pos, obj_state, mut obj_effects) in query.iter_mut()
+    {
         if obj_pos.x == source_pos.x
             && obj_pos.y == source_pos.y
             && obj_player_id.0 == source_player_id.0
@@ -2955,9 +3370,9 @@ fn gather_event_system(
 
                     let mut items_to_update: Vec<network::Item> = Vec::new();
 
-                    info!("Resources on tile: {:?}", resources_on_tile);
-                    for resource in resources_on_tile.iter() {
-                        if let Some(res_template) = res_templates.get(&resource.name) {
+	                    info!("Resources on tile: {:?}", resources_on_tile);
+	                    for resource in resources_on_tile.iter() {
+	                        if let Some(res_template) = res_templates.get(&resource.name) {
                             let skill_name = Resource::type_to_skill(res_type.clone());
                             let skill_name_enum = Skill::from_str(&skill_name)
                                 .expect(&format!("Invalid skill name: {}", skill_name));
@@ -3083,12 +3498,19 @@ fn gather_event_system(
                             info!(
                                 "No resource template found for resource: {:?}",
                                 resource.name
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
+	                            );
+	                        }
+	                    }
+
+	                    commands.entity(gatherer_entity).insert(EventCompleted {
+	                        event_id: Uuid::new_v4(),
+	                        event_type: "gather".to_string(),
+	                        at_tick: game_tick.0,
+	                        success: true,
+	                    });
+	                }
+	                _ => {}
+	            }
         }
     }
 
@@ -4919,6 +5341,7 @@ fn repair_event_system(
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     active_infos: Res<ActiveInfos>,
+    mut run_score_state: ResMut<RunScoreState>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -4964,6 +5387,13 @@ fn repair_event_system(
 
                     // Repair structure to full health
                     structure.stats.hp = structure.stats.base_hp;
+                    run_score_state
+                        .entry(structure.player_id.0)
+                        .or_insert_with(|| PlayerRunScore {
+                            start_tick: game_tick.0,
+                            ..PlayerRunScore::default()
+                        })
+                        .repairs += 1;
                 }
                 _ => {}
             }
@@ -5111,10 +5541,7 @@ fn spell_damage_event_system(
         if map_event.run_tick < game_tick.0 {
             // Execute event
             match &map_event.event_type {
-                VisibleEvent::SpellDamageEvent {
-                    spell: _,
-                    target_id,
-                } => {
+                VisibleEvent::SpellDamageEvent { spell, target_id } => {
                     debug!("Processing SpellDamageEvent");
                     events_to_remove.push(*map_event_id);
 
@@ -5151,15 +5578,25 @@ fn spell_damage_event_system(
                     }
 
                     // Process spell damage
-                    Combat::process_spell_damage(&mut commands, &game_tick, &caster, &mut target);
+                    let damage = Combat::process_spell_damage(
+                        &mut commands,
+                        &game_tick,
+                        spell.clone(),
+                        &caster,
+                        &mut target,
+                    );
 
                     let target_state_str = target.state.to_string();
+                    let attack_type = match spell {
+                        Spell::ShadowBolt => "Shadow Bolt".to_string(),
+                        Spell::ArcaneBolt => "Arcane Bolt".to_string(),
+                    };
 
                     let damage_event = VisibleEvent::DamageEvent {
                         target_id: target.id.0,
                         target_pos: target.pos.clone(),
-                        attack_type: "Shadow Bolt".to_string(),
-                        damage: 1,
+                        attack_type,
+                        damage,
                         combo: None,
                         state: target_state_str,
                     };
@@ -5384,6 +5821,8 @@ fn use_item_system(
                                         base_hp: item_owner.stats.base_hp,
                                         stamina: 10000, // TODO missing stamina
                                         base_stamina: 10000,
+                                        mana: item_owner.stats.mana.unwrap_or(0),
+                                        base_mana: item_owner.stats.base_mana.unwrap_or(0),
                                         thirst: None,
                                         hunger: None,
                                         tiredness: None,
@@ -5953,6 +6392,9 @@ fn drink_eat_system(
                     if let Ok(mut stats) = stats_query.get_mut(entity) {
                         if let Some(base_stamina) = stats.base_stamina {
                             stats.stamina = Some(base_stamina);
+                        }
+                        if let Some(base_mana) = stats.base_mana {
+                            stats.mana = Some(base_mana);
                         }
                     }
 
@@ -7123,6 +7565,7 @@ fn game_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     mut query: Query<ObjQueryMut>,
     mut perception_updates: ResMut<PerceptionUpdates>,
+    mut player_intro_state: ResMut<PlayerIntroState>,
     mut plans: ResMut<Plans>,
 ) {
     let mut events_to_remove = Vec::new();
@@ -7152,6 +7595,19 @@ fn game_event_system(
                     send_to_client(*player_id, world_packet, &clients);
 
                     perception_updates.insert((*player_id, PerceptionUpdateType::InitPerception));
+                }
+                GameEventType::PlayerNotice {
+                    player_id,
+                    message,
+                    expiry,
+                } => {
+                    events_to_remove.push(*event_id);
+
+                    let packet = ResponsePacket::Notice {
+                        noticemsg: message.to_string(),
+                        expiry: *expiry,
+                    };
+                    send_to_client(*player_id, packet, &clients);
                 }
                 GameEventType::SpawnNPC {
                     npc_type,
@@ -7255,6 +7711,14 @@ fn game_event_system(
                     debug!("Processing SpawnVillager event");
                     events_to_remove.push(*event_id);
 
+                    if player_intro_state
+                        .get(player_id)
+                        .map(|entry| entry.villager_spawned)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
                     let (villager_entity, villager_id) = Encounter::spawn_villager(
                         *player_id,
                         *pos,
@@ -7265,21 +7729,38 @@ fn game_event_system(
                         &game_tick,
                     );
 
-                    commands.trigger(NewObj { entity: villager_entity });
+                    if let Some(intro_entry) = player_intro_state.get_mut(player_id) {
+                        intro_entry.villager_spawned = true;
+                    }
+
+                    commands.trigger(NewObj {
+                        entity: villager_entity,
+                    });
 
                     let speech_event = VisibleEvent::SpeechEvent {
-                        speech: "Thank the gods! I thought I was going to die in that wreck...".to_string(),
+                        speech: "Thank the gods! I thought I was going to die in that wreck..."
+                            .to_string(),
                         intensity: 3,
                     };
                     map_events.new(villager_id.0, game_tick.0 + 10, speech_event);
 
                     // Villager teaches construction plans
                     plans.add(*player_id, "Crafting Tent".to_string(), 0, 0);
-                    plans.add(*player_id, "Burrow".to_string(), 0, 0);
                     plans.add(*player_id, "Watchtower".to_string(), 0, 0);
 
+                    let discovery_packet = ResponsePacket::DiscoveryEvent {
+                        version: 1,
+                        discovery_type: "plan".to_string(),
+                        title: "Plans shared".to_string(),
+                        unlock_source: "Rescued villager".to_string(),
+                        location: Some(format!("{},{}", pos.x, pos.y)),
+                        result: "Crafting Tent turns scavenged supplies into tools; Watchtower turns warning time into safety.".to_string(),
+                    };
+                    send_to_client(*player_id, discovery_packet, &clients);
+
                     let plan_speech = VisibleEvent::SpeechEvent {
-                        speech: "I know how to build a few things. Let me share what I know.".to_string(),
+                        speech: "I know how to build a few things. Let me share what I know."
+                            .to_string(),
                         intensity: 3,
                     };
                     map_events.new(villager_id.0, game_tick.0 + 50, plan_speech);
@@ -7484,6 +7965,21 @@ fn game_event_system(
     }
 }
 
+fn player_intro_state_system(
+    game_tick: Res<GameTick>,
+    mut player_intro_state: ResMut<PlayerIntroState>,
+) {
+    if game_tick.0 % 10 != 0 {
+        return;
+    }
+
+    for intro_entry in player_intro_state.values_mut() {
+        if !intro_entry.danger_unlocked && game_tick.0 >= intro_entry.start_tick + 4800 {
+            intro_entry.danger_unlocked = true;
+        }
+    }
+}
+
 // Tier 1: Spawns Giant Rats when 20+ food items are stored in a storage structure
 fn rat_event_system(
     mut commands: Commands,
@@ -7493,6 +7989,7 @@ fn rat_event_system(
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     map: Res<Map>,
+    player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
 ) {
     // only run this every 20 ticks (2 seconds)
@@ -7521,6 +8018,10 @@ fn rat_event_system(
     }
 
     for (player_id, (id, pos, count)) in food_items_stored.iter() {
+        if intro_is_younger_than(&game_tick, *player_id, &player_intro_state, 4800) {
+            continue;
+        }
+
         if *count >= 20 {
             // Try to find a valid spawn position with max attempts to prevent infinite loop
             let mut spawned = false;
@@ -7566,7 +8067,10 @@ fn rat_event_system(
             }
 
             if spawned {
-                info!("Tier 1 Crisis: Rat Spoilage triggered for player {}", player_id);
+                info!(
+                    "Tier 1 Crisis: Rat Spoilage triggered for player {}",
+                    player_id
+                );
                 crisis_state
                     .entry(*player_id)
                     .or_insert_with(PlayerCrisis::default)
@@ -7583,8 +8087,11 @@ fn initial_encounter_system(
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
+    mut game_events: ResMut<GameEvents>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
+    mut player_intro_state: ResMut<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    objectives: Res<Objectives>,
     dead_query: Query<&Id, With<StateDead>>,
 ) {
     if game_tick.0 % 10 != 0 {
@@ -7594,13 +8101,83 @@ fn initial_encounter_system(
     let dead_ids: std::collections::HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (player_id, entry) in initial_encounter_state.iter_mut() {
-        let crisis = crisis_state.entry(*player_id).or_insert_with(PlayerCrisis::default);
+        let Some(intro_entry) = player_intro_state.get_mut(player_id) else {
+            continue;
+        };
+
+        let crisis = crisis_state
+            .entry(*player_id)
+            .or_insert_with(PlayerCrisis::default);
+        let all_rats_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
+
+        if !intro_entry.shipwreck_chain_started && game_tick.0 >= entry.first_rat_spawn_tick {
+            let first_rat_id = entry.rat_ids[0];
+            let (entity, _, _, _) = Encounter::spawn_npc_with_id(
+                first_rat_id,
+                NPC_PLAYER_ID,
+                entry.spawn_pos,
+                "Giant Rat".to_string(),
+                &mut commands,
+                &mut ids,
+                &mut entity_map,
+                &templates,
+            );
+            commands.trigger(NewObj { entity });
+            intro_entry.shipwreck_chain_started = true;
+            info!(
+                "Initial Encounter: spawning first Giant Rat for player {}",
+                player_id
+            );
+        }
+
+        if game_tick.0 >= entry.second_rat_spawn_tick && !dead_ids.contains(&entry.rat_ids[1]) {
+            let second_rat_id = entry.rat_ids[1];
+            if entity_map.get_entity(second_rat_id).is_none() {
+                let (entity, _, _, _) = Encounter::spawn_npc_with_id(
+                    second_rat_id,
+                    NPC_PLAYER_ID,
+                    entry.spawn_pos,
+                    "Giant Rat".to_string(),
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
+                );
+                commands.trigger(NewObj { entity });
+                intro_entry.shipwreck_chain_started = true;
+                info!(
+                    "Initial Encounter: spawning second Giant Rat for player {}",
+                    player_id
+                );
+            }
+        }
+
+        if !entry.villager_event_scheduled
+            && shipwreck_inspection_can_spawn_villager(
+                game_tick.0,
+                entry,
+                objectives.get(player_id),
+            )
+        {
+            let villager_event_id = ids.new_map_event_id();
+            let villager_event = GameEvent {
+                event_id: villager_event_id,
+                start_tick: game_tick.0,
+                run_tick: game_tick.0 + 1,
+                event_type: GameEventType::SpawnVillager {
+                    pos: entry.villager_spawn_pos,
+                    player_id: *player_id,
+                },
+            };
+            game_events.insert(villager_event.event_id, villager_event);
+            entry.villager_event_scheduled = true;
+        }
 
         // Phase 0: waiting for both rats to die → spawn boar/crab
         if !crisis.initial_encounter {
-            if entry.rat_ids.iter().all(|id| dead_ids.contains(id)) {
+            if game_tick.0 >= entry.phase1_unlock_tick && all_rats_dead {
                 let npc_id = ids.new_obj_id();
-                Encounter::spawn_npc_with_id(
+                let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     npc_id,
                     NPC_PLAYER_ID,
                     entry.spawn_pos,
@@ -7610,9 +8187,13 @@ fn initial_encounter_system(
                     &mut entity_map,
                     &templates,
                 );
+                commands.trigger(NewObj { entity });
                 entry.phase1_npc_id = Some(npc_id);
                 crisis.initial_encounter = true;
-                info!("Initial Encounter: spawning {} after rats killed for player {}", entry.phase1_spawn, player_id);
+                info!(
+                    "Initial Encounter: spawning {} after rats killed for player {}",
+                    entry.phase1_spawn, player_id
+                );
             }
             continue;
         }
@@ -7620,8 +8201,8 @@ fn initial_encounter_system(
         // Phase 1: waiting for the boar/crab to die → spawn spider
         if !crisis.spider_encounter {
             if let Some(phase1_id) = entry.phase1_npc_id {
-                if dead_ids.contains(&phase1_id) {
-                    Encounter::spawn_npc(
+                if game_tick.0 >= entry.spider_unlock_tick && dead_ids.contains(&phase1_id) {
+                    let (entity, _, _, _) = Encounter::spawn_npc(
                         NPC_PLAYER_ID,
                         entry.spawn_pos,
                         "Spider".to_string(),
@@ -7630,8 +8211,12 @@ fn initial_encounter_system(
                         &mut entity_map,
                         &templates,
                     );
+                    commands.trigger(NewObj { entity });
                     crisis.spider_encounter = true;
-                    info!("Initial Encounter: spawning Spider after {} killed for player {}", entry.phase1_spawn, player_id);
+                    info!(
+                        "Initial Encounter: spawning Spider after {} killed for player {}",
+                        entry.phase1_spawn, player_id
+                    );
                 }
             }
         }
@@ -7648,6 +8233,7 @@ fn wolf_pack_system(
     templates: Res<Templates>,
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
+    player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
 ) {
     // Check every 10 ticks (1 second)
@@ -7656,6 +8242,10 @@ fn wolf_pack_system(
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
+        if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
+            continue;
+        }
+
         // Skip players who have already triggered wolf pack
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.wolf_pack {
@@ -7719,7 +8309,10 @@ fn wolf_pack_system(
         }
 
         if spawned {
-            info!("Tier 2 Crisis: Wolf Pack triggered for player {}", player_id.0);
+            info!(
+                "Tier 2 Crisis: Wolf Pack triggered for player {}",
+                player_id.0
+            );
             crisis_state
                 .entry(player_id.0)
                 .or_insert_with(PlayerCrisis::default)
@@ -7807,7 +8400,10 @@ fn goblin_raid_system(
             }
 
             if spawned {
-                info!("Tier 3 Crisis: Goblin Wolf Rider Raid triggered for player {}", player_id);
+                info!(
+                    "Tier 3 Crisis: Goblin Wolf Rider Raid triggered for player {}",
+                    player_id
+                );
                 crisis_state
                     .entry(*player_id)
                     .or_insert_with(PlayerCrisis::default)
@@ -7844,8 +8440,7 @@ fn undead_incursion_system(
 
         let mut spawned = false;
         for _attempt in 0..10 {
-            let spawn_pos =
-                get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
+            let spawn_pos = get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
 
             if let Some(spawn_pos) = spawn_pos {
                 let path = Map::find_path(
@@ -7900,7 +8495,10 @@ fn undead_incursion_system(
         }
 
         if spawned {
-            info!("Tier 4 Crisis: Undead Incursion triggered for player {}", player_id.0);
+            info!(
+                "Tier 4 Crisis: Undead Incursion triggered for player {}",
+                player_id.0
+            );
             crisis_state
                 .entry(player_id.0)
                 .or_insert_with(PlayerCrisis::default)
@@ -7944,8 +8542,7 @@ fn goblin_pillager_system(
     for (player_id, (target_id, pos)) in player_targets.iter() {
         let mut spawned = false;
         for _attempt in 0..10 {
-            let spawn_pos =
-                get_random_pos_at_range(*player_id, pos.x, pos.y, 7, Vec::new(), &map);
+            let spawn_pos = get_random_pos_at_range(*player_id, pos.x, pos.y, 7, Vec::new(), &map);
 
             if let Some(spawn_pos) = spawn_pos {
                 let path = Map::find_path(
@@ -7984,7 +8581,10 @@ fn goblin_pillager_system(
         }
 
         if spawned {
-            info!("Tier 5 Crisis: Goblin Pillager Raid triggered for player {}", player_id);
+            info!(
+                "Tier 5 Crisis: Goblin Pillager Raid triggered for player {}",
+                player_id
+            );
             crisis_state
                 .entry(*player_id)
                 .or_insert_with(PlayerCrisis::default)
@@ -8003,6 +8603,11 @@ fn nightly_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     clients: Res<Clients>,
+    player_intro_state: Res<PlayerIntroState>,
+    objectives: Res<Objectives>,
+    crisis_state: Res<CrisisState>,
+    legendary_threat_state: Res<LegendaryThreatState>,
+    mut run_score_state: ResMut<RunScoreState>,
     mut last_threat_day: Local<HashMap<i32, i32>>,
 ) {
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
@@ -8020,6 +8625,10 @@ fn nightly_threat_system(
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
+        if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
+            continue;
+        }
+
         // Only trigger once per day per player
         if let Some(&last_day) = last_threat_day.get(&player_id.0) {
             if last_day >= current_day {
@@ -8028,25 +8637,43 @@ fn nightly_threat_system(
         }
 
         // Determine threat composition based on day count
-        let (creatures, warning) = match current_day {
-            2 => (vec!["Wolf"; 2], "Wolves howl nearby as darkness falls..."),
-            3 => (vec!["Wolf", "Wolf", "Giant Rat", "Giant Rat"], "The pack grows bolder tonight..."),
-            4 => (vec!["Wolf", "Wolf", "Wolf", "Spider"], "A chill wind carries the sound of many creatures..."),
-            5 => (vec!["Skeleton", "Skeleton", "Zombie"], "The dead stir as night approaches..."),
-            6 => (vec!["Skeleton", "Skeleton", "Zombie", "Zombie", "Shadow"], "An unnatural darkness gathers..."),
-            _ => {
-                // Day 7+: stronger undead waves, scaling
-                let num_zombies = std::cmp::min((current_day - 4) as usize, 5);
-                let num_skeletons = std::cmp::min((current_day - 3) as usize, 4);
-                let mut creatures: Vec<&str> = Vec::new();
-                for _ in 0..num_zombies {
-                    creatures.push("Zombie");
-                }
-                for _ in 0..num_skeletons {
-                    creatures.push("Skeleton");
-                }
-                creatures.push("Shadow");
-                (creatures, "The horde descends upon your settlement!")
+        let player_objectives = objectives.get(&player_id.0);
+        let (creatures, warning) = if survival_director_active(current_day, player_objectives) {
+            let tier = crisis_state.get(&player_id.0).map(crisis_tier).unwrap_or(0);
+            let active_legendary_count = legendary_threat_state
+                .get(&player_id.0)
+                .map(|threat| {
+                    if threat.active && !threat.defeated {
+                        1
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
+            let horde_size = survival_horde_size(current_day, tier, active_legendary_count);
+            (
+                survival_horde_composition(horde_size, current_day),
+                "The survival horde descends upon your settlement!",
+            )
+        } else {
+            match current_day {
+                2 => (vec!["Wolf"; 2], "Wolves howl nearby as darkness falls..."),
+                3 => (
+                    vec!["Wolf", "Wolf", "Giant Rat", "Giant Rat"],
+                    "The pack grows bolder tonight...",
+                ),
+                4 => (
+                    vec!["Wolf", "Wolf", "Wolf", "Spider"],
+                    "A chill wind carries the sound of many creatures...",
+                ),
+                5 => (
+                    vec!["Skeleton", "Skeleton", "Zombie"],
+                    "The dead stir as night approaches...",
+                ),
+                _ => (
+                    vec!["Skeleton", "Skeleton", "Zombie", "Zombie", "Shadow"],
+                    "An unnatural darkness gathers...",
+                ),
             }
         };
 
@@ -8060,8 +8687,7 @@ fn nightly_threat_system(
         // Find spawn position 5-7 tiles from hero
         let mut spawned = false;
         for _attempt in 0..10 {
-            let spawn_pos =
-                get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
+            let spawn_pos = get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
 
             if let Some(spawn_pos) = spawn_pos {
                 let path = Map::find_path(
@@ -8097,9 +8723,622 @@ fn nightly_threat_system(
         }
 
         if spawned {
-            info!("Nightly threat: Day {} spawned {} creatures for player {}",
-                current_day, creatures.len(), player_id.0);
+            info!(
+                "Nightly threat: Day {} spawned {} creatures for player {}",
+                current_day,
+                creatures.len(),
+                player_id.0
+            );
             last_threat_day.insert(player_id.0, current_day);
+            run_score_state
+                .entry(player_id.0)
+                .or_insert_with(|| PlayerRunScore {
+                    start_tick: game_tick.0,
+                    ..PlayerRunScore::default()
+                })
+                .waves_survived += 1;
+        }
+    }
+}
+
+fn find_legendary_hideout_pos(player_id: i32, spawn_pos: Position, map: &Map) -> Position {
+    let mut candidates = Vec::new();
+    for range in 14..=22 {
+        for (x, y) in Map::ring((spawn_pos.x, spawn_pos.y), range) {
+            if Map::is_valid_pos((x, y)) && Map::is_passable(x, y, map) {
+                candidates.push(Position { x, y });
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return get_random_pos_at_range(player_id, spawn_pos.x, spawn_pos.y, 14, Vec::new(), map)
+            .unwrap_or(spawn_pos);
+    }
+
+    let index = rand::thread_rng().gen_range(0..candidates.len());
+    candidates[index]
+}
+
+fn spawn_legendary_npc(
+    player_id: i32,
+    npc_id: i32,
+    pos: Position,
+    template: &str,
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+) -> Entity {
+    let (entity, _, _, _) = Encounter::spawn_npc_with_id(
+        npc_id,
+        NPC_PLAYER_ID,
+        pos,
+        template.to_string(),
+        commands,
+        ids,
+        entity_map,
+        templates,
+    );
+
+    if template == LEGENDARY_BOSS {
+        commands.entity(entity).insert(LegendaryBoss { player_id });
+    }
+
+    entity
+}
+
+fn spawn_legendary_hideout(
+    player_id: i32,
+    pos: Position,
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+) -> (i32, i32) {
+    let hideout_id = ids.new_obj_id();
+    let hideout = Obj::create_nospawn(
+        hideout_id,
+        MERCHANT_PLAYER_ID,
+        LEGENDARY_HIDEOUT.to_string(),
+        pos,
+        State::None,
+        Inventory {
+            owner: hideout_id,
+            items: Vec::new(),
+        },
+        templates,
+    );
+    let hideout_entity = commands
+        .spawn((hideout, LegendaryHideout { player_id }))
+        .id();
+    ids.new_obj(hideout_id, MERCHANT_PLAYER_ID);
+    entity_map.new_obj(hideout_id, hideout_entity);
+    commands.trigger(NewObj {
+        entity: hideout_entity,
+    });
+
+    let boss_id = ids.new_obj_id();
+    let boss_entity = spawn_legendary_npc(
+        player_id,
+        boss_id,
+        pos,
+        LEGENDARY_BOSS,
+        commands,
+        ids,
+        entity_map,
+        templates,
+    );
+    commands.trigger(NewObj {
+        entity: boss_entity,
+    });
+
+    for guard_template in [LEGENDARY_RAIDER, LEGENDARY_RAIDER, LEGENDARY_CAPTAIN] {
+        let guard_id = ids.new_obj_id();
+        let guard_entity = spawn_legendary_npc(
+            player_id,
+            guard_id,
+            pos,
+            guard_template,
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+        let role = if guard_template == LEGENDARY_CAPTAIN {
+            LegendaryFollowerRole::Captain
+        } else {
+            LegendaryFollowerRole::Raider
+        };
+        commands
+            .entity(guard_entity)
+            .insert(LegendaryFollower { player_id, role });
+        commands.trigger(NewObj {
+            entity: guard_entity,
+        });
+    }
+
+    (hideout_id, boss_id)
+}
+
+fn reveal_legendary_hideout(
+    player_id: i32,
+    threat: &mut LegendaryThreat,
+    objectives: &mut Objectives,
+    clients: &Res<Clients>,
+    reason: &str,
+) {
+    if threat.hideout_revealed {
+        return;
+    }
+
+    threat.hideout_revealed = true;
+    objectives
+        .entry(player_id)
+        .or_insert_with(PlayerObjectives::default)
+        .find_legendary_hideout = true;
+
+    let packet = ResponsePacket::DiscoveryEvent {
+        version: 1,
+        discovery_type: "legendary_hideout".to_string(),
+        title: "Dragon hideout revealed".to_string(),
+        unlock_source: reason.to_string(),
+        location: Some(format!("{},{}", threat.hideout_pos.x, threat.hideout_pos.y)),
+        result: "The raids have a source. The Fire Dragon can be ended only inside the hideout."
+            .to_string(),
+    };
+    send_to_client(player_id, packet, clients);
+}
+
+fn spawn_legendary_follower(
+    player_id: i32,
+    role: LegendaryFollowerRole,
+    pos: Position,
+    structure_target: Option<i32>,
+    storage_target: Option<i32>,
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+) -> i32 {
+    let npc_id = ids.new_obj_id();
+    let entity = match role {
+        LegendaryFollowerRole::Torchbearer => {
+            if let Some(target_id) = structure_target {
+                let (entity, _, _, _) = Encounter::spawn_torch_crisis(
+                    npc_id,
+                    NPC_PLAYER_ID,
+                    pos,
+                    LEGENDARY_TORCHBEARER.to_string(),
+                    commands,
+                    ids,
+                    entity_map,
+                    templates,
+                    target_id,
+                );
+                entity
+            } else {
+                spawn_legendary_npc(
+                    player_id,
+                    npc_id,
+                    pos,
+                    LEGENDARY_TORCHBEARER,
+                    commands,
+                    ids,
+                    entity_map,
+                    templates,
+                )
+            }
+        }
+        LegendaryFollowerRole::Thief => {
+            if let Some(target_id) = storage_target {
+                let (entity, _, _, _) = Encounter::spawn_steal_crisis(
+                    npc_id,
+                    NPC_PLAYER_ID,
+                    pos,
+                    LEGENDARY_THIEF.to_string(),
+                    commands,
+                    ids,
+                    entity_map,
+                    templates,
+                    target_id,
+                );
+                entity
+            } else {
+                spawn_legendary_npc(
+                    player_id,
+                    npc_id,
+                    pos,
+                    LEGENDARY_THIEF,
+                    commands,
+                    ids,
+                    entity_map,
+                    templates,
+                )
+            }
+        }
+        LegendaryFollowerRole::Captain => spawn_legendary_npc(
+            player_id,
+            npc_id,
+            pos,
+            LEGENDARY_CAPTAIN,
+            commands,
+            ids,
+            entity_map,
+            templates,
+        ),
+        LegendaryFollowerRole::Raider => spawn_legendary_npc(
+            player_id,
+            npc_id,
+            pos,
+            LEGENDARY_RAIDER,
+            commands,
+            ids,
+            entity_map,
+            templates,
+        ),
+    };
+
+    commands.entity(entity).insert(LegendaryFollower {
+        player_id,
+        role: role.clone(),
+    });
+    commands.trigger(NewObj { entity });
+
+    npc_id
+}
+
+fn legendary_threat_status(threat: &LegendaryThreat) -> String {
+    if threat.defeated {
+        "defeated".to_string()
+    } else if threat.active {
+        "active".to_string()
+    } else if threat.rumor_sent {
+        "rumored".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn legendary_threat_packets(
+    player_id: i32,
+    game_tick: &GameTick,
+    legendary_threat_state: &LegendaryThreatState,
+) -> Vec<network::LegendaryThreatPacket> {
+    let Some(threat) = legendary_threat_state.get(&player_id) else {
+        return Vec::new();
+    };
+
+    let days_active = threat
+        .active_since_tick
+        .map(|tick| ((game_tick.0 - tick).max(0) / GAME_TICKS_PER_DAY) + 1)
+        .unwrap_or(0);
+    let next_attack_eta = if threat.active && !threat.defeated {
+        Some(((threat.next_follower_tick - game_tick.0).max(0)) / TICKS_PER_SEC)
+    } else {
+        None
+    };
+
+    vec![network::LegendaryThreatPacket {
+        name: threat.name.clone(),
+        status: legendary_threat_status(threat),
+        days_active,
+        hideout_known: threat.hideout_revealed,
+        hideout_location: if threat.hideout_revealed {
+            Some(format!("{},{}", threat.hideout_pos.x, threat.hideout_pos.y))
+        } else {
+            None
+        },
+        next_attack_eta,
+        followers_defeated: threat.followers_defeated,
+        captains_defeated: threat.captains_defeated,
+    }]
+}
+
+fn legendary_threat_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    map: Res<Map>,
+    spawn_positions: Res<SpawnPositions>,
+    hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
+    structure_query: Query<(&Id, &PlayerId, &Position), With<ClassStructure>>,
+    storage_query: Query<(&Id, &PlayerId, &Position, &Inventory), With<Storage>>,
+    dead_query: Query<&Id, With<StateDead>>,
+    mut objectives: ResMut<Objectives>,
+    mut legendary_threat_state: ResMut<LegendaryThreatState>,
+) {
+    if game_tick.0 % 10 != 0 {
+        return;
+    }
+
+    let current_day = game_tick.day();
+    if current_day < LEGENDARY_RUMOR_DAY {
+        return;
+    }
+
+    let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
+
+    for (_hero_id, player_id, hero_pos) in hero_query.iter() {
+        let Some(spawn_pos) = spawn_positions.get(&player_id.0).copied() else {
+            continue;
+        };
+
+        if !legendary_threat_state.contains_key(&player_id.0) {
+            let hideout_pos = find_legendary_hideout_pos(player_id.0, spawn_pos, &map);
+            let (hideout_id, boss_id) = spawn_legendary_hideout(
+                player_id.0,
+                hideout_pos,
+                &mut commands,
+                &mut ids,
+                &mut entity_map,
+                &templates,
+            );
+            legendary_threat_state.insert(
+                player_id.0,
+                LegendaryThreat {
+                    name: LEGENDARY_BOSS.to_string(),
+                    hideout_pos,
+                    hideout_id: Some(hideout_id),
+                    boss_id: Some(boss_id),
+                    rumor_sent: true,
+                    active: false,
+                    defeated: false,
+                    hideout_revealed: false,
+                    active_since_tick: None,
+                    defeated_at_tick: None,
+                    next_follower_tick: 0,
+                    waves_sent: 0,
+                    follower_waves: Vec::new(),
+                    followers_defeated: 0,
+                    captains_defeated: 0,
+                },
+            );
+
+            let packet = ResponsePacket::Notice {
+                noticemsg:
+                    "Smoke coils from somewhere inland. Survivors whisper of a Fire Dragon."
+                        .to_string(),
+                expiry: Some(12000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+        }
+
+        let Some(threat) = legendary_threat_state.get_mut(&player_id.0) else {
+            continue;
+        };
+
+        for wave in threat.follower_waves.iter_mut() {
+            if !wave.defeated && wave.ids.iter().all(|id| dead_ids.contains(id)) {
+                wave.defeated = true;
+            }
+        }
+
+        let defeated_wave_count = threat
+            .follower_waves
+            .iter()
+            .filter(|wave| wave.defeated)
+            .count() as i32;
+
+        if !threat.hideout_revealed
+            && (threat.captains_defeated >= LEGENDARY_HIDEOUT_REVEAL_CAPTAINS
+                || defeated_wave_count >= LEGENDARY_HIDEOUT_REVEAL_WAVES)
+        {
+            reveal_legendary_hideout(
+                player_id.0,
+                threat,
+                &mut objectives,
+                &clients,
+                "Follower campaign",
+            );
+        }
+
+        if !threat.hideout_revealed
+            && Map::dist(*hero_pos, threat.hideout_pos) <= LEGENDARY_HIDEOUT_REVEAL_RANGE
+        {
+            reveal_legendary_hideout(player_id.0, threat, &mut objectives, &clients, "Scouting");
+        }
+
+        if current_day >= LEGENDARY_ACTIVE_DAY && !threat.active && !threat.defeated {
+            threat.active = true;
+            threat.active_since_tick = Some(game_tick.0);
+            threat.next_follower_tick = game_tick.0;
+            let packet = ResponsePacket::Notice {
+                noticemsg: "The Fire Dragon has found your trail. Its followers will keep coming until the hideout falls.".to_string(),
+                expiry: Some(14000),
+            };
+            send_to_client(player_id.0, packet, &clients);
+        }
+
+        if !threat.active || threat.defeated || game_tick.0 < threat.next_follower_tick {
+            continue;
+        }
+
+        let structure_target = structure_query
+            .iter()
+            .find(|(_, structure_player_id, _)| structure_player_id.0 == player_id.0)
+            .map(|(id, _, pos)| (id.0, *pos));
+        let storage_target = storage_query
+            .iter()
+            .filter(|(_, storage_player_id, _, _)| storage_player_id.0 == player_id.0)
+            .max_by_key(|(_, _, _, inventory)| inventory.get_total_gold())
+            .map(|(id, _, pos, _)| (id.0, *pos));
+
+        let target_pos = storage_target
+            .map(|(_, pos)| pos)
+            .or_else(|| structure_target.map(|(_, pos)| pos))
+            .unwrap_or(*hero_pos);
+        let spawn_pos =
+            get_random_pos_at_range(player_id.0, target_pos.x, target_pos.y, 6, Vec::new(), &map)
+                .unwrap_or(target_pos);
+
+        threat.waves_sent += 1;
+        let mut roles = vec![LegendaryFollowerRole::Raider];
+        if storage_target.is_some() {
+            roles.push(LegendaryFollowerRole::Thief);
+        }
+        if structure_target.is_some() {
+            roles.push(LegendaryFollowerRole::Torchbearer);
+        }
+        if threat.waves_sent % 3 == 0 {
+            roles.push(LegendaryFollowerRole::Captain);
+        }
+
+        let mut wave_ids = Vec::new();
+        for role in roles {
+            let follower_id = spawn_legendary_follower(
+                player_id.0,
+                role,
+                spawn_pos,
+                structure_target.map(|(id, _)| id),
+                storage_target.map(|(id, _)| id),
+                &mut commands,
+                &mut ids,
+                &mut entity_map,
+                &templates,
+            );
+            wave_ids.push(follower_id);
+        }
+
+        threat.follower_waves.push(LegendaryFollowerWave {
+            ids: wave_ids,
+            defeated: false,
+        });
+
+        let active_ticks = threat
+            .active_since_tick
+            .map(|tick| game_tick.0 - tick)
+            .unwrap_or(0);
+        let delay = if active_ticks >= LEGENDARY_FAST_AFTER_TICKS {
+            LEGENDARY_FAST_WAVE_TICKS
+        } else {
+            LEGENDARY_STANDARD_WAVE_TICKS
+        };
+        threat.next_follower_tick = game_tick.0 + delay;
+    }
+}
+
+fn legendary_death_tracking_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    dead_query: Query<(&Id, Option<&LegendaryFollower>, Option<&LegendaryBoss>), Added<StateDead>>,
+    mut objectives: ResMut<Objectives>,
+    mut run_score_state: ResMut<RunScoreState>,
+    mut legendary_threat_state: ResMut<LegendaryThreatState>,
+) {
+    for (id, follower, boss) in dead_query.iter() {
+        if let Some(follower) = follower {
+            let run_score = run_score_state
+                .entry(follower.player_id)
+                .or_insert_with(|| PlayerRunScore {
+                    start_tick: game_tick.0,
+                    ..PlayerRunScore::default()
+                });
+            run_score.enemies_killed += 1;
+
+            if follower.role == LegendaryFollowerRole::Captain {
+                run_score.elites_killed += 1;
+                run_score.captains_killed += 1;
+            }
+
+            if let Some(threat) = legendary_threat_state.get_mut(&follower.player_id) {
+                threat.followers_defeated += 1;
+                if follower.role == LegendaryFollowerRole::Captain {
+                    threat.captains_defeated += 1;
+                }
+
+                if threat.captains_defeated >= LEGENDARY_HIDEOUT_REVEAL_CAPTAINS {
+                    reveal_legendary_hideout(
+                        follower.player_id,
+                        threat,
+                        &mut objectives,
+                        &clients,
+                        "Captain defeated",
+                    );
+                }
+            }
+        }
+
+        if let Some(boss) = boss {
+            let run_score =
+                run_score_state
+                    .entry(boss.player_id)
+                    .or_insert_with(|| PlayerRunScore {
+                        start_tick: game_tick.0,
+                        ..PlayerRunScore::default()
+                    });
+            run_score.legendary_kills += 1;
+            run_score.hideouts_cleared += 1;
+
+            objectives
+                .entry(boss.player_id)
+                .or_insert_with(PlayerObjectives::default)
+                .defeat_ashen_warlord = true;
+
+            if let Some(threat) = legendary_threat_state.get_mut(&boss.player_id) {
+                threat.active = false;
+                threat.defeated = true;
+                threat.defeated_at_tick = Some(game_tick.0);
+                reveal_legendary_hideout(
+                    boss.player_id,
+                    threat,
+                    &mut objectives,
+                    &clients,
+                    "Legendary defeated",
+                );
+            }
+
+            let packet = ResponsePacket::DiscoveryEvent {
+                version: 1,
+                discovery_type: "legendary_victory".to_string(),
+                title: "Fire Dragon defeated".to_string(),
+                unlock_source: "Hideout cleared".to_string(),
+                location: None,
+                result: format!("The Fire Dragon falls. The raids stop, and your legend grows around kill {}.", id.0),
+            };
+            send_to_client(boss.player_id, packet, &clients);
+        }
+    }
+}
+
+fn run_score_kill_tracking_system(
+    game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    dead_query: Query<
+        (&Template, Option<&LastAttacker>),
+        (
+            With<SubclassNPC>,
+            Added<StateDead>,
+            Without<LegendaryFollower>,
+            Without<LegendaryBoss>,
+        ),
+    >,
+    mut run_score_state: ResMut<RunScoreState>,
+) {
+    for (template, last_attacker) in dead_query.iter() {
+        let Some(last_attacker) = last_attacker else {
+            continue;
+        };
+        let Some(player_id) = ids.get_player(last_attacker.id) else {
+            continue;
+        };
+        if !player::is_player(player_id) {
+            continue;
+        }
+
+        let run_score = run_score_state
+            .entry(player_id)
+            .or_insert_with(|| PlayerRunScore {
+                start_tick: game_tick.0,
+                ..PlayerRunScore::default()
+            });
+        run_score.enemies_killed += 1;
+
+        if is_elite_enemy_template(&template.0) {
+            run_score.elites_killed += 1;
         }
     }
 }
@@ -8146,7 +9385,7 @@ fn map_event_system(
             // Day 5
             (5, 600..=700) => Some("The island's dangers grow. Your settlement must be strong to survive."),
             // Day 7+, every morning
-            (d, 600..=700) if d >= 7 && d % 2 == 1 => Some("The darkness beyond your walls grows deeper. Fortify your defenses."),
+            (d, 600..=699) if d >= 7 && d % 2 == 1 => Some("The darkness beyond your walls grows deeper. Fortify your defenses."),
             _ => None,
         };
 
@@ -8167,38 +9406,88 @@ fn objectives_system(
     clients: Res<Clients>,
     hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
     structure_query: Query<(&PlayerId, &Template), With<ClassStructure>>,
+    storage_query: Query<(&PlayerId, &Position, &Inventory), With<Storage>>,
     villager_query: Query<&PlayerId, With<SubclassVillager>>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    dead_query: Query<&Id, With<StateDead>>,
+    spawn_positions: Res<SpawnPositions>,
+    crisis_state: Res<CrisisState>,
+    legendary_threat_state: Res<LegendaryThreatState>,
     mut objectives: ResMut<Objectives>,
+    mut run_score_state: ResMut<RunScoreState>,
 ) {
     // Check every 50 ticks (5 seconds)
     if game_tick.0 % 50 != 0 {
         return;
     }
 
-    for (player_id, _pos) in hero_query.iter() {
+    let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
+
+    for (player_id, hero_pos) in hero_query.iter() {
+        let player_structures: Vec<String> = structure_query
+            .iter()
+            .filter(|(pid, _)| pid.0 == player_id.0)
+            .map(|(_, template)| template.0.clone())
+            .collect();
+        let structure_count = player_structures.len();
+        let has_campfire = player_structures.iter().any(|name| name == "Campfire");
+        let has_shelter = player_structures.iter().any(|name| {
+            name == "Small Tent" || name == "Large Tent" || name == "Yurt" || name == "Large Yurt"
+        });
+        let has_expansion = player_structures.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "Crafting Tent" | "Mine" | "Lumbercamp" | "Quarry" | "Trapper" | "Farm"
+            )
+        });
+        let starting_rats_dead = initial_encounter_state
+            .get(&player_id.0)
+            .map(|entry| entry.rat_ids.iter().all(|id| dead_ids.contains(id)))
+            .unwrap_or(false);
+
         let obj = objectives
             .entry(player_id.0)
             .or_insert_with(PlayerObjectives::default);
 
         // Check: Build a Campfire
-        if !obj.build_campfire {
-            for (struct_player_id, template) in structure_query.iter() {
-                if struct_player_id.0 == player_id.0 && template.0 == "Campfire" {
-                    obj.build_campfire = true;
-                    break;
-                }
-            }
+        if !obj.build_campfire && has_campfire {
+            obj.build_campfire = true;
+            send_discovery_event(
+                player_id.0,
+                "settlement",
+                "Campfire lesson learned",
+                "First sheltercraft",
+                None,
+                "Fire extends sight and warmth. Night threats become easier to read around light.",
+                &clients,
+            );
+        }
+
+        if !obj.win_first_fight && starting_rats_dead {
+            obj.win_first_fight = true;
+            send_discovery_event(
+                player_id.0,
+                "combat",
+                "First fight survived",
+                "Shipwreck attack",
+                None,
+                "Fast creatures punish hesitation. Quick attacks build control; block buys time.",
+                &clients,
+            );
         }
 
         // Check: Build 3 Structures
-        if !obj.build_3_structures {
-            let count = structure_query
-                .iter()
-                .filter(|(pid, _)| pid.0 == player_id.0)
-                .count();
-            if count >= 3 {
-                obj.build_3_structures = true;
-            }
+        if !obj.build_3_structures && structure_count >= 3 {
+            obj.build_3_structures = true;
+            send_discovery_event(
+                player_id.0,
+                "settlement",
+                "A working camp",
+                "Construction",
+                None,
+                "A camp becomes safer when each building solves a different problem: light, rest, storage, defense.",
+                &clients,
+            );
         }
 
         // Check: Recruit a Villager
@@ -8206,14 +9495,45 @@ fn objectives_system(
             for villager_pid in villager_query.iter() {
                 if villager_pid.0 == player_id.0 {
                     obj.recruit_villager = true;
+                    send_discovery_event(
+                        player_id.0,
+                        "villager",
+                        "A settler joins you",
+                        "Shipwreck rescue",
+                        None,
+                        "Villagers turn survival into a settlement: assign repeatable work and protect their needs.",
+                        &clients,
+                    );
                     break;
                 }
             }
         }
 
+        if !obj.choose_expansion && has_expansion {
+            obj.choose_expansion = true;
+            send_discovery_event(
+                player_id.0,
+                "progression",
+                "Expansion path chosen",
+                "Settlement plan",
+                None,
+                "Resource camps feed crafting; crafting structures turn discoveries into stronger tools and defenses.",
+                &clients,
+            );
+        }
+
         // Check: Survive 5 Nights (day >= 6 means survived 5 nights)
         if !obj.survive_5_nights && game_tick.day() >= 6 {
             obj.survive_5_nights = true;
+            send_discovery_event(
+                player_id.0,
+                "survival",
+                "Five nights survived",
+                "Island pressure",
+                None,
+                "Longer survival raises the stakes. Watch threat pressure before storing wealth or pushing deep inland.",
+                &clients,
+            );
         }
 
         // Always send current state — ensures reconnecting clients get objectives
@@ -8225,6 +9545,403 @@ fn objectives_system(
             survive_5_nights: obj.survive_5_nights,
         };
         send_to_client(player_id.0, packet, &clients);
+
+        let objective_state_packet = build_objective_state_packet(
+            obj,
+            structure_count as i32,
+            has_shelter,
+            starting_rats_dead,
+            game_tick.day(),
+        );
+        send_to_client(player_id.0, objective_state_packet, &clients);
+
+        let threat_state_packet = build_threat_state_packet(
+            player_id.0,
+            hero_pos,
+            &game_tick,
+            &storage_query,
+            &spawn_positions,
+            &crisis_state,
+            &legendary_threat_state,
+        );
+        if let ResponsePacket::ThreatState { pressure_level, .. } = &threat_state_packet {
+            let pressure_value = pressure_level_value(pressure_level);
+            let run_score = run_score_state
+                .entry(player_id.0)
+                .or_insert_with(|| PlayerRunScore {
+                    start_tick: game_tick.0,
+                    ..PlayerRunScore::default()
+                });
+            run_score.highest_pressure_level = run_score.highest_pressure_level.max(pressure_value);
+        }
+        send_to_client(player_id.0, threat_state_packet, &clients);
+    }
+}
+
+fn send_discovery_event(
+    player_id: i32,
+    discovery_type: &str,
+    title: &str,
+    unlock_source: &str,
+    location: Option<String>,
+    result: &str,
+    clients: &Res<Clients>,
+) {
+    let packet = ResponsePacket::DiscoveryEvent {
+        version: 1,
+        discovery_type: discovery_type.to_string(),
+        title: title.to_string(),
+        unlock_source: unlock_source.to_string(),
+        location,
+        result: result.to_string(),
+    };
+    send_to_client(player_id, packet, clients);
+}
+
+fn objective_progress(
+    id: &str,
+    title: &str,
+    done: bool,
+    current_id: &str,
+    category: &str,
+    target: Option<&str>,
+    action_hint: &str,
+    lesson: &str,
+    reward: &str,
+    progress: Option<i32>,
+    goal: Option<i32>,
+) -> network::ObjectiveProgress {
+    let state = if done {
+        "complete"
+    } else if id == current_id {
+        "active"
+    } else {
+        "locked"
+    };
+
+    network::ObjectiveProgress {
+        id: id.to_string(),
+        title: title.to_string(),
+        state: state.to_string(),
+        category: category.to_string(),
+        target: target.map(|value| value.to_string()),
+        action_hint: action_hint.to_string(),
+        lesson: lesson.to_string(),
+        reward: reward.to_string(),
+        progress,
+        goal,
+    }
+}
+
+fn first_incomplete_objective_id(obj: &PlayerObjectives, has_shelter: bool) -> String {
+    if !obj.scavenge_shipwreck {
+        return "scavenge_shipwreck".to_string();
+    }
+    if !obj.build_campfire {
+        return "build_campfire".to_string();
+    }
+    if !obj.win_first_fight {
+        return "win_first_fight".to_string();
+    }
+    if !obj.recruit_villager {
+        return "recruit_villager".to_string();
+    }
+    if !has_shelter && !obj.build_3_structures {
+        return "build_shelter_storage".to_string();
+    }
+    if !obj.choose_expansion {
+        return "choose_expansion".to_string();
+    }
+    if !obj.survive_5_nights {
+        return "survive_5_nights".to_string();
+    }
+    if !obj.find_legendary_hideout {
+        return "find_legendary_hideout".to_string();
+    }
+    if !obj.defeat_ashen_warlord {
+        return "defeat_ashen_warlord".to_string();
+    }
+
+    "complete".to_string()
+}
+
+fn build_objective_state_packet(
+    obj: &PlayerObjectives,
+    structure_count: i32,
+    has_shelter: bool,
+    starting_rats_dead: bool,
+    day: i32,
+) -> ResponsePacket {
+    let current_id = first_incomplete_objective_id(obj, has_shelter);
+    let objectives = vec![
+        objective_progress(
+            "scavenge_shipwreck",
+            "Scavenge the shipwreck",
+            obj.scavenge_shipwreck,
+            &current_id,
+            "First Hour",
+            Some("Shipwreck"),
+            "Inspect the wreck and move useful supplies into your camp.",
+            "The island starts as a pattern hunt: inspect, learn, take what solves the next danger.",
+            "Starting supplies, POI awareness, and your first survival clue.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "build_campfire",
+            "Build a campfire",
+            obj.build_campfire,
+            &current_id,
+            "Settlement",
+            Some("Campfire"),
+            "Use Stick and Resin to place and build a Campfire near your burrow.",
+            "Light is safety: it expands what you can see and makes night pressure legible.",
+            "Warmth, vision, and a center for the first camp.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "win_first_fight",
+            "Win the first fight",
+            obj.win_first_fight || starting_rats_dead,
+            &current_id,
+            "Combat",
+            Some("Giant Rat"),
+            "Read the threat, use quick attacks for control, and block if you need time.",
+            "Combat is a grammar: quick, precise, fierce, and block each mean something.",
+            "XP, loot, and confidence to leave the firelight.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "recruit_villager",
+            "Rescue a settler",
+            obj.recruit_villager,
+            &current_id,
+            "Villager",
+            Some("Shipwreck survivor"),
+            "Keep the survivor alive and use their knowledge to unlock early plans.",
+            "Villagers are not just workers; they reveal needs, skills, and settlement loops.",
+            "Crafting Tent and Watchtower plans.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "build_shelter_storage",
+            "Solve rest and storage",
+            has_shelter || obj.build_3_structures,
+            &current_id,
+            "Settlement",
+            Some("Shelter or storage"),
+            "Build shelter for fatigue and storage for supplies, then add a defensive structure.",
+            "Buildings should answer visible problems, not just fill space.",
+            "A camp that can survive work, weather, and the next night.",
+            Some(structure_count.min(3)),
+            Some(3),
+        ),
+        objective_progress(
+            "choose_expansion",
+            "Choose an expansion path",
+            obj.choose_expansion,
+            &current_id,
+            "Progression",
+            Some("Crafting Tent or resource camp"),
+            "Build a Crafting Tent, Mine, Lumbercamp, Quarry, Trapper, or Farm.",
+            "Expansion creates strategy: gather better, craft better, defend better.",
+            "A repeatable resource or crafting loop.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "survive_5_nights",
+            "Survive five nights",
+            obj.survive_5_nights,
+            &current_id,
+            "Survival",
+            Some("Nightfall"),
+            "Use warnings, walls, light, gear, and villagers to prepare before dusk.",
+            "Threats are pressure signals. Mastery means preparing before the attack.",
+            "A stable foothold and a score worth remembering.",
+            Some((day - 1).clamp(0, 5)),
+            Some(5),
+        ),
+        objective_progress(
+            "find_legendary_hideout",
+            "Find the source of the raids",
+            obj.find_legendary_hideout,
+            &current_id,
+            "Legendary Threat",
+            Some("Fire Dragon"),
+            "Defeat captains, break follower waves, or scout inland until the hideout is revealed.",
+            "Late survival is not only defense: pressure has a source, and veterans hunt it.",
+            "The Fire Dragon's hideout location.",
+            None,
+            None,
+        ),
+        objective_progress(
+            "defeat_ashen_warlord",
+            "Eliminate the Fire Dragon",
+            obj.defeat_ashen_warlord,
+            &current_id,
+            "Legendary Threat",
+            Some("Dragon Hideout"),
+            "Prepare supplies, breach the hideout, and defeat the Fire Dragon to stop its followers.",
+            "A legendary enemy is a campaign, not a single fight.",
+            "Follower raids stop and your final score gains a major valor bonus.",
+            None,
+            None,
+        ),
+    ];
+
+    ResponsePacket::ObjectiveState {
+        version: 1,
+        current_id,
+        objectives,
+    }
+}
+
+fn risk_severity(current: i32, threshold: i32) -> String {
+    if current >= threshold {
+        "high".to_string()
+    } else if current >= (threshold * 2) / 3 {
+        "medium".to_string()
+    } else if current > 0 {
+        "low".to_string()
+    } else {
+        "quiet".to_string()
+    }
+}
+
+fn build_threat_state_packet(
+    player_id: i32,
+    hero_pos: &Position,
+    game_tick: &GameTick,
+    storage_query: &Query<(&PlayerId, &Position, &Inventory), With<Storage>>,
+    spawn_positions: &SpawnPositions,
+    crisis_state: &CrisisState,
+    legendary_threat_state: &LegendaryThreatState,
+) -> ResponsePacket {
+    let mut food_stored = 0;
+    let mut gold_stored = 0;
+
+    for (storage_player_id, _pos, inventory) in storage_query.iter() {
+        if storage_player_id.0 != player_id {
+            continue;
+        }
+
+        gold_stored += inventory.get_total_gold();
+        for item in inventory.items.iter() {
+            if item.class == FOOD {
+                food_stored += item.quantity;
+            }
+        }
+    }
+
+    let distance_from_spawn = spawn_positions
+        .get(&player_id)
+        .map(|spawn| Map::dist(*spawn, *hero_pos))
+        .unwrap_or(0) as i32;
+    let ticks_in_day = game_tick.0.rem_euclid(GAME_TICKS_PER_DAY);
+    let ticks_to_dusk = if ticks_in_day <= DUSK {
+        DUSK - ticks_in_day
+    } else {
+        GAME_TICKS_PER_DAY - ticks_in_day + DUSK
+    };
+    let nights_survived = (game_tick.day() - 1).max(0);
+
+    let known_risks = vec![
+        network::ThreatRisk {
+            id: "food_spoilage".to_string(),
+            label: "Food stores attract rats".to_string(),
+            severity: risk_severity(food_stored, 20),
+            trigger_hint: "20 food in storage can trigger a rat spoilage crisis.".to_string(),
+            counter_hint: "Cook, spend, split, or defend food stores before they pile up."
+                .to_string(),
+            current: Some(food_stored),
+            threshold: Some(20),
+        },
+        network::ThreatRisk {
+            id: "gold_raid".to_string(),
+            label: "Gold attracts raiders".to_string(),
+            severity: risk_severity(gold_stored, 30),
+            trigger_hint: "30 gold in storage can draw mounted thieves.".to_string(),
+            counter_hint: "Build walls, watchtowers, or invest gold before hoarding it."
+                .to_string(),
+            current: Some(gold_stored),
+            threshold: Some(30),
+        },
+        network::ThreatRisk {
+            id: "wilderness_distance".to_string(),
+            label: "Distance from camp raises danger".to_string(),
+            severity: risk_severity(distance_from_spawn, 8),
+            trigger_hint: "Traveling 8 tiles from spawn can draw a wolf pack.".to_string(),
+            counter_hint: "Scout with stamina, light, and an escape path.".to_string(),
+            current: Some(distance_from_spawn),
+            threshold: Some(8),
+        },
+        network::ThreatRisk {
+            id: "nightfall".to_string(),
+            label: "Nightfall pressure".to_string(),
+            severity: if ticks_to_dusk <= 300 {
+                "high"
+            } else if ticks_to_dusk <= 700 {
+                "medium"
+            } else {
+                "low"
+            }
+            .to_string(),
+            trigger_hint: "Dusk brings nightly pressure after the first day.".to_string(),
+            counter_hint: "Return to light, finish building, and keep villagers close before dusk."
+                .to_string(),
+            current: Some(ticks_to_dusk),
+            threshold: Some(300),
+        },
+    ];
+
+    let crisis = crisis_state.get(&player_id).cloned().unwrap_or_default();
+    let active_crisis_count = crisis_tier(&crisis);
+    let active_legendary_count = legendary_threat_state
+        .get(&player_id)
+        .map(|threat| {
+            if threat.active && !threat.defeated {
+                1
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0);
+    let high_risks = known_risks
+        .iter()
+        .filter(|risk| risk.severity == "high")
+        .count() as i32;
+    let pressure_score = high_risks
+        + active_crisis_count
+        + active_legendary_count
+        + if nights_survived >= 3 { 1 } else { 0 };
+    let pressure_level = match pressure_score {
+        0 => "Calm",
+        1 => "Building",
+        2 => "High",
+        _ => "Crisis",
+    }
+    .to_string();
+
+    let next_night_warning = if game_tick.day() <= 1 {
+        "First day: learn the camp loop before the island pushes back.".to_string()
+    } else if ticks_to_dusk <= 300 {
+        "Dusk is close. Stop long errands and prepare the camp.".to_string()
+    } else {
+        "Use daylight to solve the highest visible risk before nightfall.".to_string()
+    };
+
+    ResponsePacket::ThreatState {
+        version: 1,
+        day: game_tick.day(),
+        phase: game_tick.time_of_day(),
+        pressure_level,
+        next_night_warning,
+        known_risks,
+        legendary_threats: legendary_threat_packets(player_id, game_tick, legendary_threat_state),
     }
 }
 
@@ -8257,14 +9974,23 @@ fn weather_cycle_system(
         1 => vec![Weather::ClearSunny, Weather::Fog],
         2..=3 => vec![Weather::ClearSunny, Weather::HeavyRain, Weather::Fog],
         4..=6 => vec![
-            Weather::ClearSunny, Weather::HeavyRain, Weather::Fog,
-            Weather::ColdSnap, Weather::Snow, Weather::Heatwave,
+            Weather::ClearSunny,
+            Weather::HeavyRain,
+            Weather::Fog,
+            Weather::ColdSnap,
+            Weather::Snow,
+            Weather::Heatwave,
             Weather::Thunderstorm,
         ],
         _ => vec![
-            Weather::ClearSunny, Weather::HeavyRain, Weather::Fog,
-            Weather::ColdSnap, Weather::Snow, Weather::Blizzard,
-            Weather::Heatwave, Weather::Thunderstorm,
+            Weather::ClearSunny,
+            Weather::HeavyRain,
+            Weather::Fog,
+            Weather::ColdSnap,
+            Weather::Snow,
+            Weather::Blizzard,
+            Weather::Heatwave,
+            Weather::Thunderstorm,
         ],
     };
 
@@ -8287,9 +10013,19 @@ fn weather_cycle_system(
 
     // Notify players about weather conditions
     if !weather_areas.is_empty() {
-        let weather_names: Vec<String> = weather_areas.iter().map(|w| w.weather.to_string()).collect();
-        let unique_names: Vec<String> = weather_names.into_iter().collect::<std::collections::HashSet<_>>().into_iter().collect();
-        let weather_msg = format!("Weather report: {} observed on the island.", unique_names.join(", "));
+        let weather_names: Vec<String> = weather_areas
+            .iter()
+            .map(|w| w.weather.to_string())
+            .collect();
+        let unique_names: Vec<String> = weather_names
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let weather_msg = format!(
+            "Weather report: {} observed on the island.",
+            unique_names.join(", ")
+        );
 
         for player_id in hero_query.iter() {
             let packet = ResponsePacket::Notice {
@@ -8351,7 +10087,10 @@ fn weather_effects_system(
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 300 {
                 let packet = ResponsePacket::Notice {
-                    noticemsg: format!("The {} chills you to the bone! Seek shelter or warmth.", weather.to_string()),
+                    noticemsg: format!(
+                        "The {} chills you to the bone! Seek shelter or warmth.",
+                        weather.to_string()
+                    ),
                     expiry: Some(5000),
                 };
                 send_to_client(player_id.0, packet, &clients);
@@ -8465,9 +10204,9 @@ fn morale_system(
         }
 
         // +10 if food available in player's structures
-        let has_food = structure_query.iter().any(|(pid, inv)| {
-            pid.0 == player_id.0 && inv.get_by_class(FOOD.to_string()).is_some()
-        });
+        let has_food = structure_query
+            .iter()
+            .any(|(pid, inv)| pid.0 == player_id.0 && inv.get_by_class(FOOD.to_string()).is_some());
         if has_food {
             new_morale += 10.0;
         } else {
@@ -8475,18 +10214,24 @@ fn morale_system(
         }
 
         // -15 if any ally died recently (within last 600 ticks / 1 min)
-        let recent_death = dead_query.iter().any(|(pid, dead)| {
-            pid.0 == player_id.0 && (game_tick.0 - dead.dead_at) < 600
-        });
+        let recent_death = dead_query
+            .iter()
+            .any(|(pid, dead)| pid.0 == player_id.0 && (game_tick.0 - dead.dead_at) < 600);
         if recent_death {
             new_morale -= 15.0;
         }
 
         // Weather affects morale
         if let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) {
-            if weather.is_cold() { new_morale -= 10.0; }
-            if weather.is_hot() { new_morale -= 5.0; }
-            if weather.is_rainy() { new_morale -= 5.0; }
+            if weather.is_cold() {
+                new_morale -= 10.0;
+            }
+            if weather.is_hot() {
+                new_morale -= 5.0;
+            }
+            if weather.is_rainy() {
+                new_morale -= 5.0;
+            }
         }
 
         // Clamp morale to 0-100
@@ -8552,7 +10297,7 @@ pub struct MonolithInvestigation(pub HashMap<i32, MonolithProgress>);
 // Victory tracking per player
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PlayerVictory {
-    pub rescue_progress: i32,   // Ticks survived (for day counting)
+    pub rescue_progress: i32, // Ticks survived (for day counting)
     pub prosperity: bool,
     pub conquest: bool,
 }
@@ -8840,6 +10585,8 @@ fn resurrect_system(
                     base_hp: hero.stats.base_hp,
                     stamina: hero.stats.stamina.unwrap_or(100),
                     base_stamina: hero.stats.base_stamina.unwrap_or(100),
+                    mana: hero.stats.mana.unwrap_or(0),
+                    base_mana: hero.stats.base_mana.unwrap_or(0),
                     thirst: None,
                     hunger: None,
                     tiredness: None,
@@ -9125,7 +10872,6 @@ fn update_obj_observer(
     mut query: Query<UpdateObjQuery>,
     mut viewshed_query: Query<&mut Viewshed>,
 ) {
-
     let Ok(mut obj) = query.get_mut(update_obj.entity) else {
         error!("Query failed to find entity {:?}", update_obj.entity);
         return;
@@ -9144,7 +10890,9 @@ fn update_obj_observer(
                     event_id: Uuid::new_v4(),
                     obj_id: obj.id.0,
                     run_tick: game_tick.0,
-                    event_type: VisibleEvent::UpdateObjEvent { attrs: update_obj.attrs.clone() },
+                    event_type: VisibleEvent::UpdateObjEvent {
+                        attrs: update_obj.attrs.clone(),
+                    },
                 };
 
                 visible_events.push(map_event.clone());
@@ -9155,8 +10903,7 @@ fn update_obj_observer(
                 let template = templates.obj_templates.get(value.to_string());
 
                 if let Some(images) = template.images {
-                    let random_image =
-                        rand::thread_rng().gen_range(0..images.len());
+                    let random_image = rand::thread_rng().gen_range(0..images.len());
                     obj.misc.image = images[random_image].clone();
                 } else {
                     obj.misc.image = Obj::template_to_image(&template.template);
@@ -9167,7 +10914,9 @@ fn update_obj_observer(
                     event_id: Uuid::new_v4(),
                     obj_id: obj.id.0,
                     run_tick: game_tick.0,
-                    event_type: VisibleEvent::UpdateObjEvent { attrs: update_obj.attrs.clone() },
+                    event_type: VisibleEvent::UpdateObjEvent {
+                        attrs: update_obj.attrs.clone(),
+                    },
                 };
 
                 visible_events.push(map_event.clone());
@@ -9179,7 +10928,9 @@ fn update_obj_observer(
                     event_id: Uuid::new_v4(),
                     obj_id: obj.id.0,
                     run_tick: game_tick.0,
-                    event_type: VisibleEvent::UpdateObjEvent { attrs: update_obj.attrs.clone() },
+                    event_type: VisibleEvent::UpdateObjEvent {
+                        attrs: update_obj.attrs.clone(),
+                    },
                 };
 
                 visible_events.push(map_event.clone());
@@ -9212,17 +10963,14 @@ fn update_obj_observer(
 
                 viewshed.range = new_range;
 
-                perception_updates.insert((
-                    obj.player_id.0,
-                    PerceptionUpdateType::UpdatePerception,
-                ));
+                perception_updates
+                    .insert((obj.player_id.0, PerceptionUpdateType::UpdatePerception));
             }
             _ => {
                 error!("Unknown attribute {:?}", attr);
             }
         }
     }
-
 }
 
 fn start_build_observer(
@@ -9936,8 +11684,25 @@ fn true_death_system(
     mut explored_map: ResMut<ExploredMap>,
     mut map_events: ResMut<MapEvents>,
     player_stats: Res<PlayerStats>,
-    mut crisis_state: ResMut<CrisisState>,
-    mut spawn_positions: ResMut<SpawnPositions>,
+    (
+        mut crisis_state,
+        mut spawn_positions,
+        objectives,
+        monolith_investigation,
+        prices,
+        templates,
+        mut run_score_state,
+        mut legendary_threat_state,
+    ): (
+        ResMut<CrisisState>,
+        ResMut<SpawnPositions>,
+        Res<Objectives>,
+        Res<MonolithInvestigation>,
+        Res<Prices>,
+        Res<Templates>,
+        ResMut<RunScoreState>,
+        ResMut<LegendaryThreatState>,
+    ),
     mut hero_query: Query<
         (
             Entity,
@@ -9951,7 +11716,8 @@ fn true_death_system(
         ),
         With<SubclassHero>,
     >,
-    villager_query: Query<(Entity, &PlayerId, &Id), With<SubclassVillager>>,
+    score_obj_query: Query<(&PlayerId, &Inventory, &Class, &Template, &State)>,
+    villager_query: Query<(Entity, &PlayerId, &Id, Option<&StateDead>), With<SubclassVillager>>,
 ) {
     for (entity, player_id, id, name, template, skills, true_death, state_dead) in
         hero_query.iter_mut()
@@ -9959,21 +11725,104 @@ fn true_death_system(
         if (game_tick.0 - true_death.true_death_at) > 10 * TICKS_PER_SEC {
             info!("Hero true death: {:?}", id.0);
 
-            // Calculate highest crisis tier survived (+1000 XP per tier)
-            let crisis_tier = if let Some(crisis) = crisis_state.get(&player_id.0) {
-                let mut tier = 0;
-                if crisis.rat_spoilage { tier = 1; }
-                if crisis.wolf_pack { tier = 2; }
-                if crisis.goblin_raid { tier = 3; }
-                if crisis.undead_incursion { tier = 4; }
-                if crisis.goblin_pillager { tier = 5; }
-                tier
-            } else {
-                0
-            };
+            // Calculate highest crisis tier survived (+1000 XP per tier for legacy XP)
+            let crisis_tier = crisis_state.get(&player_id.0).map(crisis_tier).unwrap_or(0);
 
             let crisis_bonus_xp = crisis_tier * 1000;
             let total_xp = skills.get_total_xp() + crisis_bonus_xp;
+
+            let run_score = run_score_state
+                .get(&player_id.0)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut total_wealth_value = 0;
+            let mut structures_alive = 0;
+            let mut upgrades = 0;
+
+            for (obj_player_id, inventory, class, obj_template, obj_state) in score_obj_query.iter()
+            {
+                if obj_player_id.0 != player_id.0 || Obj::is_dead(obj_state) {
+                    continue;
+                }
+
+                for item in inventory.items.iter() {
+                    if item.class == GOLD {
+                        total_wealth_value += item.quantity;
+                    } else {
+                        let item_value = prices
+                            .find_sell_price(
+                                item.name.clone(),
+                                item.subclass.clone(),
+                                item.class.clone(),
+                            )
+                            .unwrap_or(1);
+                        total_wealth_value += item_value.max(1) * item.quantity;
+                    }
+                }
+
+                if class.0 == CLASS_STRUCTURE {
+                    structures_alive += 1;
+                    let template = templates.obj_templates.get(obj_template.0.clone());
+                    total_wealth_value += template.build_cost.unwrap_or(0);
+                    if template.level.unwrap_or(0) > 0 {
+                        upgrades += 1;
+                    }
+                }
+            }
+
+            let villagers_alive = villager_query
+                .iter()
+                .filter(|(_, villager_player_id, _, dead)| {
+                    villager_player_id.0 == player_id.0 && dead.is_none()
+                })
+                .count() as i32;
+
+            let active_legendary_days = legendary_threat_state
+                .get(&player_id.0)
+                .and_then(|threat| threat.active_since_tick)
+                .map(|active_since| {
+                    let end_tick = legendary_threat_state
+                        .get(&player_id.0)
+                        .and_then(|threat| threat.defeated_at_tick)
+                        .unwrap_or(game_tick.0);
+                    ((end_tick - active_since).max(0) / GAME_TICKS_PER_DAY) + 1
+                })
+                .unwrap_or(0);
+
+            let monolith_sealed = monolith_investigation
+                .get(&player_id.0)
+                .map(|progress| progress.sealed)
+                .unwrap_or(false);
+            let completed_objectives = completed_objectives_count(objectives.get(&player_id.0));
+            let total_skill_levels: i32 = skills.get_levels().values().sum();
+            let days_survived = (game_tick.day() - 1).max(0);
+            let nights_survived = days_survived;
+            let score_inputs = RunScoreInputs {
+                days_survived,
+                nights_survived,
+                waves_survived: run_score.waves_survived,
+                active_legendary_days,
+                hero_rank: template.0.clone(),
+                total_skill_levels,
+                total_xp,
+                total_wealth_value,
+                structures_alive,
+                upgrades,
+                repairs: run_score.repairs,
+                villagers_alive,
+                crisis_tier,
+                enemies_killed: run_score.enemies_killed,
+                elites_killed: run_score.elites_killed,
+                captains_killed: run_score.captains_killed,
+                legendary_kills: run_score.legendary_kills,
+                hideouts_cleared: run_score.hideouts_cleared,
+                completed_objectives,
+                monolith_sealed,
+            };
+            let score_breakdown = calculate_run_score_breakdown(&score_inputs);
+            let total_score =
+                score_total_from_breakdown(&score_breakdown, run_score.highest_pressure_level);
 
             let killer = state_dead.killer.clone();
 
@@ -9991,6 +11840,18 @@ fn true_death_system(
                 hero_name: name.0.clone(),
                 hero_rank: template.0.clone(),
                 total_xp: total_xp,
+                total_score,
+                score_survival: score_breakdown.survival,
+                score_progression: score_breakdown.progression,
+                score_wealth: score_breakdown.wealth,
+                score_defense: score_breakdown.defense,
+                score_valor: score_breakdown.valor,
+                score_legacy: score_breakdown.legacy,
+                days_survived,
+                highest_pressure_level: run_score.highest_pressure_level,
+                waves_survived: run_score.waves_survived,
+                legendary_kills: run_score.legendary_kills,
+                hideouts_cleared: run_score.hideouts_cleared,
                 fate: fate.clone(),
                 crisis_tier: crisis_tier,
             };
@@ -10001,6 +11862,13 @@ fn true_death_system(
                 hero_name: name.0.clone(),
                 hero_rank: template.0.clone(),
                 total_xp: total_xp,
+                score_total: total_score,
+                score_breakdown,
+                days_survived,
+                waves_survived: run_score.waves_survived,
+                highest_pressure_level: run_score.highest_pressure_level,
+                legendary_kills: run_score.legendary_kills,
+                hideouts_cleared: run_score.hideouts_cleared,
                 fate: fate.clone(),
                 crisis_tier: crisis_tier,
             };
@@ -10009,9 +11877,11 @@ fn true_death_system(
             // Clean up crisis state and spawn position for this player
             crisis_state.remove(&player_id.0);
             spawn_positions.remove(&player_id.0);
+            run_score_state.remove(&player_id.0);
+            legendary_threat_state.remove(&player_id.0);
 
             // Transfer villagers to merchant player
-            for (villager_entity, villager_player_id, villager_id) in villager_query.iter() {
+            for (villager_entity, villager_player_id, villager_id, _) in villager_query.iter() {
                 if villager_player_id.0 == player_id.0 {
                     info!("Transferring villager: {:?}", villager_id.0);
 
@@ -10364,12 +12234,18 @@ fn stamina_recovery_system(
     }
 
     for (mut stats, last_combat_tick) in stats_query.iter_mut() {
+        let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
         if let (Some(stamina), Some(base_stamina)) = (stats.stamina, stats.base_stamina) {
             if stamina < base_stamina {
                 // Recover faster out of combat (5/sec) vs in combat (1/sec)
-                let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
                 let recovery = if in_combat { 1 } else { 5 };
                 stats.stamina = Some((stamina + recovery).min(base_stamina));
+            }
+        }
+
+        if let (Some(mana), Some(base_mana)) = (stats.mana, stats.base_mana) {
+            if base_mana > 0 && mana < base_mana && !in_combat {
+                stats.mana = Some((mana + 2).min(base_mana));
             }
         }
     }
@@ -10391,6 +12267,25 @@ fn stamina_update_system(
                     id: id.0,
                     stamina: stamina,
                 };
+                send_to_client(player_id.0, packet, &clients);
+            }
+        }
+    }
+}
+
+fn mana_update_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    hero_query: Query<(&Id, &PlayerId, &Stats), (With<SubclassHero>, Without<StateDead>)>,
+) {
+    if game_tick.0 % TICKS_PER_SEC != 0 {
+        return;
+    }
+
+    for (id, player_id, stats) in hero_query.iter() {
+        if let (Some(mana), Some(base_mana)) = (stats.mana, stats.base_mana) {
+            if base_mana > 0 {
+                let packet = ResponsePacket::InfoManaUpdate { id: id.0, mana };
                 send_to_client(player_id.0, packet, &clients);
             }
         }

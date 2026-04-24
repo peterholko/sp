@@ -185,6 +185,7 @@ interface UIState {
   thirstStatus: string,
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
+  combatState: any,
 }
 
 export default class UI extends React.Component<any, UIState> {
@@ -298,6 +299,7 @@ export default class UI extends React.Component<any, UIState> {
       thirstStatus: '',
       fatigueStatus: '',
       infoRefineItemTriggered: false,
+      combatState: null,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -411,6 +413,8 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.STRUCTURE_LIST, this.handleStructureList, this);
     Global.gameEmitter.on(NetworkEvent.INFO_ASSIGN, this.handleInfoAssign, this);
     Global.gameEmitter.on(NetworkEvent.ATTACK, this.handleAttack, this);
+    Global.gameEmitter.on(NetworkEvent.ABILITY, this.handleAbility, this);
+    Global.gameEmitter.on(NetworkEvent.COMBAT_STATE, this.handleCombatState, this);
     Global.gameEmitter.on(NetworkEvent.ADVANCE, this.handleAdvance, this);
     Global.gameEmitter.on(NetworkEvent.START_UPGRADE, this.handleStartUpgrade, this);
     Global.gameEmitter.on(NetworkEvent.UPGRADE, this.handleUpgrade, this);
@@ -751,7 +755,16 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleComboClick() {
-    Global.network.sendCombo(Global.heroId, Global.selectedKey.id, 'quick');
+    const combatState = Global.combatState || {};
+    const comboType = combatState.available_finisher;
+    if (!comboType) {
+      return;
+    }
+
+    const targetId = combatState.target_id !== undefined
+      ? combatState.target_id
+      : Global.selectedKey.id;
+    Global.network.sendCombo(Global.heroId, targetId, comboType);
   }
 
   handleQuickAttack(event: React.MouseEvent) {
@@ -770,6 +783,13 @@ export default class UI extends React.Component<any, UIState> {
     Global.network.sendBlock(Global.heroId);
   }
 
+  handleAbilityClick(abilityId: string) {
+    const targetId = Global.selectedKey && Global.selectedKey.id !== undefined
+      ? Global.selectedKey.id
+      : undefined;
+    Global.network.sendAbility(abilityId, Global.heroId, targetId);
+  }
+
   handleDamage(message) {
     var hideAttacks = Global.attacks.length == 0;
     this.setState({ hideAttacksPanel: hideAttacks });
@@ -783,6 +803,16 @@ export default class UI extends React.Component<any, UIState> {
 
   }
 
+  handleCombatState(message) {
+    const attackHistory = message && message.attack_history ? message.attack_history : [];
+    const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
+
+    this.setState({
+      combatState: message,
+      hideAttacksPanel: attackHistory.length == 0 && !hasComboHint,
+    });
+  }
+
   handleStats(message) {
     console.log('UI handleStats');
     this.setState({ heroStats: message, hungerStatus: message.hunger, thirstStatus: message.thirst, fatigueStatus: message.tiredness });
@@ -790,14 +820,20 @@ export default class UI extends React.Component<any, UIState> {
 
   handleHeroStatsUpdate(event) {
     console.log('UI handleHeroStatsUpdate');
-    this.setState({ heroStats: event });
+    this.setState({ heroStats: { ...this.state.heroStats, ...event } });
   }
 
 
 
   handleAttack(message) {
     Global.heroStamina = Math.max(0, Global.heroStamina - message.stamina_cost);
-    Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina });
+    Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
+  }
+
+  handleAbility(message) {
+    Global.heroStamina = Math.max(0, Global.heroStamina - (message.stamina_cost || 0));
+    Global.heroMana = Math.max(0, Global.heroMana - (message.mana_cost || 0));
+    Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
   }
 
   handleAdvance(message) {
@@ -1066,6 +1102,9 @@ export default class UI extends React.Component<any, UIState> {
   handleInfoHero(message) {
     console.log('UI handleInfoHero');
     if (Util.isPlayerObj(message.id)) {
+      Global.heroClass = message.hero_class || Global.heroClass;
+      Global.heroMana = message.mana !== undefined ? message.mana : Global.heroMana;
+      Global.heroMaxMana = message.base_mana !== undefined ? message.base_mana : Global.heroMaxMana;
       this.setState({ hideHeroPanel: false, heroDetailedData: message });
     }
   }
@@ -1613,8 +1652,36 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({ worldData: message });
   }
 
+  getAbilityHints() {
+    const combatAbilities = this.state.combatState && this.state.combatState.abilities
+      ? this.state.combatState.abilities
+      : [];
+
+    if (combatAbilities.length > 0) {
+      return combatAbilities;
+    }
+
+    switch (Global.heroClass) {
+      case "Warrior":
+        return [{ id: "shield_bash", label: "Guard Bash", cost_type: "stamina", cost: 10, range: 1, hint: "Stun an adjacent threat and raise your guard." }];
+      case "Ranger":
+        return [
+          { id: "aimed_shot", label: "Aimed Shot", cost_type: "stamina", cost: 8, range: 3, hint: "Deal reliable bow damage before enemies reach you." },
+          { id: "disengage", label: "Disengage", cost_type: "stamina", cost: 8, range: 1, hint: "Step away from an adjacent enemy." },
+        ];
+      case "Mage":
+        return [
+          { id: "arcane_bolt", label: "Arcane Bolt", cost_type: "mana", cost: 20, range: 3, hint: "Spend mana for dependable ranged damage." },
+          { id: "ward", label: "Ward", cost_type: "mana", cost: 15, range: 0, hint: "Raise a short magical ward." },
+        ];
+      default:
+        return [];
+    }
+  }
+
   render() {
     console.log("styles", styles);
+    const abilityHints = this.getAbilityHints();
     return (
       <div id="ui" className={styles.ui}>
 
@@ -1666,8 +1733,31 @@ export default class UI extends React.Component<any, UIState> {
         <ActionButton type={FIERCE}
           handler={this.handleFierceAttack} />
 
+        {abilityHints.length > 0 &&
+          <div className={styles.abilitybar}>
+            {abilityHints.map((ability) => {
+              const disabled = Boolean(ability.disabled_reason);
+              const title = ability.disabled_reason
+                ? `${ability.label}: ${ability.disabled_reason}`
+                : `${ability.label}: ${ability.hint} (${ability.cost} ${ability.cost_type})`;
+              return (
+                <button
+                  key={ability.id}
+                  type="button"
+                  className={styles.abilitybutton}
+                  disabled={disabled}
+                  title={title}
+                  onClick={() => this.handleAbilityClick(ability.id)}
+                >
+                  {ability.label}
+                </button>
+              );
+            })}
+          </div>
+        }
+
         {!this.state.hideAttacksPanel &&
-          <AttacksPanel attacks={Global.attacks} />}
+          <AttacksPanel attacks={Global.attacks} combatState={this.state.combatState} />}
 
         <img src={bracebutton}
           id="bracebutton"
@@ -1841,6 +1931,13 @@ export default class UI extends React.Component<any, UIState> {
             heroName={this.state.trueDeathData.hero_name}
             heroRank={this.state.trueDeathData.hero_rank}
             totalXp={this.state.trueDeathData.total_xp}
+            scoreTotal={this.state.trueDeathData.score_total}
+            scoreBreakdown={this.state.trueDeathData.score_breakdown}
+            daysSurvived={this.state.trueDeathData.days_survived}
+            wavesSurvived={this.state.trueDeathData.waves_survived}
+            highestPressureLevel={this.state.trueDeathData.highest_pressure_level}
+            legendaryKills={this.state.trueDeathData.legendary_kills}
+            hideoutsCleared={this.state.trueDeathData.hideouts_cleared}
             fate={this.state.trueDeathData.fate} />
         }
       </div>

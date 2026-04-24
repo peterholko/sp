@@ -3,25 +3,26 @@ use bevy::prelude::*;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-use uuid::Uuid;
-use tracing_subscriber::{reload, EnvFilter, Registry};
 use std::sync::{Arc, Mutex};
+use tracing_subscriber::{reload, EnvFilter, Registry};
+use uuid::Uuid;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::common::{Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
-use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
+use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
 
-use crate::combat::{Combat, CombatQuery};
-use crate::effect::Effects;
+use crate::combat::{Combat, CombatQuery, CombatQueryItem};
+use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, Clients, DebugObjs, DamageRecord, GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith,
-    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery,
-    Objectives, PlayerObjectives, PlayerStat, PlayerStats, SpawnPositions,
+    is_pos_empty, Clients, DamageRecord, DebugObjs, GameTick, InitialEncounterState,
+    LogLevelOverrides, Merchant, Monolith, MonolithInvestigation, MonolithProgress,
+    NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives, PlayerRunScore,
+    PlayerStat, PlayerStats, RunScoreState, SpawnPositions, WeakSanctuary,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -30,10 +31,11 @@ use crate::network::{
 };
 use crate::obj::{
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire, Class,
-    ClassStructure, EndRepeatAction, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, Personality,
-    PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State,
-    StateBuilding, StateChange, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
-    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    ClassStructure, EndRepeatAction, HeroClass, HeroClassProfile, Id, LastCombatTick, Misc, Name,
+    NewObj, Obj, Order, Personality, PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter,
+    StartBuild, StartUpgrade, State, StateBuilding, StateChange, StateDead, Stats, Subclass,
+    SubclassHero, SubclassVillager, Template, UpdateObj, Viewshed, WorkEntry, WorkQueue,
+    WorkStatus, WorkType,
 };
 use crate::player_setup::StartLocations;
 use crate::recipe::Recipes;
@@ -110,6 +112,12 @@ pub enum PlayerEvent {
         attack_type: String,
         source_id: i32,
         target_id: i32,
+    },
+    Ability {
+        player_id: i32,
+        ability_id: String,
+        source_id: i32,
+        target_id: Option<i32>,
     },
     Combo {
         player_id: i32,
@@ -520,6 +528,7 @@ struct CoreQuery {
     misc: &'static Misc,
     effects: &'static Effects,
     inventory: &'static Inventory,
+    hero_class: Option<&'static HeroClass>,
 }
 
 #[derive(QueryData)]
@@ -589,6 +598,12 @@ impl Plugin for PlayerPlugin {
                 login_system,
                 move_system,
                 attack_system,
+            )
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
                 gather_system,
                 get_stats_system,
                 info_skills_system,
@@ -704,8 +719,12 @@ fn new_player_system(
     mut recipes: ResMut<Recipes>,
     mut plans: ResMut<Plans>,
     templates: Res<Templates>,
-    mut player_stats: ResMut<PlayerStats>,
-    mut spawn_positions: ResMut<SpawnPositions>,
+    mut player_setup_state: ParamSet<(
+        ResMut<PlayerStats>,
+        ResMut<SpawnPositions>,
+        ResMut<RunScoreState>,
+    )>,
+    mut player_intro_state: ResMut<PlayerIntroState>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     monoliths: Query<ObjQuery, With<Monolith>>,
 ) {
@@ -719,25 +738,30 @@ fn new_player_system(
                 class_name,
             } => {
                 events_to_remove.push(*event_id);
+                let setup_result = {
+                    let mut spawn_positions = player_setup_state.p1();
+                    player_setup::new(
+                        *player_id,
+                        hero_name.to_string(),
+                        class_name.to_string(),
+                        &mut commands,
+                        &mut start_locations,
+                        &mut ids,
+                        &mut entity_map,
+                        &mut map_events,
+                        &mut game_events,
+                        &mut recipes,
+                        &mut plans,
+                        &templates,
+                        &game_tick,
+                        &monoliths,
+                        &mut spawn_positions,
+                        &mut player_intro_state,
+                        &mut initial_encounter_state,
+                    )
+                };
 
-                match player_setup::new(
-                    *player_id,
-                    hero_name.to_string(),
-                    class_name.to_string(),
-                    &mut commands,
-                    &mut start_locations,
-                    &mut ids,
-                    &mut entity_map,
-                    &mut map_events,
-                    &mut game_events,
-                    &mut recipes,
-                    &mut plans,
-                    &templates,
-                    &game_tick,
-                    &monoliths,
-                    &mut spawn_positions,
-                    &mut initial_encounter_state,
-                ) {
+                match setup_result {
                     Ok(_) => {
                         let event_type = GameEventType::Login {
                             player_id: *player_id,
@@ -751,12 +775,20 @@ fn new_player_system(
                             event_type,
                         };
 
-                        player_stats.insert(
+                        player_setup_state.p0().insert(
                             *player_id,
                             PlayerStat {
                                 player_id: *player_id,
                                 num_deaths: 0,
                                 damage_records: VecDeque::with_capacity(10),
+                            },
+                        );
+
+                        player_setup_state.p2().insert(
+                            *player_id,
+                            PlayerRunScore {
+                                start_tick: game_tick.0,
+                                ..PlayerRunScore::default()
                             },
                         );
 
@@ -939,6 +971,455 @@ fn move_system(
     }
 }
 
+fn combo_hints_for_history(
+    attack_history: &Vec<String>,
+    templates: &Templates,
+) -> (Vec<network::ComboHint>, Option<String>) {
+    let mut matching_combos = Vec::new();
+    let mut available_finisher = None;
+
+    if attack_history.is_empty() {
+        return (matching_combos, available_finisher);
+    }
+
+    for (_combo_name, combo_template) in templates.combo_templates.iter() {
+        if attack_history.len() > combo_template.attacks.len() {
+            continue;
+        }
+
+        let is_prefix = attack_history
+            .iter()
+            .zip(combo_template.attacks.iter())
+            .all(|(history_attack, combo_attack)| history_attack == combo_attack);
+
+        if !is_prefix {
+            continue;
+        }
+
+        if attack_history.len() == combo_template.attacks.len() {
+            available_finisher = Some(combo_template.name.clone());
+        } else {
+            matching_combos.push(network::ComboHint {
+                name: combo_template.name.clone(),
+                remaining_attacks: combo_template.attacks[attack_history.len()..].to_vec(),
+                effect: combo_template.effects.first().cloned(),
+            });
+        }
+    }
+
+    return (matching_combos, available_finisher);
+}
+
+fn enemy_intent_for_template(template: &str) -> String {
+    match template {
+        "Giant Rat" | "Spider" | "Scorpion" => "Fast creature looking for an opening".to_string(),
+        "Wolf" | "Wild Boar" | "Giant Crab" => {
+            "Close-range attacker testing your position".to_string()
+        }
+        "Zombie" | "Skeleton" | "Shipwreck Zombie" | "Shadow" => {
+            "Undead pressure advancing steadily".to_string()
+        }
+        "Necromancer" => "Caster seeking distance and corpses to exploit".to_string(),
+        "Wolf Rider" | "Goblin Pillager" => {
+            "Raider targeting your stored value and structures".to_string()
+        }
+        _ => "Hostile target preparing to attack".to_string(),
+    }
+}
+
+fn counter_hint_for_template(template: &str, attack_history: &Vec<String>) -> String {
+    if attack_history.is_empty() {
+        return "Start with quick for control, precise for setup, fierce for damage, or block to buy time.".to_string();
+    }
+
+    match template {
+        "Giant Rat" | "Spider" | "Wolf" => {
+            "Fast enemies reward control: quick chains toward Hamstring, while block protects low stamina.".to_string()
+        }
+        "Skeleton" | "Zombie" | "Shipwreck Zombie" => {
+            "Steady undead can be set up with precise attacks, then punished with a combo finisher.".to_string()
+        }
+        "Necromancer" => {
+            "Pressure the caster before corpses become resources; block if you cannot close safely.".to_string()
+        }
+        _ => "Follow the visible combo hints or block when the exchange is turning against you.".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbilityCostType {
+    Stamina,
+    Mana,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbilityEffect {
+    ShieldBash,
+    AimedShot,
+    Disengage,
+    ArcaneBolt,
+    Ward,
+}
+
+const GUARD_BASH_STUN_TICKS: i32 = 2 * TICKS_PER_SEC;
+const WARRIOR_BRACE_DURATION_TICKS: i32 = 75;
+const WARRIOR_BRACE_AMPLIFIER: f32 = 1.5;
+const STANDARD_BRACE_DURATION_TICKS: i32 = 50;
+const STANDARD_BRACE_AMPLIFIER: f32 = 1.0;
+const MAGE_WARD_DURATION_TICKS: i32 = 75;
+const MAGE_WARD_AMPLIFIER: f32 = 1.0;
+
+#[derive(Clone, Copy)]
+struct AbilityDef {
+    id: &'static str,
+    label: &'static str,
+    hero_class: HeroClass,
+    cost_type: AbilityCostType,
+    cost: i32,
+    range: u32,
+    cooldown: i32,
+    required_weapon_subclass: Option<&'static str>,
+    requires_target: bool,
+    effect: AbilityEffect,
+    hint: &'static str,
+}
+
+fn ability_def(ability_id: &str) -> Option<AbilityDef> {
+    match ability_id {
+        "shield_bash" => Some(AbilityDef {
+            id: "shield_bash",
+            label: "Guard Bash",
+            hero_class: HeroClass::Warrior,
+            cost_type: AbilityCostType::Stamina,
+            cost: 10,
+            range: 1,
+            cooldown: 5,
+            required_weapon_subclass: None,
+            requires_target: true,
+            effect: AbilityEffect::ShieldBash,
+            hint: "Stuns an adjacent threat and raises your guard.",
+        }),
+        "aimed_shot" => Some(AbilityDef {
+            id: "aimed_shot",
+            label: "Aimed Shot",
+            hero_class: HeroClass::Ranger,
+            cost_type: AbilityCostType::Stamina,
+            cost: 8,
+            range: 3,
+            cooldown: 5,
+            required_weapon_subclass: Some("Bow"),
+            requires_target: true,
+            effect: AbilityEffect::AimedShot,
+            hint: "Deals reliable bow damage before enemies reach you.",
+        }),
+        "disengage" => Some(AbilityDef {
+            id: "disengage",
+            label: "Disengage",
+            hero_class: HeroClass::Ranger,
+            cost_type: AbilityCostType::Stamina,
+            cost: 8,
+            range: 1,
+            cooldown: 5,
+            required_weapon_subclass: None,
+            requires_target: true,
+            effect: AbilityEffect::Disengage,
+            hint: "Steps one tile away from an adjacent enemy.",
+        }),
+        "arcane_bolt" => Some(AbilityDef {
+            id: "arcane_bolt",
+            label: "Arcane Bolt",
+            hero_class: HeroClass::Mage,
+            cost_type: AbilityCostType::Mana,
+            cost: 20,
+            range: 3,
+            cooldown: 5,
+            required_weapon_subclass: None,
+            requires_target: true,
+            effect: AbilityEffect::ArcaneBolt,
+            hint: "Spends mana for dependable ranged damage.",
+        }),
+        "ward" => Some(AbilityDef {
+            id: "ward",
+            label: "Ward",
+            hero_class: HeroClass::Mage,
+            cost_type: AbilityCostType::Mana,
+            cost: 15,
+            range: 0,
+            cooldown: 5,
+            required_weapon_subclass: None,
+            requires_target: false,
+            effect: AbilityEffect::Ward,
+            hint: "Raises a short defensive ward against the next hit.",
+        }),
+        _ => None,
+    }
+}
+
+fn ability_defs_for_class(hero_class: HeroClass) -> Vec<AbilityDef> {
+    HeroClassProfile::for_class(hero_class)
+        .ability_ids
+        .iter()
+        .map(|ability_id| ability_def(ability_id).expect("class profile references ability"))
+        .collect()
+}
+
+fn has_required_weapon(actor: &CombatQueryItem, required_weapon_subclass: Option<&str>) -> bool {
+    let Some(required_weapon_subclass) = required_weapon_subclass else {
+        return true;
+    };
+
+    actor
+        .inventory
+        .get_equipped_weapons()
+        .iter()
+        .any(|item| item.subclass == required_weapon_subclass)
+}
+
+fn ability_cost_value(actor: &CombatQueryItem, cost_type: AbilityCostType) -> i32 {
+    match cost_type {
+        AbilityCostType::Stamina => actor.stats.stamina.unwrap_or(0),
+        AbilityCostType::Mana => actor.stats.mana.unwrap_or(0),
+    }
+}
+
+fn ability_disabled_reason(
+    ability: AbilityDef,
+    actor: &CombatQueryItem,
+    target: Option<&CombatQueryItem>,
+) -> Option<String> {
+    if actor.hero_class.copied() != Some(ability.hero_class) {
+        return Some(format!("Requires {}", ability.hero_class.to_str()));
+    }
+
+    if !has_required_weapon(actor, ability.required_weapon_subclass) {
+        return Some(format!(
+            "Equip a {}",
+            ability
+                .required_weapon_subclass
+                .unwrap_or("required weapon")
+        ));
+    }
+
+    if ability_cost_value(actor, ability.cost_type) < ability.cost {
+        return Some(match ability.cost_type {
+            AbilityCostType::Stamina => "Not enough stamina".to_string(),
+            AbilityCostType::Mana => "Not enough mana".to_string(),
+        });
+    }
+
+    if ability.requires_target {
+        let Some(target) = target else {
+            return Some("Select a target".to_string());
+        };
+
+        if Obj::is_dead(&target.state) {
+            return Some("Target is dead".to_string());
+        }
+
+        if Map::dist(*actor.pos, *target.pos) > ability.range {
+            return Some("Out of range".to_string());
+        }
+    }
+
+    None
+}
+
+fn ability_hints_for(
+    actor: &CombatQueryItem,
+    target: Option<&CombatQueryItem>,
+) -> Vec<network::AbilityHint> {
+    let Some(hero_class) = actor.hero_class.copied() else {
+        return Vec::new();
+    };
+
+    ability_defs_for_class(hero_class)
+        .iter()
+        .map(|ability| network::AbilityHint {
+            id: ability.id.to_string(),
+            label: ability.label.to_string(),
+            cost_type: match ability.cost_type {
+                AbilityCostType::Stamina => "stamina".to_string(),
+                AbilityCostType::Mana => "mana".to_string(),
+            },
+            cost: ability.cost,
+            range: ability.range as i32,
+            disabled_reason: ability_disabled_reason(*ability, actor, target),
+            hint: ability.hint.to_string(),
+        })
+        .collect()
+}
+
+fn spend_ability_cost(actor: &mut CombatQueryItem, ability: AbilityDef) {
+    match ability.cost_type {
+        AbilityCostType::Stamina => {
+            let stamina = actor.stats.stamina.unwrap_or(0);
+            actor.stats.stamina = Some(stamina - ability.cost);
+        }
+        AbilityCostType::Mana => {
+            let mana = actor.stats.mana.unwrap_or(0);
+            actor.stats.mana = Some(mana - ability.cost);
+        }
+    }
+}
+
+fn ability_response_packet(source_id: i32, ability: AbilityDef) -> ResponsePacket {
+    ResponsePacket::Ability {
+        source_id,
+        ability_id: ability.id.to_string(),
+        cooldown: ability.cooldown,
+        stamina_cost: match ability.cost_type {
+            AbilityCostType::Stamina => Some(ability.cost),
+            AbilityCostType::Mana => None,
+        },
+        mana_cost: match ability.cost_type {
+            AbilityCostType::Stamina => None,
+            AbilityCostType::Mana => Some(ability.cost),
+        },
+    }
+}
+
+fn equipped_damage(actor: &CombatQueryItem, weapon_subclass: Option<&str>) -> i32 {
+    actor
+        .inventory
+        .get_equipped_weapons()
+        .iter()
+        .filter(|item| {
+            weapon_subclass
+                .map(|subclass| item.subclass == subclass)
+                .unwrap_or(true)
+        })
+        .filter_map(|item| match item.attrs.get(&AttrKey::Damage) {
+            Some(AttrVal::Num(value)) => Some(*value as i32),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn add_timed_effect(
+    obj_id: i32,
+    effects: &mut Effects,
+    map_events: &mut MapEvents,
+    game_tick: i32,
+    effect: Effect,
+    duration_ticks: i32,
+    amplifier: f32,
+) {
+    effects
+        .0
+        .insert(effect.clone(), (duration_ticks, amplifier, 1));
+    map_events.new(
+        obj_id,
+        game_tick + duration_ticks,
+        VisibleEvent::EffectExpiredEvent { effect },
+    );
+}
+
+fn disengage_destination(attacker_pos: Position, target_pos: Position) -> Option<Position> {
+    let dx = (attacker_pos.x - target_pos.x).signum();
+    let dy = (attacker_pos.y - target_pos.y).signum();
+
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+
+    Some(Position {
+        x: attacker_pos.x + dx,
+        y: attacker_pos.y + dy,
+    })
+}
+
+fn apply_ability_damage(
+    commands: &mut Commands,
+    game_tick: &Res<GameTick>,
+    actor: &mut CombatQueryItem,
+    target: &mut CombatQueryItem,
+    damage: i32,
+) -> i32 {
+    let damage = damage.max(1);
+    target.stats.hp -= damage;
+    actor.last_combat_tick.0 = game_tick.0;
+    target.last_combat_tick.0 = game_tick.0;
+
+    if actor.player_id.0 != target.player_id.0 {
+        commands
+            .entity(target.entity)
+            .insert(crate::obj::LastAttacker {
+                id: actor.id.0,
+                tick: game_tick.0,
+            });
+    }
+
+    if target.stats.hp <= 0 {
+        *target.state = State::Dead;
+        commands.entity(target.entity).insert(StateDead {
+            dead_at: game_tick.0,
+            killer: actor.template.0.clone(),
+        });
+    }
+
+    damage
+}
+
+fn base_mana_for_template(hero_class: Option<HeroClass>, template: &ObjTemplate) -> i32 {
+    template.base_mana.unwrap_or_else(|| {
+        hero_class
+            .map(|hero_class| HeroClassProfile::for_class(hero_class).base_mana)
+            .unwrap_or(0)
+    })
+}
+
+fn refresh_stats_from_template(
+    stats: &mut Stats,
+    hero_class: Option<HeroClass>,
+    template: &ObjTemplate,
+) {
+    let base_hp = template.base_hp.unwrap_or(stats.base_hp);
+    let base_mana = base_mana_for_template(hero_class, template);
+
+    stats.hp = base_hp;
+    stats.base_hp = base_hp;
+    stats.stamina = template.base_stamina;
+    stats.base_stamina = template.base_stamina;
+    stats.mana = Some(base_mana);
+    stats.base_mana = Some(base_mana);
+    stats.base_def = template.base_def.unwrap_or(0);
+    stats.base_damage = template.base_dmg;
+    stats.damage_range = template.dmg_range;
+    stats.base_speed = template.base_speed;
+    stats.base_vision = template.base_vision;
+}
+
+fn send_combat_state(
+    player_id: i32,
+    target_id: i32,
+    target_template: String,
+    attack_history: Vec<String>,
+    actor: &CombatQueryItem,
+    target: &CombatQueryItem,
+    templates: &Templates,
+    clients: &Res<Clients>,
+) {
+    let (matching_combos, available_finisher) = combo_hints_for_history(&attack_history, templates);
+    let packet = ResponsePacket::CombatState {
+        version: 1,
+        target_id,
+        enemy_intent: enemy_intent_for_template(&target_template),
+        attack_history: attack_history.clone(),
+        matching_combos,
+        available_finisher,
+        stamina_costs: network::StaminaCosts {
+            quick: 5,
+            precise: 5,
+            fierce: 5,
+            block: 0,
+        },
+        abilities: ability_hints_for(actor, Some(target)),
+        counter_hint: counter_hint_for_template(&target_template, &attack_history),
+    };
+    send_to_client(player_id, packet, clients);
+}
+
 fn attack_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
@@ -950,7 +1431,7 @@ fn attack_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_stats: ResMut<PlayerStats>,
-    mut query: Query<CombatQuery>,
+    mut query_set: ParamSet<(Query<CombatQuery>, Query<ObjQuery>)>,
     mut last_player_attack: Local<HashMap<i32, i32>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -977,7 +1458,8 @@ fn attack_system(
 
                 let entities = [attacker_entity, target_entity];
 
-                let Ok([mut attacker, mut target]) = query.get_many_mut(entities) else {
+                let mut combat_query = query_set.p0();
+                let Ok([mut attacker, mut target]) = combat_query.get_many_mut(entities) else {
                     error!(
                         "Cannot find attacker or target from entities {:?}",
                         entities
@@ -1039,6 +1521,21 @@ fn attack_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
+
+                let mut attack_history = attacker
+                    .combo_tracker
+                    .as_ref()
+                    .filter(|combo_tracker| combo_tracker.target_id == target.id.0)
+                    .map(|combo_tracker| {
+                        combo_tracker
+                            .attacks
+                            .iter()
+                            .map(|attack| attack.clone().to_str())
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_else(Vec::new);
+                attack_history.push(attack_type.clone());
+                let target_template = target.template.0.clone();
 
                 // Calculate and process damage
                 let (damage, combo, skill_updated) = Combat::process_attack(
@@ -1076,6 +1573,16 @@ fn attack_system(
                 };
 
                 send_to_client(*player_id, packet, &clients);
+                send_combat_state(
+                    *player_id,
+                    *target_id,
+                    target_template,
+                    attack_history,
+                    &attacker,
+                    &target,
+                    &templates,
+                    &clients,
+                );
 
                 // Update skill
                 if let Some(skill_updated) = skill_updated {
@@ -1089,6 +1596,302 @@ fn attack_system(
                         );
                     }
                 }
+            }
+            PlayerEvent::Ability {
+                player_id,
+                ability_id,
+                source_id,
+                target_id,
+            } => {
+                events_to_remove.push(*event_id);
+
+                let Some(ability) = ability_def(ability_id) else {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Unknown ability.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                };
+
+                let Some(attacker_entity) = entity_map.get_entity(*source_id) else {
+                    error!("Cannot find ability source entity from id: {:?}", source_id);
+                    continue;
+                };
+
+                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
+                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Ability is on cooldown.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !ability.requires_target {
+                    let mut combat_query = query_set.p0();
+                    let Ok(mut attacker) = combat_query.get_mut(attacker_entity) else {
+                        error!("Cannot find ability source entity {:?}", attacker_entity);
+                        continue;
+                    };
+
+                    if attacker.player_id.0 != *player_id {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Ability source not owned by player.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+
+                    if Obj::is_dead(&attacker.state) {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "The dead cannot use abilities.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+
+                    if let Some(reason) = ability_disabled_reason(ability, &attacker, None) {
+                        let packet = ResponsePacket::Error { errmsg: reason };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+
+                    spend_ability_cost(&mut attacker, ability);
+                    match ability.effect {
+                        AbilityEffect::Ward => {
+                            add_timed_effect(
+                                attacker.id.0,
+                                &mut attacker.effects,
+                                &mut map_events,
+                                game_tick.0,
+                                Effect::WeakSanctuary,
+                                MAGE_WARD_DURATION_TICKS,
+                                MAGE_WARD_AMPLIFIER,
+                            );
+                            commands.entity(attacker.entity).insert(WeakSanctuary {
+                                id: attacker.id.0,
+                                pos: *attacker.pos,
+                            });
+                            attacker.last_combat_tick.0 = game_tick.0;
+                        }
+                        _ => {}
+                    }
+
+                    last_player_attack.insert(*player_id, game_tick.0);
+                    send_to_client(
+                        *player_id,
+                        ability_response_packet(*source_id, ability),
+                        &clients,
+                    );
+                    continue;
+                }
+
+                let Some(target_id) = target_id else {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Select a target for that ability.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                };
+
+                let Some(target_entity) = entity_map.get_entity(*target_id) else {
+                    error!("Cannot find ability target entity from id: {:?}", target_id);
+                    continue;
+                };
+
+                if ability.effect == AbilityEffect::Disengage {
+                    let obj_query = query_set.p1();
+                    let (Ok(attacker), Ok(target)) =
+                        (obj_query.get(attacker_entity), obj_query.get(target_entity))
+                    else {
+                        error!(
+                            "Cannot find ability source or target for retreat precheck {:?}",
+                            [attacker_entity, target_entity]
+                        );
+                        continue;
+                    };
+
+                    let Some(dst) = disengage_destination(*attacker.pos, *target.pos) else {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "No open retreat tile.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    };
+
+                    if !Map::is_valid_pos((dst.x, dst.y))
+                        || !Map::is_passable_by_obj(dst.x, dst.y, true, false, false, &map)
+                        || !is_pos_empty(*player_id, dst.x, dst.y, &obj_query)
+                    {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "No open retreat tile.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+                }
+
+                let entities = [attacker_entity, target_entity];
+                let mut combat_query = query_set.p0();
+                let Ok([mut attacker, mut target]) = combat_query.get_many_mut(entities) else {
+                    error!(
+                        "Cannot find ability source or target from entities {:?}",
+                        entities
+                    );
+                    continue;
+                };
+
+                if attacker.player_id.0 != *player_id {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Ability source not owned by player.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if Obj::is_dead(&attacker.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "The dead cannot use abilities.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if let Some(reason) = ability_disabled_reason(ability, &attacker, Some(&target)) {
+                    let packet = ResponsePacket::Error { errmsg: reason };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                let target_template = target.template.0.clone();
+
+                match ability.effect {
+                    AbilityEffect::ShieldBash => {
+                        let damage_amount = 3 + attacker.stats.base_damage.unwrap_or(0);
+                        spend_ability_cost(&mut attacker, ability);
+                        let damage = apply_ability_damage(
+                            &mut commands,
+                            &game_tick,
+                            &mut attacker,
+                            &mut target,
+                            damage_amount,
+                        );
+                        add_timed_effect(
+                            target.id.0,
+                            &mut target.effects,
+                            &mut map_events,
+                            game_tick.0,
+                            Effect::Stunned,
+                            GUARD_BASH_STUN_TICKS,
+                            1.0,
+                        );
+                        add_timed_effect(
+                            attacker.id.0,
+                            &mut attacker.effects,
+                            &mut map_events,
+                            game_tick.0,
+                            Effect::Bracing,
+                            WARRIOR_BRACE_DURATION_TICKS,
+                            WARRIOR_BRACE_AMPLIFIER,
+                        );
+                        Combat::add_damage_event(
+                            game_tick.0,
+                            "Guard Bash".to_string(),
+                            damage,
+                            None,
+                            &attacker,
+                            &target,
+                            &mut map_events,
+                        );
+                    }
+                    AbilityEffect::AimedShot => {
+                        let damage_amount = 4
+                            + attacker.stats.base_damage.unwrap_or(0)
+                            + equipped_damage(&attacker, Some("Bow"));
+                        spend_ability_cost(&mut attacker, ability);
+                        let damage = apply_ability_damage(
+                            &mut commands,
+                            &game_tick,
+                            &mut attacker,
+                            &mut target,
+                            damage_amount,
+                        );
+                        Combat::add_damage_event(
+                            game_tick.0,
+                            "Aimed Shot".to_string(),
+                            damage,
+                            None,
+                            &attacker,
+                            &target,
+                            &mut map_events,
+                        );
+                    }
+                    AbilityEffect::Disengage => {
+                        let Some(dst) = disengage_destination(*attacker.pos, *target.pos) else {
+                            let packet = ResponsePacket::Error {
+                                errmsg: "No open retreat tile.".to_string(),
+                            };
+                            send_to_client(*player_id, packet, &clients);
+                            continue;
+                        };
+
+                        if !Map::is_valid_pos((dst.x, dst.y))
+                            || !Map::is_passable_by_obj(dst.x, dst.y, true, false, false, &map)
+                        {
+                            let packet = ResponsePacket::Error {
+                                errmsg: "No open retreat tile.".to_string(),
+                            };
+                            send_to_client(*player_id, packet, &clients);
+                            continue;
+                        }
+
+                        spend_ability_cost(&mut attacker, ability);
+                        commands.trigger(StateChange {
+                            entity: attacker.entity,
+                            new_state: State::Moving,
+                        });
+                        map_events.new(
+                            attacker.id.0,
+                            game_tick.0 + 6,
+                            VisibleEvent::MoveEvent {
+                                src: *attacker.pos,
+                                dst,
+                            },
+                        );
+                        attacker.last_combat_tick.0 = game_tick.0;
+                    }
+                    AbilityEffect::ArcaneBolt => {
+                        spend_ability_cost(&mut attacker, ability);
+                        map_events.new(
+                            attacker.id.0,
+                            game_tick.0,
+                            VisibleEvent::SpellDamageEvent {
+                                spell: Spell::ArcaneBolt,
+                                target_id: *target_id,
+                            },
+                        );
+                        attacker.last_combat_tick.0 = game_tick.0;
+                        target.last_combat_tick.0 = game_tick.0;
+                    }
+                    AbilityEffect::Ward => {}
+                }
+
+                last_player_attack.insert(*player_id, game_tick.0);
+                send_to_client(
+                    *player_id,
+                    ability_response_packet(*source_id, ability),
+                    &clients,
+                );
+                send_combat_state(
+                    *player_id,
+                    *target_id,
+                    target_template,
+                    Vec::new(),
+                    &attacker,
+                    &target,
+                    &templates,
+                    &clients,
+                );
             }
             PlayerEvent::Combo {
                 player_id,
@@ -1110,7 +1913,8 @@ fn attack_system(
 
                 let entities = [attacker_entity, target_entity];
 
-                let Ok([mut attacker, mut target]) = query.get_many_mut(entities) else {
+                let mut combat_query = query_set.p0();
+                let Ok([mut attacker, mut target]) = combat_query.get_many_mut(entities) else {
                     error!(
                         "Cannot find attacker or target from entities {:?}",
                         entities
@@ -1163,15 +1967,29 @@ fn attack_system(
                     continue;
                 }
 
-                // Check global attack cooldown (per-player, not affected by being attacked)
-                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
-                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                let attack_history = attacker
+                    .combo_tracker
+                    .as_ref()
+                    .filter(|combo_tracker| combo_tracker.target_id == target.id.0)
+                    .map(|combo_tracker| {
+                        combo_tracker
+                            .attacks
+                            .iter()
+                            .map(|attack| attack.clone().to_str())
+                            .collect::<Vec<String>>()
+                    })
+                    .unwrap_or_default();
+                let (_matching_combos, available_finisher) =
+                    combo_hints_for_history(&attack_history, &templates);
+                if available_finisher.is_none() {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Attack is on cooldown.".to_string(),
+                        errmsg: "No combo is ready.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
+
+                let target_template = target.template.0.clone();
 
                 // Calculate and process damage
                 let (damage, combo, skill_updated) = Combat::process_combo(
@@ -1192,7 +2010,7 @@ fn attack_system(
                     game_tick.0,
                     "combo".to_string(),
                     damage,
-                    combo,
+                    combo.clone(),
                     &attacker,
                     &target,
                     &mut map_events,
@@ -1210,6 +2028,28 @@ fn attack_system(
                 };
 
                 send_to_client(*player_id, packet, &clients);
+                send_combat_state(
+                    *player_id,
+                    *target_id,
+                    target_template,
+                    Vec::new(),
+                    &attacker,
+                    &target,
+                    &templates,
+                    &clients,
+                );
+
+                if let Some(combo_name) = combo.clone() {
+                    let discovery_packet = ResponsePacket::DiscoveryEvent {
+                        version: 1,
+                        discovery_type: "combat".to_string(),
+                        title: format!("Combo landed: {}", combo_name),
+                        unlock_source: "Combat pattern".to_string(),
+                        location: None,
+                        result: "You completed an attack sequence. Combos are learned patterns: repeat the sequence when the same problem appears.".to_string(),
+                    };
+                    send_to_client(*player_id, discovery_packet, &clients);
+                }
 
                 debug!("Skill gain: {:?}", skill_updated);
 
@@ -1260,7 +2100,8 @@ fn attack_system(
                     continue;
                 };
 
-                let Ok(mut attacker) = query.get_mut(attacker_entity) else {
+                let mut combat_query = query_set.p0();
+                let Ok(mut attacker) = combat_query.get_mut(attacker_entity) else {
                     continue;
                 };
 
@@ -1282,10 +2123,27 @@ fn attack_system(
                     continue;
                 }
 
-                // Apply Bracing effect (3.0x defense for 50 ticks)
-                attacker.effects.0.insert(
-                    crate::effect::Effect::Bracing,
-                    (50, 1.0, 1),
+                let (brace_duration, brace_amp) =
+                    if matches!(attacker.hero_class, Some(&HeroClass::Warrior)) {
+                        if let (Some(stamina), Some(base_stamina)) =
+                            (attacker.stats.stamina, attacker.stats.base_stamina)
+                        {
+                            attacker.stats.stamina = Some((stamina + 3).min(base_stamina));
+                        }
+                        (WARRIOR_BRACE_DURATION_TICKS, WARRIOR_BRACE_AMPLIFIER)
+                    } else {
+                        (STANDARD_BRACE_DURATION_TICKS, STANDARD_BRACE_AMPLIFIER)
+                    };
+
+                // Apply Bracing effect. Warriors get a longer, stronger Iron Stance.
+                add_timed_effect(
+                    attacker.id.0,
+                    &mut attacker.effects,
+                    &mut map_events,
+                    game_tick.0,
+                    Effect::Bracing,
+                    brace_duration,
+                    brace_amp,
                 );
 
                 last_player_attack.insert(*player_id, game_tick.0);
@@ -2236,6 +3094,8 @@ fn get_stats_system(
                         base_hp: obj_stats.base_hp,
                         stamina: obj_stats.stamina.unwrap_or(100),
                         base_stamina: obj_stats.base_stamina.unwrap_or(100),
+                        mana: obj_stats.mana.unwrap_or(0),
+                        base_mana: obj_stats.base_mana.unwrap_or(0),
                         thirst: thirst_str,
                         hunger: hunger_str,
                         tiredness: tired_str,
@@ -2334,11 +3194,16 @@ fn info_hero_system(
         effects: effects,
         hp: Some(stats.hp),
         stamina: stats.stamina,
+        mana: stats.mana,
         thirst: thirst.num_to_string(),
         hunger: hunger.num_to_string(),
         tiredness: tired.num_to_string(),
         base_hp: Some(stats.base_hp),
         base_stamina: stats.base_stamina,
+        base_mana: stats.base_mana,
+        hero_class: obj
+            .hero_class
+            .map(|hero_class| hero_class.to_str().to_string()),
         base_def: Some(stats.base_def),
         base_vision: stats.base_vision,
         base_speed: stats.base_speed,
@@ -2483,7 +3348,10 @@ fn info_villager_system(
         order: order,
         capacity: capacity,
         total_weight: total_weight,
-        personality: personality_query.get(obj.entity).ok().map(|p| p.to_str().to_string()),
+        personality: personality_query
+            .get(obj.entity)
+            .ok()
+            .map(|p| p.to_str().to_string()),
     };
 
     send_to_client(info_villager_event.player_id, response_packet, &clients);
@@ -2648,17 +3516,22 @@ fn info_structure_system(
 fn info_monolith_system(
     info_monolith_event: On<InfoMonolithEvent>,
     clients: Res<Clients>,
-    mut queries: ParamSet<(
-        Query<CoreQuery>,
-        Query<&mut Inventory, With<SubclassHero>>,
-    )>,
+    mut queries: ParamSet<(Query<CoreQuery>, Query<&mut Inventory, With<SubclassHero>>)>,
     monolith_query: Query<&Monolith>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     mut monolith_investigation: ResMut<MonolithInvestigation>,
 ) {
     // First pass: read monolith info via CoreQuery
-    let (monolith_id, monolith_name, monolith_class, monolith_subclass, monolith_template, monolith_image, soulshards) = {
+    let (
+        monolith_id,
+        monolith_name,
+        monolith_class,
+        monolith_subclass,
+        monolith_template,
+        monolith_image,
+        soulshards,
+    ) = {
         let query = queries.p0();
         let Ok(obj) = query.get(info_monolith_event.entity) else {
             error!("Cannot find obj for {:?}", info_monolith_event.entity);
@@ -2670,7 +3543,15 @@ fn info_monolith_system(
             return;
         };
 
-        (obj.id.0, obj.name.0.to_string(), obj.class.0.to_string(), obj.subclass.to_string(), obj.template.0.to_string(), obj.misc.image.clone(), monolith.soulshards)
+        (
+            obj.id.0,
+            obj.name.0.to_string(),
+            obj.class.0.to_string(),
+            obj.subclass.to_string(),
+            obj.template.0.to_string(),
+            obj.misc.image.clone(),
+            monolith.soulshards,
+        )
     };
 
     let response_packet = ResponsePacket::InfoMonolith {
@@ -2718,13 +3599,21 @@ fn info_monolith_system(
                                     noticemsg: "You press the Soulshards into the Monolith's surface. The runes flare to life! Visions flood your mind — this island was once a great kingdom, destroyed by dark magic. The Monolith is the source of the undead plague. It can be sealed... but you must bring a powerful offering. Craft a Seal Stone and return.".to_string(),
                                     expiry: Some(20000),
                                 };
-                                send_to_client(info_monolith_event.player_id, lore_packet, &clients);
+                                send_to_client(
+                                    info_monolith_event.player_id,
+                                    lore_packet,
+                                    &clients,
+                                );
                             } else {
                                 let hint_packet = ResponsePacket::Notice {
                                     noticemsg: format!("The Monolith resonates with your Soulshards ({}/3 needed). Gather more to proceed.", shard_item.quantity),
                                     expiry: Some(8000),
                                 };
-                                send_to_client(info_monolith_event.player_id, hint_packet, &clients);
+                                send_to_client(
+                                    info_monolith_event.player_id,
+                                    hint_packet,
+                                    &clients,
+                                );
                             }
                         } else {
                             let hint_packet = ResponsePacket::Notice {
@@ -2770,7 +3659,8 @@ fn info_monolith_system(
         _ => {
             // Already sealed
             let packet = ResponsePacket::Notice {
-                noticemsg: "The Monolith stands sealed. Its sanctuary protects the island.".to_string(),
+                noticemsg: "The Monolith stands sealed. Its sanctuary protects the island."
+                    .to_string(),
                 expiry: Some(5000),
             };
             send_to_client(info_monolith_event.player_id, packet, &clients);
@@ -2807,6 +3697,19 @@ fn info_poi_system(
     let player_obj = objectives
         .entry(info_poi_event.player_id)
         .or_insert_with(PlayerObjectives::default);
+    if obj.template.0 == "Shipwreck" && !player_obj.scavenge_shipwreck {
+        player_obj.scavenge_shipwreck = true;
+        let discovery_packet = ResponsePacket::DiscoveryEvent {
+            version: 1,
+            discovery_type: "poi".to_string(),
+            title: "Shipwreck scavenged".to_string(),
+            unlock_source: "First Hour".to_string(),
+            location: Some(format!("{},{}", obj.pos.x, obj.pos.y)),
+            result: "The wreck teaches the first rule: inspect places, recover supplies, and turn danger into tools.".to_string(),
+        };
+        send_to_client(info_poi_event.player_id, discovery_packet, &clients);
+    }
+
     if !player_obj.explore_poi {
         player_obj.explore_poi = true;
         let objectives_packet = ResponsePacket::Objectives {
@@ -3070,7 +3973,16 @@ fn info_advance_system(
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
-    query: Query<(&PlayerId, &Template, &Skills)>,
+    mut query: Query<(
+        &PlayerId,
+        &mut Template,
+        &mut Stats,
+        &Inventory,
+        &Effects,
+        Option<&HeroClass>,
+        Option<&mut Viewshed>,
+        &Skills,
+    )>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -3084,7 +3996,17 @@ fn info_advance_system(
                     continue;
                 };
 
-                let Ok((obj_player_id, obj_template, obj_skills)) = query.get(entity) else {
+                let Ok((
+                    obj_player_id,
+                    obj_template,
+                    _obj_stats,
+                    _inventory,
+                    _effects,
+                    _hero_class,
+                    _viewshed,
+                    obj_skills,
+                )) = query.get_mut(entity)
+                else {
                     error!("Cannot find obj for {:?}", entity);
                     continue;
                 };
@@ -3114,7 +4036,17 @@ fn info_advance_system(
                     continue;
                 };
 
-                let Ok((obj_player_id, obj_template, obj_skills)) = query.get(entity) else {
+                let Ok((
+                    obj_player_id,
+                    mut obj_template,
+                    mut obj_stats,
+                    inventory,
+                    effects,
+                    hero_class,
+                    viewshed,
+                    obj_skills,
+                )) = query.get_mut(entity)
+                else {
                     error!("Cannot find obj for {:?}", entity);
                     continue;
                 };
@@ -3135,6 +4067,25 @@ fn info_advance_system(
 
                         send_to_client(*player_id, advance_packet, &clients);
                         continue;
+                    }
+
+                    let next_obj_template = templates.obj_templates.get(next_template.clone());
+                    refresh_stats_from_template(
+                        &mut obj_stats,
+                        hero_class.copied(),
+                        &next_obj_template,
+                    );
+                    obj_template.0 = next_template.clone();
+
+                    if let Some(mut viewshed) = viewshed {
+                        viewshed.range = Obj::set_viewshed_range(
+                            *id,
+                            next_template.clone(),
+                            game_tick.0,
+                            inventory,
+                            &templates,
+                            effects.get_vision_modifier(&templates),
+                        );
                     }
 
                     //Add obj update event
@@ -4972,7 +5923,9 @@ fn create_foundation_system(
                         hp: 1,
                         base_hp: structure_template.base_hp.unwrap(), // Convert option to non-option
                         stamina: None,
+                        mana: None,
                         base_stamina: None,
+                        base_mana: None,
                         base_def: 0,
                         base_damage: None,
                         damage_range: None,
@@ -8682,7 +9635,12 @@ fn set_log_level_system(
     let mut events_to_remove: Vec<i32> = Vec::new();
 
     for (event_id, event) in events.iter() {
-        if let PlayerEvent::SetLogLevel { player_id, target, level } = event {
+        if let PlayerEvent::SetLogLevel {
+            player_id,
+            target,
+            level,
+        } = event
+        {
             events_to_remove.push(*event_id);
 
             let mut success = false;
@@ -8692,7 +9650,9 @@ fn set_log_level_system(
                 log_overrides.overrides.remove(target);
                 info!("Log level for '{}' cleared (OFF)", target);
             } else {
-                log_overrides.overrides.insert(target.clone(), level.clone());
+                log_overrides
+                    .overrides
+                    .insert(target.clone(), level.clone());
                 info!("Log level for '{}' set to {}", target, level);
             }
 
@@ -8806,4 +9766,270 @@ pub fn get_time_of_day(hour: i32) -> TimeOfDay {
 
 pub fn is_player(player_id: i32) -> bool {
     player_id < MAX_PLAYER_ID // TODO switch NPC players id below 1000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::fs::File;
+
+    fn load_obj_templates() -> Vec<ObjTemplate> {
+        let obj_template_file =
+            File::open("templates/obj_template.yaml").expect("Could not open obj templates");
+        serde_yaml::from_reader(obj_template_file).expect("Could not read obj templates")
+    }
+
+    fn template_by_name(name: &str) -> ObjTemplate {
+        load_obj_templates()
+            .into_iter()
+            .find(|template| template.template == name)
+            .unwrap_or_else(|| panic!("Missing template {}", name))
+    }
+
+    fn base_test_stats() -> Stats {
+        Stats {
+            hp: 1,
+            stamina: Some(1),
+            mana: Some(0),
+            base_hp: 1,
+            base_stamina: Some(1),
+            base_mana: Some(0),
+            base_def: 0,
+            damage_range: Some(1),
+            base_damage: Some(1),
+            base_speed: Some(1),
+            base_vision: Some(1),
+        }
+    }
+
+    #[test]
+    fn class_ability_lists_are_distinct() {
+        let warrior = ability_defs_for_class(HeroClass::Warrior);
+        let ranger = ability_defs_for_class(HeroClass::Ranger);
+        let mage = ability_defs_for_class(HeroClass::Mage);
+
+        assert_eq!(
+            warrior.iter().map(|ability| ability.id).collect::<Vec<_>>(),
+            vec!["shield_bash"]
+        );
+        assert_eq!(
+            ranger.iter().map(|ability| ability.id).collect::<Vec<_>>(),
+            vec!["aimed_shot", "disengage"]
+        );
+        assert_eq!(
+            mage.iter().map(|ability| ability.id).collect::<Vec<_>>(),
+            vec!["arcane_bolt", "ward"]
+        );
+    }
+
+    #[test]
+    fn ability_definitions_keep_class_costs_and_requirements() {
+        let aimed_shot = ability_def("aimed_shot").expect("aimed_shot ability");
+        assert_eq!(aimed_shot.hero_class, HeroClass::Ranger);
+        assert_eq!(aimed_shot.cost_type, AbilityCostType::Stamina);
+        assert_eq!(aimed_shot.required_weapon_subclass, Some("Bow"));
+        assert_eq!(aimed_shot.range, 3);
+
+        let arcane_bolt = ability_def("arcane_bolt").expect("arcane_bolt ability");
+        assert_eq!(arcane_bolt.hero_class, HeroClass::Mage);
+        assert_eq!(arcane_bolt.cost_type, AbilityCostType::Mana);
+        assert_eq!(arcane_bolt.cost, 20);
+    }
+
+    #[test]
+    fn class_profiles_point_at_existing_templates_and_abilities() {
+        let templates = load_obj_templates();
+        let template_names: HashSet<String> = templates
+            .iter()
+            .map(|template| template.template.clone())
+            .collect();
+
+        for hero_class in [HeroClass::Warrior, HeroClass::Ranger, HeroClass::Mage] {
+            let profile = HeroClassProfile::for_class(hero_class);
+            assert_eq!(profile.hero_class, hero_class);
+            assert!(template_names.contains(profile.novice_template));
+            assert!(!profile.label.is_empty());
+            assert!(!profile.selection_hint.is_empty());
+
+            for ability_id in profile.ability_ids {
+                assert!(
+                    ability_def(ability_id).is_some(),
+                    "profile references missing ability {}",
+                    ability_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hero_advance_chains_have_templates_for_every_class() {
+        let templates = load_obj_templates();
+        let template_names: HashSet<String> = templates
+            .iter()
+            .map(|template| template.template.clone())
+            .collect();
+
+        for start in ["Novice Warrior", "Novice Ranger", "Novice Mage"] {
+            let mut current = start.to_string();
+            assert!(template_names.contains(&current), "missing {}", current);
+
+            loop {
+                let (next, _required_xp) = SkillData::hero_advance(current.clone());
+                if next == MAX_RANK {
+                    break;
+                }
+
+                assert!(template_names.contains(&next), "missing {}", next);
+                current = next;
+            }
+        }
+    }
+
+    #[test]
+    fn mage_rank_templates_scale_mana() {
+        let mana_by_rank = [
+            ("Novice Mage", 100),
+            ("Skilled Mage", 150),
+            ("Great Mage", 225),
+            ("Legendary Mage", 325),
+        ];
+
+        for (template_name, expected_mana) in mana_by_rank {
+            let template = template_by_name(template_name);
+            assert_eq!(template.base_mana, Some(expected_mana));
+        }
+
+        assert_eq!(template_by_name("Novice Warrior").base_mana, Some(0));
+        assert_eq!(template_by_name("Novice Ranger").base_mana, Some(0));
+    }
+
+    #[test]
+    fn refresh_stats_updates_ranger_progression_values() {
+        let template = template_by_name("Skilled Ranger");
+        let mut stats = base_test_stats();
+
+        refresh_stats_from_template(&mut stats, Some(HeroClass::Ranger), &template);
+
+        assert_eq!(stats.hp, 150);
+        assert_eq!(stats.base_hp, 150);
+        assert_eq!(stats.stamina, Some(175));
+        assert_eq!(stats.base_stamina, Some(175));
+        assert_eq!(stats.mana, Some(0));
+        assert_eq!(stats.base_mana, Some(0));
+        assert_eq!(stats.base_speed, Some(8));
+        assert_eq!(stats.base_vision, Some(6));
+    }
+
+    #[test]
+    fn refresh_stats_updates_mage_max_mana() {
+        let template = template_by_name("Great Mage");
+        let mut stats = base_test_stats();
+
+        refresh_stats_from_template(&mut stats, Some(HeroClass::Mage), &template);
+
+        assert_eq!(stats.hp, 220);
+        assert_eq!(stats.base_mana, Some(225));
+        assert_eq!(stats.mana, Some(225));
+        assert_eq!(stats.base_def, 2);
+    }
+
+    #[test]
+    fn guard_bash_definition_and_effect_timers_match_profile() {
+        let guard_bash = ability_def("shield_bash").expect("guard bash ability");
+
+        assert_eq!(guard_bash.label, "Guard Bash");
+        assert_eq!(guard_bash.hero_class, HeroClass::Warrior);
+        assert_eq!(guard_bash.cost_type, AbilityCostType::Stamina);
+        assert_eq!(guard_bash.cost, 10);
+        assert_eq!(guard_bash.range, 1);
+
+        let mut effects = Effects(HashMap::new());
+        let mut map_events = MapEvents::default();
+        add_timed_effect(
+            42,
+            &mut effects,
+            &mut map_events,
+            100,
+            Effect::Stunned,
+            GUARD_BASH_STUN_TICKS,
+            1.0,
+        );
+        add_timed_effect(
+            7,
+            &mut effects,
+            &mut map_events,
+            100,
+            Effect::Bracing,
+            WARRIOR_BRACE_DURATION_TICKS,
+            WARRIOR_BRACE_AMPLIFIER,
+        );
+
+        assert_eq!(
+            effects.0.get(&Effect::Bracing),
+            Some(&(WARRIOR_BRACE_DURATION_TICKS, WARRIOR_BRACE_AMPLIFIER, 1))
+        );
+        assert!(map_events.values().any(|event| {
+            event.obj_id == 42
+                && event.run_tick == 100 + GUARD_BASH_STUN_TICKS
+                && matches!(
+                    &event.event_type,
+                    VisibleEvent::EffectExpiredEvent { effect }
+                        if *effect == Effect::Stunned
+                )
+        }));
+    }
+
+    #[test]
+    fn ranger_ability_definitions_support_kiting() {
+        let aimed_shot = ability_def("aimed_shot").expect("aimed shot ability");
+        let disengage = ability_def("disengage").expect("disengage ability");
+
+        assert_eq!(aimed_shot.hero_class, HeroClass::Ranger);
+        assert_eq!(aimed_shot.required_weapon_subclass, Some("Bow"));
+        assert_eq!(aimed_shot.range, 3);
+        assert_eq!(disengage.hero_class, HeroClass::Ranger);
+        assert_eq!(
+            disengage_destination(Position { x: 2, y: 2 }, Position { x: 1, y: 2 }),
+            Some(Position { x: 3, y: 2 })
+        );
+        assert_eq!(
+            disengage_destination(Position { x: 2, y: 2 }, Position { x: 2, y: 2 }),
+            None
+        );
+    }
+
+    #[test]
+    fn mage_ward_uses_timed_weak_sanctuary() {
+        let ward = ability_def("ward").expect("ward ability");
+        assert_eq!(ward.hero_class, HeroClass::Mage);
+        assert_eq!(ward.cost_type, AbilityCostType::Mana);
+        assert_eq!(ward.cost, 15);
+
+        let mut effects = Effects(HashMap::new());
+        let mut map_events = MapEvents::default();
+        add_timed_effect(
+            9,
+            &mut effects,
+            &mut map_events,
+            200,
+            Effect::WeakSanctuary,
+            MAGE_WARD_DURATION_TICKS,
+            MAGE_WARD_AMPLIFIER,
+        );
+
+        assert_eq!(
+            effects.0.get(&Effect::WeakSanctuary),
+            Some(&(MAGE_WARD_DURATION_TICKS, MAGE_WARD_AMPLIFIER, 1))
+        );
+        assert!(map_events.values().any(|event| {
+            event.obj_id == 9
+                && event.run_tick == 200 + MAGE_WARD_DURATION_TICKS
+                && matches!(
+                    &event.event_type,
+                    VisibleEvent::EffectExpiredEvent { effect }
+                        if *effect == Effect::WeakSanctuary
+                )
+        }));
+    }
 }

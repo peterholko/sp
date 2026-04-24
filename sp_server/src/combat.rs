@@ -6,16 +6,17 @@ use rand::Rng;
 
 use crate::constants::TICKS_PER_SEC;
 use crate::effect::{Effect, Effects};
-use crate::event::{MapEvents, VisibleEvent};
-use crate::game::{
-    Fortified, GameTick,
-};
-use crate::obj::{Class, Id, LastCombatTick, PlayerId, Position, State, StateDead, Stats, Subclass, Template, Misc};
+use crate::event::{MapEvents, Spell, VisibleEvent};
+use crate::game::{Fortified, GameTick};
 use crate::ids::Ids;
-use crate::item::{self, Inventory,AttrKey, Item};
+use crate::item::{self, AttrKey, Inventory, Item};
 use crate::map::Map;
 use crate::obj::Obj;
-use crate::skill::{Skills, SkillUpdated};
+use crate::obj::{
+    Class, HeroClass, Id, LastAttacker, LastCombatTick, Misc, PlayerId, Position, State, StateDead,
+    Stats, Subclass, Template,
+};
+use crate::skill::{SkillUpdated, Skills};
 use crate::templates::{ComboTemplate, ObjTemplate, Templates};
 
 pub const QUICK: &str = "quick";
@@ -86,6 +87,7 @@ pub struct CombatQuery {
     pub effects: &'static mut Effects,
     pub inventory: &'static mut Inventory,
     pub skills: Option<&'static mut Skills>,
+    pub hero_class: Option<&'static HeroClass>,
     pub combo_tracker: Option<&'static mut ComboTracker>,
     pub last_combat_tick: &'static mut LastCombatTick,
 }
@@ -140,8 +142,10 @@ impl Combat {
         let defense_effects_mod = Self::get_defense_effects(target, templates);
 
         // 6 Get damage mod from items
-        let damage_from_items = attacker.inventory.get_items_value_by_attr(&item::AttrKey::Damage, true);
-           
+        let damage_from_items = attacker
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Damage, true);
+
         // 6b Get weapon skill damage bonus (+5% per skill level)
         let skill_damage_mod = Self::get_skill_damage_mod(attacker, &attacker_weapons);
 
@@ -151,10 +155,12 @@ impl Combat {
         // TODO 8 Get damage reduction from Defensive action
 
         // 8a Get Sanctuary damage reduction
-        let sanctuary_defense = Self::get_sanctuary_defense(target, templates);        
+        let sanctuary_defense = Self::get_sanctuary_defense(target, templates);
 
         // 9 Get armor from defender items
-        let defense_from_items = target.inventory.get_items_value_by_attr(&item::AttrKey::Defense, true);
+        let defense_from_items = target
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Defense, true);
 
         // TODO 10 Check if Defender has Defensive Stance
 
@@ -179,11 +185,14 @@ impl Combat {
         let roll_damage = rng.gen_range(0.0..damage_range) + base_damage;
 
         // 18 Calculate total damage
-        let total_damage =
-            (roll_damage + damage_from_items) * damage_effects_mod * attack_type_damage_mod * skill_damage_mod;
+        let total_damage = (roll_damage + damage_from_items)
+            * damage_effects_mod
+            * attack_type_damage_mod
+            * skill_damage_mod;
 
         // 19 Calculate total defense
-        let total_defense = (base_defense * defense_from_items) * defense_effects_mod * sanctuary_defense;
+        let total_defense =
+            (base_defense * defense_from_items) * defense_effects_mod * sanctuary_defense;
 
         // 20 & 21 Calculate damage defense reduction
         let defense_reduction = total_defense / (total_defense + 50.0);
@@ -214,6 +223,23 @@ impl Combat {
         // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
+
+        if attacker.player_id.0 != target.player_id.0 {
+            commands.entity(target.entity).insert(LastAttacker {
+                id: attacker.id.0,
+                tick: game_tick.0,
+            });
+        }
+
+        if matches!(target.hero_class, Some(&HeroClass::Warrior))
+            && target.effects.0.contains_key(&Effect::Bracing)
+        {
+            if let (Some(stamina), Some(base_stamina)) =
+                (target.stats.stamina, target.stats.base_stamina)
+            {
+                target.stats.stamina = Some((stamina + 3).min(base_stamina));
+            }
+        }
 
         // 28 Apply new effects from this attack
         /*Self::apply_combo_effects(
@@ -299,12 +325,16 @@ impl Combat {
         let defense_effects_mod = Self::get_defense_effects(target, templates);
 
         // 6 Get damage mod from items
-        let damage_from_items = attacker.inventory.get_items_value_by_attr(&item::AttrKey::Damage, true);
+        let damage_from_items = attacker
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Damage, true);
 
         // TODO 8 Get damage reduction from Defensive action
 
         // 9 Get armor from defender items
-        let defense_from_items = target.inventory.get_items_value_by_attr(&item::AttrKey::Defense, true);
+        let defense_from_items = target
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Defense, true);
 
         // TODO 10 Check if Defender has Defensive Stance
 
@@ -366,6 +396,23 @@ impl Combat {
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
 
+        if attacker.player_id.0 != target.player_id.0 {
+            commands.entity(target.entity).insert(LastAttacker {
+                id: attacker.id.0,
+                tick: game_tick.0,
+            });
+        }
+
+        if matches!(target.hero_class, Some(&HeroClass::Warrior))
+            && target.effects.0.contains_key(&Effect::Bracing)
+        {
+            if let (Some(stamina), Some(base_stamina)) =
+                (target.stats.stamina, target.stats.base_stamina)
+            {
+                target.stats.stamina = Some((stamina + 3).min(base_stamina));
+            }
+        }
+
         // 28 Apply new effects from this attack
         Self::apply_combo_effects(
             combo_template.clone(),
@@ -421,12 +468,18 @@ impl Combat {
     pub fn process_spell_damage(
         commands: &mut Commands,
         game_tick: &Res<GameTick>,
+        spell: Spell,
         caster: &CombatSpellQueryItem,
         target: &mut CombatSpellQueryItem,
     ) -> i32 {
-        target.stats.hp -= 1;
+        let damage = match spell {
+            Spell::ShadowBolt => 1,
+            Spell::ArcaneBolt => 12,
+        };
+        target.stats.hp -= damage;
 
         if target.stats.hp <= 0 {
+            *target.state = State::Dead;
             debug!("Target {:?} is dead", target.entity);
             commands.entity(target.entity).insert(StateDead {
                 dead_at: game_tick.0,
@@ -434,7 +487,7 @@ impl Combat {
             });
         }
 
-        return 1;
+        return damage;
     }
 
     fn process_weapon_procs(
@@ -635,14 +688,14 @@ impl Combat {
     }
 
     fn get_defense_effects(target: &mut CombatQueryItem, templates: &Res<Templates>) -> f32 {
-        for (effect, (_duration, _amplifier, _stacks)) in target.effects.0.iter() {
+        for (effect, (_duration, amplifier, _stacks)) in target.effects.0.iter() {
             let effect_template = templates
                 .effect_templates
                 .get(&effect.clone().to_str())
                 .expect("Effect missing from templates");
 
             if let Some(effect_defense) = effect_template.defense {
-                let modifier = 1.0 + effect_defense; // defense is negative in the template file
+                let modifier = 1.0 + (effect_defense * amplifier);
                 return modifier;
             }
         }
@@ -657,7 +710,9 @@ impl Combat {
             .get(&Effect::Sanctuary.to_str())
             .expect("Missing Sanctuary Template Effect");
 
-        let sanctuary_defense = sanctuary_effect.defense.expect("Missing defense on Sanctuary Template Effect");
+        let sanctuary_defense = sanctuary_effect
+            .defense
+            .expect("Missing defense on Sanctuary Template Effect");
 
         if let Some((_duration, amplifier, _stacks)) = target.effects.0.get(&Effect::Sanctuary) {
             return sanctuary_defense * amplifier;

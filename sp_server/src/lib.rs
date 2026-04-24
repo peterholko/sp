@@ -9,44 +9,41 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-
+use bevy::app::TaskPoolPlugin;
+use bevy::diagnostic::FrameCountPlugin;
 use bevy::log::LogPlugin;
 use bevy::scene::ScenePlugin;
 use bevy::state::app::StatesPlugin;
-use bevy::{
-    app::ScheduleRunnerPlugin,
-    prelude::*,
-};
-use bevy::diagnostic::FrameCountPlugin;
-use bevy::app::TaskPoolPlugin;
-use core::time::Duration;
 use bevy::state::state::States;
+use bevy::{app::ScheduleRunnerPlugin, prelude::*};
+use core::time::Duration;
+use lazy_static::lazy_static;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{reload, EnvFilter, Layer, Registry};
-use lazy_static::lazy_static;
-use std::sync::{Arc, Mutex};
 
-use game::{GamePlugin};
+use game::GamePlugin;
 
 lazy_static! {
     pub static ref LOG_RELOAD_HANDLE: Arc<Mutex<Option<reload::Handle<EnvFilter, Registry>>>> =
         Arc::new(Mutex::new(None));
 }
 
-pub mod event;
+pub mod constants;
 pub mod database;
+pub mod event;
 pub mod game;
 pub mod obj;
-pub mod constants;
 pub mod world;
 
 mod combat;
 mod effect;
 mod encounter;
 mod experiment;
-pub mod item;
+mod farm;
 mod ids;
+pub mod item;
 mod map;
 mod network;
 mod player;
@@ -55,10 +52,9 @@ mod recipe;
 mod resource;
 mod structure;
 mod templates;
-mod villager_util;
 mod terrain_feature;
-mod farm;
 mod trade;
+mod villager_util;
 
 #[path = "ai/common/common.rs"]
 mod common;
@@ -92,7 +88,6 @@ pub enum AppState {
 }
 
 pub fn setup(command: &String) {
-
     let mut new_game = true;
 
     if command == "reload" {
@@ -110,15 +105,16 @@ pub fn setup(command: &String) {
             TIMESTEP_10_PER_SECOND,
         )))
         .add_plugins(LogPlugin {
-            level: bevy::log::Level::DEBUG,
-            // Very permissive base filter - let all DEBUG logs through
+            level: bevy::log::Level::TRACE,
+            // Very permissive base filter - let TRACE logs through where dynamic overrides allow it
             // The reloadable layer in custom_layer will control what actually appears
-            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=warn,siege_perilous=debug".into(),
+            filter: "wgpu=error,naga=error,bevy_ecs=warn,big_brain=trace,siege_perilous=debug"
+                .into(),
             custom_layer: |_| {
                 // Setup reloadable log filter for dynamic control
                 // This starts with all siege_perilous modules at INFO level
                 // Admin commands can dynamically change individual module levels to DEBUG/TRACE
-                let initial_filter = EnvFilter::new("siege_perilous=info");
+                let initial_filter = EnvFilter::new("info,big_brain=debug,siege_perilous=info");
                 let (reloadable_layer, reload_handle) = reload::Layer::new(initial_filter);
 
                 // Store handle in lazy_static for Bevy system access
@@ -133,9 +129,7 @@ pub fn setup(command: &String) {
             },
             ..default()
         })
-        .add_plugins(GamePlugin {
-            new_game: new_game,
-        })
+        .add_plugins(GamePlugin { new_game: new_game })
         .init_state::<AppState>()
         .register_type::<combat::Combo>()
         .register_type::<common::Destination>()
@@ -200,7 +194,7 @@ pub fn setup(command: &String) {
         .register_type::<trade::Prices>()
         .register_type::<trade::TradePort>()
         .register_type::<trade::TradePorts>()
-        .register_type::<trade::WantedItem>()        
+        .register_type::<trade::WantedItem>()
         .init_asset::<DynamicScene>()
         .run();
 }

@@ -32,6 +32,9 @@ export class Global {
     public static heroMaxHp = 0;
     public static heroStamina = 0;
     public static heroMaxStamina = 0;
+    public static heroMana = 0;
+    public static heroMaxMana = 0;
+    public static heroClass = "";
 
     public static drawMapCompleted = false;
     public static effectTextOffsetY = 0;
@@ -65,6 +68,7 @@ export class Global {
     public static merchantSellTarget;
 
     public static attacks = [];
+    public static combatState = null;
 
     public static noticeExpiry = 5000;
 

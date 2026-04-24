@@ -138,7 +138,14 @@ impl WeatherAreas {
 impl Weather {
     /// Returns true if this weather is cold (ColdSnap, Snow, Blizzard, PolarVortex, IceStorm)
     pub fn is_cold(&self) -> bool {
-        matches!(self, Weather::ColdSnap | Weather::Snow | Weather::Blizzard | Weather::PolarVortex | Weather::IceStorm)
+        matches!(
+            self,
+            Weather::ColdSnap
+                | Weather::Snow
+                | Weather::Blizzard
+                | Weather::PolarVortex
+                | Weather::IceStorm
+        )
     }
 
     /// Returns true if this weather is hot (Heatwave, Drought)
@@ -148,12 +155,22 @@ impl Weather {
 
     /// Returns true if this weather is rainy (HeavyRain, Thunderstorm, Moonsoon)
     pub fn is_rainy(&self) -> bool {
-        matches!(self, Weather::HeavyRain | Weather::Thunderstorm | Weather::Moonsoon)
+        matches!(
+            self,
+            Weather::HeavyRain | Weather::Thunderstorm | Weather::Moonsoon
+        )
     }
 
     /// Returns true if this weather is a storm that damages structures
     pub fn is_storm(&self) -> bool {
-        matches!(self, Weather::Thunderstorm | Weather::Hurricane | Weather::Moonsoon | Weather::SuperTyphoon | Weather::Tornado)
+        matches!(
+            self,
+            Weather::Thunderstorm
+                | Weather::Hurricane
+                | Weather::Moonsoon
+                | Weather::SuperTyphoon
+                | Weather::Tornado
+        )
     }
 
     /// Returns true if this weather is fog
@@ -163,7 +180,10 @@ impl Weather {
 
     /// Returns true if this weather is snowy (reduces speed)
     pub fn is_snowy(&self) -> bool {
-        matches!(self, Weather::Snow | Weather::Blizzard | Weather::PolarVortex | Weather::IceStorm)
+        matches!(
+            self,
+            Weather::Snow | Weather::Blizzard | Weather::PolarVortex | Weather::IceStorm
+        )
     }
 }
 
@@ -234,7 +254,14 @@ pub fn day_system(
     templates: Option<Res<Templates>>,
     player_query: Query<&PlayerId>,
     mut viewshed_query: Query<
-        (Entity, &Id, &Template, &Inventory, &mut Viewshed, Option<&Effects>),
+        (
+            Entity,
+            &Id,
+            &Template,
+            &Inventory,
+            &mut Viewshed,
+            Option<&Effects>,
+        ),
         Without<SubclassNPC>,
     >,
 ) {

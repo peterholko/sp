@@ -86,11 +86,20 @@ use dotenvy::dotenv;
 #[serde(tag = "cmd")]
 enum NetworkPacket {
     #[serde(rename = "login")]
-    Login { account_name: String, password: String },
+    Login {
+        account_name: String,
+        password: String,
+    },
     #[serde(rename = "register")]
-    Register { account_name: String, password: String },
+    Register {
+        account_name: String,
+        password: String,
+    },
     #[serde(rename = "select_class")]
-    SelectedClass { class_name: String, hero_name: String },
+    SelectedClass {
+        class_name: String,
+        hero_name: String,
+    },
     #[serde(rename = "recreate_hero")]
     RecreateHero,
     #[serde(rename = "get_stats")]
@@ -105,6 +114,12 @@ enum NetworkPacket {
         source_id: i32,
         target_id: i32,
     },
+    #[serde(rename = "ability")]
+    Ability {
+        ability_id: String,
+        source_id: i32,
+        target_id: Option<i32>,
+    },
     #[serde(rename = "combo")]
     Combo {
         source_id: i32,
@@ -112,9 +127,7 @@ enum NetworkPacket {
         combo_type: String,
     },
     #[serde(rename = "block")]
-    Block {
-        source_id: i32,
-    },
+    Block { source_id: i32 },
     #[serde(rename = "info_obj")]
     InfoObj { id: i32 },
     #[serde(rename = "info_skills")]
@@ -134,7 +147,11 @@ enum NetworkPacket {
     #[serde(rename = "info_equip")]
     InfoEquip { id: i32 },
     #[serde(rename = "info_item")]
-    InfoItem { obj_id: i32, item_id: i32, action: String },
+    InfoItem {
+        obj_id: i32,
+        item_id: i32,
+        action: String,
+    },
     #[serde(rename = "info_item_by_name")]
     InfoItemByName { name: String },
     #[serde(rename = "info_item_transfer")]
@@ -146,9 +163,17 @@ enum NetworkPacket {
     #[serde(rename = "info_hire")]
     InfoHire { source_id: i32 },
     #[serde(rename = "item_transfer")]
-    ItemTransfer {item: i32, source_id: i32, target_id: i32 },
+    ItemTransfer {
+        item: i32,
+        source_id: i32,
+        target_id: i32,
+    },
     #[serde(rename = "item_split")]
-    ItemSplit { owner_id: i32, item: i32, quantity: i32 },
+    ItemSplit {
+        owner_id: i32,
+        item: i32,
+        quantity: i32,
+    },
     #[serde(rename = "gather")]
     Gather,
     #[serde(rename = "operate")]
@@ -221,11 +246,15 @@ enum NetworkPacket {
     #[serde(rename = "remove_assign")]
     RemoveAssign { worker_id: i32, structure_id: i32 },
     #[serde(rename = "equip")]
-    Equip { obj_id: i32, item: i32, status: bool },
+    Equip {
+        obj_id: i32,
+        item: i32,
+        status: bool,
+    },
     #[serde(rename = "delete_item")]
     DeleteItem { obj_id: i32, item_id: i32 },
     #[serde(rename = "info_craft")]
-    InfoCraft { crafter_id: i32},
+    InfoCraft { crafter_id: i32 },
     #[serde(rename = "info_structure_craft")]
     InfoStructureCraft { structure_id: i32 },
     #[serde(rename = "info_structure_queue")]
@@ -241,18 +270,15 @@ enum NetworkPacket {
     AddRefineEntry {
         structure_id: i32,
         refine_item_id: i32,
-    }, 
+    },
     #[serde(rename = "remove_work_entry")]
     RemoveWorkEntry { structure_id: i32, index: i32 },
     #[serde(rename = "info_refine")]
-    InfoRefine { refiner_id: i32},
+    InfoRefine { refiner_id: i32 },
     #[serde(rename = "info_structure_refine")]
     InfoStructureRefine { structure_id: i32 },
     #[serde(rename = "info_structure_refine_item")]
-    InfoStructureRefineItem {
-        structure_id: i32,
-        item_id: i32,
-    },
+    InfoStructureRefineItem { structure_id: i32, item_id: i32 },
     #[serde(rename = "use")]
     Use { obj_id: i32, item_id: i32 },
     #[serde(rename = "delete")]
@@ -270,7 +296,11 @@ enum NetworkPacket {
     #[serde(rename = "hire")]
     Hire { source_id: i32, target_id: i32 },
     #[serde(rename = "buy_item")]
-    BuyItem { seller_id: i32, item_id: i32, quantity: i32 },
+    BuyItem {
+        seller_id: i32,
+        item_id: i32,
+        quantity: i32,
+    },
     #[serde(rename = "sell_item")]
     SellItem {
         item_id: i32,
@@ -282,10 +312,7 @@ enum NetworkPacket {
     #[serde(rename = "debug_obj")]
     DebugObj { obj_id: i32 },
     #[serde(rename = "set_log_level")]
-    SetLogLevel {
-        target: String,
-        level: String,
-    },
+    SetLogLevel { target: String, level: String },
     #[serde(rename = "get_log_levels")]
     GetLogLevels,
 }
@@ -362,11 +389,14 @@ pub enum ResponsePacket {
         effects: Vec<effect::EffectInfo>,
         hp: Option<i32>,
         stamina: Option<i32>,
+        mana: Option<i32>,
         thirst: String,
         hunger: String,
         tiredness: String,
         base_hp: Option<i32>,
         base_stamina: Option<i32>,
+        base_mana: Option<i32>,
+        hero_class: Option<String>,
         base_def: Option<i32>,
         base_vision: Option<u32>,
         base_speed: Option<i32>,
@@ -608,6 +638,11 @@ pub enum ResponsePacket {
         id: i32,
         stamina: i32,
     },
+    #[serde(rename = "info_mana_update")]
+    InfoManaUpdate {
+        id: i32,
+        mana: i32,
+    },
     #[serde(rename = "info_merchant")]
     InfoMerchant {
         source_id: i32,
@@ -717,10 +752,18 @@ pub enum ResponsePacket {
         cooldown: i32,
         stamina_cost: i32,
     },
+    #[serde(rename = "ability")]
+    Ability {
+        source_id: i32,
+        ability_id: String,
+        cooldown: i32,
+        stamina_cost: Option<i32>,
+        mana_cost: Option<i32>,
+    },
     #[serde(rename = "info_assign")]
     InfoAssign {
         structure_id: i32,
-        assignments: Vec<Assignment>,        
+        assignments: Vec<Assignment>,
     },
     #[serde(rename = "assign")]
     Assign {
@@ -878,6 +921,13 @@ pub enum ResponsePacket {
         hero_name: String,
         hero_rank: String,
         total_xp: i32,
+        score_total: i32,
+        score_breakdown: ScoreBreakdown,
+        days_survived: i32,
+        waves_survived: i32,
+        highest_pressure_level: i32,
+        legendary_kills: i32,
+        hideouts_cleared: i32,
         fate: String,
         crisis_tier: i32,
     },
@@ -888,6 +938,43 @@ pub enum ResponsePacket {
         recruit_villager: bool,
         explore_poi: bool,
         survive_5_nights: bool,
+    },
+    #[serde(rename = "objective_state")]
+    ObjectiveState {
+        version: i32,
+        current_id: String,
+        objectives: Vec<ObjectiveProgress>,
+    },
+    #[serde(rename = "threat_state")]
+    ThreatState {
+        version: i32,
+        day: i32,
+        phase: String,
+        pressure_level: String,
+        next_night_warning: String,
+        known_risks: Vec<ThreatRisk>,
+        legendary_threats: Vec<LegendaryThreatPacket>,
+    },
+    #[serde(rename = "combat_state")]
+    CombatState {
+        version: i32,
+        target_id: i32,
+        enemy_intent: String,
+        attack_history: Vec<String>,
+        matching_combos: Vec<ComboHint>,
+        available_finisher: Option<String>,
+        stamina_costs: StaminaCosts,
+        abilities: Vec<AbilityHint>,
+        counter_hint: String,
+    },
+    #[serde(rename = "discovery_event")]
+    DiscoveryEvent {
+        version: i32,
+        discovery_type: String,
+        title: String,
+        unlock_source: String,
+        location: Option<String>,
+        result: String,
     },
 }
 
@@ -930,6 +1017,8 @@ pub struct StatsData {
     pub base_hp: i32,
     pub stamina: i32,
     pub base_stamina: i32,
+    pub mana: i32,
+    pub base_mana: i32,
     pub thirst: Option<String>,
     pub hunger: Option<String>,
     pub tiredness: Option<String>,
@@ -1122,6 +1211,79 @@ pub struct Xp {
     pub skill: String,
     pub xp: i32,
     pub levelup: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ObjectiveProgress {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+    pub category: String,
+    pub target: Option<String>,
+    pub action_hint: String,
+    pub lesson: String,
+    pub reward: String,
+    pub progress: Option<i32>,
+    pub goal: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ThreatRisk {
+    pub id: String,
+    pub label: String,
+    pub severity: String,
+    pub trigger_hint: String,
+    pub counter_hint: String,
+    pub current: Option<i32>,
+    pub threshold: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LegendaryThreatPacket {
+    pub name: String,
+    pub status: String,
+    pub days_active: i32,
+    pub hideout_known: bool,
+    pub hideout_location: Option<String>,
+    pub next_attack_eta: Option<i32>,
+    pub followers_defeated: i32,
+    pub captains_defeated: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ScoreBreakdown {
+    pub survival: i32,
+    pub progression: i32,
+    pub wealth: i32,
+    pub defense: i32,
+    pub valor: i32,
+    pub legacy: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ComboHint {
+    pub name: String,
+    pub remaining_attacks: Vec<String>,
+    pub effect: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct StaminaCosts {
+    pub quick: i32,
+    pub precise: i32,
+    pub fierce: i32,
+    pub block: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AbilityHint {
+    pub id: String,
+    pub label: String,
+    pub cost_type: String,
+    pub cost: i32,
+    pub range: i32,
+    pub disabled_reason: Option<String>,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1400,6 +1562,31 @@ pub async fn tokio_setup(
     let manager = Manager::new(pg_config, NoTls);
     let pool = Pool::builder(manager).max_size(16).build().unwrap();
 
+    if let Ok(client) = pool.get().await {
+        let score_migrations = [
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS total_score INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_survival INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_progression INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_wealth INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_defense INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_valor INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS score_legacy INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS days_survived INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS highest_pressure_level INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS waves_survived INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS legendary_kills INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS hideouts_cleared INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scores ADD COLUMN IF NOT EXISTS crisis_tier INTEGER NOT NULL DEFAULT 0",
+            "UPDATE scores SET total_score = total_xp WHERE total_score = 0",
+        ];
+
+        for statement in score_migrations {
+            if let Err(err) = client.execute(statement, &[]).await {
+                println!("Score schema migration failed: {:?}", err);
+            }
+        }
+    }
+
     println!("Resetting game: {:?}", reset_game);
     if reset_game {
         let client = pool
@@ -1440,6 +1627,18 @@ pub async fn tokio_setup(
                     hero_name,
                     hero_rank,
                     total_xp,
+                    total_score,
+                    score_survival,
+                    score_progression,
+                    score_wealth,
+                    score_defense,
+                    score_valor,
+                    score_legacy,
+                    days_survived,
+                    highest_pressure_level,
+                    waves_survived,
+                    legendary_kills,
+                    hideouts_cleared,
                     fate,
                     crisis_tier,
                 } => {
@@ -1449,14 +1648,33 @@ pub async fn tokio_setup(
                         .expect("Error getting DB connection from pool");
 
                     let statement = client
-                        .prepare("INSERT INTO scores (player_id, hero_name, hero_rank, total_xp, fate, crisis_tier) VALUES ($1, $2, $3, $4, $5, $6)")
+                        .prepare("INSERT INTO scores (player_id, hero_name, hero_rank, total_xp, total_score, score_survival, score_progression, score_wealth, score_defense, score_valor, score_legacy, days_survived, highest_pressure_level, waves_survived, legendary_kills, hideouts_cleared, fate, crisis_tier) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)")
                         .await
                         .expect("Error preparing statement");
 
                     client
                         .execute(
                             &statement,
-                            &[&player_id, &hero_name, &hero_rank, &total_xp, &fate, &crisis_tier],
+                            &[
+                                &player_id,
+                                &hero_name,
+                                &hero_rank,
+                                &total_xp,
+                                &total_score,
+                                &score_survival,
+                                &score_progression,
+                                &score_wealth,
+                                &score_defense,
+                                &score_valor,
+                                &score_legacy,
+                                &days_survived,
+                                &highest_pressure_level,
+                                &waves_survived,
+                                &legendary_kills,
+                                &hideouts_cleared,
+                                &fate,
+                                &crisis_tier,
+                            ],
                         )
                         .await
                         .expect("Error executing statement");
@@ -1595,7 +1813,8 @@ async fn handle_connection(
 
     net_debug!(
         "New client id: {:?} for WebSocket connection: {}",
-        client_id, peer
+        client_id,
+        peer
     );
 
     // Get peer address
@@ -1708,7 +1927,10 @@ async fn handle_connection(
 
     // Check if session is older than 1 day
     if now.signed_duration_since(created_at) > chrono::Duration::days(1) {
-        println!("Session expired: created {} is older than 1 day", created_at);
+        println!(
+            "Session expired: created {} is older than 1 day",
+            created_at
+        );
         return Err((client_id, Error::AttackAttempt));
     }
 
@@ -1758,7 +1980,10 @@ async fn handle_connection(
 
     let Ok(row_account) = row_account else {
         // Account not found - this is a data integrity issue (orphaned session)
-        println!("DATA INTEGRITY ERROR: Account not found for player_id {} referenced by session {}", player_id, session_id);
+        println!(
+            "DATA INTEGRITY ERROR: Account not found for player_id {} referenced by session {}",
+            player_id, session_id
+        );
         println!("Cleaning up orphaned session...");
 
         // Clean up the orphaned session
@@ -1774,15 +1999,31 @@ async fn handle_connection(
         return Err((client_id, Error::AttackAttempt));
     };
 
-    let player_username: String = row_account.get::<_, Option<String>>("account_name").unwrap_or_default();
+    let player_username: String = row_account
+        .get::<_, Option<String>>("account_name")
+        .unwrap_or_default();
     let player_state: String = row_account.get("player_state");
-    let is_admin: bool = row_account.get::<_, Option<bool>>("is_admin").unwrap_or(false);
+    let is_admin: bool = row_account
+        .get::<_, Option<bool>>("is_admin")
+        .unwrap_or(false);
 
-    let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
+    let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, COALESCE(total_score, total_xp) as total_score, COALESCE(score_survival, 0) as score_survival, COALESCE(score_progression, 0) as score_progression, COALESCE(score_wealth, 0) as score_wealth, COALESCE(score_defense, 0) as score_defense, COALESCE(score_valor, 0) as score_valor, COALESCE(score_legacy, 0) as score_legacy, COALESCE(days_survived, 0) as days_survived, COALESCE(highest_pressure_level, 0) as highest_pressure_level, COALESCE(waves_survived, 0) as waves_survived, COALESCE(legendary_kills, 0) as legendary_kills, COALESCE(hideouts_cleared, 0) as hideouts_cleared, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
 
     let mut hero_name: String = String::new();
     let mut hero_rank: String = String::new();
     let mut total_xp: i32 = 0;
+    let mut total_score: i32 = 0;
+    let mut score_survival: i32 = 0;
+    let mut score_progression: i32 = 0;
+    let mut score_wealth: i32 = 0;
+    let mut score_defense: i32 = 0;
+    let mut score_valor: i32 = 0;
+    let mut score_legacy: i32 = 0;
+    let mut days_survived: i32 = 0;
+    let mut highest_pressure_level: i32 = 0;
+    let mut waves_survived: i32 = 0;
+    let mut legendary_kills: i32 = 0;
+    let mut hideouts_cleared: i32 = 0;
     let mut fate: String = String::new();
     let mut crisis_tier: i32 = 0;
 
@@ -1790,6 +2031,18 @@ async fn handle_connection(
         hero_name = row_score.get("hero_name");
         hero_rank = row_score.get("hero_rank");
         total_xp = row_score.get("total_xp");
+        total_score = row_score.get("total_score");
+        score_survival = row_score.get("score_survival");
+        score_progression = row_score.get("score_progression");
+        score_wealth = row_score.get("score_wealth");
+        score_defense = row_score.get("score_defense");
+        score_valor = row_score.get("score_valor");
+        score_legacy = row_score.get("score_legacy");
+        days_survived = row_score.get("days_survived");
+        highest_pressure_level = row_score.get("highest_pressure_level");
+        waves_survived = row_score.get("waves_survived");
+        legendary_kills = row_score.get("legendary_kills");
+        hideouts_cleared = row_score.get("hideouts_cleared");
         fate = row_score.get("fate");
         crisis_tier = row_score.get("crisis_tier");
     };
@@ -1835,6 +2088,20 @@ async fn handle_connection(
                 hero_name: hero_name.clone(),
                 hero_rank: hero_rank.clone(),
                 total_xp: total_xp,
+                score_total: total_score,
+                score_breakdown: ScoreBreakdown {
+                    survival: score_survival,
+                    progression: score_progression,
+                    wealth: score_wealth,
+                    defense: score_defense,
+                    valor: score_valor,
+                    legacy: score_legacy,
+                },
+                days_survived,
+                waves_survived,
+                highest_pressure_level,
+                legendary_kills,
+                hideouts_cleared,
                 fate: fate.clone(),
                 crisis_tier: crisis_tier,
             }
@@ -1961,6 +2228,9 @@ async fn handle_connection(
                                             }
                                             NetworkPacket::Attack{attack_type, source_id, target_id} => {
                                                 handle_attack(player_id, attack_type, source_id, target_id, client_to_game_sender.clone())
+                                            }
+                                            NetworkPacket::Ability{ability_id, source_id, target_id} => {
+                                                handle_ability(player_id, ability_id, source_id, target_id, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::Combo{source_id, target_id, combo_type} => {
                                                 handle_combo(player_id, source_id, target_id, combo_type, client_to_game_sender.clone())
@@ -2435,6 +2705,26 @@ fn handle_attack(
 
     ResponsePacket::None
 }
+
+fn handle_ability(
+    player_id: i32,
+    ability_id: String,
+    source_id: i32,
+    target_id: Option<i32>,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::Ability {
+            player_id,
+            ability_id,
+            source_id,
+            target_id,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::None
+}
+
 fn handle_combo(
     player_id: i32,
     source_id: i32,
@@ -3726,7 +4016,10 @@ fn handle_set_log_level(
     // Validate level
     if !["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "OFF"].contains(&level.as_str()) {
         return ResponsePacket::Error {
-            errmsg: format!("Invalid log level: {}. Use ERROR, WARN, INFO, DEBUG, TRACE, or OFF", level),
+            errmsg: format!(
+                "Invalid log level: {}. Use ERROR, WARN, INFO, DEBUG, TRACE, or OFF",
+                level
+            ),
         };
     }
 

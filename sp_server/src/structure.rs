@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::obj::{Class, State};
-use crate::item::{Inventory, Item};
-use crate::{network, obj};
 use crate::constants::*;
+use crate::item::{Inventory, Item};
+use crate::obj::{Class, State};
 use crate::templates::{ObjTemplate, ObjTemplates, ResReq, Templates};
+use crate::{network, obj};
 
 pub const RESOURCE: &str = "resource";
 pub const CRAFT: &str = "craft";
@@ -32,14 +32,11 @@ pub struct Plan {
 pub struct Plans(Vec<Plan>);
 
 impl Plans {
-    pub fn add(
-        &mut self,
-        player_id: i32,
-        structure: String,
-        level: i32,
-        tier: i32
-    ) {
-        if self.iter().any(|p| p.player_id == player_id && p.structure == structure) {
+    pub fn add(&mut self, player_id: i32, structure: String, level: i32, tier: i32) {
+        if self
+            .iter()
+            .any(|p| p.player_id == player_id && p.structure == structure)
+        {
             return;
         }
 
@@ -57,7 +54,6 @@ impl Plans {
 pub struct Structure;
 
 impl Structure {
-
     pub fn available_to_build(
         player_id: i32,
         plans: Vec<Plan>,
@@ -148,18 +144,18 @@ impl Structure {
     ) -> Vec<ResReq> {
         if target_class == "structure" {
             let target_items = inventory.items.clone();
-    
+
             if target_state == State::Founded {
                 let structure_template = templates.obj_templates.get(target_template);
-    
+
                 let mut req_items = structure_template
                     .req
                     .expect("Template should have req field.");
-    
+
                 // Check current required quantity from structure items
                 for req_item in req_items.iter_mut() {
                     let mut req_quantity = req_item.quantity;
-    
+
                     for target_item in target_items.iter() {
                         if req_item.req_type == target_item.name
                             || req_item.req_type == target_item.class
@@ -172,25 +168,25 @@ impl Structure {
                             }
                         }
                     }
-    
+
                     req_item.cquantity = Some(req_quantity);
                 }
-    
+
                 return req_items;
             } else if target_state == State::PlanningUpgrade {
                 let structure_template = templates.obj_templates.get_by_name_template(
                     selected_upgrade.expect("PlanningUpgrade and Selected Upgrade is None"),
                     target_template,
                 );
-    
+
                 let mut req_items = structure_template
                     .upgrade_req
                     .expect("Template should have upgrade_req field.");
-    
+
                 // Check current required quantity from structure items
                 for req_item in req_items.iter_mut() {
                     let mut req_quantity = req_item.quantity;
-    
+
                     for target_item in target_items.iter() {
                         if req_item.req_type == target_item.name
                             || req_item.req_type == target_item.class
@@ -203,19 +199,17 @@ impl Structure {
                             }
                         }
                     }
-    
+
                     req_item.cquantity = Some(req_quantity);
                 }
-    
+
                 return req_items;
             }
         }
-    
+
         // Return empty vector
         return Vec::new();
     }
-
-    
 
     pub fn resource_type(structure_template: String) -> String {
         let resource: String = match structure_template.as_str() {
@@ -229,7 +223,8 @@ impl Structure {
     }
 
     pub fn is_built(state: State) -> bool {
-        let is_built = state != State::Progressing || state != State::Upgrading || state != State::Stalled;
+        let is_built =
+            state != State::Progressing || state != State::Upgrading || state != State::Stalled;
 
         return is_built;
     }

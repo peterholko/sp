@@ -1,16 +1,13 @@
 use bevy::prelude::*;
-use big_brain::{
-    prelude::*,
-};
+use big_brain::prelude::*;
 
 use crate::constants::*;
 use crate::obj::Position;
 
-
 #[derive(Debug, Reflect, Component, Default)]
 #[reflect(Component)]
 pub struct Destination {
-    pub pos: Position
+    pub pos: Position,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -18,7 +15,6 @@ pub struct Destination {
 pub struct Target {
     pub id: i32,
 }
-
 
 #[derive(Debug, Clone, Component, ActionBuilder)]
 pub struct MoveTo;
@@ -104,7 +100,6 @@ impl Thirst {
     }
 }
 
-
 #[derive(Component, Debug)]
 pub struct Tired {
     pub tired: f32,
@@ -142,7 +137,6 @@ impl Tired {
         }
     }
 }
-
 
 #[derive(Component, Debug)]
 pub struct Heat {
@@ -235,4 +229,3 @@ impl TaskTarget {
         Self { target }
     }
 }
-

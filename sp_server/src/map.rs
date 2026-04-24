@@ -14,7 +14,7 @@ use tiled::Loader;
 use pathfinding::prelude::astar;
 
 use crate::constants::SANCTUARY_RANGE;
-use crate::obj::{Position, Blocker};
+use crate::obj::{Blocker, Position};
 use crate::player;
 use crate::world::Weather;
 
@@ -362,7 +362,7 @@ impl Map {
         src_pos: Position,
         dst_pos: Position,
         map: &Map,
-        mover_player_id: i32,  // TODO This should be expanded to include details about the mover
+        mover_player_id: i32, // TODO This should be expanded to include details about the mover
         mut blocking_list: Vec<Blocker>,
         landwalk: bool,
         waterwalk: bool,
@@ -426,7 +426,10 @@ impl Map {
     ) -> Option<(Vec<MapPos>, u32)> {
         let goal: MapPos = MapPos(dst_pos.x, dst_pos.y);
 
-        if let Some(pos) = blocking_list.iter().position(|blocker| blocker.pos.x == goal.0 && blocker.pos.y == goal.1) {
+        if let Some(pos) = blocking_list
+            .iter()
+            .position(|blocker| blocker.pos.x == goal.0 && blocker.pos.y == goal.1)
+        {
             blocking_list.swap_remove(pos);
         }
 
@@ -502,7 +505,11 @@ impl Map {
         return false;
     }
 
-    pub fn get_nearby_tile_types(pos: Position, tile_types: Vec<TileType>, map: &Map) -> Vec<TileType> {
+    pub fn get_nearby_tile_types(
+        pos: Position,
+        tile_types: Vec<TileType>,
+        map: &Map,
+    ) -> Vec<TileType> {
         let mut nearby_tile_types = Vec::new();
         let neighbours = Map::range((pos.x, pos.y), 1);
 
@@ -517,7 +524,11 @@ impl Map {
         return nearby_tile_types;
     }
 
-    pub fn get_nearby_tiles_by_types(pos: Position, tile_types: Vec<TileType>, map: &Map) -> Vec<(Position, TileType)> {
+    pub fn get_nearby_tiles_by_types(
+        pos: Position,
+        tile_types: Vec<TileType>,
+        map: &Map,
+    ) -> Vec<(Position, TileType)> {
         let mut nearby_tile_types = Vec::new();
         let neighbours = Map::range((pos.x, pos.y), 1);
 
@@ -953,7 +964,8 @@ impl Map {
                 map,
             );
             let is_not_blocked = Map::is_not_blocked(neighbour, blocking_list);
-            let is_blocker_attackable = Map::is_blocker_attackable(mover_player_id, neighbour, blocking_list);
+            let is_blocker_attackable =
+                Map::is_blocker_attackable(mover_player_id, neighbour, blocking_list);
             //info!("blocking_list: {:?} is_not_blocked: {:?} is_blocker_attackable: {:?}", blocking_list, is_not_blocked, is_blocker_attackable);
 
             let mut allow_move_to_goal = false;
@@ -1065,7 +1077,11 @@ impl Map {
         return true;
     }
 
-    fn is_blocker_attackable(mover_player_id: i32, (x, y): (i32, i32), blocking_list: &Vec<Blocker>) -> bool {
+    fn is_blocker_attackable(
+        mover_player_id: i32,
+        (x, y): (i32, i32),
+        blocking_list: &Vec<Blocker>,
+    ) -> bool {
         for blocker in blocking_list {
             if x == blocker.pos.x && y == blocker.pos.y {
                 // TODO check relations between mover and blocker
@@ -1131,7 +1147,7 @@ impl Map {
         if source_pos == target_pos {
             return true;
         }
-        
+
         for (x, y) in neighbours {
             if x == target_pos.x && y == target_pos.y {
                 return true;

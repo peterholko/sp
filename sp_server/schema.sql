@@ -101,9 +101,22 @@ CREATE TABLE public.scores (
     id SERIAL PRIMARY KEY,            -- unique row id
     player_id INTEGER NOT NULL,          -- player identifier (UUID is common in games, could also be BIGINT)
     hero_name TEXT NOT NULL,          -- hero's name
-    hero_rank INTEGER NOT NULL,       -- rank or level
+    hero_rank TEXT NOT NULL,       -- rank or level
     total_xp BIGINT NOT NULL,         -- accumulated XP
+    total_score INTEGER NOT NULL DEFAULT 0,
+    score_survival INTEGER NOT NULL DEFAULT 0,
+    score_progression INTEGER NOT NULL DEFAULT 0,
+    score_wealth INTEGER NOT NULL DEFAULT 0,
+    score_defense INTEGER NOT NULL DEFAULT 0,
+    score_valor INTEGER NOT NULL DEFAULT 0,
+    score_legacy INTEGER NOT NULL DEFAULT 0,
+    days_survived INTEGER NOT NULL DEFAULT 0,
+    highest_pressure_level INTEGER NOT NULL DEFAULT 0,
+    waves_survived INTEGER NOT NULL DEFAULT 0,
+    legendary_kills INTEGER NOT NULL DEFAULT 0,
+    hideouts_cleared INTEGER NOT NULL DEFAULT 0,
     fate TEXT NOT NULL,               -- descriptive sentence of hero's fate
+    crisis_tier INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW() -- when this score was recorded
 );
 
@@ -111,5 +124,4 @@ CREATE TABLE public.scores (
 --
 -- PostgreSQL database dump complete
 --
-
 

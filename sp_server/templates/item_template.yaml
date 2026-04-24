@@ -293,7 +293,7 @@
   image: maplelog
   weight: 10
   refine_skill: Woodcutting
-  refine_skill_req: 5
+  refine_skill_req: 0
   refine_time: 30
   produces: 
     - Cragroot Maple Timber
@@ -803,6 +803,25 @@
   slot: Main Hand
   image: trainingaxe
   weight: 10
+  attrs:
+    - name: Logging
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+
+- name: Training Bow
+  class: Weapon
+  subclass: Bow
+  slot: Main Hand
+  image: bow
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 8
+    - name: Hunting
+      value: 2
 
 - name: Copper Broad Axe
   class: Weapon
@@ -810,6 +829,13 @@
   slot: Main Hand
   image: heavyaxe
   weight: 10 
+  attrs:
+    - name: Logging
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
 
 ##################
 ##### ARMOR ######

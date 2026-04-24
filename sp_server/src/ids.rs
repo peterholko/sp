@@ -28,7 +28,6 @@ impl Ids {
         self.obj
     }
 
-
     pub fn new_item_id(&mut self) -> i32 {
         self.item = self.item + 1;
         self.item
@@ -67,7 +66,6 @@ impl Ids {
     }
 
     pub fn get_all_obj_ids(&self, player_id: i32) -> Vec<i32> {
-        
         let mut obj_ids = Vec::new();
         for (obj_id, player) in self.obj_player_map.iter() {
             if *player == player_id {

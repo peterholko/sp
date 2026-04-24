@@ -486,11 +486,11 @@ export default class LoginControl extends React.Component<any, any> {
       const leaderboardEntries = data
         .slice()
         .sort((a, b) => {
-          const totalXpA = typeof a.total_xp === 'number' ? a.total_xp : Number(a.total_xp) || 0;
-          const totalXpB = typeof b.total_xp === 'number' ? b.total_xp : Number(b.total_xp) || 0;
+          const totalScoreA = typeof a.total_score === 'number' ? a.total_score : Number(a.total_score) || 0;
+          const totalScoreB = typeof b.total_score === 'number' ? b.total_score : Number(b.total_score) || 0;
 
-          if (totalXpB !== totalXpA) {
-            return totalXpB - totalXpA;
+          if (totalScoreB !== totalScoreA) {
+            return totalScoreB - totalScoreA;
           }
 
           const heroNameA = typeof a.hero_name === 'string' ? a.hero_name : '';
@@ -501,7 +501,10 @@ export default class LoginControl extends React.Component<any, any> {
           id: entry.id,
           heroName: entry.hero_name,
           heroRank: entry.hero_rank,
+          totalScore: typeof entry.total_score === 'number' ? entry.total_score.toLocaleString() : entry.total_score || entry.total_xp,
           totalXp: typeof entry.total_xp === 'number' ? entry.total_xp.toLocaleString() : entry.total_xp,
+          daysSurvived: entry.days_survived || 0,
+          legendaryKills: entry.legendary_kills || 0,
           fate: entry.fate,
         }));
 
@@ -878,11 +881,11 @@ export default class LoginControl extends React.Component<any, any> {
               <span style={selectHeroNameText}>Hero's Name: </span>
               <input style={selectHeroInput} type="text" autoFocus onChange={this.handleHeroNameChange} />
               <span style={selectHeroClassText}>Hero's Class:</span>
-              <img src={warrior} style={warriorStyle} onClick={this.handleWarriorSelect} />
+              <img src={warrior} style={warriorStyle} onClick={this.handleWarriorSelect} title="Warrior: safest adjacent fighter, wins by bracing, stunning, and sustaining pressure." />
               <span style={warriorText}>Warrior</span>
-              <img src={ranger} style={rangerStyle} onClick={this.handleRangerSelect} />
+              <img src={ranger} style={rangerStyle} onClick={this.handleRangerSelect} title="Ranger: fastest scout and kiter, wins by vision, bow range, and disengaging." />
               <span style={rangerText}>Ranger</span>
-              <img src={mage} style={mageStyle} onClick={this.handleMageSelect} />
+              <img src={mage} style={mageStyle} onClick={this.handleMageSelect} title="Mage: fragile mana caster, wins by burst damage and temporary magical protection." />
               <span style={mageText}>Mage</span>
               {this.state.inappropiateName &&
                 <span style={nameErrorText}>Inappropiate Name</span>
@@ -964,6 +967,13 @@ export default class LoginControl extends React.Component<any, any> {
             heroName={this.state.trueDeathData.hero_name}
             heroRank={this.state.trueDeathData.hero_rank}
             totalXp={this.state.trueDeathData.total_xp}
+            scoreTotal={this.state.trueDeathData.score_total}
+            scoreBreakdown={this.state.trueDeathData.score_breakdown}
+            daysSurvived={this.state.trueDeathData.days_survived}
+            wavesSurvived={this.state.trueDeathData.waves_survived}
+            highestPressureLevel={this.state.trueDeathData.highest_pressure_level}
+            legendaryKills={this.state.trueDeathData.legendary_kills}
+            hideoutsCleared={this.state.trueDeathData.hideouts_cleared}
             fate={this.state.trueDeathData.fate} />
         }
 
@@ -978,7 +988,9 @@ export default class LoginControl extends React.Component<any, any> {
                     <tr>
                       <th>Hero Name</th>
                       <th>Hero Rank</th>
-                      <th>Total XP</th>
+                      <th>Score</th>
+                      <th>Days</th>
+                      <th>Legends</th>
                       <th>Fate</th>
                     </tr>
                   </thead>
@@ -987,7 +999,9 @@ export default class LoginControl extends React.Component<any, any> {
                       <tr key={entry.id}>
                         <td>{entry.heroName}</td>
                         <td className="rank">{entry.heroRank}</td>
-                        <td>{entry.totalXp}</td>
+                        <td>{entry.totalScore}</td>
+                        <td>{entry.daysSurvived}</td>
+                        <td>{entry.legendaryKills}</td>
                         <td className="fate">{entry.fate}</td>
                       </tr>
                     ))}

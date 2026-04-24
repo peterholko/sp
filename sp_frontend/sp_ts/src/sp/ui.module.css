@@ -115,6 +115,34 @@
   position: fixed;
 }
 
+.abilitybar {
+  bottom: 64px;
+  left: 50%;
+  margin-left: -150px;
+  position: fixed;
+  z-index: 4;
+  display: flex;
+  gap: 6px;
+}
+
+.abilitybutton {
+  min-width: 92px;
+  height: 30px;
+  border: 1px solid #8a734d;
+  border-radius: 3px;
+  background: #25282b;
+  color: #f3ead7;
+  font-family: Cinzel, serif;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.abilitybutton:disabled {
+  color: #777;
+  border-color: #4c4c4c;
+  cursor: default;
+}
+
 .merchantbuybutton {
   top: 50%;
   left: 50%;

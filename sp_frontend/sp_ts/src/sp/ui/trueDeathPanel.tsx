@@ -8,6 +8,13 @@ interface TrueDeathPanelProps {
   heroName: string,
   heroRank: string,
   totalXp: integer,
+  scoreTotal?: number,
+  scoreBreakdown?: any,
+  daysSurvived?: number,
+  wavesSurvived?: number,
+  highestPressureLevel?: number,
+  legendaryKills?: number,
+  hideoutsCleared?: number,
   fate: string,
 }
 
@@ -34,8 +41,8 @@ export default class TrueDeathPanel extends React.Component<TrueDeathPanelProps,
       top: '50%',
       left: '50%',
       width: '323px',
-      height: '360px',
-      marginTop: '-180px',
+      height: '430px',
+      marginTop: '-215px',
       marginLeft: '-161px',
       position: 'fixed',
       zIndex: 7
@@ -80,13 +87,36 @@ export default class TrueDeathPanel extends React.Component<TrueDeathPanelProps,
         <table style={tableStyle}>
           <tbody>
             <tr>
+              <td>Final Score: </td>
+              <td>{(this.props.scoreTotal || this.props.totalXp).toLocaleString()}</td>
+            </tr>
+            <tr>
               <td>Total Xp Earned: </td>
               <td>{this.props.totalXp}</td>
+            </tr>
+            <tr>
+              <td>Days Survived: </td>
+              <td>{this.props.daysSurvived || 0}</td>
+            </tr>
+            <tr>
+              <td>Waves Survived: </td>
+              <td>{this.props.wavesSurvived || 0}</td>
+            </tr>
+            <tr>
+              <td>Legendary Kills: </td>
+              <td>{this.props.legendaryKills || 0}</td>
             </tr>
             <tr>
               <td>Fate: </td>
               <td>{this.props.fate}</td>
             </tr>
+            {this.props.scoreBreakdown &&
+              <tr>
+                <td>Score Split: </td>
+                <td>
+                  S {this.props.scoreBreakdown.survival || 0} / P {this.props.scoreBreakdown.progression || 0} / V {this.props.scoreBreakdown.valor || 0}
+                </td>
+              </tr>}
           </tbody>
         </table>
         <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick}/>

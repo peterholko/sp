@@ -1,17 +1,14 @@
 use bevy::prelude::*;
 
-
-
-use rand::Rng;
-use crate::resource::Resource;
 use crate::game::{EventInProgress, VillagerQuery};
+use crate::resource::Resource;
+use rand::Rng;
 
 use crate::map::MapPos;
 use crate::obj::{ActiveTask, BaseAttrs, Obj, Order, Personality, State, SubclassNPC};
 use crate::skill::{self, SkillData, Skills};
 use crate::skill_defs::Skill;
-use crate::templates::{SkillTemplates};
-
+use crate::templates::SkillTemplates;
 
 #[derive(Debug, Clone)]
 pub struct VillagerUtil;
@@ -21,20 +18,38 @@ impl VillagerUtil {
 
     pub fn generate_name() -> String {
         let first_names = vec![
-            "Geoffry", "Roderich", "Warder", "Andes", "Aldric", "Bram",
-            "Cedric", "Dunstan", "Edric", "Gareth", "Hadwin", "Ivar",
-            "Jorik", "Leofric", "Marden", "Oswin", "Percival", "Roderic",
-            "Sigmund", "Theron", "Ulric", "Wulfric", "Elara", "Brynn",
-            "Isolde", "Maren", "Rowena", "Seren", "Thyra", "Wren",
-            "Astrid", "Dagny", "Freya", "Hild", "Kenna", "Lirael",
+            "Geoffry", "Roderich", "Warder", "Andes", "Aldric", "Bram", "Cedric", "Dunstan",
+            "Edric", "Gareth", "Hadwin", "Ivar", "Jorik", "Leofric", "Marden", "Oswin", "Percival",
+            "Roderic", "Sigmund", "Theron", "Ulric", "Wulfric", "Elara", "Brynn", "Isolde",
+            "Maren", "Rowena", "Seren", "Thyra", "Wren", "Astrid", "Dagny", "Freya", "Hild",
+            "Kenna", "Lirael",
         ];
 
         let last_names = vec![
-            "Holte", "Denholm", "Folcey", "Bardaye", "Ashford", "Blackwood",
-            "Crestfall", "Dunmore", "Fairholm", "Greystone", "Hawkridge",
-            "Ironside", "Kettleworth", "Lindwell", "Moorfield", "Northgate",
-            "Oakvale", "Pinehurst", "Ravencroft", "Stonebridge", "Thornwall",
-            "Underhill", "Whitmore", "Yarrow",
+            "Holte",
+            "Denholm",
+            "Folcey",
+            "Bardaye",
+            "Ashford",
+            "Blackwood",
+            "Crestfall",
+            "Dunmore",
+            "Fairholm",
+            "Greystone",
+            "Hawkridge",
+            "Ironside",
+            "Kettleworth",
+            "Lindwell",
+            "Moorfield",
+            "Northgate",
+            "Oakvale",
+            "Pinehurst",
+            "Ravencroft",
+            "Stonebridge",
+            "Thornwall",
+            "Underhill",
+            "Whitmore",
+            "Yarrow",
         ];
 
         let mut rng = rand::thread_rng();
@@ -76,11 +91,7 @@ impl VillagerUtil {
         return attrs;
     }
 
-    pub fn generate_skills(
-        villager_id: i32,
-        skill_templates: &SkillTemplates,
-    ) -> Skills {
-
+    pub fn generate_skills(villager_id: i32, skill_templates: &SkillTemplates) -> Skills {
         let mut skills = Skills::new();
 
         let mut pool_of_skills = Vec::new();
@@ -98,14 +109,11 @@ impl VillagerUtil {
         for _i in 0..3 {
             let index = rng.gen_range(0..pool_of_skills.len());
             let selected_skill_name = pool_of_skills.remove(index).name;
-            let selected_skill_enum = Skill::from_str(&selected_skill_name).expect(&format!("Invalid skill name: {}", selected_skill_name));
+            let selected_skill_enum = Skill::from_str(&selected_skill_name)
+                .expect(&format!("Invalid skill name: {}", selected_skill_name));
             let random_xp = rng.gen_range(1..2000);
 
-            skills.update(
-                selected_skill_enum,
-                random_xp,
-                skill_templates,
-            );
+            skills.update(selected_skill_enum, random_xp, skill_templates);
         }
 
         return skills;
@@ -142,5 +150,4 @@ impl VillagerUtil {
 
         return activity;
     }
-
 }

@@ -44,11 +44,17 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
   render() {
     let imagePath = '';
 
-    const hpRatio = this.props.heroStats.hp / Global.heroMaxHp;
+    const hpRatio = Global.heroMaxHp > 0 ? this.props.heroStats.hp / Global.heroMaxHp : 0;
     const hpBarWidth = hpRatio * STAT_BAR_WIDTH;
 
     const staRatio = Global.heroMaxStamina > 0 ? this.props.heroStats.stamina / Global.heroMaxStamina : 0;
     const staBarWidth = staRatio * STAT_BAR_WIDTH;
+
+    const baseMana = this.props.heroStats.base_mana || Global.heroMaxMana || 0;
+    const mana = this.props.heroStats.mana !== undefined ? this.props.heroStats.mana : Global.heroMana;
+    const showMana = baseMana > 0;
+    const manaRatio = showMana ? mana / baseMana : 0;
+    const manaBarWidth = manaRatio * STAT_BAR_WIDTH;
 
     if(Global.heroId in Global.objectStates) {
       let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
@@ -103,7 +109,7 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
   
     const manaBarStyle  = {
       transform: 'translate(97px, 55px)',
-      width: this.state.manaBarWidth + 'px',
+      width: manaBarWidth + 'px',
       height: STAT_BAR_HEIGHT + 'px',
       zIndex: 4,
       position: 'fixed' 
@@ -189,8 +195,12 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           <img src={hpbar} style={hpBarStyle}/>
           <img src={statbg} style={stabgStyle}/>
           <img src={stabar} style={staBarStyle}/>
-          <img src={statbg} style={manabgStyle}/>
-          <img src={manabar} style={manaBarStyle}/>
+          {showMana &&
+            <>
+              <img src={statbg} style={manabgStyle}/>
+              <img src={manabar} style={manaBarStyle}/>
+            </>
+          }
 
           <span style={tStyle}>T</span>
           <span style={hStyle}>H</span>
@@ -207,4 +217,3 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     );
   }
 }
-

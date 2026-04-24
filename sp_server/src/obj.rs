@@ -18,7 +18,6 @@ use crate::templates::{ItemTemplate, ObjTemplate, ObjTemplates, Templates};
 use crate::world::time_of_day_vision_mod;
 
 #[derive(Debug, Reflect, Component, Default, Clone, Copy, Eq, PartialEq, Hash)]
-
 #[reflect(Component)]
 pub struct Id(pub i32);
 
@@ -54,6 +53,76 @@ pub struct Template(pub String);
 #[derive(Debug, Reflect, Component, Default, Clone)]
 #[reflect(Component)]
 pub struct Class(pub String);
+
+#[derive(Debug, Reflect, Component, Default, Clone, Copy, Eq, PartialEq, Hash)]
+#[reflect(Component)]
+pub enum HeroClass {
+    #[default]
+    Warrior,
+    Ranger,
+    Mage,
+}
+
+impl HeroClass {
+    pub fn from_str(class_name: &str) -> Option<Self> {
+        match class_name {
+            "Warrior" | "Novice Warrior" => Some(HeroClass::Warrior),
+            "Ranger" | "Novice Ranger" => Some(HeroClass::Ranger),
+            "Mage" | "Novice Mage" => Some(HeroClass::Mage),
+            _ => None,
+        }
+    }
+
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            HeroClass::Warrior => "Warrior",
+            HeroClass::Ranger => "Ranger",
+            HeroClass::Mage => "Mage",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HeroClassProfile {
+    pub hero_class: HeroClass,
+    pub label: &'static str,
+    pub novice_template: &'static str,
+    pub base_mana: i32,
+    pub ability_ids: &'static [&'static str],
+    pub selection_hint: &'static str,
+}
+
+impl HeroClassProfile {
+    pub fn for_class(hero_class: HeroClass) -> Self {
+        match hero_class {
+            HeroClass::Warrior => HeroClassProfile {
+                hero_class,
+                label: "Warrior",
+                novice_template: "Novice Warrior",
+                base_mana: 0,
+                ability_ids: &["shield_bash"],
+                selection_hint: "Survives pressure, braces, and finishes adjacent fights.",
+            },
+            HeroClass::Ranger => HeroClassProfile {
+                hero_class,
+                label: "Ranger",
+                novice_template: "Novice Ranger",
+                base_mana: 0,
+                ability_ids: &["aimed_shot", "disengage"],
+                selection_hint:
+                    "Scouts farther, shoots from range, and slips away before being surrounded.",
+            },
+            HeroClass::Mage => HeroClassProfile {
+                hero_class,
+                label: "Mage",
+                novice_template: "Novice Mage",
+                base_mana: 100,
+                ability_ids: &["arcane_bolt", "ward"],
+                selection_hint: "Spends mana on bolts and wards, then recovers through rest.",
+            },
+        }
+    }
+}
 
 #[derive(Debug, Reflect, Component, Default, Clone)]
 #[reflect(Component)]
@@ -351,11 +420,19 @@ impl Default for LastCombatTick {
 }
 
 #[derive(Debug, Component, Clone)]
+pub struct LastAttacker {
+    pub id: i32,
+    pub tick: i32,
+}
+
+#[derive(Debug, Component, Clone)]
 pub struct Stats {
     pub hp: i32,
     pub stamina: Option<i32>,
+    pub mana: Option<i32>,
     pub base_hp: i32,
     pub base_stamina: Option<i32>,
+    pub base_mana: Option<i32>,
     pub base_def: i32,
     pub damage_range: Option<i32>,
     pub base_damage: Option<i32>,
@@ -375,8 +452,6 @@ impl Stats {
     }
 }
 
-
-
 #[derive(Debug, Component, Clone, Default, Eq, PartialEq)]
 pub enum ActiveTask {
     #[default]
@@ -389,6 +464,7 @@ pub enum ActiveTask {
     Drinking,
     Sleeping,
     Fleeing,
+    FightingBack,
     Following,
     Building,
     Gathering,
@@ -429,6 +505,7 @@ impl ActiveTask {
             ActiveTask::Eating => "Eating",
             ActiveTask::FindingShelter => "Finding shelter",
             ActiveTask::Fleeing => "Fleeing",
+            ActiveTask::FightingBack => "Fighting back",
             ActiveTask::Gathering => "Gathering",
             ActiveTask::Operating => "Operating",
             ActiveTask::Mining => "Mining",
@@ -565,12 +642,12 @@ pub struct TemplateChange {
 
 #[derive(EntityEvent)]
 pub struct NewObj {
-    pub entity: Entity
+    pub entity: Entity,
 }
 
 #[derive(EntityEvent)]
 pub struct RemoveObj {
-    pub entity: Entity
+    pub entity: Entity,
 }
 
 #[derive(EntityEvent)]
@@ -891,7 +968,9 @@ impl Obj {
                 hp: template.base_hp.unwrap_or(100),
                 base_hp: template.base_hp.unwrap_or(100),
                 stamina: template.base_stamina,
+                mana: template.base_mana.filter(|base_mana| *base_mana > 0),
                 base_stamina: template.base_stamina,
+                base_mana: template.base_mana.filter(|base_mana| *base_mana > 0),
                 base_def: template.base_def.unwrap_or(0),
                 base_damage: template.base_dmg,
                 damage_range: template.dmg_range,
@@ -899,7 +978,10 @@ impl Obj {
                 base_vision: template.base_vision,
             },
             effects: Effects(HashMap::new()),
-            inventory: Inventory { owner: obj_id, items: Vec::new() },
+            inventory: Inventory {
+                owner: obj_id,
+                items: Vec::new(),
+            },
             last_combat_tick: LastCombatTick::default(),
         };
 
@@ -917,9 +999,7 @@ impl Obj {
         entity_map.new_obj(obj_id, entity_id);
 
         // Create a new object event
-        commands.trigger(NewObj {
-            entity: entity_id
-        });
+        commands.trigger(NewObj { entity: entity_id });
 
         (obj_id, entity_id)
     }
@@ -959,7 +1039,9 @@ impl Obj {
                 hp: template.base_hp.unwrap_or(100),
                 base_hp: template.base_hp.unwrap_or(100),
                 stamina: template.base_stamina,
+                mana: template.base_mana.filter(|base_mana| *base_mana > 0),
                 base_stamina: template.base_stamina,
+                base_mana: template.base_mana.filter(|base_mana| *base_mana > 0),
                 base_def: template.base_def.unwrap_or(0),
                 base_damage: template.base_dmg,
                 damage_range: template.dmg_range,
@@ -1314,7 +1396,7 @@ impl Obj {
         let c = construction_skill as f32;
         let m = masonry_skill as f32;
         let ca = carpentry_skill as f32;
-    
+
         let multiplier = 1.0 + 0.10 * c + 0.06 * m + 0.06 * ca;
         (base_work as f32) * multiplier
     }

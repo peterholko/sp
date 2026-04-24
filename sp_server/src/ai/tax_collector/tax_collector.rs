@@ -242,9 +242,7 @@ pub fn taxes_to_collect_scorer_system(
         };
 
         if let Ok((collector, inventory)) = collector_query.get(collector_entity) {
-            if let Some(gold) =
-                inventory.get_by_class(GOLD.to_string())
-            {
+            if let Some(gold) = inventory.get_by_class(GOLD.to_string()) {
                 if gold.quantity < collector.collection_amount {
                     score.set(1.0);
                 } else {

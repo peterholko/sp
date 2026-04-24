@@ -5,11 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::constants::*;
+use crate::effect::Effect;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
-use crate::game::{InitialEncounterEntry, InitialEncounterState, Merchant, Monolith, ObjQuery, SpawnPositions};
+use crate::game::{
+    InitialEncounterEntry, InitialEncounterState, Merchant, Monolith, ObjQuery, PlayerIntroEntry,
+    PlayerIntroState, SpawnPositions,
+};
 use crate::item::{Inventory, Slot};
-use crate::effect::Effect;
 use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
@@ -19,7 +22,11 @@ use crate::common::{
     Destination, Drink, Eat, Heat, Hunger, Idle, MoveTo, Sleep, Thirst, Tired, Transport,
 };
 use crate::villager::{
-    CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer, FindDrink, FindFood, FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer, LoadItems, Morale, ProcessOrder, SetFleeDestination, SetOrderDestination, SetStorageDestination, StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood, UnloadItems
+    ArmedRetaliationScorer, CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer,
+    FightBack, FindDrink, FindFood, FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer,
+    LoadItems, Morale, ProcessOrder, SetFleeDestination, SetOrderDestination,
+    SetStorageDestination, StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood,
+    UnloadItems,
 };
 
 use crate::{
@@ -30,8 +37,9 @@ use crate::{
     item::{self},
     obj::Obj,
     obj::{
-        ActiveTask, Class, ClassStructure, Id, Misc, Name, Order, PlayerId, Position, State,
-        StateAboard, Stats, Storage, Subclass, SubclassHero, SubclassVillager, Template, Viewshed,
+        ActiveTask, Class, ClassStructure, HeroClass, HeroClassProfile, Id, Misc, Name, Order,
+        PlayerId, Position, State, StateAboard, Stats, Storage, Subclass, SubclassHero,
+        SubclassVillager, Template, Viewshed,
     },
     recipe::Recipes,
     skill::Skills,
@@ -56,6 +64,7 @@ pub fn new(
     game_tick: &Res<GameTick>,
     monoliths: &Query<ObjQuery, With<Monolith>>,
     spawn_positions: &mut ResMut<SpawnPositions>,
+    player_intro_state: &mut ResMut<PlayerIntroState>,
     initial_encounter_state: &mut ResMut<InitialEncounterState>,
 ) -> Result<(), String> {
     // Select a start location and remove it from the list
@@ -70,6 +79,16 @@ pub fn new(
         Position {
             x: start_location.hero_pos[0],
             y: start_location.hero_pos[1],
+        },
+    );
+
+    player_intro_state.insert(
+        player_id,
+        PlayerIntroEntry {
+            start_tick: game_tick.0,
+            shipwreck_chain_started: false,
+            villager_spawned: false,
+            danger_unlocked: false,
         },
     );
 
@@ -165,7 +184,9 @@ pub fn new(
             hp: structure_template.base_hp.unwrap_or(100),
             base_hp: structure_template.base_hp.unwrap_or(100), // Convert option to non-option
             stamina: None,
+            mana: None,
             base_stamina: None,
+            base_mana: None,
             base_def: 0,
             base_damage: None,
             damage_range: None,
@@ -250,8 +271,11 @@ pub fn new(
 
     // Creating hero
     debug!("Creating hero for player: {:?}", player_id);
-    let hero_template_name = "Novice".to_string() + " " + class_name.as_str();
+    let hero_class = HeroClass::from_str(&class_name).unwrap_or_default();
+    let hero_profile = HeroClassProfile::for_class(hero_class);
+    let hero_template_name = hero_profile.novice_template.to_string();
     let hero_template = templates.obj_templates.get(hero_template_name.clone());
+    let base_mana = hero_template.base_mana.unwrap_or(hero_profile.base_mana);
 
     let hero_id = ids.new_obj_id();
 
@@ -297,7 +321,7 @@ pub fn new(
         5,
         &templates.item_templates,
     );
-    inventory.new(
+    let sharpened_stick = inventory.new(
         ids.new_item_id(),
         "Sharpened Stick".to_string(),
         1,
@@ -327,36 +351,65 @@ pub fn new(
 
     // Equip torch for night spawns so the hero has visibility
     let time_of_day = get_time_of_day(game_tick.0);
-    if time_of_day == crate::world::TimeOfDay::Dusk
-        || time_of_day == crate::world::TimeOfDay::Night
+    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
     {
         inventory.equip(torch.id, Some(Slot::OffHand));
     }
 
-    let mut item_attrs = HashMap::new();
-    item_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
-    item_attrs.insert(item::AttrKey::DeepWoundChance, item::AttrVal::Num(0.9));
+    match hero_class {
+        HeroClass::Warrior => {
+            let mut weapon_attrs = HashMap::new();
+            weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
+            weapon_attrs.insert(item::AttrKey::DeepWoundChance, item::AttrVal::Num(0.9));
 
-    inventory.new_with_attrs(
-        ids.new_item_id(),
-        hero_id,
-        "Copper Training Axe".to_string(),
-        1,
-        item_attrs.clone(),
-        &templates.item_templates,
-    );
+            let axe = inventory.new_with_attrs(
+                ids.new_item_id(),
+                hero_id,
+                "Copper Training Axe".to_string(),
+                1,
+                weapon_attrs,
+                &templates.item_templates,
+            );
+            inventory.equip(axe.0.id, Some(Slot::MainHand));
 
-    let mut item_attrs = HashMap::new();
-    item_attrs.insert(item::AttrKey::Defense, item::AttrVal::Num(3.0));
+            let mut armor_attrs = HashMap::new();
+            armor_attrs.insert(item::AttrKey::Defense, item::AttrVal::Num(3.0));
 
-    inventory.new_with_attrs(
-        ids.new_item_id(),
-        hero_id,
-        "Copper Helm".to_string(),
-        1,
-        item_attrs.clone(),
-        &templates.item_templates,
-    );
+            let helm = inventory.new_with_attrs(
+                ids.new_item_id(),
+                hero_id,
+                "Copper Helm".to_string(),
+                1,
+                armor_attrs,
+                &templates.item_templates,
+            );
+            inventory.equip(helm.0.id, Some(Slot::Helm));
+        }
+        HeroClass::Ranger => {
+            let mut bow_attrs = HashMap::new();
+            bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
+            bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
+
+            let bow = inventory.new_with_attrs(
+                ids.new_item_id(),
+                hero_id,
+                "Training Bow".to_string(),
+                1,
+                bow_attrs,
+                &templates.item_templates,
+            );
+            inventory.equip(bow.0.id, Some(Slot::MainHand));
+        }
+        HeroClass::Mage => {
+            inventory.equip(sharpened_stick.id, Some(Slot::MainHand));
+            inventory.new(
+                ids.new_item_id(),
+                "Mana".to_string(),
+                5,
+                &templates.item_templates,
+            );
+        }
+    }
 
     let mut item_attrs2 = HashMap::new();
     item_attrs2.insert(item::AttrKey::Healing, item::AttrVal::Num(10.0));
@@ -391,7 +444,9 @@ pub fn new(
             hp: hero_template.base_hp.unwrap(),
             base_hp: hero_template.base_hp.unwrap(),
             stamina: hero_template.base_stamina,
+            mana: Some(base_mana),
             base_stamina: hero_template.base_stamina,
+            base_mana: Some(base_mana),
             base_def: hero_template.base_def.unwrap(),
             base_damage: hero_template.base_dmg,
             damage_range: hero_template.dmg_range,
@@ -435,6 +490,7 @@ pub fn new(
             },
             EncounterMoves(0),
             bound_monolith,
+            hero_class,
             SubclassHero,            // Hero component tag
             Thirst::new(0.0, 0.025), //0.1 before
             Hunger::new(0.0, 0.025),
@@ -455,8 +511,7 @@ pub fn new(
     debug!("map_events: {:?}", map_events);
 
     // Create campfire at hero's location only if it's dusk or night
-    if time_of_day == crate::world::TimeOfDay::Dusk
-        || time_of_day == crate::world::TimeOfDay::Night
+    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
@@ -681,6 +736,7 @@ pub fn new(
         Thinker::build()
             .label("Villager")
             .picker(Highest)
+            .when(ArmedRetaliationScorer, FightBack)
             .when(EnemyDistanceScorer, flee)
             .when(ThirstyScorer, find_move_to_and_drink)
             .when(HungryScorer, find_move_to_and_eat)
@@ -781,6 +837,7 @@ pub fn new(
             Thinker::build()
                 .label("Villager")
                 .picker(Highest)
+                .when(ArmedRetaliationScorer, FightBack)
                 .when(EnemyDistanceScorer, Flee)
                 .when(ThirstyScorer, find_move_to_and_drink)
                 .when(HungryScorer, find_move_to_and_eat)
@@ -817,6 +874,7 @@ pub fn new(
 
     // Starting plans (survival basics only — more plans acquired through exploration and villager)
     plans.add(player_id, "Campfire".to_string(), 0, 0);
+    plans.add(player_id, "Burrow".to_string(), 0, 0);
     plans.add(player_id, "Stockade".to_string(), 0, 0);
 
     let mut thirst_attr = HashMap::new();
@@ -1171,7 +1229,7 @@ pub fn new(
         &templates,
     );*/
 
-    // Spawn giant rats from the shipwreck ~1 minute after player arrives
+    // Scripted shipwreck intro pacing is handled relative to the player's join time
     let shipwreck_pos = Position {
         x: start_location.shipwreck_pos[0],
         y: start_location.shipwreck_pos[1],
@@ -1181,22 +1239,15 @@ pub fn new(
     for i in 0..2 {
         let rat_npc_id = ids.new_obj_id();
         rat_ids.push(rat_npc_id);
-        let rat_event_id = ids.new_map_event_id();
-        let rat_event = GameEvent {
-            event_id: rat_event_id,
-            start_tick: game_tick.0,
-            run_tick: game_tick.0 + 600 + (i * 30), // Stagger spawns ~1 minute in
-            event_type: GameEventType::SpawnNPC {
-                npc_type: "Giant Rat".to_string(),
-                pos: shipwreck_pos,
-                npc_id: Some(rat_npc_id),
-            },
-        };
-        game_events.insert(rat_event.event_id, rat_event);
     }
 
-    // Register the initial encounter chain: rats → boar/crab → spider
-    // The boar/crab and spider spawn when the previous enemy is killed (see initial_encounter_system)
+    // Register the initial encounter chain: rats → boar/crab → spider.
+    // The villager waits for shipwreck inspection, but only after the help call has fired.
+    let villager_spawn_pos = Position {
+        x: start_location.villager_pos[0],
+        y: start_location.villager_pos[1],
+    };
+    let villager_help_tick = game_tick.0 + 1100;
     let phase1_spawn = if rand::thread_rng().gen_range(0..2) == 0 {
         "Giant Crab".to_string()
     } else {
@@ -1209,36 +1260,62 @@ pub fn new(
             phase1_spawn,
             phase1_npc_id: None,
             spawn_pos: shipwreck_pos,
-            start_tick: game_tick.0,
+            villager_spawn_pos,
+            first_rat_spawn_tick: game_tick.0 + 900,
+            second_rat_spawn_tick: game_tick.0 + 1200,
+            villager_ready_tick: villager_help_tick + TICKS_PER_SEC,
+            phase1_unlock_tick: game_tick.0 + 2600,
+            spider_unlock_tick: game_tick.0 + 3600,
+            villager_event_scheduled: false,
         },
     );
 
-    // Distress sound from the shipwreck ~2:30 min after player arrives
+    let intro_notice = GameEvent {
+        event_id: ids.new_map_event_id(),
+        start_tick: game_tick.0,
+        run_tick: game_tick.0 + 120,
+        event_type: GameEventType::PlayerNotice {
+            player_id,
+            message: "Survival thread started: inspect the shipwreck, check your burrow, then build fire before dusk.".to_string(),
+            expiry: Some(10000),
+        },
+    };
+    game_events.insert(intro_notice.event_id, intro_notice);
+
+    let campfire_notice = GameEvent {
+        event_id: ids.new_map_event_id(),
+        start_tick: game_tick.0,
+        run_tick: game_tick.0 + 700,
+        event_type: GameEventType::PlayerNotice {
+            player_id,
+            message: "First lesson: fire solves light and warmth. If you can see danger early, you can choose the fight.".to_string(),
+            expiry: Some(10000),
+        },
+    };
+    game_events.insert(campfire_notice.event_id, campfire_notice);
+
+    let distress_notice = GameEvent {
+        event_id: ids.new_map_event_id(),
+        start_tick: game_tick.0,
+        run_tick: villager_help_tick,
+        event_type: GameEventType::PlayerNotice {
+            player_id,
+            message: "A voice cries out from the shipwreck. Someone may still be alive."
+                .to_string(),
+            expiry: Some(10000),
+        },
+    };
+    game_events.insert(distress_notice.event_id, distress_notice);
+
+    // Distress sound from the shipwreck after the first pressure beat
     let distress_event = VisibleEvent::SoundEvent {
         pos: shipwreck_pos,
         sound: "A desperate voice calls from the shipwreck: \"Is anyone out there?!\"".to_string(),
         intensity: 5,
     };
-    map_events.new(hero_id, game_tick.0 + 1500, distress_event);
+    map_events.new(hero_id, villager_help_tick, distress_event);
 
-    // Castaway villager emerges from the shipwreck ~3:20 min after player arrives
-    // Spawn at villager_pos (land tile) not shipwreck_pos (water tile) so they can pathfind
-    let villager_spawn_pos = Position {
-        x: start_location.villager_pos[0],
-        y: start_location.villager_pos[1],
-    };
-    let villager_event = GameEvent {
-        event_id: ids.new_map_event_id(),
-        start_tick: game_tick.0,
-        run_tick: game_tick.0 + 2000,
-        event_type: GameEventType::SpawnVillager {
-            pos: villager_spawn_pos,
-            player_id,
-        },
-    };
-    game_events.insert(villager_event.event_id, villager_event);
-
-    // Wolf howl sound event ~4 minutes after player arrives (atmospheric, no wolf spawn)
+    // Wolf howl sound event after the player has learned the first camp loop
     let hero_pos = Position {
         x: start_location.hero_pos[0],
         y: start_location.hero_pos[1],
@@ -1248,7 +1325,7 @@ pub fn new(
         sound: "A wolf howls in the distance".to_string(),
         intensity: 10,
     };
-    map_events.new(hero_id, game_tick.0 + 2400, wolf_howl_event);
+    map_events.new(hero_id, game_tick.0 + 3000, wolf_howl_event);
 
     // Schedule the necromancer event for the next evening
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
@@ -1289,16 +1366,39 @@ pub fn new(
             owner: poi_id,
             items: Vec::new(),
         };
-        poi_inventory.new(ids.new_item_id(), "Health Potion".to_string(), 3, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Gold Coins".to_string(), 25, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Copper Broad Axe".to_string(), 1, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Resin Torch".to_string(), 2, &templates.item_templates);
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Health Potion".to_string(),
+            3,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Gold Coins".to_string(),
+            25,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Copper Broad Axe".to_string(),
+            1,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Resin Torch".to_string(),
+            2,
+            &templates.item_templates,
+        );
 
         let poi = Obj::create_nospawn(
             poi_id,
             MERCHANT_PLAYER_ID,
             "Burned House".to_string(),
-            Position { x: pos[0], y: pos[1] },
+            Position {
+                x: pos[0],
+                y: pos[1],
+            },
             State::None,
             poi_inventory,
             &templates,
@@ -1308,14 +1408,17 @@ pub fn new(
         entity_map.new_obj(poi_id, poi_entity);
         commands.trigger(NewObj { entity: poi_entity });
 
-        // Spawn skeletons guarding the burned house after 1 minute
-        let poi_pos = Position { x: pos[0], y: pos[1] };
+        // Spawn skeletons guarding the burned house after 8 minutes
+        let poi_pos = Position {
+            x: pos[0],
+            y: pos[1],
+        };
         for i in 0..2 {
             let event_id = ids.new_map_event_id();
             let spawn_event = GameEvent {
                 event_id,
                 start_tick: game_tick.0,
-                run_tick: game_tick.0 + 600 + (i * 10),
+                run_tick: game_tick.0 + 4800 + (i * 10),
                 event_type: GameEventType::SpawnNPC {
                     npc_type: "Skeleton".to_string(),
                     pos: poi_pos,
@@ -1333,15 +1436,33 @@ pub fn new(
             owner: poi_id,
             items: Vec::new(),
         };
-        poi_inventory.new(ids.new_item_id(), "Soulshard".to_string(), 3, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Health Potion".to_string(), 2, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Yurt Deed".to_string(), 1, &templates.item_templates);
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Soulshard".to_string(),
+            3,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Health Potion".to_string(),
+            2,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Yurt Deed".to_string(),
+            1,
+            &templates.item_templates,
+        );
 
         let poi = Obj::create_nospawn(
             poi_id,
             MERCHANT_PLAYER_ID,
             "Graveyard".to_string(),
-            Position { x: pos[0], y: pos[1] },
+            Position {
+                x: pos[0],
+                y: pos[1],
+            },
             State::None,
             poi_inventory,
             &templates,
@@ -1351,14 +1472,17 @@ pub fn new(
         entity_map.new_obj(poi_id, poi_entity);
         commands.trigger(NewObj { entity: poi_entity });
 
-        // Spawn zombies at the graveyard after 2 minutes
-        let poi_pos = Position { x: pos[0], y: pos[1] };
+        // Spawn zombies at the graveyard after 12 minutes
+        let poi_pos = Position {
+            x: pos[0],
+            y: pos[1],
+        };
         for i in 0..3 {
             let event_id = ids.new_map_event_id();
             let spawn_event = GameEvent {
                 event_id,
                 start_tick: game_tick.0,
-                run_tick: game_tick.0 + 1200 + (i * 10),
+                run_tick: game_tick.0 + 7200 + (i * 10),
                 event_type: GameEventType::SpawnNPC {
                     npc_type: "Zombie".to_string(),
                     pos: poi_pos,
@@ -1376,16 +1500,39 @@ pub fn new(
             owner: poi_id,
             items: Vec::new(),
         };
-        poi_inventory.new(ids.new_item_id(), "Quickforge Iron Ore".to_string(), 5, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Valleyrun Copper Ingot".to_string(), 5, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Gold Coins".to_string(), 50, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Mine Deed".to_string(), 1, &templates.item_templates);
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Quickforge Iron Ore".to_string(),
+            5,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Valleyrun Copper Ingot".to_string(),
+            5,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Gold Coins".to_string(),
+            50,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Mine Deed".to_string(),
+            1,
+            &templates.item_templates,
+        );
 
         let poi = Obj::create_nospawn(
             poi_id,
             MERCHANT_PLAYER_ID,
             "Sealed Cavern".to_string(),
-            Position { x: pos[0], y: pos[1] },
+            Position {
+                x: pos[0],
+                y: pos[1],
+            },
             State::None,
             poi_inventory,
             &templates,
@@ -1395,14 +1542,17 @@ pub fn new(
         entity_map.new_obj(poi_id, poi_entity);
         commands.trigger(NewObj { entity: poi_entity });
 
-        // Spawn spiders guarding the cavern after 3 minutes
-        let poi_pos = Position { x: pos[0], y: pos[1] };
+        // Spawn spiders guarding the cavern after 14 minutes
+        let poi_pos = Position {
+            x: pos[0],
+            y: pos[1],
+        };
         for i in 0..2 {
             let event_id = ids.new_map_event_id();
             let spawn_event = GameEvent {
                 event_id,
                 start_tick: game_tick.0,
-                run_tick: game_tick.0 + 1800 + (i * 10),
+                run_tick: game_tick.0 + 8400 + (i * 10),
                 event_type: GameEventType::SpawnNPC {
                     npc_type: "Spider".to_string(),
                     pos: poi_pos,
@@ -1420,17 +1570,45 @@ pub fn new(
             owner: poi_id,
             items: Vec::new(),
         };
-        poi_inventory.new(ids.new_item_id(), "Valleyrun Copper Ore".to_string(), 10, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Flameforge Copper Ore".to_string(), 5, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Training Pick Axe".to_string(), 1, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Firewood".to_string(), 5, &templates.item_templates);
-        poi_inventory.new(ids.new_item_id(), "Quarry Deed".to_string(), 1, &templates.item_templates);
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Valleyrun Copper Ore".to_string(),
+            10,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Flameforge Copper Ore".to_string(),
+            5,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Training Pick Axe".to_string(),
+            1,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Firewood".to_string(),
+            5,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Quarry Deed".to_string(),
+            1,
+            &templates.item_templates,
+        );
 
         let poi = Obj::create_nospawn(
             poi_id,
             MERCHANT_PLAYER_ID,
             "Abandoned Mine".to_string(),
-            Position { x: pos[0], y: pos[1] },
+            Position {
+                x: pos[0],
+                y: pos[1],
+            },
             State::None,
             poi_inventory,
             &templates,
@@ -1440,14 +1618,17 @@ pub fn new(
         entity_map.new_obj(poi_id, poi_entity);
         commands.trigger(NewObj { entity: poi_entity });
 
-        // Spawn giant rats in the mine after 90 seconds
-        let poi_pos = Position { x: pos[0], y: pos[1] };
+        // Spawn giant rats in the mine after 10 minutes
+        let poi_pos = Position {
+            x: pos[0],
+            y: pos[1],
+        };
         for i in 0..3 {
             let event_id = ids.new_map_event_id();
             let spawn_event = GameEvent {
                 event_id,
                 start_tick: game_tick.0,
-                run_tick: game_tick.0 + 900 + (i * 10),
+                run_tick: game_tick.0 + 6000 + (i * 10),
                 event_type: GameEventType::SpawnNPC {
                     npc_type: "Giant Rat".to_string(),
                     pos: poi_pos,

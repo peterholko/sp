@@ -67,6 +67,7 @@ export namespace NetworkEvent {
     export const EXPLORE : string = 'EXPLORE';
     export const GATHER : string = 'GATHER';
     export const ATTACK : string = 'ATTACK';
+    export const ABILITY : string = 'ABILITY';
     export const DMG : string = 'DMG';
     export const SPOIL : string = 'SPOIL';
     export const STEAL : string = 'STEAL';
@@ -81,4 +82,8 @@ export namespace NetworkEvent {
     export const REDUCED_EFFECT: string = 'REDUCED_EFFECT';
     export const INCREASED_EFFECT: string = 'INCREASED_EFFECT';
     export const OBJECTIVES: string = 'OBJECTIVES';
+    export const OBJECTIVE_STATE: string = 'OBJECTIVE_STATE';
+    export const THREAT_STATE: string = 'THREAT_STATE';
+    export const COMBAT_STATE: string = 'COMBAT_STATE';
+    export const DISCOVERY_EVENT: string = 'DISCOVERY_EVENT';
 }

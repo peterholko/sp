@@ -7,7 +7,10 @@ use big_brain::prelude::{Highest, Thinker};
 
 use rand::Rng;
 
-use crate::common::{Destination, Drink, Eat, Heat, Hunger, MoveTo, Hide, Idle, Sleep, TaskTarget, AttackTarget, SetAttackTarget, Thirst, Tired, Transport};
+use crate::common::{
+    AttackTarget, Destination, Drink, Eat, Heat, Hide, Hunger, Idle, MoveTo, SetAttackTarget,
+    Sleep, TaskTarget, Thirst, Tired, Transport,
+};
 use crate::constants::*;
 use crate::effect::Effects;
 use crate::event::{EventExecuting, EventExecutingState, MapEvents, VisibleEvent};
@@ -17,23 +20,39 @@ use crate::game::{
 use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, Inventory};
 use crate::map::{Map, TileType};
-use crate::npc::{CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, NpcMoveNearTarget, NpcMoveTo, NpcMoveToTarget, RaiseDead, SetCorpseTarget, SetHome, SetSpoilTarget, SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer, TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget, VisibleTargetScorer};
-use crate::tax_collector::{AtLanding, Forfeiture, IsAboard, IsTaxCollected, MoveToEmpire, MoveToPos, MoveToTarget, NoTaxesToCollect, OverdueTaxScorer, TaxCollector, TaxCollectorTransport, TaxesToCollect};
-use crate::obj::{ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager};
+use crate::npc::{
+    CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, NpcMoveNearTarget,
+    NpcMoveTo, NpcMoveToTarget, RaiseDead, SetCorpseTarget, SetHome, SetSpoilTarget,
+    SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer,
+    TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget,
+    VisibleTargetScorer,
+};
 use crate::obj::{
-    Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassNPC, Template,
-    Viewshed,
+    ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager,
+};
+use crate::obj::{
+    Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass,
+    SubclassNPC, Template, Viewshed,
 };
 use crate::skill::Skills;
+use crate::tax_collector::{
+    AtLanding, Forfeiture, IsAboard, IsTaxCollected, MoveToEmpire, MoveToPos, MoveToTarget,
+    NoTaxesToCollect, OverdueTaxScorer, TaxCollector, TaxCollectorTransport, TaxesToCollect,
+};
 use crate::villager::{
-    CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer, FindDrink, FindFood,
-    FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer, LoadItems, Morale,
-    ProcessOrder, SetFleeDestination, SetOrderDestination, SetStorageDestination,
-    StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood, UnloadItems,
+    ArmedRetaliationScorer, CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer,
+    FightBack, FindDrink, FindFood, FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer,
+    LoadItems, Morale, ProcessOrder, SetFleeDestination, SetOrderDestination,
+    SetStorageDestination, StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood,
+    UnloadItems,
 };
 use crate::villager_util::VillagerUtil;
 
 use crate::templates::{ObjTemplate, Templates};
+
+const RESCUED_VILLAGER_NEED_PER_TICK: f32 = 0.02;
+const RESCUED_VILLAGER_STARTING_THIRST: f32 = 62.0;
+const RESCUED_VILLAGER_STARTING_HUNGER: f32 = 18.0;
 
 #[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
 #[reflect(Resource)]
@@ -61,17 +80,15 @@ struct Loot {
     max: i32,
 }
 
-
 impl Encounter {
     pub fn probability(moves_since_encounter: i32, wildness: i32) -> f32 {
-
         // No encounter in safe areas
         if wildness == 0 {
             return 0.0;
         }
 
         let move_base: f32 = 0.99; // 6 moves to reach 1.0
-        //let move_base: f32 = 0.95175;  // 3 moves to reach 1.0
+                                   //let move_base: f32 = 0.95175;  // 3 moves to reach 1.0
         let wildness_base: f32 = 0.985;
 
         let result = 1.0
@@ -89,24 +106,24 @@ impl Encounter {
         map: &Map,
     ) -> Option<Position> {
         let mut selected_pos;
-    
+
         // Check for a valid stop within 2 tiles
         let mut neighbours = Map::range((center_x, center_y), 2);
         selected_pos = Self::find_valid_pos(neighbours, player_id, &all_obj_pos, map);
-    
+
         // If none found, check for a valid spot on the 3rd and 4th ring
         if selected_pos.is_none() {
             neighbours = Map::ring((center_x, center_y), 3);
             selected_pos = Self::find_valid_pos(neighbours, player_id, &all_obj_pos, map);
-    
+
             if selected_pos.is_none() {
                 neighbours = Map::ring((center_x, center_y), 4);
                 selected_pos = Self::find_valid_pos(neighbours, player_id, &all_obj_pos, map);
             }
         }
-    
+
         debug!("Selected Pos (before fallback): {:?}", selected_pos);
-    
+
         // If no valid tile can be selected return center x,y
         if selected_pos.is_none() {
             selected_pos = Some(Position {
@@ -114,7 +131,7 @@ impl Encounter {
                 y: center_y,
             });
         }
-    
+
         return selected_pos;
     }
 
@@ -163,7 +180,9 @@ impl Encounter {
                 hp: npc_template.base_hp.unwrap(),
                 base_hp: npc_template.base_hp.unwrap(),
                 stamina: npc_template.base_stamina,
+                mana: None,
                 base_stamina: npc_template.base_stamina,
+                base_mana: None,
                 base_def: npc_template.base_def.unwrap(),
                 base_damage: npc_template.base_dmg,
                 damage_range: npc_template.dmg_range,
@@ -171,17 +190,20 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
-            inventory: Inventory { owner: npc_id, items: Vec::new() },
+            inventory: Inventory {
+                owner: npc_id,
+                items: Vec::new(),
+            },
             last_combat_tick: LastCombatTick::default(),
         };
-        
+
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
 
         let chase_and_attack = Steps::build()
-        .label("Chase and Attack")
-        .step(SetAttackTarget)
-        .step(NpcMoveToTarget)
-        .step(AttackTarget);
+            .label("Chase and Attack")
+            .step(SetAttackTarget)
+            .step(NpcMoveToTarget)
+            .step(AttackTarget);
 
         let entity = commands
             .spawn((
@@ -200,7 +222,6 @@ impl Encounter {
                     .when(VisibleTargetScorer, chase_and_attack),
             ))
             .id();
-
 
         ids.new_obj(npc_id, player_id);
         entity_map.new_obj(npc_id, entity);
@@ -226,14 +247,17 @@ impl Encounter {
             //Position { x: 16, y: 33 },
             pos,
             State::None,
-            Inventory { owner: necro_id, items: Vec::new() },
+            Inventory {
+                owner: necro_id,
+                items: Vec::new(),
+            },
             templates,
         );
 
         let template = templates.obj_templates.get("Necromancer".to_string());
 
         Encounter::generate_loot(necro_id, ids, &mut necro_obj.inventory, templates);
-        
+
         let cast_spell_target = Steps::build()
             .label("Cast Spell Target")
             .step(SetAttackTarget)
@@ -244,7 +268,7 @@ impl Encounter {
             .label("Raise Dead")
             .step(SetCorpseTarget)
             .step(NpcMoveToTarget)
-            .step(RaiseDead);        
+            .step(RaiseDead);
 
         let flee_and_hide = Steps::build()
             .label("Flee and Hide")
@@ -260,7 +284,9 @@ impl Encounter {
         let necro_entity = commands
             .spawn((
                 necro_obj.clone(),
-                Viewshed { range: template.base_vision.expect("Necromancer has no vision") },
+                Viewshed {
+                    range: template.base_vision.expect("Necromancer has no vision"),
+                },
                 SubclassNPC,
                 Minions { ids: Vec::new() },
                 Home { pos: home_pos },
@@ -282,7 +308,6 @@ impl Encounter {
         ids.new_obj(necro_obj.id.0, player_id);
         entity_map.new_obj(necro_obj.id.0, necro_entity);
 
-
         return (necro_entity, necro_obj.id, PlayerId(player_id), pos);
     }
 
@@ -298,8 +323,7 @@ impl Encounter {
         let villager_id = ids.new_obj_id();
 
         let villager_template_name = "Human Villager".to_string();
-        let villager_template =
-            templates.obj_templates.get(villager_template_name.clone());
+        let villager_template = templates.obj_templates.get(villager_template_name.clone());
 
         let image: String;
         if let Some(template_images) = villager_template.images {
@@ -327,7 +351,9 @@ impl Encounter {
                 hp: villager_template.base_hp.unwrap(),
                 base_hp: villager_template.base_hp.unwrap(),
                 stamina: villager_template.base_stamina,
+                mana: None,
                 base_stamina: villager_template.base_stamina,
+                base_mana: None,
                 base_def: villager_template.base_def.unwrap(),
                 base_damage: villager_template.base_dmg,
                 damage_range: villager_template.dmg_range,
@@ -403,9 +429,7 @@ impl Encounter {
             .step(MoveTo)
             .step(UnloadItems);
 
-        let load_items = Steps::build()
-            .label("LoadItems")
-            .step(LoadItems);
+        let load_items = Steps::build().label("LoadItems").step(LoadItems);
 
         let villager_inventory = villager.inventory.clone();
 
@@ -438,14 +462,21 @@ impl Encounter {
             .id();
 
         commands.entity(villager_entity).insert((
-            Thirst::new(10.0, 0.02),
-            Hunger::new(10.0, 0.02),
+            Thirst::new(
+                RESCUED_VILLAGER_STARTING_THIRST,
+                RESCUED_VILLAGER_NEED_PER_TICK,
+            ),
+            Hunger::new(
+                RESCUED_VILLAGER_STARTING_HUNGER,
+                RESCUED_VILLAGER_NEED_PER_TICK,
+            ),
             Tired::new(0.0, 0.02),
             Heat::new(50.0),
             Morale::new(50.0),
             Thinker::build()
                 .label("Villager")
                 .picker(Highest)
+                .when(ArmedRetaliationScorer, FightBack)
                 .when(EnemyDistanceScorer, flee)
                 .when(ThirstyScorer, find_move_to_and_drink)
                 .when(HungryScorer, find_move_to_and_eat)
@@ -482,7 +513,6 @@ impl Encounter {
         game_tick: &Res<GameTick>,
         map_events: &mut ResMut<MapEvents>,
     ) {
-
         let tax_collector_ship_id = ids.new_obj_id();
         let tax_collector_ship_obj = Obj::create_nospawn(
             tax_collector_ship_id,
@@ -490,7 +520,10 @@ impl Encounter {
             "Tax Ship".to_string(),
             empire_pos,
             State::None,
-            Inventory { owner: tax_collector_ship_id, items: Vec::new() },
+            Inventory {
+                owner: tax_collector_ship_id,
+                items: Vec::new(),
+            },
             templates,
         );
 
@@ -501,7 +534,10 @@ impl Encounter {
             "Tax Collector".to_string(),
             empire_pos,
             State::None,
-            Inventory { owner: tax_collector_id, items: Vec::new() },
+            Inventory {
+                owner: tax_collector_id,
+                items: Vec::new(),
+            },
             templates,
         );
 
@@ -553,7 +589,7 @@ impl Encounter {
 
         // Create a new object event
         commands.trigger(NewObj {
-            entity: tax_collector_ship_entity
+            entity: tax_collector_ship_entity,
         });
 
         let target_hero_id = ids
@@ -639,7 +675,7 @@ impl Encounter {
 
         // Create a new object event
         commands.trigger(NewObj {
-            entity: tax_collector_entity
+            entity: tax_collector_entity,
         });
     }
 
@@ -674,7 +710,9 @@ impl Encounter {
                 hp: npc_template.base_hp.unwrap(),
                 base_hp: npc_template.base_hp.unwrap(),
                 stamina: npc_template.base_stamina,
+                mana: None,
                 base_stamina: npc_template.base_stamina,
+                base_mana: None,
                 base_def: npc_template.base_def.unwrap(),
                 base_damage: npc_template.base_dmg,
                 damage_range: npc_template.dmg_range,
@@ -682,7 +720,10 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
-            inventory: Inventory { owner: npc_id, items: Vec::new() },
+            inventory: Inventory {
+                owner: npc_id,
+                items: Vec::new(),
+            },
             last_combat_tick: LastCombatTick::default(),
         };
 
@@ -718,7 +759,6 @@ impl Encounter {
                     .when(VisibleTargetScorer, chase_and_attack), //.when(NoTargetScorer, Wander)
             ))
             .id();
-
 
         ids.new_obj(npc_id, player_id);
         entity_map.new_obj(npc_id, entity);
@@ -757,7 +797,9 @@ impl Encounter {
                 hp: npc_template.base_hp.unwrap(),
                 base_hp: npc_template.base_hp.unwrap(),
                 stamina: npc_template.base_stamina,
+                mana: None,
                 base_stamina: npc_template.base_stamina,
+                base_mana: None,
                 base_def: npc_template.base_def.unwrap(),
                 base_damage: npc_template.base_dmg,
                 damage_range: npc_template.dmg_range,
@@ -765,10 +807,13 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
-            inventory: Inventory { owner: npc_id, items: Vec::new() },
+            inventory: Inventory {
+                owner: npc_id,
+                items: Vec::new(),
+            },
             last_combat_tick: LastCombatTick::default(),
         };
-        
+
         Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
 
         let steal_target = Steps::build()
@@ -804,7 +849,6 @@ impl Encounter {
                     .when(VisibleTargetScorer, chase_and_attack), //.when(NoTargetScorer, Wander)
             ))
             .id();
-
 
         ids.new_obj(npc_id, player_id);
         entity_map.new_obj(npc_id, entity);
@@ -843,7 +887,9 @@ impl Encounter {
                 hp: npc_template.base_hp.unwrap(),
                 base_hp: npc_template.base_hp.unwrap(),
                 stamina: npc_template.base_stamina,
+                mana: None,
                 base_stamina: npc_template.base_stamina,
+                base_mana: None,
                 base_def: npc_template.base_def.unwrap(),
                 base_damage: npc_template.base_dmg,
                 damage_range: npc_template.dmg_range,
@@ -851,7 +897,10 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
-            inventory: Inventory { owner: npc_id, items: Vec::new() },
+            inventory: Inventory {
+                owner: npc_id,
+                items: Vec::new(),
+            },
             last_combat_tick: LastCombatTick::default(),
         };
 
@@ -888,14 +937,12 @@ impl Encounter {
             ))
             .id();
 
-
-
         ids.new_obj(npc_id, player_id);
         entity_map.new_obj(npc_id, entity);
 
         return (entity, Id(npc_id), PlayerId(player_id), pos);
     }
-    
+
     pub fn generate_loot(
         npc_id: i32,
         ids: &mut ResMut<Ids>,
@@ -1007,19 +1054,19 @@ impl Encounter {
             .into_iter()
             .filter(|(x, y)| Self::is_valid_pos(*x, *y, player_id, all_obj_pos, map))
             .collect();
-    
+
         if valid_neighbours.len() > 0 {
             let mut rng = rand::thread_rng();
             let index = rng.gen_range(0..valid_neighbours.len());
             debug!("Random valid pos index: {:?}", index);
             let (pos_x, pos_y) = valid_neighbours[index];
-    
+
             return Some(Position { x: pos_x, y: pos_y });
         } else {
             return None;
         }
     }
-    
+
     fn is_valid_pos(
         x: i32,
         y: i32,
@@ -1031,20 +1078,15 @@ impl Encounter {
         let is_valid_pos = Map::is_valid_pos((x, y));
         let is_not_blocked = Self::is_not_blocked(player_id, x, y, &all_obj_pos);
         debug!("is_not_blocked: {:?}", is_not_blocked);
-    
+
         if is_passable && is_valid_pos && is_not_blocked {
             return true;
         }
-    
+
         return false;
     }
-    
-    fn is_not_blocked(
-        player_id: i32, 
-        x: i32, 
-        y: i32, 
-        all_obj_pos: &Vec<EncounterMapObj>,
-    ) -> bool {
+
+    fn is_not_blocked(player_id: i32, x: i32, y: i32, all_obj_pos: &Vec<EncounterMapObj>) -> bool {
         debug!(
             "is_not_blocked: {:?} {:?} {:?} {:?}",
             player_id, x, y, all_obj_pos
@@ -1056,7 +1098,32 @@ impl Encounter {
                 return false;
             }
         }
-    
+
         return true;
-    }    
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rescued_villager_needs_reach_hungry_and_thirsty_after_one_minute() {
+        let mut thirst = Thirst::new(
+            RESCUED_VILLAGER_STARTING_THIRST,
+            RESCUED_VILLAGER_NEED_PER_TICK,
+        );
+        let mut hunger = Hunger::new(
+            RESCUED_VILLAGER_STARTING_HUNGER,
+            RESCUED_VILLAGER_NEED_PER_TICK,
+        );
+
+        for _ in 0..(60 * 10) {
+            thirst.update_by_tick_amount(1.0);
+            hunger.update_by_tick_amount(1.0);
+        }
+
+        assert_eq!(thirst.num_to_string(), THIRSTY);
+        assert_eq!(hunger.num_to_string(), HUNGRY);
+    }
 }

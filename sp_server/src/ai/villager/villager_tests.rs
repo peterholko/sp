@@ -396,11 +396,7 @@ fn idle_scorer_returns_baseline_score() {
     app.update();
 
     let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
-    assert_eq!(
-        score.get(),
-        0.1,
-        "Expected idle score to be 0.1 (baseline)"
-    );
+    assert_eq!(score.get(), 0.1, "Expected idle score to be 0.1 (baseline)");
 }
 
 // ==================== Heat Scorer Tests ====================
@@ -569,6 +565,7 @@ fn minimal_templates() -> Templates {
         groups: None,
         base_hp: None,
         base_stamina: None,
+        base_mana: None,
         base_dmg: None,
         dmg_range: None,
         base_def: None,
@@ -603,10 +600,14 @@ fn minimal_templates() -> Templates {
 
 // ==================== Action State Tests ====================
 
-use big_brain::actions::spawn_action;
+use crate::effect::{Effect, Effects};
 use crate::event::{GameEvents, MapEvents};
 use crate::ids::Ids;
-use crate::item::Item;
+use crate::item::{Item, Slot};
+use crate::map::{MoistureType, TemperatureType, TileInfo, TileType, HEIGHT, WIDTH};
+use crate::skill::Skills;
+use crate::templates::EffectTemplate;
+use big_brain::actions::spawn_action;
 
 /// Builder for creating test villagers with full VillagerQuery components
 pub struct ActionTestVillagerBuilder {
@@ -651,6 +652,16 @@ impl ActionTestVillagerBuilder {
         self
     }
 
+    pub fn with_player_id(mut self, player_id: i32) -> Self {
+        self.player_id = player_id;
+        self
+    }
+
+    pub fn with_position(mut self, position: Position) -> Self {
+        self.position = position;
+        self
+    }
+
     pub fn with_thirst(mut self, val: f32) -> Self {
         self.thirst = val;
         self
@@ -681,6 +692,11 @@ impl ActionTestVillagerBuilder {
         self
     }
 
+    pub fn with_equipped_weapon(mut self) -> Self {
+        self.inventory_items.push(create_weapon_item(self.id));
+        self
+    }
+
     pub fn spawn(self, world: &mut World) -> Entity {
         world
             .spawn((
@@ -704,9 +720,107 @@ impl ActionTestVillagerBuilder {
                     event_type: String::new(),
                     state: self.event_state,
                 },
+                ActiveShelter(NO_SHELTER),
             ))
             .id()
     }
+}
+
+fn open_test_map() -> Map {
+    let tile_count = (WIDTH * HEIGHT) as usize;
+    Map {
+        width: WIDTH,
+        height: HEIGHT,
+        base: vec![
+            TileInfo {
+                tile_type: TileType::Grasslands,
+                layers: Vec::new(),
+            };
+            tile_count
+        ],
+        temperature: vec![TemperatureType::WarmTemperate; tile_count],
+        moisture: vec![MoistureType::Humid; tile_count],
+        wildness: vec![0; tile_count],
+    }
+}
+
+fn spawn_base_obj(
+    world: &mut World,
+    id: i32,
+    player_id: i32,
+    position: Position,
+    subclass: Subclass,
+) -> Entity {
+    world
+        .spawn((
+            Id(id),
+            PlayerId(player_id),
+            position,
+            Class(CLASS_UNIT.to_string()),
+            subclass,
+            State::None,
+            Inventory {
+                owner: id,
+                items: Vec::new(),
+            },
+        ))
+        .id()
+}
+
+fn combat_stats(hp: i32, stamina: i32, damage: i32, damage_range: i32) -> Stats {
+    Stats {
+        hp,
+        stamina: Some(stamina),
+        mana: None,
+        base_hp: hp,
+        base_stamina: Some(stamina),
+        base_mana: None,
+        base_def: 0,
+        damage_range: Some(damage_range),
+        base_damage: Some(damage),
+        base_speed: Some(1),
+        base_vision: Some(2),
+    }
+}
+
+fn insert_combat_components(world: &mut World, entity: Entity, hp: i32, damage: i32) {
+    world.entity_mut(entity).insert((
+        Template("Villager".to_string()),
+        Misc {
+            image: String::new(),
+            hsl: Vec::new(),
+            groups: Vec::new(),
+        },
+        combat_stats(hp, 20, damage, 1),
+        Effects(HashMap::new()),
+        LastCombatTick::default(),
+    ));
+}
+
+fn minimal_combat_templates() -> Templates {
+    let mut templates = minimal_templates();
+    templates.effect_templates.load(vec![EffectTemplate {
+        name: Effect::Sanctuary.to_str(),
+        duration: 0,
+        max_hp: None,
+        healing: None,
+        damage: None,
+        damage_over_time: None,
+        speed: None,
+        attack_speed: None,
+        defense: Some(1.0),
+        stackable: None,
+        armor: None,
+        lifeleech: None,
+        viewshed: None,
+        ignore_all_armor: None,
+        instant_kill_chance: None,
+        next_attack: None,
+        vision: None,
+        health: None,
+        stamina: None,
+    }]);
+    templates
 }
 
 /// Creates a drink item for testing
@@ -751,6 +865,26 @@ fn create_food_item(owner: i32) -> Item {
     }
 }
 
+fn create_weapon_item(owner: i32) -> Item {
+    Item {
+        id: 102,
+        owner,
+        name: "Training Sword".to_string(),
+        quantity: 1,
+        durability: None,
+        class: WEAPON.to_string(),
+        subclass: "Sword".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "training_sword.png".to_string(),
+        weight: 2.0,
+        equipped: true,
+        experiment: None,
+        start_time: 0,
+        attrs: HashMap::new(),
+        produces: Vec::new(),
+    }
+}
+
 /// Macro to create a test app with action system and all required resources
 macro_rules! setup_action_test_app {
     ($system:expr) => {{
@@ -760,10 +894,8 @@ macro_rules! setup_action_test_app {
         app.world_mut()
             .insert_resource(EntityObjMap(HashMap::new()));
         app.world_mut().insert_resource(Ids::default());
-        app.world_mut()
-            .insert_resource(MapEvents(HashMap::new()));
-        app.world_mut()
-            .insert_resource(GameEvents(HashMap::new()));
+        app.world_mut().insert_resource(MapEvents(HashMap::new()));
+        app.world_mut().insert_resource(GameEvents(HashMap::new()));
         app
     }};
 }
@@ -789,6 +921,289 @@ fn spawn_action_as_requested<T: ActionBuilder + Clone>(
         .unwrap() = ActionState::Requested;
 
     action_entity
+}
+
+fn register_test_obj(app: &mut App, obj_id: i32, player_id: i32, entity: Entity) {
+    app.world_mut()
+        .resource_mut::<Ids>()
+        .new_obj(obj_id, player_id);
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(obj_id, entity);
+}
+
+#[test]
+fn move_to_succeeds_immediately_when_already_at_destination() {
+    let mut app = setup_action_test_app!(move_to_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Subclass::Villager,
+        Destination { pos },
+        combat_stats(10, 10, 1, 1),
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action_entity = spawn_action_as_requested(&mut app, &MoveTo, villager);
+
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Success);
+
+    let villager_state = app.world().entity(villager).get::<State>().unwrap();
+    assert_eq!(*villager_state, State::None);
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
+fn gather_order_on_current_tile_schedules_another_gather_event() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            move_to_system,
+            process_order_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+    app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_templates());
+
+    let pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Subclass::Villager,
+        Template("Villager".to_string()),
+        combat_stats(10, 10, 1, 1),
+        Skills::new(),
+        Order::Gather {
+            res_type: ORE.to_string(),
+            pos,
+            storage_pos: None,
+            storage_id: None,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let set_destination_action = spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Executing
+    );
+    app.update();
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+
+    let move_action = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    app.update();
+    assert_eq!(
+        *app.world()
+            .entity(move_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+
+    let process_order_action = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
+    app.update();
+    assert_eq!(
+        *app.world()
+            .entity(process_order_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Executing
+    );
+
+    let game_events = app.world().resource::<GameEvents>();
+    assert_eq!(game_events.len(), 1);
+    assert!(game_events.values().any(|event| matches!(
+        &event.event_type,
+        GameEventType::GatherEvent {
+            gatherer_id,
+            res_type
+        } if *gatherer_id == 1 && res_type == ORE
+    )));
+}
+
+#[test]
+fn armed_retaliation_scorer_scores_for_equipped_villager_attacked_by_adjacent_enemy() {
+    let mut app = setup_test_app!(armed_retaliation_scorer_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, attacker);
+    }
+
+    let scorer_entity = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&ArmedRetaliationScorer, &mut commands, villager)
+    };
+    app.world_mut().flush();
+
+    app.update();
+
+    let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+    assert_eq!(score.get(), 1.0);
+}
+
+#[test]
+fn fight_back_system_attacks_adjacent_last_attacker_when_armed() {
+    let mut app = setup_action_test_app!(fight_back_system);
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_combat_templates());
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Subclass::Villager);
+    insert_combat_components(app.world_mut(), villager, 30, 10);
+    insert_combat_components(app.world_mut(), attacker, 30, 1);
+
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, attacker);
+    }
+
+    let action = spawn_action_as_requested(&mut app, &FightBack, villager);
+
+    app.update();
+
+    let attacker_stats = app.world().entity(attacker).get::<Stats>().unwrap();
+    assert!(
+        attacker_stats.hp < 30,
+        "expected armed villager to damage adjacent attacker"
+    );
+
+    assert!(app.world().entity(villager).get::<LastAttacker>().is_none());
+
+    let action_state = app.world().entity(action).get::<ActionState>().unwrap();
+    assert_eq!(*action_state, ActionState::Executing);
+}
+
+#[test]
+fn set_flee_destination_succeeds_when_hero_is_reachable() {
+    let mut app = setup_action_test_app!(set_flee_destination_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+
+    let hero = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1,
+        Position { x: 7, y: 5 },
+        Subclass::Hero,
+    );
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 4, y: 5 },
+        Subclass::None,
+    );
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+    }
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Success);
+
+    let destination = app.world().entity(villager).get::<Destination>().unwrap();
+    assert_ne!(destination.pos, villager_pos);
 }
 
 // ==================== Drink Action Tests ====================
@@ -912,6 +1327,17 @@ fn drink_action_succeeds_when_event_completes() {
         ActionState::Success,
         "Expected action to succeed when event completes"
     );
+
+    let event_executing = app
+        .world()
+        .entity(villager)
+        .get::<EventExecuting>()
+        .unwrap();
+    assert_eq!(
+        event_executing.state,
+        EventExecutingState::None,
+        "Expected drink action to consume the completed event state"
+    );
 }
 
 // ==================== Eat Action Tests ====================
@@ -1017,6 +1443,147 @@ fn eat_action_succeeds_when_event_completes() {
         *action_state,
         ActionState::Success,
         "Expected action to succeed when event completes"
+    );
+
+    let event_executing = app
+        .world()
+        .entity(villager)
+        .get::<EventExecuting>()
+        .unwrap();
+    assert_eq!(
+        event_executing.state,
+        EventExecutingState::None,
+        "Expected eat action to consume the completed event state"
+    );
+}
+
+#[test]
+fn active_task_tracks_drink_pipeline_and_returns_to_none() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    let action_entity = spawn_action_as_requested(&mut app, &Drink, villager);
+
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::GettingDrink,
+        "Expected executing drink action to report GettingDrink"
+    );
+
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Success;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::None,
+        "Expected completed drink pipeline to clear active task"
+    );
+}
+
+#[test]
+fn active_task_reports_ore_gather_order_as_mining() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    });
+
+    let action_entity = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Mining,
+        "Expected executing ore gather order to report Mining"
+    );
+}
+
+#[test]
+fn clear_event_executing_preserves_completed_state_while_actor_has_active_action() {
+    let mut app = App::new();
+    app.add_systems(Update, clear_event_executing);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_event_state(EventExecutingState::Completed)
+        .spawn(app.world_mut());
+
+    let completed_find = spawn_action_as_requested(&mut app, &FindDrink, villager);
+    *app.world_mut()
+        .entity_mut(completed_find)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Success;
+
+    let active_drink = spawn_action_as_requested(&mut app, &Drink, villager);
+    *app.world_mut()
+        .entity_mut(active_drink)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let event_executing = app
+        .world()
+        .entity(villager)
+        .get::<EventExecuting>()
+        .unwrap();
+    assert_eq!(
+        event_executing.state,
+        EventExecutingState::Completed,
+        "Expected completed event state to survive while a later action is executing"
+    );
+}
+
+#[test]
+fn clear_event_executing_clears_completed_state_when_actor_has_only_terminal_actions() {
+    let mut app = App::new();
+    app.add_systems(Update, clear_event_executing);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_event_state(EventExecutingState::Completed)
+        .spawn(app.world_mut());
+
+    let completed_drink = spawn_action_as_requested(&mut app, &Drink, villager);
+    *app.world_mut()
+        .entity_mut(completed_drink)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Success;
+
+    app.update();
+
+    let event_executing = app
+        .world()
+        .entity(villager)
+        .get::<EventExecuting>()
+        .unwrap();
+    assert_eq!(
+        event_executing.state,
+        EventExecutingState::None,
+        "Expected completed event state to clear once no action is active"
     );
 }
 
@@ -1172,11 +1739,7 @@ macro_rules! setup_multi_scorer_app {
 }
 
 /// Helper to spawn a scorer and return its entity
-fn spawn_scorer_for<T: ScorerBuilder + Clone>(
-    app: &mut App,
-    scorer: &T,
-    actor: Entity,
-) -> Entity {
+fn spawn_scorer_for<T: ScorerBuilder + Clone>(app: &mut App, scorer: &T, actor: Entity) -> Entity {
     let entity = {
         let mut commands = app.world_mut().commands();
         spawn_scorer(scorer, &mut commands, actor)
@@ -1264,7 +1827,7 @@ fn emergency_thirst_overrides_high_tiredness() {
 
     let villager = TestVillagerBuilder::new()
         .with_thirst(95.0) // Emergency
-        .with_tired(75.0)  // High but not emergency
+        .with_tired(75.0) // High but not emergency
         .spawn(app.world_mut());
 
     let thirst_scorer = spawn_scorer_for(&mut app, &ThirstyScorer, villager);
@@ -1289,7 +1852,7 @@ fn emergency_hunger_overrides_high_tiredness() {
 
     let villager = TestVillagerBuilder::new()
         .with_hunger(95.0) // Emergency
-        .with_tired(75.0)  // High but not emergency
+        .with_tired(75.0) // High but not emergency
         .spawn(app.world_mut());
 
     let hunger_scorer = spawn_scorer_for(&mut app, &HungryScorer, villager);
@@ -1316,7 +1879,7 @@ fn all_vital_needs_competing_highest_emergency_wins() {
     let villager = TestVillagerBuilder::new()
         .with_thirst(95.0) // Emergency
         .with_hunger(75.0) // High routine
-        .with_tired(60.0)  // Moderate
+        .with_tired(60.0) // Moderate
         .spawn(app.world_mut());
 
     let thirst_scorer = spawn_scorer_for(&mut app, &ThirstyScorer, villager);
@@ -1546,10 +2109,8 @@ macro_rules! setup_behavior_test_app {
         app.world_mut()
             .insert_resource(EntityObjMap(HashMap::new()));
         app.world_mut().insert_resource(Ids::default());
-        app.world_mut()
-            .insert_resource(MapEvents(HashMap::new()));
-        app.world_mut()
-            .insert_resource(GameEvents(HashMap::new()));
+        app.world_mut().insert_resource(MapEvents(HashMap::new()));
+        app.world_mut().insert_resource(GameEvents(HashMap::new()));
         app
     }};
 }
@@ -1822,11 +2383,7 @@ fn villager_can_drink_then_eat_sequentially() {
 
     app.update();
 
-    let action_state = app
-        .world()
-        .entity(eat_action)
-        .get::<ActionState>()
-        .unwrap();
+    let action_state = app.world().entity(eat_action).get::<ActionState>().unwrap();
     assert_eq!(
         *action_state,
         ActionState::Executing,
@@ -1842,11 +2399,7 @@ fn villager_can_drink_then_eat_sequentially() {
 
     app.update();
 
-    let action_state = app
-        .world()
-        .entity(eat_action)
-        .get::<ActionState>()
-        .unwrap();
+    let action_state = app.world().entity(eat_action).get::<ActionState>().unwrap();
     assert_eq!(
         *action_state,
         ActionState::Success,
@@ -1890,11 +2443,7 @@ fn drink_failure_does_not_block_subsequent_eat_action() {
 
     app.update();
 
-    let action_state = app
-        .world()
-        .entity(eat_action)
-        .get::<ActionState>()
-        .unwrap();
+    let action_state = app.world().entity(eat_action).get::<ActionState>().unwrap();
     assert_eq!(
         *action_state,
         ActionState::Executing,
