@@ -13,8 +13,8 @@ use crate::item::{self, AttrKey, Inventory, Item};
 use crate::map::Map;
 use crate::obj::Obj;
 use crate::obj::{
-    Class, HeroClass, Id, LastAttacker, LastCombatTick, Misc, PlayerId, Position, State, StateDead,
-    Stats, Subclass, Template,
+    is_peaceful_interruptible_state, CancelEvents, Class, HeroClass, Id, LastAttacker,
+    LastCombatTick, Misc, PlayerId, Position, State, StateDead, Stats, Subclass, Template,
 };
 use crate::skill::{SkillUpdated, Skills};
 use crate::templates::{ComboTemplate, ObjTemplate, Templates};
@@ -106,12 +106,50 @@ pub struct CombatSpellQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub effects: &'static mut Effects,
+    pub last_combat_tick: &'static mut LastCombatTick,
 }
 
 #[derive(Debug, Clone)]
 pub struct Combat;
 
 impl Combat {
+    pub fn class_template_is_attackable(class: &Class, _template: &Template) -> bool {
+        !class.is_poi()
+    }
+
+    pub fn non_attackable_class_template_error(
+        class: &Class,
+        template: &Template,
+    ) -> Option<String> {
+        if template.0 == "Shipwreck" {
+            Some("The shipwreck can only be inspected, not attacked.".to_string())
+        } else if !Self::class_template_is_attackable(class, template) {
+            Some("That cannot be attacked.".to_string())
+        } else {
+            None
+        }
+    }
+
+    pub fn target_is_attackable(target: &CombatQueryItem) -> bool {
+        Self::class_template_is_attackable(target.class, target.template)
+    }
+
+    pub fn non_attackable_target_error(target: &CombatQueryItem) -> Option<String> {
+        Self::non_attackable_class_template_error(target.class, target.template)
+    }
+
+    pub fn target_is_fortified(target: &CombatQueryItem) -> bool {
+        target.effects.has(Effect::Fortified)
+    }
+
+    pub fn fortified_target_melee_error(target: &CombatQueryItem) -> Option<String> {
+        if Self::target_is_fortified(target) {
+            Some("Only ranged attacks can hit a fortified target.".to_string())
+        } else {
+            None
+        }
+    }
+
     pub fn process_attack(
         attack_type: AttackType,
         attacker: &mut CombatQueryItem,
@@ -223,6 +261,8 @@ impl Combat {
         // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
+        Self::interrupt_peaceful_work(commands, attacker.entity, &attacker.state);
+        Self::interrupt_peaceful_work(commands, target.entity, &target.state);
 
         if attacker.player_id.0 != target.player_id.0 {
             commands.entity(target.entity).insert(LastAttacker {
@@ -395,6 +435,8 @@ impl Combat {
         // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
         target.last_combat_tick.0 = game_tick.0;
+        Self::interrupt_peaceful_work(commands, attacker.entity, &attacker.state);
+        Self::interrupt_peaceful_work(commands, target.entity, &target.state);
 
         if attacker.player_id.0 != target.player_id.0 {
             commands.entity(target.entity).insert(LastAttacker {
@@ -746,6 +788,12 @@ impl Combat {
         };
 
         map_events.new(attacker.id.0, game_tick, damage_event);
+    }
+
+    fn interrupt_peaceful_work(commands: &mut Commands, entity: Entity, state: &State) {
+        if is_peaceful_interruptible_state(state) {
+            commands.trigger(CancelEvents { entity });
+        }
     }
 
     fn attack_type_damage_mod(attack_type: AttackType) -> f32 {

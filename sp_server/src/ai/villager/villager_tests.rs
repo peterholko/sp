@@ -682,6 +682,16 @@ impl ActionTestVillagerBuilder {
         self
     }
 
+    pub fn with_active_task(mut self, task: ActiveTask) -> Self {
+        self.active_task = task;
+        self
+    }
+
+    pub fn with_morale(mut self, val: f32) -> Self {
+        self.morale = val;
+        self
+    }
+
     pub fn with_drink_item(mut self) -> Self {
         self.inventory_items.push(create_drink_item(self.id));
         self
@@ -698,7 +708,7 @@ impl ActionTestVillagerBuilder {
     }
 
     pub fn spawn(self, world: &mut World) -> Entity {
-        world
+        let entity = world
             .spawn((
                 Id(self.id),
                 PlayerId(self.player_id),
@@ -722,7 +732,20 @@ impl ActionTestVillagerBuilder {
                 },
                 ActiveShelter(NO_SHELTER),
             ))
-            .id()
+            .id();
+
+        world.entity_mut(entity).insert((
+            Name("Villager".to_string()),
+            Template("Villager".to_string()),
+            Misc {
+                image: String::new(),
+                hsl: Vec::new(),
+                groups: Vec::new(),
+            },
+            Effects(HashMap::new()),
+        ));
+
+        entity
     }
 }
 
@@ -756,9 +779,17 @@ fn spawn_base_obj(
             Id(id),
             PlayerId(player_id),
             position,
+            Name(format!("Obj {}", id)),
+            Template("Villager".to_string()),
             Class(CLASS_UNIT.to_string()),
             subclass,
+            Misc {
+                image: String::new(),
+                hsl: Vec::new(),
+                groups: Vec::new(),
+            },
             State::None,
+            Effects(HashMap::new()),
             Inventory {
                 owner: id,
                 items: Vec::new(),
@@ -932,6 +963,109 @@ fn register_test_obj(app: &mut App, obj_id: i32, player_id: i32, entity: Entity)
         .new_obj(obj_id, entity);
 }
 
+fn setup_enemy_distance_app() -> App {
+    let mut app = setup_test_app!(enemy_distance_scorer_system);
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_templates());
+    app
+}
+
+fn spawn_enemy_distance_fixture(
+    app: &mut App,
+    fortified_villager: bool,
+    enemy_template: &str,
+) -> Entity {
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .spawn(app.world_mut());
+
+    if fortified_villager {
+        app.world_mut()
+            .entity_mut(villager)
+            .get_mut::<Effects>()
+            .unwrap()
+            .0
+            .insert(Effect::Fortified, (0, 0.0, 1));
+    }
+
+    let hero = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1,
+        Position { x: 7, y: 5 },
+        Subclass::Hero,
+    );
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+    app.world_mut()
+        .entity_mut(enemy)
+        .insert(Template(enemy_template.to_string()));
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_obj(2, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+    }
+
+    let scorer_entity = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&EnemyDistanceScorer, &mut commands, villager)
+    };
+    app.world_mut().flush();
+    scorer_entity
+}
+
+#[test]
+fn enemy_distance_scorer_ignores_melee_enemy_near_fortified_villager() {
+    let mut app = setup_enemy_distance_app();
+    let scorer = spawn_enemy_distance_fixture(&mut app, true, "Wolf");
+
+    app.update();
+
+    let score = app.world().entity(scorer).get::<Score>().unwrap();
+    assert_eq!(score.get(), 0.0);
+}
+
+#[test]
+fn enemy_distance_scorer_flees_when_unfortified_villager_has_nearby_enemy() {
+    let mut app = setup_enemy_distance_app();
+    let scorer = spawn_enemy_distance_fixture(&mut app, false, "Wolf");
+
+    app.update();
+
+    let score = app.world().entity(scorer).get::<Score>().unwrap();
+    assert_eq!(score.get(), 1.0);
+}
+
+#[test]
+fn enemy_distance_scorer_flees_from_caster_near_fortified_villager() {
+    let mut app = setup_enemy_distance_app();
+    let scorer = spawn_enemy_distance_fixture(&mut app, true, "Necromancer");
+
+    app.update();
+
+    let score = app.world().entity(scorer).get::<Score>().unwrap();
+    assert_eq!(score.get(), 1.0);
+}
+
 #[test]
 fn move_to_succeeds_immediately_when_already_at_destination() {
     let mut app = setup_action_test_app!(move_to_system);
@@ -1003,7 +1137,8 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
     ));
     register_test_obj(&mut app, 1, 1, villager);
 
-    let set_destination_action = spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
     app.update();
     assert_eq!(
         *app.world()
@@ -1149,6 +1284,62 @@ fn fight_back_system_attacks_adjacent_last_attacker_when_armed() {
 }
 
 #[test]
+fn fight_back_system_does_not_melee_fortified_attacker() {
+    let mut app = setup_action_test_app!(fight_back_system);
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_combat_templates());
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Subclass::Villager);
+    insert_combat_components(app.world_mut(), villager, 30, 10);
+    insert_combat_components(app.world_mut(), attacker, 30, 1);
+    app.world_mut()
+        .entity_mut(attacker)
+        .get_mut::<Effects>()
+        .unwrap()
+        .0
+        .insert(Effect::Fortified, (0, 0.0, 1));
+
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, attacker);
+    }
+
+    let action = spawn_action_as_requested(&mut app, &FightBack, villager);
+
+    app.update();
+
+    let attacker_stats = app.world().entity(attacker).get::<Stats>().unwrap();
+    assert_eq!(attacker_stats.hp, 30);
+    assert!(app.world().entity(villager).get::<LastAttacker>().is_none());
+
+    let action_state = app.world().entity(action).get::<ActionState>().unwrap();
+    assert_eq!(*action_state, ActionState::Failure);
+}
+
+#[test]
 fn set_flee_destination_succeeds_when_hero_is_reachable() {
     let mut app = setup_action_test_app!(set_flee_destination_system);
     app.world_mut().insert_resource(open_test_map());
@@ -1206,6 +1397,71 @@ fn set_flee_destination_succeeds_when_hero_is_reachable() {
     assert_ne!(destination.pos, villager_pos);
 }
 
+#[test]
+fn set_flee_destination_fails_when_fortified_villager_only_has_blocked_melee_threats() {
+    let mut app = setup_action_test_app!(set_flee_destination_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Effects>()
+        .unwrap()
+        .0
+        .insert(Effect::Fortified, (0, 0.0, 1));
+
+    let hero = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1,
+        Position { x: 7, y: 5 },
+        Subclass::Hero,
+    );
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+    app.world_mut()
+        .entity_mut(enemy)
+        .insert(Template("Wolf".to_string()));
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+    }
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Failure);
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+}
+
 // ==================== Drink Action Tests ====================
 
 #[test]
@@ -1258,6 +1514,40 @@ fn drink_action_transitions_to_executing_when_drink_available() {
         EventExecutingState::Executing,
         "Expected EventExecuting state to be Executing"
     );
+}
+
+#[test]
+fn drink_action_fails_when_villager_is_combat_locked() {
+    let mut app = setup_action_test_app!(drink_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_thirst(80.0)
+        .with_drink_item()
+        .spawn(app.world_mut());
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(LastCombatTick(TICKS_PER_SEC));
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .insert(1, villager);
+
+    let action_entity = spawn_action_as_requested(&mut app, &Drink, villager);
+
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
 }
 
 #[test]
@@ -1458,7 +1748,7 @@ fn eat_action_succeeds_when_event_completes() {
 }
 
 #[test]
-fn active_task_tracks_drink_pipeline_and_returns_to_none() {
+fn active_task_tracks_drink_pipeline_and_returns_to_idle() {
     let mut app = App::new();
     app.add_systems(Update, active_task_system);
 
@@ -1489,8 +1779,36 @@ fn active_task_tracks_drink_pipeline_and_returns_to_none() {
     let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
     assert_eq!(
         *active_task,
-        ActiveTask::None,
-        "Expected completed drink pipeline to clear active task"
+        ActiveTask::Idle,
+        "Expected completed drink pipeline to settle to Idle"
+    );
+}
+
+#[test]
+fn active_task_uses_idle_when_no_action_is_active() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::None)
+        .spawn(app.world_mut());
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Idle,
+        "Expected no active action to display as Idle"
+    );
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Idle,
+        "Expected repeated no-action ticks to remain Idle"
     );
 }
 
@@ -1520,6 +1838,157 @@ fn active_task_reports_ore_gather_order_as_mining() {
         *active_task,
         ActiveTask::Mining,
         "Expected executing ore gather order to report Mining"
+    );
+}
+
+#[test]
+fn active_task_reports_set_flee_destination_as_fleeing() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Fleeing,
+        "Expected selecting a flee destination to report Fleeing"
+    );
+}
+
+#[test]
+fn active_task_preserves_fleeing_during_move_to() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Fleeing)
+        .spawn(app.world_mut());
+    let action_entity = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Fleeing,
+        "Expected MoveTo to preserve Fleeing during the flee pipeline"
+    );
+}
+
+#[test]
+fn active_task_preserves_shelter_drink_and_food_during_move_to() {
+    for previous in [
+        ActiveTask::FindingShelter,
+        ActiveTask::GettingDrink,
+        ActiveTask::GettingFood,
+    ] {
+        let mut app = App::new();
+        app.add_systems(Update, active_task_system);
+
+        let villager = ActionTestVillagerBuilder::new()
+            .with_active_task(previous.clone())
+            .spawn(app.world_mut());
+        let action_entity = spawn_action_as_requested(&mut app, &MoveTo, villager);
+        *app.world_mut()
+            .entity_mut(action_entity)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Executing;
+
+        app.update();
+
+        let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+        assert_eq!(
+            *active_task, previous,
+            "Expected MoveTo to preserve {:?} during multi-step pipeline",
+            previous
+        );
+    }
+}
+
+#[test]
+fn active_task_preserves_order_activity_during_destination_and_move_steps() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Mining)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    });
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    *app.world_mut()
+        .entity_mut(set_destination_action)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Mining,
+        "Expected SetOrderDestination to report the underlying order activity"
+    );
+
+    *app.world_mut()
+        .entity_mut(set_destination_action)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Success;
+    let move_action = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    *app.world_mut()
+        .entity_mut(move_action)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Mining,
+        "Expected MoveTo to preserve the underlying order activity"
+    );
+}
+
+#[test]
+fn active_task_clears_to_idle_after_flee_pipeline_finishes() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Fleeing)
+        .spawn(app.world_mut());
+    let action_entity = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Success;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Idle,
+        "Expected completed flee pipeline to settle to Idle"
     );
 }
 
@@ -1588,6 +2057,102 @@ fn clear_event_executing_clears_completed_state_when_actor_has_only_terminal_act
 }
 
 // ==================== Sleep Action Tests ====================
+
+#[test]
+fn exhausted_villager_without_shelter_rests_on_current_tile_and_loses_morale() {
+    let mut app = setup_action_test_app!(find_shelter_system);
+
+    let pos = Position { x: 8, y: 9 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(pos)
+        .with_tired(EXHAUSTED_SCORE + 1.0)
+        .with_morale(50.0)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Exhausted {
+        at_tick: TICKS_PER_SEC,
+    });
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action_entity = spawn_action_as_requested(
+        &mut app,
+        &FindShelter {
+            trigger_event: "Sleep".to_string(),
+        },
+        villager,
+    );
+
+    app.update();
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<EventExecuting>()
+        .unwrap()
+        .state = EventExecutingState::Completed;
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        pos
+    );
+    let morale = app.world().entity(villager).get::<Morale>().unwrap();
+    assert_eq!(morale.morale, 45.0);
+    assert_eq!(morale.rough_sleep_penalty, 5.0);
+}
+
+#[test]
+fn exhausted_villager_without_shelter_does_not_rest_while_combat_locked() {
+    let mut app = setup_action_test_app!(find_shelter_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_tired(EXHAUSTED_SCORE + 1.0)
+        .with_morale(50.0)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Exhausted {
+            at_tick: TICKS_PER_SEC,
+        },
+        LastCombatTick(TICKS_PER_SEC),
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action_entity = spawn_action_as_requested(
+        &mut app,
+        &FindShelter {
+            trigger_event: "Sleep".to_string(),
+        },
+        villager,
+    );
+
+    app.update();
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<EventExecuting>()
+        .unwrap()
+        .state = EventExecutingState::Completed;
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Failure
+    );
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+    let morale = app.world().entity(villager).get::<Morale>().unwrap();
+    assert_eq!(morale.morale, 50.0);
+    assert_eq!(morale.rough_sleep_penalty, 0.0);
+}
 
 #[test]
 fn sleep_action_transitions_to_executing() {

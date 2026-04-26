@@ -400,6 +400,7 @@ pub fn move_to_target_action_system(
                             false,
                             false,
                             true, // Allow move onto position with transport
+                            true,
                         ) {
                             info!("Follower path: {:?}", path_result);
 
@@ -552,6 +553,7 @@ pub fn move_to_pos_action_system(
                             true, //TODO look up the terrain-walks for the npc
                             false,
                             false,
+                            true,
                         ) {
                             info!("Follower path: {:?}", path_result);
 
@@ -654,6 +656,7 @@ pub fn move_to_empire_action_system(
                             true,
                             false,
                             false,
+                            true,
                         ) {
                             info!("Follower path: {:?}", path_result);
 

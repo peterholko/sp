@@ -30,12 +30,12 @@ use crate::network::{
     self, send_to_client, CraftingItem, RefiningItem, ResponsePacket, StatsData, StructureList,
 };
 use crate::obj::{
-    Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire, Class,
-    ClassStructure, EndRepeatAction, HeroClass, HeroClassProfile, Id, LastCombatTick, Misc, Name,
-    NewObj, Obj, Order, Personality, PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter,
-    StartBuild, StartUpgrade, State, StateBuilding, StateChange, StateDead, Stats, Subclass,
-    SubclassHero, SubclassVillager, Template, UpdateObj, Viewshed, WorkEntry, WorkQueue,
-    WorkStatus, WorkType,
+    is_combat_locked, ActiveTask, Assignment, Assignments, BaseAttrs, BuildProgressUpdate,
+    BuildUpgradeState, Campfire, Class, ClassStructure, EndRepeatAction, HeroClass,
+    HeroClassProfile, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, Personality, PlayerId,
+    Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
+    StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
+    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::StartLocations;
 use crate::recipe::Recipes;
@@ -529,6 +529,23 @@ struct CoreQuery {
     effects: &'static Effects,
     inventory: &'static Inventory,
     hero_class: Option<&'static HeroClass>,
+    last_combat_tick: Option<&'static LastCombatTick>,
+}
+
+fn combat_locked(last_combat_tick: Option<&LastCombatTick>, game_tick: i32) -> bool {
+    last_combat_tick
+        .map(|last_combat_tick| is_combat_locked(game_tick, last_combat_tick))
+        .unwrap_or(false)
+}
+
+fn send_combat_locked_error(player_id: i32, clients: &Res<Clients>) {
+    send_to_client(
+        player_id,
+        ResponsePacket::Error {
+            errmsg: "Cannot do that while in combat.".to_string(),
+        },
+        clients,
+    );
 }
 
 #[derive(QueryData)]
@@ -1216,12 +1233,39 @@ fn ability_disabled_reason(
             return Some("Target is dead".to_string());
         }
 
+        if ability_is_damaging(ability) {
+            if let Some(errmsg) = Combat::non_attackable_target_error(target) {
+                return Some(errmsg);
+            }
+        }
+
+        if ability_is_damaging(ability)
+            && Combat::target_is_fortified(target)
+            && !ability_is_ranged_attack(ability)
+        {
+            return Some("Only ranged attacks can hit a fortified target.".to_string());
+        }
+
         if Map::dist(*actor.pos, *target.pos) > ability.range {
             return Some("Out of range".to_string());
         }
     }
 
     None
+}
+
+fn ability_is_damaging(ability: AbilityDef) -> bool {
+    matches!(
+        ability.effect,
+        AbilityEffect::ShieldBash | AbilityEffect::AimedShot | AbilityEffect::ArcaneBolt
+    )
+}
+
+fn ability_is_ranged_attack(ability: AbilityDef) -> bool {
+    matches!(
+        ability.effect,
+        AbilityEffect::AimedShot | AbilityEffect::ArcaneBolt
+    )
 }
 
 fn ability_hints_for(
@@ -1502,6 +1546,18 @@ fn attack_system(
                     continue;
                 }
 
+                if let Some(errmsg) = Combat::non_attackable_target_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Check if attacker has enough stamina
                 let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
                 if attacker_stamina < 5 {
@@ -1562,6 +1618,7 @@ fn attack_system(
                 );
 
                 // Track player attack cooldown
+                attacker.last_combat_tick.0 = game_tick.0;
                 last_player_attack.insert(*player_id, game_tick.0);
 
                 // Response to client with attack response packet
@@ -1957,6 +2014,18 @@ fn attack_system(
                     continue;
                 }
 
+                if let Some(errmsg) = Combat::non_attackable_target_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Check if attacker has enough stamina
                 let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
                 if attacker_stamina < 5 {
@@ -2176,7 +2245,7 @@ fn gather_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
-    hero_query: Query<(&Position, &State, &mut Inventory)>,
+    hero_query: Query<(&Position, &State, &mut Inventory, Option<&LastCombatTick>)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -2196,7 +2265,9 @@ fn gather_system(
                     continue;
                 };
 
-                let Ok((hero_pos, hero_state, hero_inventory)) = hero_query.get(hero_entity) else {
+                let Ok((hero_pos, hero_state, hero_inventory, last_combat_tick)) =
+                    hero_query.get(hero_entity)
+                else {
                     error!("Cannot find hero for {:?}", hero_entity);
                     continue;
                 };
@@ -2206,6 +2277,11 @@ fn gather_system(
                         errmsg: "The dead cannot gather".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
                     continue;
                 }
 
@@ -2603,7 +2679,13 @@ fn refine_system(
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     mut active_infos: ResMut<ActiveInfos>,
-    hero_query: Query<(&Position, &State, &mut Inventory, &mut Skills)>,
+    hero_query: Query<(
+        &Position,
+        &State,
+        &mut Inventory,
+        &mut Skills,
+        Option<&LastCombatTick>,
+    )>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -2623,7 +2705,7 @@ fn refine_system(
                     continue;
                 };
 
-                let Ok((_hero_pos, hero_state, hero_inventory, hero_skills)) =
+                let Ok((_hero_pos, hero_state, hero_inventory, hero_skills, last_combat_tick)) =
                     hero_query.get(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
@@ -2635,6 +2717,11 @@ fn refine_system(
                         errmsg: "The dead cannot refine.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
                     continue;
                 }
 
@@ -2719,7 +2806,7 @@ fn refine_system(
                     continue;
                 };
 
-                let Ok((_hero_pos, hero_state, hero_inventory, _hero_skills)) =
+                let Ok((_hero_pos, hero_state, hero_inventory, _hero_skills, last_combat_tick)) =
                     hero_query.get(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
@@ -2731,6 +2818,11 @@ fn refine_system(
                         errmsg: "The dead cannot craft.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
                     continue;
                 }
 
@@ -2801,7 +2893,13 @@ fn structure_refine_system(
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     mut active_infos: ResMut<ActiveInfos>,
-    mut query: Query<(&PlayerId, &Position, &State, &mut Inventory)>,
+    mut query: Query<(
+        &PlayerId,
+        &Position,
+        &State,
+        &mut Inventory,
+        Option<&LastCombatTick>,
+    )>,
     skills_query: Query<&mut Skills>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -2835,7 +2933,13 @@ fn structure_refine_system(
                 };
 
                 let Ok(
-                    [(hero_player_id, hero_pos, hero_state, hero_inventory), (structure_player_id, structure_pos, structure_state, structure_inventory)],
+                    [(hero_player_id, hero_pos, hero_state, hero_inventory, last_combat_tick), (
+                        structure_player_id,
+                        structure_pos,
+                        structure_state,
+                        structure_inventory,
+                        _structure_last_combat_tick,
+                    )],
                 ) = query.get_many_mut([hero_entity, structure_entity])
                 else {
                     error!("Cannot find hero or structure for {:?}", hero_entity);
@@ -2852,6 +2956,11 @@ fn structure_refine_system(
                         errmsg: "The dead cannot refine.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
                     continue;
                 }
 
@@ -2966,7 +3075,13 @@ fn structure_refine_system(
                 };
 
                 let Ok(
-                    [(hero_player_id, hero_pos, hero_state, hero_inventory), (structure_player_id, structure_pos, structure_state, structure_inventory)],
+                    [(hero_player_id, hero_pos, hero_state, hero_inventory, last_combat_tick), (
+                        structure_player_id,
+                        structure_pos,
+                        structure_state,
+                        structure_inventory,
+                        _structure_last_combat_tick,
+                    )],
                 ) = query.get_many_mut([hero_entity, structure_entity])
                 else {
                     error!("Cannot find hero or structure for {:?}", hero_entity);
@@ -2978,6 +3093,11 @@ fn structure_refine_system(
                         errmsg: "The dead cannot refine.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
                     continue;
                 }
 
@@ -3222,11 +3342,13 @@ fn info_villager_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
+    mut active_infos: ResMut<ActiveInfos>,
     query: Query<CoreQuery>,
     base_attrs_query: Query<(&BaseAttrs, &Skills)>,
     stats_query: Query<&Stats>,
     attrs_query: Query<(&Thirst, &Hunger, &Tired, &Heat)>,
     order_query: Query<&Order>,
+    active_task_query: Query<&ActiveTask>,
     assignment_query: Query<&Assignment>,
     personality_query: Query<&Personality>,
 ) {
@@ -3314,6 +3436,10 @@ fn info_villager_system(
         order = Some(current_order.to_string());
     }
 
+    if let Ok(active_task) = active_task_query.get(obj.entity) {
+        activity = Some(active_task.to_string());
+    }
+
     let response_packet = ResponsePacket::InfoVillager {
         id: obj.id.0,
         name: obj.name.0.to_string(),
@@ -3354,6 +3480,10 @@ fn info_villager_system(
             .map(|p| p.to_str().to_string()),
     };
 
+    active_infos.add(
+        (obj.id.0, ActiveInfoType::Obj),
+        info_villager_event.player_id,
+    );
     send_to_client(info_villager_event.player_id, response_packet, &clients);
 }
 
@@ -4628,6 +4758,9 @@ fn info_item_system(
                     }
                     "structure_queue" => {
                         active_infos.remove((*id, ActiveInfoType::StructureQueue), *player_id);
+                    }
+                    "villager" => {
+                        active_infos.remove((*id, ActiveInfoType::Obj), *player_id);
                     }
                     _ => {}
                 }
@@ -5990,7 +6123,7 @@ fn build_system(
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    builder_query: Query<(&Position, &State)>,
+    builder_query: Query<(&Position, &State, Option<&LastCombatTick>)>,
     mut structure_query: Query<(&Name, &Position, &State, &Inventory, &mut Assignments)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -6044,10 +6177,17 @@ fn build_system(
                     continue;
                 }
 
-                let Ok((builder_pos, builder_state)) = builder_query.get(builder_entity) else {
+                let Ok((builder_pos, builder_state, last_combat_tick)) =
+                    builder_query.get(builder_entity)
+                else {
                     error!("Cannot find builder for {:?}", builder_id);
                     continue;
                 };
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
+                    continue;
+                }
 
                 let Ok((
                     structure_name,
@@ -6259,7 +6399,7 @@ fn upgrade_system(
     map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    builder_query: Query<(&Position, &State)>,
+    builder_query: Query<(&Position, &State, Option<&LastCombatTick>)>,
     mut structure_query: Query<
         (
             &Position,
@@ -6325,10 +6465,17 @@ fn upgrade_system(
                     continue;
                 }
 
-                let Ok((builder_pos, builder_state)) = builder_query.get(builder_entity) else {
+                let Ok((builder_pos, builder_state, last_combat_tick)) =
+                    builder_query.get(builder_entity)
+                else {
                     error!("Cannot find builder for {:?}", builder_id);
                     continue;
                 };
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
+                    continue;
+                }
 
                 let Ok((
                     structure_pos,
@@ -8676,7 +8823,7 @@ fn use_item_system(
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
-    mut query: Query<(&PlayerId, &State, &mut Inventory)>,
+    mut query: Query<(&PlayerId, &State, &mut Inventory, Option<&LastCombatTick>)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -8694,7 +8841,8 @@ fn use_item_system(
                     continue;
                 };
 
-                let Ok((owner_player_id, owner_state, owner_inventory)) = query.get(owner_entity)
+                let Ok((owner_player_id, owner_state, owner_inventory, last_combat_tick)) =
+                    query.get(owner_entity)
                 else {
                     error!("Query failed to find entity {:?}", owner_entity);
                     continue;
@@ -8718,10 +8866,20 @@ fn use_item_system(
                 }
 
                 // Check if item exists in inventory
-                let Some(_item) = owner_inventory.get_by_id(*item_id) else {
+                let Some(item) = owner_inventory.get_by_id(*item_id) else {
                     error!("Cannot find item for {:?}", *item_id);
                     continue;
                 };
+
+                if combat_locked(last_combat_tick, game_tick.0)
+                    && matches!(
+                        (item.class.as_str(), item.subclass.as_str()),
+                        (FOOD, _) | (DRINK, _) | (BEDROLL, _) | (_, FISHING_ROD)
+                    )
+                {
+                    send_combat_locked_error(*player_id, &clients);
+                    continue;
+                }
 
                 // Insert explore event
                 let use_item_event = VisibleEvent::UseItemEvent {
@@ -8743,7 +8901,7 @@ fn use_item_system(
                     continue;
                 };
 
-                let Ok((owner_player_id, owner_state, mut owner_inventory)) =
+                let Ok((owner_player_id, owner_state, mut owner_inventory, _last_combat_tick)) =
                     query.get_mut(owner_entity)
                 else {
                     error!("Query failed to find entity {:?}", owner_entity);
@@ -8800,10 +8958,11 @@ fn sleep_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     game_tick: Res<GameTick>,
+    clients: Res<Clients>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
-    mut query: Query<&mut State>,
+    query: Query<(&State, Option<&LastCombatTick>)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -8825,6 +8984,20 @@ fn sleep_system(
                     error!("Cannot find hero entity for {:?}", hero_id);
                     continue;
                 };
+
+                let Ok((hero_state, last_combat_tick)) = query.get(hero_entity) else {
+                    error!("Cannot find hero state for {:?}", hero_entity);
+                    continue;
+                };
+
+                if Obj::is_dead(hero_state) {
+                    continue;
+                }
+
+                if combat_locked(last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
+                    continue;
+                }
 
                 commands.trigger(StateChange {
                     entity: hero_entity,
@@ -9996,6 +10169,32 @@ mod tests {
         assert_eq!(
             disengage_destination(Position { x: 2, y: 2 }, Position { x: 2, y: 2 }),
             None
+        );
+    }
+
+    #[test]
+    fn only_ranged_damage_abilities_can_hit_fortified_targets() {
+        let guard_bash = ability_def("shield_bash").expect("guard bash ability");
+        let aimed_shot = ability_def("aimed_shot").expect("aimed shot ability");
+        let arcane_bolt = ability_def("arcane_bolt").expect("arcane bolt ability");
+        let disengage = ability_def("disengage").expect("disengage ability");
+
+        assert!(ability_is_damaging(guard_bash));
+        assert!(!ability_is_ranged_attack(guard_bash));
+        assert!(ability_is_ranged_attack(aimed_shot));
+        assert!(ability_is_ranged_attack(arcane_bolt));
+        assert!(!ability_is_damaging(disengage));
+    }
+
+    #[test]
+    fn shipwreck_is_not_attackable() {
+        let class = Class(CLASS_POI.to_string());
+        let template = Template("Shipwreck".to_string());
+
+        assert!(!Combat::class_template_is_attackable(&class, &template));
+        assert_eq!(
+            Combat::non_attackable_class_template_error(&class, &template),
+            Some("The shipwreck can only be inspected, not attacked.".to_string())
         );
     }
 

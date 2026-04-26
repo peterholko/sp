@@ -57,14 +57,15 @@ use crate::network::{
 use crate::network::{ResponsePacket, StatsData};
 use crate::npc::NPCPlugin;
 use crate::obj::{
-    ActiveShelter, ActiveTask, AddLightEffect, Assignment, Assignments, BaseAttrs,
-    BuildProgressUpdate, BuildUpgradeState, Campfire, CancelEvents, Class, ClassStructure,
-    EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker, LastCombatTick, Misc, Name, NewObj,
-    Obj, Order, PlayerId, Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade,
-    Shelter, Sheltered, StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding,
-    StateChange, StateDead, StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC,
-    SubclassVillager, Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj,
-    Viewshed, Watchtower, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
+    Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
+    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker,
+    LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId, Position, RemoveLightEffect,
+    RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild, StartUpgrade,
+    StartWork, State, StateAboard, StateBuilding, StateChange, StateDead, StateUpgrading, Stats,
+    Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager, Template, TemplateChange,
+    TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower, WorkEntry, WorkQueue,
+    WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerPlugin};
 use crate::recipe::{RecipePlugin, Recipes};
@@ -750,6 +751,7 @@ pub struct ObjWithStatsQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub inventory: &'static mut Inventory,
+    pub last_combat_tick: &'static LastCombatTick,
 }
 
 #[derive(QueryData)]
@@ -956,6 +958,10 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 stamina_recovery_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                combat_lock_interrupt_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -3348,6 +3354,14 @@ fn gather_event_system(
                         continue;
                     };
 
+                    if *gatherer.state != State::Gathering {
+                        debug!(
+                            "Skipping stale GatherEvent for {:?}; state is {:?}",
+                            gatherer_id, gatherer.state
+                        );
+                        continue;
+                    }
+
                     commands.trigger(StateChange {
                         entity: gatherer_entity,
                         new_state: State::None,
@@ -3370,9 +3384,9 @@ fn gather_event_system(
 
                     let mut items_to_update: Vec<network::Item> = Vec::new();
 
-	                    info!("Resources on tile: {:?}", resources_on_tile);
-	                    for resource in resources_on_tile.iter() {
-	                        if let Some(res_template) = res_templates.get(&resource.name) {
+                    info!("Resources on tile: {:?}", resources_on_tile);
+                    for resource in resources_on_tile.iter() {
+                        if let Some(res_template) = res_templates.get(&resource.name) {
                             let skill_name = Resource::type_to_skill(res_type.clone());
                             let skill_name_enum = Skill::from_str(&skill_name)
                                 .expect(&format!("Invalid skill name: {}", skill_name));
@@ -3498,19 +3512,19 @@ fn gather_event_system(
                             info!(
                                 "No resource template found for resource: {:?}",
                                 resource.name
-	                            );
-	                        }
-	                    }
+                            );
+                        }
+                    }
 
-	                    commands.entity(gatherer_entity).insert(EventCompleted {
-	                        event_id: Uuid::new_v4(),
-	                        event_type: "gather".to_string(),
-	                        at_tick: game_tick.0,
-	                        success: true,
-	                    });
-	                }
-	                _ => {}
-	            }
+                    commands.entity(gatherer_entity).insert(EventCompleted {
+                        event_id: Uuid::new_v4(),
+                        event_type: "gather".to_string(),
+                        at_tick: game_tick.0,
+                        success: true,
+                    });
+                }
+                _ => {}
+            }
         }
     }
 
@@ -3767,7 +3781,7 @@ fn refine_event_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut query: Query<(&Template, &mut Inventory, &mut Skills)>,
+    mut query: Query<(&Template, &State, &mut Inventory, &mut Skills)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -3794,12 +3808,24 @@ fn refine_event_system(
                         continue;
                     };
 
-                    let Ok((refiner_template, mut refiner_inventory, mut refiner_skills)) =
-                        query.get_mut(refiner_entity)
+                    let Ok((
+                        refiner_template,
+                        refiner_state,
+                        mut refiner_inventory,
+                        mut refiner_skills,
+                    )) = query.get_mut(refiner_entity)
                     else {
                         error!("Cannot find refiner from entity {:?}", refiner_entity);
                         continue;
                     };
+
+                    if *refiner_state != State::Refining {
+                        debug!(
+                            "Skipping stale RefineEvent for {:?}; state is {:?}",
+                            refiner_id, refiner_state
+                        );
+                        continue;
+                    }
 
                     // Remove Event In Progress
                     commands.entity(refiner_entity).remove::<EventInProgress>();
@@ -3965,7 +3991,7 @@ fn structure_refine_event_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut refiner_query: Query<(&Subclass, &mut Skills)>,
+    mut refiner_query: Query<(&Subclass, &State, &mut Skills)>,
     mut structure_query: Query<(&Template, &mut Inventory, &mut WorkQueue)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
@@ -3993,12 +4019,20 @@ fn structure_refine_event_system(
                         continue;
                     };
 
-                    let Ok((refiner_subclass, mut refiner_skills)) =
+                    let Ok((refiner_subclass, refiner_state, mut refiner_skills)) =
                         refiner_query.get_mut(refiner_entity)
                     else {
                         error!("Cannot find refiner from entity {:?}", refiner_entity);
                         continue;
                     };
+
+                    if *refiner_state != State::Refining {
+                        debug!(
+                            "Skipping stale StructureRefineEvent for {:?}; state is {:?}",
+                            refiner_id, refiner_state
+                        );
+                        continue;
+                    }
 
                     let Some(structure_entity) = entity_map.get_entity(*structure_id) else {
                         error!("Cannot find entity from structure_id: {:?}", structure_id);
@@ -4232,7 +4266,7 @@ fn craft_event_system(
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut query: Query<(&PlayerId, &Subclass, &mut Inventory, &mut Skills)>,
+    mut query: Query<(&PlayerId, &Subclass, &State, &mut Inventory, &mut Skills)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -4256,6 +4290,7 @@ fn craft_event_system(
                     let Ok((
                         crafter_player_id,
                         crafter_subclass,
+                        crafter_state,
                         mut crafter_inventory,
                         mut crafter_skills,
                     )) = query.get_mut(crafter_entity)
@@ -4263,6 +4298,14 @@ fn craft_event_system(
                         error!("Cannot find crafter from entity {:?}", crafter_entity);
                         continue;
                     };
+
+                    if *crafter_state != State::Crafting {
+                        debug!(
+                            "Skipping stale CraftEvent for {:?}; state is {:?}",
+                            crafter_id, crafter_state
+                        );
+                        continue;
+                    }
 
                     // Add State Change Event to None
                     commands.trigger(StateChange {
@@ -4367,7 +4410,7 @@ fn structure_craft_event_system(
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut crafter_query: Query<&mut Skills>,
+    mut crafter_query: Query<(&State, &mut Skills)>,
     mut query: Query<(&Template, &mut Inventory, &mut WorkQueue)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
@@ -4411,13 +4454,23 @@ fn structure_craft_event_system(
                         continue;
                     };
 
-                    let Ok(mut crafter_skills) = crafter_query.get_mut(crafter_entity) else {
+                    let Ok((crafter_state, mut crafter_skills)) =
+                        crafter_query.get_mut(crafter_entity)
+                    else {
                         error!(
                             "Cannot find crafter skills from entity {:?}",
                             crafter_entity
                         );
                         continue;
                     };
+
+                    if *crafter_state != State::Crafting {
+                        debug!(
+                            "Skipping stale StructureCraftEvent for {:?}; state is {:?}",
+                            crafter_id, crafter_state
+                        );
+                        continue;
+                    }
 
                     // Add State Change Event to None
                     commands.trigger(StateChange {
@@ -5586,6 +5639,9 @@ fn spell_damage_event_system(
                         &mut target,
                     );
 
+                    caster.last_combat_tick.0 = game_tick.0;
+                    target.last_combat_tick.0 = game_tick.0;
+
                     let target_state_str = target.state.to_string();
                     let attack_type = match spell {
                         Spell::ShadowBolt => "Shadow Bolt".to_string(),
@@ -6160,6 +6216,7 @@ fn drink_eat_system(
     active_infos: ResMut<ActiveInfos>,
     mut needs_query: Query<(&mut Thirst, &mut Hunger, &mut Tired)>,
     mut query: Query<&mut Inventory>,
+    state_query: Query<&State>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut stats_query: Query<&mut Stats>,
 ) {
@@ -6212,6 +6269,11 @@ fn drink_eat_system(
                         error!("Query failed to find inventory entity {:?}", entity);
                         continue;
                     };
+
+                    if !matches!(state_query.get(entity), Ok(state) if *state == State::Drinking) {
+                        debug!("Skipping stale DrinkEvent for {:?}", obj_id);
+                        continue;
+                    }
 
                     let Some(item) = obj_inventory.get_by_id(*item_id) else {
                         error!("Cannot find item from id: {:?}", item_id);
@@ -6290,6 +6352,11 @@ fn drink_eat_system(
                         error!("Query failed to find inventory entity {:?}", entity);
                         continue;
                     };
+
+                    if !matches!(state_query.get(entity), Ok(state) if *state == State::Eating) {
+                        debug!("Skipping stale EatEvent for {:?}", obj_id);
+                        continue;
+                    }
 
                     let Some(item) = obj_inventory.get_by_id(*item_id) else {
                         debug!("Failed to find item: {:?}", item_id);
@@ -6375,6 +6442,11 @@ fn drink_eat_system(
                         error!("Cannot find entity from id: {:?}", obj_id);
                         continue;
                     };
+
+                    if !matches!(state_query.get(entity), Ok(state) if *state == State::Sleeping) {
+                        debug!("Skipping stale SleepEvent for {:?}", obj_id);
+                        continue;
+                    }
 
                     // Update Tired, remove all tiredness
                     let Ok((thirst, hunger, mut tired)) = needs_query.get_mut(entity) else {
@@ -8040,6 +8112,7 @@ fn rat_event_system(
                         false,
                         false,
                         true,
+                        true,
                     );
 
                     if let Some((path, _cost)) = path {
@@ -8284,6 +8357,7 @@ fn wolf_pack_system(
                     false,
                     false,
                     true,
+                    true,
                 );
 
                 if let Some((path, _cost)) = path {
@@ -8374,6 +8448,7 @@ fn goblin_raid_system(
                         false,
                         false,
                         true,
+                        true,
                     );
 
                     if let Some((path, _cost)) = path {
@@ -8452,6 +8527,7 @@ fn undead_incursion_system(
                     true,
                     false,
                     false,
+                    true,
                     true,
                 );
 
@@ -8554,6 +8630,7 @@ fn goblin_pillager_system(
                     true,
                     false,
                     false,
+                    true,
                     true,
                 );
 
@@ -8699,6 +8776,7 @@ fn nightly_threat_system(
                     true,
                     false,
                     false,
+                    true,
                     true,
                 );
 
@@ -9099,9 +9177,8 @@ fn legendary_threat_system(
             );
 
             let packet = ResponsePacket::Notice {
-                noticemsg:
-                    "Smoke coils from somewhere inland. Survivors whisper of a Fire Dragon."
-                        .to_string(),
+                noticemsg: "Smoke coils from somewhere inland. Survivors whisper of a Fire Dragon."
+                    .to_string(),
                 expiry: Some(12000),
             };
             send_to_client(player_id.0, packet, &clients);
@@ -9297,7 +9374,10 @@ fn legendary_death_tracking_system(
                 title: "Fire Dragon defeated".to_string(),
                 unlock_source: "Hideout cleared".to_string(),
                 location: None,
-                result: format!("The Fire Dragon falls. The raids stop, and your legend grows around kill {}.", id.0),
+                result: format!(
+                    "The Fire Dragon falls. The raids stop, and your legend grows around kill {}.",
+                    id.0
+                ),
             };
             send_to_client(boss.player_id, packet, &clients);
         }
@@ -10233,6 +10313,8 @@ fn morale_system(
                 new_morale -= 5.0;
             }
         }
+
+        new_morale -= morale.rough_sleep_penalty;
 
         // Clamp morale to 0-100
         new_morale = new_morale.clamp(0.0, 100.0);
@@ -11614,6 +11696,26 @@ fn cancel_events_observer(
                     });
                 }
             }
+            GameEventType::ForageEvent { forager_id } => {
+                if forager_id == obj_id.0 {
+                    game_events_to_cancel.push(game_event.clone());
+                }
+            }
+            GameEventType::GatherEvent { gatherer_id, .. } => {
+                if gatherer_id == obj_id.0 {
+                    game_events_to_cancel.push(game_event.clone());
+                }
+            }
+            GameEventType::RefineEvent { refiner_id, .. } => {
+                if refiner_id == obj_id.0 {
+                    game_events_to_cancel.push(game_event.clone());
+                }
+            }
+            GameEventType::CraftEvent { crafter_id, .. } => {
+                if crafter_id == obj_id.0 {
+                    game_events_to_cancel.push(game_event.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -12248,6 +12350,38 @@ fn stamina_recovery_system(
                 stats.mana = Some((mana + 2).min(base_mana));
             }
         }
+    }
+}
+
+fn combat_lock_interrupt_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut query: Query<
+        (
+            Entity,
+            &mut State,
+            &LastCombatTick,
+            Option<&mut EventExecuting>,
+        ),
+        (
+            Changed<LastCombatTick>,
+            Or<(With<SubclassHero>, With<SubclassVillager>)>,
+        ),
+    >,
+) {
+    for (entity, mut state, last_combat_tick, event_executing) in query.iter_mut() {
+        if !is_combat_locked(game_tick.0, last_combat_tick)
+            || !is_peaceful_interruptible_state(&state)
+        {
+            continue;
+        }
+
+        if let Some(mut event_executing) = event_executing {
+            event_executing.state = EventExecutingState::None;
+        }
+
+        *state = State::None;
+        commands.trigger(CancelEvents { entity });
     }
 }
 

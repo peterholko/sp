@@ -158,6 +158,7 @@ impl MapPos {
         waterwalk: bool,
         mountainwalk: bool,
         ignore_goal_terrain_type: bool,
+        allow_attackable_blockers: bool,
         goal: MapPos,
     ) -> Vec<(MapPos, u32)> {
         let &MapPos(x, y) = self;
@@ -171,6 +172,7 @@ impl MapPos {
             waterwalk,
             mountainwalk,
             ignore_goal_terrain_type,
+            allow_attackable_blockers,
             goal,
         );
         s
@@ -368,6 +370,7 @@ impl Map {
         waterwalk: bool,
         mountainwalk: bool,
         ignore_goal_terrain_type: bool,
+        allow_attackable_blockers: bool,
     ) -> Option<(Vec<MapPos>, u32)> {
         let goal: MapPos = MapPos(dst_pos.x, dst_pos.y);
 
@@ -392,6 +395,7 @@ impl Map {
                     waterwalk,
                     mountainwalk,
                     ignore_goal_terrain_type,
+                    allow_attackable_blockers,
                     goal.clone(),
                 )
             },
@@ -423,6 +427,7 @@ impl Map {
         waterwalk: bool,
         mountainwalk: bool,
         ignore_goal_terrain_type: bool,
+        allow_attackable_blockers: bool,
     ) -> Option<(Vec<MapPos>, u32)> {
         let goal: MapPos = MapPos(dst_pos.x, dst_pos.y);
 
@@ -447,6 +452,7 @@ impl Map {
                     waterwalk,
                     mountainwalk,
                     ignore_goal_terrain_type,
+                    allow_attackable_blockers,
                     goal.clone(),
                 )
             },
@@ -922,6 +928,7 @@ impl Map {
         waterwalk: bool,
         mountainwalk: bool,
         ignore_goal_terrain_type: bool,
+        allow_attackable_blockers: bool,
         goal: MapPos,
     ) -> Vec<(MapPos, u32)> {
         let neighbours_table: Vec<(i32, i32, i32)> = vec![
@@ -964,8 +971,12 @@ impl Map {
                 map,
             );
             let is_not_blocked = Map::is_not_blocked(neighbour, blocking_list);
-            let is_blocker_attackable =
-                Map::is_blocker_attackable(mover_player_id, neighbour, blocking_list);
+            let is_blocker_attackable = Map::is_blocker_attackable(
+                mover_player_id,
+                neighbour,
+                blocking_list,
+                allow_attackable_blockers,
+            );
             //info!("blocking_list: {:?} is_not_blocked: {:?} is_blocker_attackable: {:?}", blocking_list, is_not_blocked, is_blocker_attackable);
 
             let mut allow_move_to_goal = false;
@@ -1081,7 +1092,12 @@ impl Map {
         mover_player_id: i32,
         (x, y): (i32, i32),
         blocking_list: &Vec<Blocker>,
+        allow_attackable_blockers: bool,
     ) -> bool {
+        if !allow_attackable_blockers {
+            return false;
+        }
+
         for blocker in blocking_list {
             if x == blocker.pos.x && y == blocker.pos.y {
                 // TODO check relations between mover and blocker
@@ -1350,6 +1366,38 @@ impl Map {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::CLASS_STRUCTURE;
+    use crate::obj::{Class, Id, PlayerId, State, Subclass};
+
+    fn flat_test_map() -> Map {
+        Map {
+            width: WIDTH,
+            height: HEIGHT,
+            base: vec![
+                TileInfo {
+                    tile_type: TileType::Grasslands,
+                    layers: vec![1],
+                };
+                (WIDTH * HEIGHT) as usize
+            ],
+            temperature: Vec::new(),
+            moisture: Vec::new(),
+            wildness: vec![0; (WIDTH * HEIGHT) as usize],
+        }
+    }
+
+    fn vertical_wall_blockers(x: i32) -> Vec<Blocker> {
+        (0..HEIGHT)
+            .map(|y| Blocker {
+                player_id: PlayerId(1),
+                id: Id(1000 + y),
+                pos: Position { x, y },
+                class: Class(CLASS_STRUCTURE.to_string()),
+                subclass: Subclass::Wall,
+                state: State::None,
+            })
+            .collect()
+    }
 
     #[test]
     fn test_load_map() {
@@ -1377,6 +1425,32 @@ mod tests {
         for tile in tiles {
             assert_eq!(deserialized_test_tiles.contains(&tile), true);
         }
+    }
+
+    #[test]
+    fn find_fast_path_respects_attackable_blocker_option() {
+        let map = flat_test_map();
+        let src = Position { x: 0, y: 25 };
+        let dst = Position { x: 2, y: 25 };
+        let blockers = vertical_wall_blockers(1);
+
+        let blocked_path = Map::find_fast_path(
+            src,
+            dst,
+            &map,
+            2,
+            blockers.clone(),
+            true,
+            false,
+            false,
+            true,
+            false,
+        );
+        assert!(blocked_path.is_none());
+
+        let attackable_path =
+            Map::find_fast_path(src, dst, &map, 2, blockers, true, false, false, true, true);
+        assert!(attackable_path.is_some());
     }
 
     #[test]

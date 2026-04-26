@@ -20,7 +20,7 @@ use crate::item;
 use crate::item::*;
 use crate::map::{Map, MapPos};
 use crate::obj::{
-    BaseQuery, BaseQueryMutState, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
+    BaseQuery, BaseQueryMutState, Blocker, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
     StateChange, Stats, Subclass, SubclassNPC, Template, Viewshed,
 };
 use crate::obj::{BaseQueryEffects, ClassStructure};
@@ -40,6 +40,15 @@ pub struct NPCTarget {
     pub pos: Position,
     pub distance: u32,
     pub fortified: bool,
+}
+
+#[derive(Clone)]
+struct WallTargetCandidate {
+    id: i32,
+    player_id: i32,
+    pos: Position,
+    hp: i32,
+    distance: u32,
 }
 
 #[derive(Debug, Clone, Component, ActionBuilder)]
@@ -82,8 +91,11 @@ mod tests {
     use big_brain::scorers::spawn_scorer;
     use std::collections::HashMap;
 
-    use crate::constants::{CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_NPC, TICKS_PER_SEC};
+    use crate::constants::{
+        CLASS_STRUCTURE, CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_NPC, TICKS_PER_SEC,
+    };
     use crate::event::{EventExecuting, EventExecutingState};
+    use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
     use crate::templates::ObjTemplate;
 
     fn test_stats() -> Stats {
@@ -106,12 +118,12 @@ mod tests {
         Effects(HashMap::<Effect, (i32, f32, i32)>::new())
     }
 
-    fn minimal_templates() -> Templates {
-        let npc_template = ObjTemplate {
+    fn test_obj_template(name: &str, int: &str) -> ObjTemplate {
+        ObjTemplate {
             class: CLASS_UNIT.to_string(),
             subclass: SUBCLASS_NPC.to_string(),
-            template: "Goblin".to_string(),
-            image: "goblin".to_string(),
+            template: name.to_string(),
+            image: name.to_lowercase(),
             family: None,
             groups: None,
             base_hp: None,
@@ -123,7 +135,7 @@ mod tests {
             base_speed: None,
             base_vision: Some(10),
             base_work: None,
-            int: Some("cunning".to_string()),
+            int: Some(int.to_string()),
             aggression: Some("medium".to_string()),
             kill_xp: None,
             images: None,
@@ -144,28 +156,84 @@ mod tests {
             upkeep: None,
             activity: None,
             workspaces: None,
-        };
-
-        Templates::from_obj_templates(vec![npc_template])
+        }
     }
 
-    #[test]
-    fn target_scorer_picks_nearest_visible_player() {
-        let mut app = App::new();
-        app.add_systems(Update, target_scorer_system);
+    fn minimal_templates() -> Templates {
+        Templates::from_obj_templates(vec![
+            test_obj_template("Goblin", "cunning"),
+            test_obj_template("Zombie", "mindless"),
+            test_obj_template("Necromancer", "cunning"),
+            test_obj_template("Fire Dragon", "cunning"),
+            test_obj_template("Wolf", "animal"),
+        ])
+    }
 
-        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
-        app.world_mut()
-            .insert_resource(EntityObjMap(HashMap::new()));
-        app.world_mut().insert_resource(minimal_templates());
+    fn flat_test_map() -> Map {
+        Map {
+            width: WIDTH,
+            height: HEIGHT,
+            base: vec![
+                TileInfo {
+                    tile_type: TileType::Grasslands,
+                    layers: vec![1],
+                };
+                (WIDTH * HEIGHT) as usize
+            ],
+            temperature: Vec::new(),
+            moisture: Vec::new(),
+            wildness: vec![0; (WIDTH * HEIGHT) as usize],
+        }
+    }
 
+    fn empty_inventory(owner: i32) -> Inventory {
+        Inventory {
+            owner,
+            items: Vec::new(),
+        }
+    }
+
+    fn wall_stats(hp: i32) -> Stats {
+        Stats {
+            hp,
+            base_hp: hp,
+            ..test_stats()
+        }
+    }
+
+    fn fortified_effects() -> Effects {
+        Effects(HashMap::from([(Effect::Fortified, (0, 1.0, 1))]))
+    }
+
+    fn spawn_stockade_wall(app: &mut App, id: i32, pos: Position, hp: i32) {
+        app.world_mut().spawn((
+            Id(id),
+            PlayerId(1),
+            pos,
+            State::None,
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Wall,
+            empty_effects(),
+            wall_stats(hp),
+            empty_inventory(id),
+        ));
+    }
+
+    fn spawn_target_scorer(
+        app: &mut App,
+        npc_template: &str,
+        npc_pos: Position,
+        viewshed_range: u32,
+    ) -> (Entity, Entity) {
         let npc_entity = app
             .world_mut()
             .spawn((
                 PlayerId(NPC_PLAYER_ID),
-                Position { x: 0, y: 0 },
-                Template("Goblin".to_string()),
-                Viewshed { range: 10 },
+                npc_pos,
+                Template(npc_template.to_string()),
+                Viewshed {
+                    range: viewshed_range,
+                },
                 VisibleTarget::new(NO_TARGET),
                 SubclassNPC,
                 test_stats(),
@@ -175,6 +243,32 @@ mod tests {
                 },
             ))
             .id();
+
+        let scorer_entity = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&VisibleTargetScorer, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+
+        (npc_entity, scorer_entity)
+    }
+
+    fn setup_target_scorer_app() -> App {
+        let mut app = App::new();
+        app.add_systems(Update, target_scorer_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(minimal_templates());
+        app.world_mut().insert_resource(flat_test_map());
+        app
+    }
+
+    #[test]
+    fn target_scorer_picks_nearest_visible_player() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
 
         app.world_mut().spawn((
             Id(1),
@@ -198,12 +292,6 @@ mod tests {
             test_stats(),
         ));
 
-        let scorer_entity = {
-            let mut commands = app.world_mut().commands();
-            spawn_scorer(&VisibleTargetScorer, &mut commands, npc_entity)
-        };
-        app.world_mut().flush();
-
         app.update();
 
         let visible_target = app
@@ -212,6 +300,278 @@ mod tests {
             .get::<VisibleTarget>()
             .unwrap();
         assert_eq!(visible_target.target, 1);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn animal_target_scorer_skips_wall_structure_targets() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Wolf", Position { x: 0, y: 0 }, 10);
+
+        app.world_mut().spawn((
+            Id(10),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Wall,
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, NO_TARGET);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn animal_target_scorer_skips_fortified_living_targets() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Wolf", Position { x: 0, y: 0 }, 10);
+
+        app.world_mut().spawn((
+            Id(11),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            fortified_effects(),
+            test_stats(),
+            Fortified { id: 99 },
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, NO_TARGET);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn animal_target_scorer_selects_reachable_living_target() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Wolf", Position { x: 0, y: 0 }, 10);
+
+        app.world_mut().spawn((
+            Id(12),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, 12);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn animal_target_scorer_skips_living_target_blocked_by_stockades() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Wolf", Position { x: 0, y: 25 }, 10);
+
+        for y in 0..HEIGHT {
+            app.world_mut().spawn((
+                Id(1000 + y),
+                PlayerId(1),
+                Position { x: 1, y },
+                State::None,
+                Class(CLASS_STRUCTURE.to_string()),
+                Subclass::Wall,
+                empty_inventory(1000 + y),
+            ));
+        }
+
+        app.world_mut().spawn((
+            Id(13),
+            PlayerId(1),
+            Position { x: 2, y: 25 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, NO_TARGET);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn mindless_target_scorer_selects_first_blocking_stockade() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Zombie", Position { x: 0, y: 25 }, 10);
+
+        for y in 0..HEIGHT {
+            spawn_stockade_wall(&mut app, 1000 + y, Position { x: 1, y }, 20);
+            spawn_stockade_wall(&mut app, 2000 + y, Position { x: 2, y }, 1);
+        }
+
+        app.world_mut().spawn((
+            Id(14),
+            PlayerId(1),
+            Position { x: 3, y: 25 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, 1025);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn cunning_target_scorer_selects_weakest_blocking_stockade() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 25 }, 10);
+
+        for y in 0..HEIGHT {
+            spawn_stockade_wall(&mut app, 1000 + y, Position { x: 1, y }, 20);
+            spawn_stockade_wall(&mut app, 2000 + y, Position { x: 2, y }, 1);
+        }
+
+        app.world_mut().spawn((
+            Id(15),
+            PlayerId(1),
+            Position { x: 3, y: 25 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert!(
+            (2000..2000 + HEIGHT).contains(&visible_target.target),
+            "expected a weak second-layer stockade, got {}",
+            visible_target.target
+        );
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn cunning_target_scorer_uses_open_route_before_battering_stockade() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 25 }, 10);
+
+        spawn_stockade_wall(&mut app, 3000, Position { x: 1, y: 25 }, 1);
+
+        app.world_mut().spawn((
+            Id(16),
+            PlayerId(1),
+            Position { x: 2, y: 25 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, 16);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn caster_target_scorer_keeps_fortified_living_target() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Necromancer", Position { x: 0, y: 0 }, 10);
+
+        spawn_stockade_wall(&mut app, 99, Position { x: 1, y: 0 }, 10);
+
+        app.world_mut().spawn((
+            Id(17),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            fortified_effects(),
+            test_stats(),
+            Fortified { id: 99 },
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, 17);
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), NORMAL_SCORE / 100.0);
@@ -344,6 +704,7 @@ impl Plugin for NPCPlugin {
 
 pub fn target_scorer_system(
     game_tick: Res<GameTick>,
+    map: Res<Map>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut npc_query: Query<
@@ -369,6 +730,7 @@ pub fn target_scorer_system(
         &Effects,
         &Stats,
     )>, // Added April 2025 to prevent targeting NPCs
+    blocking_query: Query<BaseQuery>,
     fortified_query: Query<&Fortified>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<VisibleTargetScorer>>,
 ) {
@@ -379,7 +741,7 @@ pub fn target_scorer_system(
     for (Actor(actor), mut score, span) in &mut query {
         let obj_id = entity_map.get_obj_by_entity(*actor);
         let Ok((
-            _npc_player_id,
+            npc_player_id,
             npc_pos,
             npc_template_name,
             npc_viewshed,
@@ -420,6 +782,46 @@ pub fn target_scorer_system(
             .get_by_name_template(npc_template_name.0.clone(), npc_template_name.0.clone());
         let int = npc_template.int.unwrap_or("mindless".to_string());
         let aggression = npc_template.aggression.unwrap_or("medium".to_string());
+        let animal = is_animal(&int);
+        let smart_breach = is_cunning(&int);
+        let bypass_fortified_wall = can_bypass_fortified_wall(&npc_template_name.0);
+
+        let visible_walls: Vec<WallTargetCandidate> = target_query
+            .iter()
+            .filter_map(
+                |(
+                    target_id,
+                    target_player,
+                    target_pos,
+                    target_state,
+                    target_class,
+                    target_subclass,
+                    _target_effects,
+                    target_stats,
+                )| {
+                    if !player::is_player(target_player.0)
+                        || Obj::is_dead(target_state)
+                        || target_class.0 != CLASS_STRUCTURE
+                        || *target_subclass != Subclass::Wall
+                    {
+                        return None;
+                    }
+
+                    let distance = Map::dist(*npc_pos, *target_pos);
+                    if npc_viewshed.range < distance {
+                        return None;
+                    }
+
+                    Some(WallTargetCandidate {
+                        id: target_id.0,
+                        player_id: target_player.0,
+                        pos: *target_pos,
+                        hp: target_stats.hp,
+                        distance,
+                    })
+                },
+            )
+            .collect();
 
         // Passive NPCs never target players
         if is_passive(&aggression) {
@@ -503,6 +905,18 @@ pub fn target_scorer_system(
                 target_fortified = true;
             }
 
+            if animal && target_fortified {
+                span.span().in_scope(|| {
+                    npc_debug!(
+                        *actor,
+                        obj_id,
+                        Some(npc_template_name.0.as_str()),
+                        "Skipping fortified target for animal NPC"
+                    );
+                });
+                continue;
+            }
+
             // Skip if npc is strategic and target is stronger and fortified
             /*if (target_fortified || target_subclass.equals(SUBCLASS_WALL))
                 && is_strategic(&aggression)
@@ -525,6 +939,65 @@ pub fn target_scorer_system(
             });
 
             if npc_viewshed.range >= distance {
+                let blocking_list = Obj::blocking_list_basequery(npc_player_id.0, &blocking_query);
+                let reachable_without_attacking_blockers = Map::find_fast_path(
+                    *npc_pos,
+                    *target_pos,
+                    &map,
+                    npc_player_id.0,
+                    blocking_list.clone(),
+                    true,
+                    false,
+                    false,
+                    true,
+                    false,
+                )
+                .is_some();
+
+                if !reachable_without_attacking_blockers {
+                    if animal {
+                        span.span().in_scope(|| {
+                            npc_debug!(
+                                *actor,
+                                obj_id,
+                                Some(npc_template_name.0.as_str()),
+                                "Skipping unreachable target for animal NPC"
+                            );
+                        });
+                        continue;
+                    }
+
+                    if should_batter_walls(&int, &npc_template_name.0) {
+                        if let Some(wall_target) = select_wall_target_from_blocked_path(
+                            *npc_pos,
+                            *target_pos,
+                            npc_player_id.0,
+                            &map,
+                            blocking_list,
+                            &visible_walls,
+                            smart_breach,
+                        ) {
+                            if distance < selected_target.distance {
+                                span.span().in_scope(|| {
+                                    npc_debug!(
+                                        *actor,
+                                        obj_id,
+                                        Some(npc_template_name.0.as_str()),
+                                        "Target blocked by wall, selecting breach target_id={}",
+                                        wall_target.id
+                                    );
+                                });
+                                selected_target = NPCTarget {
+                                    distance,
+                                    ..wall_target
+                                };
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+
                 if distance < selected_target.distance {
                     selected_target = NPCTarget {
                         id: target_id.0,
@@ -546,7 +1019,7 @@ pub fn target_scorer_system(
                 selected_target.fortified
             );
         });
-        if selected_target.fortified {
+        if selected_target.fortified && !bypass_fortified_wall {
             span.span().in_scope(|| {
                 npc_debug!(
                     *actor,
@@ -696,6 +1169,7 @@ pub fn spoil_target_scorer_system(
                 false,
                 false,
                 true,
+                true,
             ) {
                 let mut blocked = false;
 
@@ -833,6 +1307,7 @@ pub fn steal_target_scorer_system(
                 false,
                 false,
                 true,
+                true,
             ) {
                 let mut blocked = false;
 
@@ -959,6 +1434,7 @@ pub fn torch_target_scorer_system(
                 true,
                 false,
                 false,
+                true,
                 true,
             ) {
                 let mut blocked = false;
@@ -1450,6 +1926,7 @@ pub fn move_to_system(
                         false,
                         false,
                         false,
+                        true,
                     ) {
                         span.span().in_scope(|| {
                             npc_trace!(
@@ -1581,6 +2058,7 @@ pub fn move_to_system(
                             false,
                             false,
                             false,
+                            true,
                         ) else {
                             span.span().in_scope(|| {
                                 npc_trace!(*actor, obj_id, None, "Cannot find path to destination");
@@ -1753,6 +2231,12 @@ pub fn move_to_target_system(
                     continue;
                 };
 
+                let npc_template = templates
+                    .obj_templates
+                    .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
+                let npc_int = npc_template.int.unwrap_or("mindless".to_string());
+                let allow_attackable_blockers = !is_animal(&npc_int);
+
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
                 if !reached_destination {
@@ -1788,6 +2272,7 @@ pub fn move_to_target_system(
                         false,
                         false,
                         true, // Allow move onto position with transport
+                        allow_attackable_blockers,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
@@ -1899,6 +2384,12 @@ pub fn move_to_target_system(
                     continue;
                 };
 
+                let npc_template = templates
+                    .obj_templates
+                    .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
+                let npc_int = npc_template.int.unwrap_or("mindless".to_string());
+                let allow_attackable_blockers = !is_animal(&npc_int);
+
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
                     npc_debug!(*actor, obj_id, None, "NPC is stunned");
@@ -1943,6 +2434,7 @@ pub fn move_to_target_system(
                         false,
                         false,
                         true, // Allow move onto position with transport
+                        allow_attackable_blockers,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
@@ -2143,6 +2635,7 @@ pub fn move_near_target_system(
                         false,
                         false,
                         true, // Allow move onto position with transport
+                        true,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
@@ -2195,6 +2688,7 @@ pub fn move_near_target_system(
                         false,
                         false,
                         false,
+                        true,
                         MapPos(npc.pos.x, npc.pos.y),
                     );
 
@@ -2381,6 +2875,7 @@ pub fn move_near_target_system(
                         false,
                         false,
                         true, // Allow move onto position with transport
+                        true,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
                         *state = ActionState::Failure;
@@ -2434,6 +2929,7 @@ pub fn move_near_target_system(
                         false,
                         false,
                         false,
+                        true,
                         MapPos(npc.pos.x, npc.pos.y),
                     );
 
@@ -2531,6 +3027,7 @@ pub fn attack_target_system(
     mut visible_target_query: Query<&mut VisibleTarget>,
     mut npc_query: Query<CombatQuery, With<SubclassNPC>>,
     mut target_query: Query<CombatQuery, Without<SubclassNPC>>,
+    fortified_query: Query<&Fortified>,
     mut query: Query<(&Actor, &mut ActionState, &AttackTarget)>,
 ) {
     for (Actor(actor), mut state, _chase_attack) in &mut query {
@@ -2547,7 +3044,7 @@ pub fn attack_target_system(
 
                 npc_info!(*actor, obj_id, npc_name, "AttackTarget action requested");
 
-                let Ok(visible_target) = visible_target_query.get_mut(*actor) else {
+                let Ok(mut visible_target) = visible_target_query.get_mut(*actor) else {
                     continue;
                 };
 
@@ -2575,20 +3072,44 @@ pub fn attack_target_system(
                     continue;
                 };
 
+                let npc_template = templates
+                    .obj_templates
+                    .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
+                let npc_int = npc_template.int.unwrap_or("mindless".to_string());
+
+                if is_animal(&npc_int)
+                    && (target.class.0 == CLASS_STRUCTURE || target.effects.has(Effect::Fortified))
+                {
+                    npc_debug!(
+                        *actor,
+                        obj_id,
+                        npc_name,
+                        "Animal NPC cannot attack structures or fortified targets"
+                    );
+                    visible_target.target = NO_TARGET;
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 // Get NPC speed
                 let npc_speed = npc.stats.base_speed.unwrap_or(1) * TICKS_PER_SEC;
 
                 // Check if target is fortified
                 if target.effects.has(Effect::Fortified) {
-                    /* let Ok(fortification) = fortified_query.get(target.entity) else {
-                        npc_error!(*actor, obj_id, npc_name, "Query failed to find entity: {:?}", target.entity);
-                        continue;
-                    };
-
-                    npc_debug!(*actor, obj_id, npc_name, "Updating target to {:?}", fortification.id);
-                    visible_target.target = fortification.id;*/
-                    npc_debug!(*actor, obj_id, npc_name, "Cannot attack fortified obj");
-                    *state = ActionState::Success;
+                    if let Ok(fortification) = fortified_query.get(target.entity) {
+                        npc_debug!(
+                            *actor,
+                            obj_id,
+                            npc_name,
+                            "Redirecting melee attack to fortification {:?}",
+                            fortification.id
+                        );
+                        visible_target.target = fortification.id;
+                        *state = ActionState::Failure;
+                    } else {
+                        npc_debug!(*actor, obj_id, npc_name, "Cannot attack fortified obj");
+                        *state = ActionState::Success;
+                    }
                     continue;
                 }
 
@@ -2833,6 +3354,7 @@ pub fn cast_target_system(
                                 false,
                                 false,
                                 false,
+                                true,
                             ) {
                                 debug!("Follower path: {:?}", path_result);
 
@@ -2880,6 +3402,7 @@ pub fn cast_target_system(
                             false,
                             false,
                             false,
+                            true,
                             MapPos(npc.pos.x, npc.pos.y),
                         );
 
@@ -3209,6 +3732,7 @@ pub fn raise_dead_system(
                         false,
                         false,
                         false,
+                        true,
                     ) {
                         println!("Follower path: {:?}", path_result);
 
@@ -3992,6 +4516,82 @@ pub fn is_animal(int: &String) -> bool {
 
 pub fn is_cunning(int: &String) -> bool {
     return *int == "cunning".to_string();
+}
+
+fn can_bypass_fortified_wall(template: &str) -> bool {
+    template.contains("Necromancer")
+        || template.contains("Lich")
+        || template.contains("Sorcerer")
+        || template.contains("Shaman")
+}
+
+fn should_batter_walls(int: &String, _template: &str) -> bool {
+    is_mindless(int) || is_cunning(int)
+}
+
+fn select_wall_target_from_blocked_path(
+    npc_pos: Position,
+    target_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: Vec<Blocker>,
+    visible_walls: &[WallTargetCandidate],
+    smart_breach: bool,
+) -> Option<NPCTarget> {
+    let (path, _cost) = Map::find_fast_path(
+        npc_pos,
+        target_pos,
+        map,
+        npc_player_id,
+        blocking_list.clone(),
+        true,
+        false,
+        false,
+        true,
+        true,
+    )?;
+
+    let mut path_walls: Vec<(usize, WallTargetCandidate)> = Vec::new();
+
+    for (path_index, map_pos) in path.iter().enumerate().skip(1) {
+        let Some(blocker) = blocking_list.iter().find(|blocker| {
+            blocker.subclass == Subclass::Wall
+                && blocker.pos.x == map_pos.0
+                && blocker.pos.y == map_pos.1
+        }) else {
+            continue;
+        };
+
+        if let Some(wall) = visible_walls.iter().find(|wall| wall.id == blocker.id.0) {
+            path_walls.push((path_index, wall.clone()));
+        }
+    }
+
+    if path_walls.is_empty() {
+        return None;
+    }
+
+    let wall = if smart_breach {
+        path_walls
+            .iter()
+            .map(|(_, wall)| wall)
+            .min_by_key(|wall| (wall.hp, wall.distance, wall.id))?
+            .clone()
+    } else {
+        path_walls
+            .iter()
+            .min_by_key(|(path_index, wall)| (*path_index, wall.distance, wall.id))?
+            .1
+            .clone()
+    };
+
+    Some(NPCTarget {
+        id: wall.id,
+        player_id: wall.player_id,
+        pos: wall.pos,
+        distance: wall.distance,
+        fortified: false,
+    })
 }
 
 pub fn is_frenzied(aggression: &String) -> bool {

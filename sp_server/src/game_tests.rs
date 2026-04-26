@@ -4,6 +4,83 @@ use crate::skill::WEAPONSMITHING;
 use crate::templates::{ResReq, SkillTemplate, SkillTemplates, Templates};
 
 #[test]
+fn combat_lock_helper_uses_three_second_window() {
+    let last_combat_tick = LastCombatTick(100);
+
+    assert!(is_combat_locked(100, &last_combat_tick));
+    assert!(is_combat_locked(129, &last_combat_tick));
+    assert!(!is_combat_locked(130, &last_combat_tick));
+    assert!(!is_combat_locked(131, &last_combat_tick));
+}
+
+#[test]
+fn combat_lock_interrupt_cancels_active_peaceful_work() {
+    let mut app = App::new();
+    app.add_systems(Update, combat_lock_interrupt_system);
+    app.add_observer(cancel_events_observer);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(GameEvents(HashMap::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Gathering,
+            SubclassHero,
+            LastCombatTick(100),
+            EventExecuting {
+                event_type: "gather".to_string(),
+                state: EventExecutingState::Executing,
+            },
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(1, hero);
+    app.world_mut().resource_mut::<MapEvents>().new(
+        1,
+        120,
+        VisibleEvent::GatherEvent {
+            res_type: ORE.to_string(),
+        },
+    );
+    app.world_mut().resource_mut::<GameEvents>().insert(
+        1,
+        GameEvent {
+            event_id: 1,
+            start_tick: 100,
+            run_tick: 120,
+            event_type: GameEventType::GatherEvent {
+                gatherer_id: 1,
+                res_type: ORE.to_string(),
+            },
+        },
+    );
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::None
+    );
+    assert_eq!(
+        app.world()
+            .entity(hero)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
 fn is_fortified_removed_after_dead_wall() {
     // Setup app
     let mut app = App::new();
@@ -173,6 +250,7 @@ fn craft_event_system_creates_crafted_item_and_updates_skill() {
         .spawn((
             PlayerId(1),
             Subclass::Villager,
+            State::Crafting,
             Inventory {
                 owner: 1,
                 items: vec![Item {
@@ -887,19 +965,17 @@ fn survival_horde_size_scales_with_crisis_and_legendary_pressure() {
 #[test]
 fn survival_horde_composition_uses_new_late_game_units() {
     let day_six = survival_horde_composition(4, 6);
-    assert!(day_six.iter().any(|unit| matches!(
-        *unit,
-        "Ghoul" | "Ghast" | "Direwolf" | "Gryphon"
-    )));
-    assert!(!day_six.iter().any(|unit| matches!(*unit, "Zombie" | "Skeleton")));
+    assert!(day_six
+        .iter()
+        .any(|unit| matches!(*unit, "Ghoul" | "Ghast" | "Direwolf" | "Gryphon")));
+    assert!(!day_six
+        .iter()
+        .any(|unit| matches!(*unit, "Zombie" | "Skeleton")));
 
     let day_eighteen = survival_horde_composition(12, 18);
     assert!(day_eighteen.iter().any(|unit| matches!(
         *unit,
-        "Drake Armageddon"
-            | "Drake Flameheart"
-            | "Drake Hurricane"
-            | "Wyvern Rider"
+        "Drake Armageddon" | "Drake Flameheart" | "Drake Hurricane" | "Wyvern Rider"
     )));
 }
 

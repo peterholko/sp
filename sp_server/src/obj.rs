@@ -413,6 +413,29 @@ impl Personality {
 #[derive(Debug, Component, Clone)]
 pub struct LastCombatTick(pub i32);
 
+pub const COMBAT_LOCK_TICKS: i32 = 3 * TICKS_PER_SEC;
+
+pub fn is_combat_locked(game_tick: i32, last_combat_tick: &LastCombatTick) -> bool {
+    game_tick.saturating_sub(last_combat_tick.0) < COMBAT_LOCK_TICKS
+}
+
+pub fn is_peaceful_interruptible_state(state: &State) -> bool {
+    matches!(
+        state,
+        State::Building
+            | State::Gathering
+            | State::Refining
+            | State::Operating
+            | State::Mining
+            | State::Lumberjacking
+            | State::Crafting
+            | State::Drinking
+            | State::Eating
+            | State::Sleeping
+            | State::Fishing
+    )
+}
+
 impl Default for LastCombatTick {
     fn default() -> Self {
         LastCombatTick(-1000)
@@ -498,14 +521,17 @@ impl ActiveTask {
     pub fn to_string(&self) -> String {
         let str = match self {
             ActiveTask::None => "None",
+            ActiveTask::Idle => "Idle",
             ActiveTask::Following => "Following",
             ActiveTask::GettingDrink => "Getting a drink",
             ActiveTask::Drinking => "Drinking",
             ActiveTask::GettingFood => "Getting some food",
             ActiveTask::Eating => "Eating",
             ActiveTask::FindingShelter => "Finding shelter",
+            ActiveTask::Sleeping => "Sleeping",
             ActiveTask::Fleeing => "Fleeing",
             ActiveTask::FightingBack => "Fighting back",
+            ActiveTask::Building => "Building",
             ActiveTask::Gathering => "Gathering",
             ActiveTask::Operating => "Operating",
             ActiveTask::Mining => "Mining",
@@ -515,12 +541,22 @@ impl ActiveTask {
             ActiveTask::Refining => "Refining",
             ActiveTask::Crafting => "Crafting",
             ActiveTask::Experimenting => "Experimenting",
+            ActiveTask::Exploring => "Exploring",
             ActiveTask::Planting => "Planting",
             ActiveTask::Tending => "Tending",
             ActiveTask::Harvesting => "Harvesting",
+            ActiveTask::Repairing => "Repairing",
             ActiveTask::Unloading => "Unloading",
             ActiveTask::MovingToGatherPos => "Moving to gather",
-            _ => "Unknown",
+            ActiveTask::MovingToOperatePos => "Moving to operate",
+            ActiveTask::MovingToRefinePos => "Moving to refine",
+            ActiveTask::MovingToCraftPos => "Moving to craft",
+            ActiveTask::MovingToExperimentPos => "Moving to experiment",
+            ActiveTask::MovingToExplorePos => "Moving to explore",
+            ActiveTask::MovingToFoodPos => "Moving to food",
+            ActiveTask::MovingToDrinkPos => "Moving to drink",
+            ActiveTask::MovingToShelterPos => "Moving to shelter",
+            ActiveTask::Unknown => "Unknown",
         };
 
         return str.to_string();
@@ -1399,5 +1435,44 @@ impl Obj {
 
         let multiplier = 1.0 + 0.10 * c + 0.06 * m + 0.06 * ca;
         (base_work as f32) * multiplier
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveTask;
+
+    #[test]
+    fn active_task_labels_cover_common_villager_panel_states() {
+        let cases = [
+            (ActiveTask::None, "None"),
+            (ActiveTask::Idle, "Idle"),
+            (ActiveTask::GettingDrink, "Getting a drink"),
+            (ActiveTask::GettingFood, "Getting some food"),
+            (ActiveTask::Sleeping, "Sleeping"),
+            (ActiveTask::FindingShelter, "Finding shelter"),
+            (ActiveTask::FightingBack, "Fighting back"),
+            (ActiveTask::Following, "Following"),
+            (ActiveTask::Building, "Building"),
+            (ActiveTask::Mining, "Mining"),
+            (ActiveTask::Woodcutting, "Woodcutting"),
+            (ActiveTask::Stonecutting, "Stonecutting"),
+            (ActiveTask::Refining, "Refining"),
+            (ActiveTask::Crafting, "Crafting"),
+            (ActiveTask::Experimenting, "Experimenting"),
+            (ActiveTask::Exploring, "Exploring"),
+            (ActiveTask::Planting, "Planting"),
+            (ActiveTask::Tending, "Tending"),
+            (ActiveTask::Harvesting, "Harvesting"),
+            (ActiveTask::Repairing, "Repairing"),
+            (ActiveTask::Unloading, "Unloading"),
+            (ActiveTask::MovingToGatherPos, "Moving to gather"),
+            (ActiveTask::MovingToDrinkPos, "Moving to drink"),
+            (ActiveTask::MovingToShelterPos, "Moving to shelter"),
+        ];
+
+        for (task, label) in cases {
+            assert_eq!(task.to_string(), label);
+        }
     }
 }

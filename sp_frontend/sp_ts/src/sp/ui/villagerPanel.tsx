@@ -48,15 +48,15 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
 
     var activity;
 
-    if(this.props.activity) {
-      activity = this.props.activity;
+    if(this.props.activity && this.props.activity.id == this.props.villagerData.id) {
+      activity = this.props.activity.activity;
     } else {
       activity = this.props.villagerData.activity;
     }
 
     var needs;
 
-    if(this.props.needsData) {
+    if(this.props.needsData && this.props.needsData.id == this.props.villagerData.id) {
       needs = this.props.needsData;
     } else {
       needs = this.props.villagerData;
@@ -192,4 +192,3 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     );
   }
 }
-

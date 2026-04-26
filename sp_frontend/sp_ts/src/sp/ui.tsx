@@ -554,6 +554,7 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ hideHeroPanel: true });
     } else if (event.panelType == 'villager') {
       this.setState({ hideVillagerPanel: true });
+      Global.network.sendInfoExit(this.state.villagerData.id, "villager");
     } else if (event.panelType == 'npc') {
       this.setState({ hideNPCPanel: true });
     } else if (event.panelType == 'obj') {
@@ -1344,7 +1345,7 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleActivityUpdate(message) {
-    this.setState({ activityData: message.activity });
+    this.setState({ activityData: message });
   }
 
   handleInfoNeedsUpdate(message) {
