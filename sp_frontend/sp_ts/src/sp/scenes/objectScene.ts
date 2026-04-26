@@ -1651,15 +1651,21 @@ export class ObjectScene extends Phaser.Scene {
       return;
     }
 
-    // Special case: "!" alert — floats upward from same position as damage numbers
-    if (message.speech === '!') {
+    // Special case: "!" alert sentinels — floats upward from same position as damage numbers
+    // '!'      -> red    (hostile NPC engaging)
+    // '!flee'  -> yellow (villager starting to flee)
+    var alertColors: { [key: string]: string } = {
+      '!': '#FF0000',
+      '!flee': '#FFD700',
+    };
+    if (alertColors[message.speech]) {
       var npcSprite = this.objectList[message.source];
       if (!npcSprite) return;
       var alertText = this.add.text(npcSprite.x + 36, npcSprite.y - 5, '!', {
         fontFamily: 'Verdana',
         fontSize: 21,
         fontStyle: 'bold',
-        color: '#FFD700',
+        color: alertColors[message.speech],
         stroke: '#000000',
         strokeThickness: 4,
       });
