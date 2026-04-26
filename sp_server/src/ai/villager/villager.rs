@@ -2059,8 +2059,6 @@ pub fn fight_back_system(
 
 pub fn set_flee_destination_system(
     mut commands: Commands,
-    game_tick: Res<GameTick>,
-    mut map_events: ResMut<MapEvents>,
     map: Res<Map>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
@@ -2091,12 +2089,7 @@ pub fn set_flee_destination_system(
         Without<SubclassHero>,
     >,
     mut action_query: Query<(&Actor, &mut ActionState, &SetFleeDestination, &ActionSpan)>,
-    mut last_flee_alert_tick: Local<HashMap<Entity, i32>>,
 ) {
-    // Re-emit threshold: if a villager hasn't fled in this many ticks,
-    // the next flee start counts as a new episode and re-alerts.
-    const FLEE_ALERT_COOLDOWN_TICKS: i32 = 50;
-
     for (Actor(actor), mut state, _set_flee_destination, span) in &mut action_query {
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
@@ -2104,27 +2097,6 @@ pub fn set_flee_destination_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "SetFleeDestination requested");
                 });
-
-                // Emit yellow "!flee" alert at the start of each flee episode.
-                let should_alert = last_flee_alert_tick
-                    .get(actor)
-                    .map_or(true, |last| game_tick.0 - last >= FLEE_ALERT_COOLDOWN_TICKS);
-                if should_alert {
-                    if let Ok((villager_id, _, _, _)) = villager_query.get(*actor) {
-                        last_flee_alert_tick.insert(*actor, game_tick.0);
-                        map_events.new(
-                            villager_id.0,
-                            game_tick.0,
-                            VisibleEvent::SpeechEvent {
-                                speech: "!flee".to_string(),
-                                intensity: 3,
-                            },
-                        );
-                    }
-                } else {
-                    last_flee_alert_tick.insert(*actor, game_tick.0);
-                }
-
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
