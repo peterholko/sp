@@ -2,6 +2,13 @@ use super::*;
 use crate::recipe::Recipe;
 use crate::skill::WEAPONSMITHING;
 use crate::templates::{ResReq, SkillTemplate, SkillTemplates, Templates};
+use std::fs::File;
+
+fn load_obj_templates() -> Vec<ObjTemplate> {
+    let obj_template_file =
+        File::open("templates/obj_template.yaml").expect("Could not open obj templates");
+    serde_yaml::from_reader(obj_template_file).expect("Could not read obj templates")
+}
 
 #[test]
 fn combat_lock_helper_uses_three_second_window() {
@@ -78,6 +85,99 @@ fn combat_lock_interrupt_cancels_active_peaceful_work() {
     );
     assert!(app.world().resource::<MapEvents>().is_empty());
     assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
+fn upgrading_campfire_to_small_tent_adds_shelter_component() {
+    let mut app = App::new();
+    app.add_systems(Update, upgrade_system);
+    app.insert_resource(GameTick(10));
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+
+    let structure_entity = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Upgrading,
+            Name("Campfire".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            ClassStructure,
+            Subclass::Campfire,
+            Template("Campfire".to_string()),
+            Misc {
+                image: "campfire".to_string(),
+                hsl: vec![],
+                groups: vec![],
+            },
+            Stats {
+                hp: 50,
+                stamina: None,
+                mana: None,
+                base_hp: 100,
+                base_stamina: None,
+                base_mana: None,
+                base_def: 0,
+                damage_range: None,
+                base_damage: None,
+                base_speed: None,
+                base_vision: None,
+            },
+            Assignments(vec![2]),
+            BuildUpgradeState {
+                build_upgrade_cost: 1.0,
+                work_done: 0.0,
+                work_per_sec: 0.0,
+            },
+            SelectedUpgrade("Small Tent".to_string()),
+            StateUpgrading,
+        ))
+        .id();
+
+    let worker_entity = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Upgrading,
+            Template("Human Villager".to_string()),
+            Skills::new(),
+            BaseAttrs {
+                creativity: 0,
+                dexterity: 0,
+                endurance: 0,
+                focus: 0,
+                intellect: 0,
+                spirit: 0,
+                strength: 0,
+                toughness: 0,
+            },
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(2, worker_entity);
+
+    app.update();
+
+    let structure = app.world().entity(structure_entity);
+    assert_eq!(structure.get::<Name>().unwrap().0, "Small Tent");
+    assert_eq!(structure.get::<Template>().unwrap().0, "Small Tent");
+    assert_eq!(*structure.get::<Subclass>().unwrap(), Subclass::Shelter);
+    assert!(structure.get::<StateUpgrading>().is_none());
+
+    let shelter = structure
+        .get::<Shelter>()
+        .expect("upgraded tent needs Shelter");
+    assert_eq!(shelter.max_residents, 1);
+
+    let stats = structure.get::<Stats>().unwrap();
+    assert_eq!(stats.base_hp, 100);
+    assert_eq!(stats.hp, 100);
 }
 
 #[test]

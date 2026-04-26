@@ -10078,6 +10078,30 @@ mod tests {
     }
 
     #[test]
+    fn campfire_upgrades_to_small_tent_with_tent_requirements() {
+        let campfire = template_by_name("Campfire");
+        assert_eq!(campfire.upgrade_to, Some(vec!["Small Tent".to_string()]));
+
+        let small_tent = template_by_name("Small Tent");
+        assert_eq!(small_tent.upgrade_cost, Some(50));
+        assert_eq!(
+            small_tent.upgrade_req,
+            Some(vec![
+                ResReq {
+                    req_type: LOG.to_string(),
+                    quantity: 5,
+                    cquantity: None,
+                },
+                ResReq {
+                    req_type: "Hide".to_string(),
+                    quantity: 3,
+                    cquantity: None,
+                },
+            ])
+        );
+    }
+
+    #[test]
     fn refresh_stats_updates_ranger_progression_values() {
         let template = template_by_name("Skilled Ranger");
         let mut stats = base_test_stats();

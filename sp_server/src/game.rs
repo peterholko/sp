@@ -2584,6 +2584,7 @@ pub fn upgrade_system(
             &mut Subclass,
             &mut Template,
             &mut Misc,
+            &mut Stats,
             &Assignments,
             &mut BuildUpgradeState,
             &SelectedUpgrade,
@@ -2610,6 +2611,7 @@ pub fn upgrade_system(
         mut structure_subclass,
         mut structure_template,
         mut structure_misc,
+        mut structure_stats,
         structure_assignments,
         mut build_state,
         selected_upgrade,
@@ -2696,6 +2698,11 @@ pub fn upgrade_system(
             *structure_class = Class(upgrade_template.class);
             *structure_subclass = Subclass::from_str(&upgrade_template.subclass);
             structure_misc.image = upgrade_template.image.clone();
+            structure_stats.base_hp = upgrade_template.base_hp.unwrap_or(structure_stats.base_hp);
+            structure_stats.hp = structure_stats.base_hp;
+            structure_stats.base_def = upgrade_template
+                .base_def
+                .unwrap_or(structure_stats.base_def);
 
             // Change structure state to none
             commands.trigger(StateChange {
@@ -2715,6 +2722,11 @@ pub fn upgrade_system(
                     if let Some(max_residents) = shelter_template.max_residents {
                         if let Ok(mut shelter) = shelters.get_mut(structure_entity) {
                             shelter.max_residents = max_residents;
+                        } else {
+                            commands.entity(structure_entity).insert(Shelter {
+                                max_residents: max_residents,
+                                residents: Vec::new(),
+                            });
                         }
                     }
                 }

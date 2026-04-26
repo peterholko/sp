@@ -44,6 +44,8 @@ export class ObjectScene extends Phaser.Scene {
   private burningSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
 
+  private lastVillagerActivity: Record<string, string> = {};
+
   constructor() {
     super({
       key: "ObjectScene",
@@ -126,6 +128,7 @@ export class ObjectScene extends Phaser.Scene {
     Global.gameEmitter.on(NetworkEvent.LOST_EFFECT, this.processLostEffect, this);
     Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.processReducedEffect, this);
     Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.processIncreasedEffect, this);
+    Global.gameEmitter.on(NetworkEvent.INFO_ACTIVITY_UPDATE, this.processActivityUpdate, this);
 
     this.load.on('filecomplete', this.fileLoadComplete, this);
     this.load.on('complete', this.loadComplete, this);
@@ -1643,6 +1646,41 @@ export class ObjectScene extends Phaser.Scene {
     targets[0].destroy();
   }
 
+  // Floating "!" alert above an NPC/villager — same animation/timing for all colors.
+  showAlertFloater(sourceId, color: string) {
+    var npcSprite = this.objectList[sourceId];
+    if (!npcSprite) return;
+    var alertText = this.add.text(npcSprite.x + 36, npcSprite.y - 5, '!', {
+      fontFamily: 'Verdana',
+      fontSize: 21,
+      fontStyle: 'bold',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 4,
+    });
+    alertText.setOrigin(0.5, 0.5);
+    alertText.setDepth(25);
+    this.tweens.add({
+      targets: alertText,
+      y: npcSprite.y - 50,
+      alpha: 0,
+      ease: 'Power1',
+      delay: 400,
+      duration: 700,
+      onComplete: (_tween, targets) => { targets[0].destroy(); },
+    });
+  }
+
+  processActivityUpdate(message) {
+    var prev = this.lastVillagerActivity[message.id];
+    this.lastVillagerActivity[message.id] = message.activity;
+
+    // Yellow "!" floater on transition into Fleeing
+    if (message.activity === 'Fleeing' && prev !== 'Fleeing') {
+      this.showAlertFloater(message.id, '#FFD700');
+    }
+  }
+
   processSpeech(message) {
     var objectState = Global.objectStates[message.source];
 
@@ -1653,27 +1691,7 @@ export class ObjectScene extends Phaser.Scene {
 
     // Special case: "!" alert — floats upward from same position as damage numbers
     if (message.speech === '!') {
-      var npcSprite = this.objectList[message.source];
-      if (!npcSprite) return;
-      var alertText = this.add.text(npcSprite.x + 36, npcSprite.y - 5, '!', {
-        fontFamily: 'Verdana',
-        fontSize: 21,
-        fontStyle: 'bold',
-        color: '#FF0000',
-        stroke: '#000000',
-        strokeThickness: 4,
-      });
-      alertText.setOrigin(0.5, 0.5);
-      alertText.setDepth(25);
-      this.tweens.add({
-        targets: alertText,
-        y: npcSprite.y - 50,
-        alpha: 0,
-        ease: 'Power1',
-        delay: 400,
-        duration: 700,
-        onComplete: (_tween, targets) => { targets[0].destroy(); },
-      });
+      this.showAlertFloater(message.source, '#FF0000');
       return;
     }
 
