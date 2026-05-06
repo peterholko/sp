@@ -377,6 +377,7 @@ impl Plugin for VillagerPlugin {
                 set_storage_destination_system.in_set(BigBrainSet::Actions),
                 load_items_system.in_set(BigBrainSet::Actions),
                 unload_items_system.in_set(BigBrainSet::Actions),
+                idle_action_system.in_set(BigBrainSet::Actions),
             )
                 .run_if(in_state(AppState::Running)),
         )
@@ -403,7 +404,7 @@ impl Plugin for VillagerPlugin {
                 vital_dialogue_system,
                 remove_no_drinks_system,
                 remove_no_food_system,
-                active_task_system,
+                active_task_system.after(BigBrainSet::Actions),
                 activity_update_system.after(active_task_system),
             )
                 .run_if(in_state(AppState::Running)),
@@ -661,7 +662,7 @@ fn enemy_threatens_villager(
     villager_effects: Option<&Effects>,
     enemy_pos: Position,
     enemy_player_id: i32,
-    enemy_template: Option<&Template>,
+    _enemy_template: Option<&Template>,
     map: &Map,
     blocking_list: &[Blocker],
 ) -> bool {
@@ -670,15 +671,8 @@ fn enemy_threatens_villager(
         return false;
     }
 
-    let villager_fortified = villager_effects
-        .map(|effects| effects.has(Effect::Fortified))
-        .unwrap_or(false);
-    let enemy_template_name = enemy_template
-        .map(|template| template.0.as_str())
-        .unwrap_or_default();
-
-    if villager_fortified {
-        return villager_threat_can_bypass_fortified_wall(enemy_template_name);
+    if villager_is_fortified(villager_effects) {
+        return false;
     }
 
     Map::find_fast_path(
@@ -696,11 +690,10 @@ fn enemy_threatens_villager(
     .is_some()
 }
 
-fn villager_threat_can_bypass_fortified_wall(template: &str) -> bool {
-    template.contains("Necromancer")
-        || template.contains("Lich")
-        || template.contains("Sorcerer")
-        || template.contains("Shaman")
+fn villager_is_fortified(villager_effects: Option<&Effects>) -> bool {
+    villager_effects
+        .map(|effects| effects.has(Effect::Fortified))
+        .unwrap_or(false)
 }
 
 pub fn idle_scorer_system(
@@ -974,11 +967,16 @@ pub fn heat_scorer_system(
 }
 
 pub fn morale_scorer_system(
-    morale_query: Query<&Morale>,
+    morale_query: Query<(&Morale, Option<&Order>)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<GoodMorale>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
-        if let Ok(_morale) = morale_query.get(*actor) {
+        if let Ok((_morale, order)) = morale_query.get(*actor) {
+            if matches!(order, None | Some(Order::None)) {
+                score.set(0.0);
+                continue;
+            }
+
             score.set(0.6);
             /*if tired.tired >= 80.0 {
                 span.span()
@@ -1102,16 +1100,31 @@ pub fn capacity_scorer_system(
     }
 }
 
-pub fn idle_action_systel(
+pub fn idle_action_system(
+    game_tick: Res<GameTick>,
     mut active_task_query: Query<&mut ActiveTask>,
-    mut query: Query<(&Actor, &mut ActionState, &Idle, &ActionSpan)>,
+    mut query: Query<(&Actor, &mut ActionState, &mut Idle, &ActionSpan)>,
 ) {
-    for (Actor(actor), mut state, _idle, _span) in &mut query {
-        if let Ok(mut active_task) = active_task_query.get_mut(*actor) {
-            *active_task = ActiveTask::Idle;
-        }
+    for (Actor(actor), mut state, mut idle, _span) in &mut query {
+        match *state {
+            ActionState::Requested => {
+                if let Ok(mut active_task) = active_task_query.get_mut(*actor) {
+                    ActiveTask::set_if_changed(&mut active_task, ActiveTask::Idle);
+                }
 
-        *state = ActionState::Success;
+                idle.start_time = game_tick.0;
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                if game_tick.0.saturating_sub(idle.start_time) >= idle.duration {
+                    *state = ActionState::Success;
+                }
+            }
+            ActionState::Cancelled => {
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1123,12 +1136,11 @@ pub fn set_order_destination_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
     obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
-    mut villager_query: Query<
+    villager_query: Query<
         (
             &PlayerId,
             &Position,
             &Order,
-            &mut ActiveTask,
             Option<&Assignment>, // Villager may not have an assignment
         ),
         With<SubclassVillager>,
@@ -1143,8 +1155,8 @@ pub fn set_order_destination_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok((villager_player_id, villager_pos, order, mut villager_attrs, assignment)) =
-                    villager_query.get_mut(*actor)
+                let Ok((villager_player_id, villager_pos, order, assignment)) =
+                    villager_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot get villager query");
@@ -1376,7 +1388,7 @@ pub fn process_order_system(
 
                 match villager_order {
                     Order::Follow { target: _ } => {
-                        *active_task = ActiveTask::Following;
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Following);
                         // Follow has no event to wait for — succeed immediately
                         // so the behavior tree loops (SetOrderDestination → MoveTo → ProcessOrder)
                         *state = ActionState::Success;
@@ -1462,7 +1474,7 @@ pub fn process_order_system(
                         }
 
                         // Set active task to building
-                        *active_task = ActiveTask::Building;
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Building);
 
                         // Add trigger to start build
                         span.span().in_scope(|| {
@@ -1962,6 +1974,17 @@ pub fn fight_back_system(
                     continue;
                 }
 
+                if let Some(errmsg) =
+                    Combat::fortified_outbound_attack_error_from_combat(&villager, &attacker, false)
+                {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, Some(villager.id.0), None, "{}", errmsg);
+                    });
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 span.span().in_scope(|| {
                     villager_info!(
                         *actor,
@@ -2114,6 +2137,20 @@ pub fn set_flee_destination_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if villager_is_fortified(villager_effects) {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Holding fortified position instead of fleeing"
+                        );
+                    });
+                    commands.entity(*actor).remove::<Destination>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let mut immediate_threat = false;
 
@@ -4337,17 +4374,14 @@ pub fn active_task_system(
     }
 
     for (villager_entity, mut active_task) in &mut villager_queries.p0() {
-        let next_task = best
-            .remove(&villager_entity)
-            .map(|(_rank, task)| task)
-            .unwrap_or(ActiveTask::Idle);
-
-        if *active_task != next_task {
-            debug!(
-                "Active Task for {:?}: {:?} -> {:?}",
-                villager_entity, *active_task, next_task
-            );
-            *active_task = next_task;
+        if let Some((_rank, next_task)) = best.remove(&villager_entity) {
+            let previous_task = (*active_task).clone();
+            if ActiveTask::set_if_changed(&mut active_task, next_task.clone()) {
+                debug!(
+                    "Active Task for {:?}: {:?} -> {:?}",
+                    villager_entity, previous_task, next_task
+                );
+            }
         }
     }
 }

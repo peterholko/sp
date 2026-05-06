@@ -7,6 +7,7 @@ import { Network } from "../network";
 import SmallButton from "./smallButton";
 import { Global } from "../global";
 import { NetworkEvent } from "../networkEvent";
+import { getNeedStatusIcon, NeedKind } from "./needStatus";
 
 interface VillagerPanelProps {
   villagerData,
@@ -31,6 +32,23 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
 
   handleSkillsClick() {
     Global.network.sendInfoSkills(this.props.villagerData.id);
+  }
+
+  renderNeedValue(kind: NeedKind, value?: string) {
+    const statusIcon = getNeedStatusIcon(kind, value);
+    const statusIconStyle = {
+      width: '12px',
+      height: '12px',
+      marginRight: '5px',
+      verticalAlign: 'middle'
+    } as React.CSSProperties
+
+    return (
+      <td>
+        {statusIcon && <img src={statusIcon} style={statusIconStyle} />}
+        <span>{value}</span>
+      </td>
+    );
   }
 
   render() {
@@ -136,15 +154,15 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
  
           <tr>
             <td>Thirst: </td>
-            <td>{needs.thirst}</td>
+            {this.renderNeedValue("thirst", needs.thirst)}
           </tr>    
           <tr>
             <td>Hunger: </td>
-            <td>{needs.hunger}</td>
+            {this.renderNeedValue("hunger", needs.hunger)}
           </tr>     
           <tr>
             <td>Tiredness: </td>
-            <td>{needs.tiredness}</td>
+            {this.renderNeedValue("tiredness", needs.tiredness)}
           </tr>                       
           <tr>
             <td>Hp: </td>

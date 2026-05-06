@@ -518,6 +518,15 @@ pub enum ActiveTask {
 }
 
 impl ActiveTask {
+    pub fn set_if_changed(current: &mut Mut<ActiveTask>, next: ActiveTask) -> bool {
+        if **current == next {
+            return false;
+        }
+
+        **current = next;
+        true
+    }
+
     pub fn to_string(&self) -> String {
         let str = match self {
             ActiveTask::None => "None",

@@ -3113,6 +3113,15 @@ pub fn attack_target_system(
                     continue;
                 }
 
+                if let Some(errmsg) =
+                    Combat::fortified_outbound_attack_error_from_combat(&npc, &target, false)
+                {
+                    npc_debug!(*actor, obj_id, npc_name, "{}", errmsg);
+                    visible_target.target = NO_TARGET;
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 if target.stats.hp <= 0 || Obj::is_dead(&target.state) {
                     npc_debug!(*actor, obj_id, npc_name, "Target is already dead");
                     if let Ok(mut vt) = visible_target_query.get_mut(*actor) {
@@ -3250,13 +3259,13 @@ pub fn cast_target_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
-    visible_target_query: Query<(&PlayerId, &VisibleTarget), Without<EventInProgress>>,
+    mut visible_target_query: Query<(&PlayerId, &mut VisibleTarget), Without<EventInProgress>>,
     mut npc_query: Query<CombatQuery, (With<SubclassNPC>, Without<EventInProgress>)>,
     mut target_query: Query<CombatQuery, Without<SubclassNPC>>,
     mut query: Query<(&Actor, &mut ActionState, &mut ChaseAndCast)>,
 ) {
     for (Actor(actor), mut state, mut chase_and_cast) in &mut query {
-        let Ok((npc_player_id, visible_target)) = visible_target_query.get(*actor) else {
+        let Ok((npc_player_id, mut visible_target)) = visible_target_query.get_mut(*actor) else {
             continue;
         };
 
@@ -3307,6 +3316,21 @@ pub fn cast_target_system(
                     let Ok(target) = target_query.get_mut(target_entity) else {
                         continue;
                     };
+
+                    if let Some(errmsg) =
+                        Combat::fortified_outbound_attack_error_from_combat(&npc, &target, true)
+                    {
+                        npc_debug!(
+                            *actor,
+                            Some(npc.id.0),
+                            Some(npc.template.0.as_str()),
+                            "{}",
+                            errmsg
+                        );
+                        visible_target.target = NO_TARGET;
+                        *state = ActionState::Failure;
+                        continue;
+                    }
 
                     let target_dist = Map::dist(*npc.pos, *target.pos);
 
@@ -4329,7 +4353,8 @@ pub fn cast_spell_target_system(
     completed_query: Query<&EventCompleted>,
     target_query: Query<&Target>,
     mut npc_query: Query<BaseQueryMutState, With<SubclassNPC>>,
-    obj_query: Query<BaseQuery, Without<SubclassNPC>>, // Without required to prevent disjointed queries
+    obj_query: Query<BaseQueryEffects, Without<SubclassNPC>>, // Without required to prevent disjointed queries
+    fortified_query: Query<&Fortified>,
     mut query: Query<(&Actor, &mut ActionState, &CastSpellTarget)>,
 ) {
     for (Actor(actor), mut state, _cast_spell_target) in &mut query {
@@ -4398,6 +4423,19 @@ pub fn cast_spell_target_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if let Some(errmsg) = Combat::fortified_outbound_attack_error(
+                    npc.effects,
+                    fortified_query.get(*actor).ok(),
+                    target.effects,
+                    fortified_query.get(target_entity).ok(),
+                    true,
+                ) {
+                    npc_debug!(*actor, obj_id, npc_name, "{}", errmsg);
+                    commands.entity(*actor).remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 // Check if target is within range
                 if Map::dist(*npc.pos, *target.pos) > 2 {

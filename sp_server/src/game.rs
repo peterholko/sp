@@ -5642,6 +5642,24 @@ fn spell_damage_event_system(
                         continue;
                     }
 
+                    if let Some(errmsg) =
+                        Combat::fortified_outbound_attack_error_from_spell(&caster, &target, true)
+                    {
+                        debug!("Spell damage blocked: {}", errmsg);
+                        *caster.state = State::None;
+                        commands.trigger(StateChange {
+                            entity: caster_entity,
+                            new_state: State::None,
+                        });
+                        commands.entity(caster_entity).insert(EventCompleted {
+                            event_id: map_event.event_id,
+                            event_type: "spell_damage".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        continue;
+                    }
+
                     // Process spell damage
                     let damage = Combat::process_spell_damage(
                         &mut commands,
@@ -11516,7 +11534,7 @@ fn start_work_observer(
                     game_events.insert(event.event_id, event);
 
                     // Set active task to crafting
-                    *active_task = ActiveTask::Crafting;
+                    ActiveTask::set_if_changed(&mut active_task, ActiveTask::Crafting);
                 }
                 WorkType::Refine => {
                     commands.trigger(StateChange {
@@ -11554,7 +11572,7 @@ fn start_work_observer(
                     game_events.insert(event.event_id, event);
 
                     // Set active task to refining
-                    *active_task = ActiveTask::Refining;
+                    ActiveTask::set_if_changed(&mut active_task, ActiveTask::Refining);
                 }
                 WorkType::Experiment => {
                     // TODO: Implement experiment work type
@@ -11581,7 +11599,7 @@ fn start_work_observer(
                     game_events.insert(event.event_id, event);
 
                     // Set active task to operating
-                    *active_task = ActiveTask::Operating;
+                    ActiveTask::set_if_changed(&mut active_task, ActiveTask::Operating);
                 }
                 _ => {}
             }

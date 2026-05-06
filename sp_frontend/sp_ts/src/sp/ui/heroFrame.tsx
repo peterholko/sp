@@ -6,11 +6,9 @@ import statbg from "ui_comp/statbg.png";
 import hpbar from "ui_comp/hpbar.png";
 import stabar from "ui_comp/stabar.png";
 import manabar from "ui_comp/manabar.png";
-import greenstatus from "ui_comp/greenstatus.png";
-import yellowstatus from "ui_comp/yellowstatus.png";
-import redstatus from "ui_comp/redstatus.png";
 import { NetworkEvent } from "../networkEvent";
 import { STAT_BAR_WIDTH, STAT_BAR_HEIGHT } from "../config";
+import { getNeedStatusIcon } from "./needStatus";
 
 interface HeroFrameProps {
   heroStats: any,
@@ -157,33 +155,9 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
-    let thirstStatusIcon;
-    let hungerStatusIcon;
-    let fatigueStatusIcon;
-
-    if(this.props.thirstStatus == 'Hydrated' || this.props.thirstStatus == 'Refreshed') {
-      thirstStatusIcon = greenstatus;
-    } else if(this.props.thirstStatus == 'Slightly Thirsty' || this.props.thirstStatus == 'Thirsty') {
-      thirstStatusIcon = yellowstatus;
-    } else if(this.props.thirstStatus == 'Parched' || this.props.thirstStatus == 'Dehydrated') {
-      thirstStatusIcon = redstatus;
-    }
-
-    if(this.props.hungerStatus == 'Satiated' || this.props.hungerStatus == 'Nourished') {
-      hungerStatusIcon = greenstatus;
-    } else if(this.props.hungerStatus == 'Hungry' || this.props.hungerStatus == 'Peckish') {
-      hungerStatusIcon = yellowstatus;
-    } else if(this.props.hungerStatus == 'Famished' || this.props.hungerStatus == 'Ravenous') {
-      hungerStatusIcon = redstatus;
-    }
-
-    if(this.props.fatigueStatus == 'Energized' || this.props.fatigueStatus == 'Restored') {
-      fatigueStatusIcon = greenstatus;
-    } else if(this.props.fatigueStatus == 'Weary' || this.props.fatigueStatus == 'Tired') {
-      fatigueStatusIcon = yellowstatus;
-    } else if(this.props.fatigueStatus == 'Exhausted' || this.props.fatigueStatus == 'Depleted') {
-      fatigueStatusIcon = redstatus;
-    }
+    const thirstStatusIcon = getNeedStatusIcon("thirst", this.props.thirstStatus);
+    const hungerStatusIcon = getNeedStatusIcon("hunger", this.props.hungerStatus);
+    const fatigueStatusIcon = getNeedStatusIcon("tiredness", this.props.fatigueStatus);
 
     return (
       
@@ -206,9 +180,9 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           <span style={hStyle}>H</span>
           <span style={fStyle}>F</span>
 
-          <img src={thirstStatusIcon} style={thirstStatusStyle}/>
-          <img src={hungerStatusIcon} style={hungerStatusStyle}/>
-          <img src={fatigueStatusIcon} style={fatigueStatusStyle}/>
+          {thirstStatusIcon && <img src={thirstStatusIcon} style={thirstStatusStyle}/>}
+          {hungerStatusIcon && <img src={hungerStatusIcon} style={hungerStatusStyle}/>}
+          {fatigueStatusIcon && <img src={fatigueStatusIcon} style={fatigueStatusStyle}/>}
 
           {!this.state.hideHero && 
             <img src={imagePath} style={heroStyle}/>

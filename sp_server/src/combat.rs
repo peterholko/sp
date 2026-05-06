@@ -85,6 +85,7 @@ pub struct CombatQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub effects: &'static mut Effects,
+    pub fortified: Option<&'static Fortified>,
     pub inventory: &'static mut Inventory,
     pub skills: Option<&'static mut Skills>,
     pub hero_class: Option<&'static HeroClass>,
@@ -106,6 +107,7 @@ pub struct CombatSpellQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub effects: &'static mut Effects,
+    pub fortified: Option<&'static Fortified>,
     pub last_combat_tick: &'static mut LastCombatTick,
 }
 
@@ -148,6 +150,66 @@ impl Combat {
         } else {
             None
         }
+    }
+
+    pub fn fortified_outbound_attack_error(
+        attacker_effects: &Effects,
+        attacker_fortified: Option<&Fortified>,
+        target_effects: &Effects,
+        target_fortified: Option<&Fortified>,
+        ranged_attack: bool,
+    ) -> Option<String> {
+        if !attacker_effects.has(Effect::Fortified) {
+            return None;
+        }
+
+        if target_effects.has(Effect::Fortified) {
+            if let (Some(attacker_fortified), Some(target_fortified)) =
+                (attacker_fortified, target_fortified)
+            {
+                if attacker_fortified.id == target_fortified.id {
+                    return None;
+                }
+            }
+        }
+
+        if !attacker_effects.has(Effect::WatchtowerLight) {
+            return Some("A watchtower is required to attack from behind a wall.".to_string());
+        }
+
+        if !ranged_attack {
+            return Some("Only ranged attacks can be used from a watchtower.".to_string());
+        }
+
+        None
+    }
+
+    pub fn fortified_outbound_attack_error_from_combat(
+        attacker: &CombatQueryItem,
+        target: &CombatQueryItem,
+        ranged_attack: bool,
+    ) -> Option<String> {
+        Self::fortified_outbound_attack_error(
+            &attacker.effects,
+            attacker.fortified,
+            &target.effects,
+            target.fortified,
+            ranged_attack,
+        )
+    }
+
+    pub fn fortified_outbound_attack_error_from_spell(
+        attacker: &CombatSpellQueryItem,
+        target: &CombatSpellQueryItem,
+        ranged_attack: bool,
+    ) -> Option<String> {
+        Self::fortified_outbound_attack_error(
+            &attacker.effects,
+            attacker.fortified,
+            &target.effects,
+            target.fortified,
+            ranged_attack,
+        )
     }
 
     pub fn process_attack(
@@ -835,4 +897,78 @@ impl Combat {
             _ => Some("Unknown Combo".to_string()),
         }
     }*/
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn effects(values: Vec<Effect>) -> Effects {
+        Effects(
+            values
+                .into_iter()
+                .map(|effect| (effect, (0, 1.0, 1)))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    #[test]
+    fn fortified_outbound_attacks_require_watchtower_and_range() {
+        let none = effects(Vec::new());
+        let fortified = effects(vec![Effect::Fortified]);
+        let tower = effects(vec![Effect::Fortified, Effect::WatchtowerLight]);
+        let outside = effects(Vec::new());
+
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(&none, None, &outside, None, false),
+            None
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &fortified,
+                Some(&Fortified { id: 7 }),
+                &outside,
+                None,
+                true,
+            ),
+            Some("A watchtower is required to attack from behind a wall.".to_string())
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &tower,
+                Some(&Fortified { id: 7 }),
+                &outside,
+                None,
+                false,
+            ),
+            Some("Only ranged attacks can be used from a watchtower.".to_string())
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &tower,
+                Some(&Fortified { id: 7 }),
+                &outside,
+                None,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn same_fortification_is_not_an_outbound_attack() {
+        let fortified = effects(vec![Effect::Fortified]);
+
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &fortified,
+                Some(&Fortified { id: 7 }),
+                &fortified,
+                Some(&Fortified { id: 7 }),
+                false,
+            ),
+            None
+        );
+    }
 }

@@ -1246,6 +1246,16 @@ fn ability_disabled_reason(
             return Some("Only ranged attacks can hit a fortified target.".to_string());
         }
 
+        if ability_is_damaging(ability) {
+            if let Some(errmsg) = Combat::fortified_outbound_attack_error_from_combat(
+                actor,
+                target,
+                ability_is_ranged_attack(ability),
+            ) {
+                return Some(errmsg);
+            }
+        }
+
         if Map::dist(*actor.pos, *target.pos) > ability.range {
             return Some("Out of range".to_string());
         }
@@ -1553,6 +1563,14 @@ fn attack_system(
                 }
 
                 if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if let Some(errmsg) =
+                    Combat::fortified_outbound_attack_error_from_combat(&attacker, &target, false)
+                {
                     let packet = ResponsePacket::Error { errmsg };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -2021,6 +2039,14 @@ fn attack_system(
                 }
 
                 if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
+                    let packet = ResponsePacket::Error { errmsg };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if let Some(errmsg) =
+                    Combat::fortified_outbound_attack_error_from_combat(&attacker, &target, false)
+                {
                     let packet = ResponsePacket::Error { errmsg };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -9944,6 +9970,7 @@ pub fn is_player(player_id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::Fortified;
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
 
@@ -10208,6 +10235,52 @@ mod tests {
         assert!(ability_is_ranged_attack(aimed_shot));
         assert!(ability_is_ranged_attack(arcane_bolt));
         assert!(!ability_is_damaging(disengage));
+    }
+
+    #[test]
+    fn ranged_damage_abilities_require_watchtower_when_attacker_is_fortified() {
+        let aimed_shot = ability_def("aimed_shot").expect("aimed shot ability");
+        let arcane_bolt = ability_def("arcane_bolt").expect("arcane bolt ability");
+        let ward = ability_def("ward").expect("ward ability");
+
+        let wall_only = Effects(HashMap::from([(Effect::Fortified, (0, 1.0, 1))]));
+        let wall_and_tower = Effects(HashMap::from([
+            (Effect::Fortified, (0, 1.0, 1)),
+            (Effect::WatchtowerLight, (0, 1.0, 1)),
+        ]));
+        let outside = Effects(HashMap::new());
+
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &wall_only,
+                Some(&Fortified { id: 9 }),
+                &outside,
+                None,
+                ability_is_ranged_attack(aimed_shot),
+            ),
+            Some("A watchtower is required to attack from behind a wall.".to_string())
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &wall_and_tower,
+                Some(&Fortified { id: 9 }),
+                &outside,
+                None,
+                ability_is_ranged_attack(aimed_shot),
+            ),
+            None
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &wall_and_tower,
+                Some(&Fortified { id: 9 }),
+                &outside,
+                None,
+                ability_is_ranged_attack(arcane_bolt),
+            ),
+            None
+        );
+        assert!(!ability_is_damaging(ward));
     }
 
     #[test]
