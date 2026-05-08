@@ -5920,6 +5920,7 @@ fn use_item_system(
     templates: Res<Templates>,
     map: Res<Map>,
     resources: Res<Resources>,
+    mut ids: ResMut<Ids>,
     mut plans: ResMut<Plans>,
     mut visible_events: ResMut<VisibleEvents>,
     mut map_events: ResMut<MapEvents>,
@@ -6148,9 +6149,14 @@ fn use_item_system(
                             );
 
                             if is_near_fresh_water || has_spring_water {
+                                // Burn one empty waterskin and replace it with
+                                // one filled. See the matching DrinkEvent
+                                // comment in drink_eat_system for why we don't
+                                // reuse transform() here (stack-aware + handles
+                                // the remove-to-zero case correctly).
                                 item_owner.inventory.remove_quantity(item.id, 1);
-                                item_owner.inventory.transform(
-                                    item.id,
+                                item_owner.inventory.new(
+                                    ids.new_item_id(),
                                     WATERSKIN_FILLED.to_string(),
                                     1,
                                     &templates.item_templates,
@@ -6320,7 +6326,7 @@ fn drink_eat_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
-    ids: Res<Ids>,
+    mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -6409,9 +6415,19 @@ fn drink_eat_system(
 
                     thirst.thirst -= thirst_value;
 
+                    // Burn one filled waterskin and replace it with one empty
+                    // waterskin. We can't reuse `transform()` here because:
+                    //   1. After remove_quantity decrements to 0, the source
+                    //      item is swap_removed, so transform() can't find it.
+                    //   2. With a stack > 1, transform() would overwrite the
+                    //      whole remaining stack to the new variant, losing
+                    //      the rest. Inventory::new merges with any existing
+                    //      empty-waterskin stack via the name+attrs match in
+                    //      Inventory::mergeable, so this works for both the
+                    //      single-waterskin and stacked cases.
                     obj_inventory.remove_quantity(*item_id, 1);
-                    obj_inventory.transform(
-                        *obj_id,
+                    obj_inventory.new(
+                        ids.new_item_id(),
                         WATERSKIN_EMPTY.to_string(),
                         1,
                         &templates.item_templates,
