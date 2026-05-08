@@ -1,5 +1,8 @@
 # price_template.yaml
-# Empire buy and sell prices for items
+# Empire buy and sell prices for items.
+# Keys are matched by name → subclass → class fallthrough in trade.rs::find_buy_price / find_sell_price.
+
+# ==== Wanted items (player sells to merchant) ====
 
 - name: Copper Ore
   buy_price: 5
@@ -15,19 +18,63 @@
   sell_quantity: 25
   impact_factor: 0.1
 
+- name: Iron Ore
+  buy_price: 8
+  buy_quantity: 800
+  sell_price: 16
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Iron Ingot
+  buy_price: 18
+  buy_quantity: 600
+  sell_price: 35
+  sell_quantity: 25
+  impact_factor: 0.1
+
 - name: Maple Log
   buy_price: 5
   buy_quantity: 1000
   sell_price: 10
-  sell_quantity: 25  
+  sell_quantity: 25
   impact_factor: 0.1
 
 - name: Maple Timber
   buy_price: 10
-  buy_quantity: 3
+  buy_quantity: 600
   sell_price: 20
-  sell_quantity: 25    
+  sell_quantity: 25
   impact_factor: 0.1
+
+- name: Raw Hide
+  buy_price: 4
+  buy_quantity: 600
+  sell_price: 9
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Stiff Leather
+  buy_price: 12
+  buy_quantity: 400
+  sell_price: 24
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Cooked Meat
+  buy_price: 5
+  buy_quantity: 500
+  sell_price: 12
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Honeybell Cloth
+  buy_price: 8
+  buy_quantity: 400
+  sell_price: 16
+  sell_quantity: 25
+  impact_factor: 0.1
+
+# ==== Merchant inventory (player buys from merchant) ====
 
 - name: Pick Axe
   buy_price: 10
@@ -43,4 +90,86 @@
   sell_quantity: 100
   impact_factor: 0.1
 
+- name: Lumbercamp Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
+  sell_quantity: 100
+  impact_factor: 0.1
 
+- name: Quarry Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Trapper Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Mine Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Farm Deed
+  buy_price: 38
+  buy_quantity: 100
+  sell_price: 75
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Small Tent Deed
+  buy_price: 20
+  buy_quantity: 100
+  sell_price: 40
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Sickle
+  buy_price: 15
+  buy_quantity: 100
+  sell_price: 30
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Bucket
+  buy_price: 7
+  buy_quantity: 100
+  sell_price: 15
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Bedroll
+  buy_price: 12
+  buy_quantity: 100
+  sell_price: 25
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Resin Torch
+  buy_price: 4
+  buy_quantity: 100
+  sell_price: 8
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Health Potion
+  buy_price: 25
+  buy_quantity: 100
+  sell_price: 50
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Seeds
+  buy_price: 1
+  buy_quantity: 200
+  sell_price: 2
+  sell_quantity: 50
+  impact_factor: 0.1

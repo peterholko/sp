@@ -444,6 +444,18 @@ pub enum GameEventType {
         message: String,
         expiry: Option<i32>,
     },
+    MerchantArrival {
+        merchant_id: i32,
+        player_id: i32,
+    },
+    MerchantLeavingSoon {
+        merchant_id: i32,
+        player_id: i32,
+    },
+    MerchantDeparture {
+        merchant_id: i32,
+        player_id: i32,
+    },
     SpawnNPC {
         npc_type: String,
         pos: Position,

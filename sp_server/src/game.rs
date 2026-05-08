@@ -1,4 +1,5 @@
 use bevy::ecs::query::{QueryData, WorldQuery};
+use bevy::ecs::system::SystemParam;
 
 use bevy::reflect::EnumInfo;
 use bevy::{
@@ -60,12 +61,12 @@ use crate::obj::{
     is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
     CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker,
-    LastCombatTick, Misc, Name, NewObj, Obj, Order, PlayerId, Position, RemoveLightEffect,
-    RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild, StartUpgrade,
-    StartWork, State, StateAboard, StateBuilding, StateChange, StateDead, StateUpgrading, Stats,
-    Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager, Template, TemplateChange,
-    TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower, WorkEntry, WorkQueue,
-    WorkStatus, WorkType,
+    LastCombatTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order, PlayerId, Position,
+    RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild,
+    StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
+    StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
+    Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower,
+    WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerPlugin};
 use crate::recipe::{RecipePlugin, Recipes};
@@ -241,6 +242,7 @@ pub struct InitialEncounterEntry {
     pub phase1_unlock_tick: i32,
     pub spider_unlock_tick: i32,
     pub villager_event_scheduled: bool,
+    pub merchant_id: i32,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -590,6 +592,78 @@ pub struct Merchant {
     pub trade_port: Position,
     pub landing_at: Position,
     pub wanted_items: Vec<WantedItem>,
+    /// Lifecycle phase. Drives the per-tick `merchant_sailing_system`
+    /// (movement) and `merchant_arrival_system` (transition + announce).
+    pub sail_state: MerchantSailState,
+}
+
+#[derive(Debug, Reflect, Default, Clone, Copy, PartialEq, Eq)]
+pub enum MerchantSailState {
+    /// Sitting at `trade_port` offshore, waiting for the next scheduled
+    /// `MerchantArrival` event.
+    #[default]
+    AtEmpire,
+    /// In transit from `trade_port` toward `landing_at`. Movement system
+    /// drives one tile per `BASE_MOVE_TICKS / speed` ticks.
+    SailingToLanding,
+    /// Arrived at `landing_at`. Trade window is open. The follow-up
+    /// `MerchantLeavingSoon` and `MerchantDeparture` events were scheduled
+    /// when the merchant transitioned into this state.
+    AtLanding,
+    /// In transit back to `trade_port` after the trade window closed.
+    SailingToEmpire,
+}
+
+// Canonical merchant inventory — used at first spawn (player_setup) and on
+// every restock when the merchant returns from the empire. Each tuple is
+// (item_name, quantity).
+pub const MERCHANT_INVENTORY: &[(&str, i32)] = &[
+    ("Gold Coins", 1500),
+    ("Yurt Deed", 1),
+    ("Lumbercamp Deed", 1),
+    ("Quarry Deed", 1),
+    ("Trapper Deed", 1),
+    ("Mine Deed", 1),
+    ("Farm Deed", 1),
+    ("Small Tent Deed", 1),
+    ("Training Pick Axe", 1),
+    ("Sickle", 1),
+    ("Bucket", 2),
+    ("Bedroll", 1),
+    ("Resin Torch", 5),
+    ("Health Potion", 3),
+    ("Seeds", 25),
+    ("Honeybell Cloth", 10),
+];
+
+// Canonical wanted-item subclasses — refreshed on each restock so the merchant
+// always offers the same trade categories. Live name/quantity/price are filled
+// in by info_merchant_system at request time from the Prices resource.
+pub const MERCHANT_WANTED_SUBCLASSES: &[&str] = &[
+    "Copper Ore",
+    "Iron Ore",
+    "Copper Ingot",
+    "Iron Ingot",
+    "Maple Log",
+    "Maple Timber",
+    "Raw Hide",
+    "Stiff Leather",
+    "Cooked Meat",
+    "Honeybell Cloth",
+];
+
+// Lifecycle tick offsets (10 ticks per second).
+const MERCHANT_LEAVING_SOON_OFFSET: i32 = 2400; // 4 min after arrival
+const MERCHANT_DEPARTURE_OFFSET: i32 = 3000; // 5 min after arrival
+const MERCHANT_RETURN_GAP: i32 = 6000; // 10 min away at the empire
+const MERCHANT_FIRST_ARRIVAL_DELAY: i32 = 1800; // 3 min after villager rescue
+
+// Bundle of game_event_system parameters that don't fit in the 16-param limit.
+#[derive(SystemParam)]
+pub struct GameEventExtras<'w, 's> {
+    pub merchant_query: Query<'w, 's, &'static mut Merchant>,
+    pub initial_encounter_state: Res<'w, InitialEncounterState>,
+    pub plans: ResMut<'w, Plans>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -1075,6 +1149,14 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 objectives_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                merchant_sailing_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                merchant_arrival_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(Update, map_event_system.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -7668,9 +7750,14 @@ fn game_event_system(
     mut query: Query<ObjQueryMut>,
     mut perception_updates: ResMut<PerceptionUpdates>,
     mut player_intro_state: ResMut<PlayerIntroState>,
-    mut plans: ResMut<Plans>,
+    mut extras: GameEventExtras,
 ) {
+    // Field access via `extras.<name>` below — bundled into one SystemParam
+    // because Bevy systems are limited to 16 top-level params.
     let mut events_to_remove = Vec::new();
+    // Events scheduled by handlers in this iteration. Collected here and
+    // inserted after the loop to avoid invalidating the iterator.
+    let mut events_to_insert: Vec<GameEvent> = Vec::new();
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
@@ -7710,6 +7797,91 @@ fn game_event_system(
                         expiry: *expiry,
                     };
                     send_to_client(*player_id, packet, &clients);
+                }
+                GameEventType::MerchantArrival {
+                    merchant_id,
+                    player_id,
+                } => {
+                    events_to_remove.push(*event_id);
+
+                    let Some(entity) = entity_map.get_entity(*merchant_id) else {
+                        error!("MerchantArrival: cannot find entity for {:?}", merchant_id);
+                        continue;
+                    };
+
+                    // Kick off the sail. The merchant_sailing_system moves the
+                    // ship one tile at a time toward `landing_at`. When it gets
+                    // there, merchant_arrival_system handles the on-arrival
+                    // logic (restock, notice, speech, schedule next events).
+                    //
+                    // Note: sailing rather than teleporting is the visible
+                    // hook the player sees — the ship comes in from the
+                    // empire side of the map. Stays in transit for a few
+                    // game-seconds depending on map distance.
+                    if let Ok(mut merchant) = extras.merchant_query.get_mut(entity) {
+                        merchant.sail_state = MerchantSailState::SailingToLanding;
+                    } else {
+                        error!(
+                            "MerchantArrival: cannot find Merchant component for {:?}",
+                            merchant_id
+                        );
+                    }
+
+                    info!(
+                        "MerchantArrival: merchant {} setting sail toward landing for player {}",
+                        merchant_id, player_id
+                    );
+                }
+                GameEventType::MerchantLeavingSoon {
+                    merchant_id,
+                    player_id,
+                } => {
+                    events_to_remove.push(*event_id);
+
+                    let notice = ResponsePacket::Notice {
+                        noticemsg: "The traveling merchant is preparing to sail. One minute until they depart.".to_string(),
+                        expiry: Some(2000),
+                    };
+                    send_to_client(*player_id, notice, &clients);
+
+                    map_events.new(
+                        *merchant_id,
+                        game_tick.0 + 4,
+                        VisibleEvent::SpeechEvent {
+                            speech: "I sail with the next tide! Speak now, or wait for my return."
+                                .to_string(),
+                            intensity: 4,
+                        },
+                    );
+                }
+                GameEventType::MerchantDeparture {
+                    merchant_id,
+                    player_id,
+                } => {
+                    events_to_remove.push(*event_id);
+
+                    map_events.new(
+                        *merchant_id,
+                        game_tick.0 + 4,
+                        VisibleEvent::SpeechEvent {
+                            speech: "Until next tide!".to_string(),
+                            intensity: 3,
+                        },
+                    );
+
+                    // Kick off the return sail. Movement system drives it
+                    // back toward `trade_port`; merchant_arrival_system
+                    // schedules the next MerchantArrival once it arrives.
+                    if let Some(entity) = entity_map.get_entity(*merchant_id) {
+                        if let Ok(mut merchant) = extras.merchant_query.get_mut(entity) {
+                            merchant.sail_state = MerchantSailState::SailingToEmpire;
+                        }
+                    }
+
+                    info!(
+                        "MerchantDeparture: merchant {} setting sail back to the empire for player {}",
+                        merchant_id, player_id
+                    );
                 }
                 GameEventType::SpawnNPC {
                     npc_type,
@@ -7847,8 +8019,10 @@ fn game_event_system(
                     map_events.new(villager_id.0, game_tick.0 + 10, speech_event);
 
                     // Villager teaches construction plans
-                    plans.add(*player_id, "Crafting Tent".to_string(), 0, 0);
-                    plans.add(*player_id, "Watchtower".to_string(), 0, 0);
+                    extras
+                        .plans
+                        .add(*player_id, "Crafting Tent".to_string(), 0, 0);
+                    extras.plans.add(*player_id, "Watchtower".to_string(), 0, 0);
 
                     let discovery_packet = ResponsePacket::DiscoveryEvent {
                         version: 1,
@@ -7866,6 +8040,24 @@ fn game_event_system(
                         intensity: 3,
                     };
                     map_events.new(villager_id.0, game_tick.0 + 50, plan_speech);
+
+                    // Trigger the first traveling-merchant visit. The merchant
+                    // entity was spawned offshore at empire_pos in player_setup;
+                    // this event flips its sail_state and the sailing system
+                    // brings it tile-by-tile toward the landing position.
+                    if let Some(entry) = extras.initial_encounter_state.get(player_id) {
+                        if entry.merchant_id != 0 {
+                            events_to_insert.push(GameEvent {
+                                event_id: ids.new_map_event_id(),
+                                start_tick: game_tick.0,
+                                run_tick: game_tick.0 + MERCHANT_FIRST_ARRIVAL_DELAY,
+                                event_type: GameEventType::MerchantArrival {
+                                    merchant_id: entry.merchant_id,
+                                    player_id: *player_id,
+                                },
+                            });
+                        }
+                    }
                 }
 
                 GameEventType::CancelAllMapEvents { obj_id } => {
@@ -8064,6 +8256,10 @@ fn game_event_system(
 
     for event_id in events_to_remove.iter() {
         game_events.remove(event_id);
+    }
+
+    for event in events_to_insert {
+        game_events.insert(event.event_id, event);
     }
 }
 
@@ -12412,6 +12608,253 @@ fn combat_lock_interrupt_system(
 
         *state = State::None;
         commands.trigger(CancelEvents { entity });
+    }
+}
+
+// Drives the merchant ship one tile at a time toward its current sail
+// destination. Mirrors the tax_collector move_to_pos pattern but is scoped
+// to entities with a `Merchant` component so it doesn't interfere with the
+// big-brain-driven NPCs.
+//
+// Skipped when:
+//   - `sail_state` isn't a sailing variant (AtEmpire / AtLanding → idle)
+//   - already at destination (the arrival_system handles transition)
+//   - already moving (an EventInProgress exists, the move event resolves
+//     and this system fires again next tick)
+fn merchant_sailing_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    map: Res<Map>,
+    mut map_events: ResMut<MapEvents>,
+    templates: Res<Templates>,
+    mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant), Without<EventInProgress>>,
+) {
+    for (entity, mut obj, merchant) in merchant_query.iter_mut() {
+        let dest = match merchant.sail_state {
+            MerchantSailState::SailingToLanding => merchant.landing_at,
+            MerchantSailState::SailingToEmpire => merchant.trade_port,
+            MerchantSailState::AtEmpire | MerchantSailState::AtLanding => continue,
+        };
+
+        if *obj.pos == dest {
+            // Arrived; merchant_arrival_system handles the transition.
+            continue;
+        }
+
+        // Only step the move when we're idle; if the previous move event is
+        // still resolving, wait for it.
+        if *obj.state != State::None {
+            continue;
+        }
+
+        if obj.effects.has(Effect::Stunned) {
+            continue;
+        }
+
+        // Speed-aware tile duration. Merchant template has base_speed: 3 so
+        // each hex takes ~33 ticks (~3.3s) which feels like a sail.
+        let npc_speed = obj.stats.base_speed.unwrap_or(1).max(1);
+        let effect_speed_mod = obj.effects.get_speed_effects(&templates);
+        let move_duration =
+            (BASE_MOVE_TICKS * (BASE_SPEED / npc_speed as f32) * (1.0 / effect_speed_mod)) as i32;
+
+        let path_result = Map::find_fast_path(
+            *obj.pos,
+            dest,
+            &map,
+            obj.player_id.0,
+            Vec::new(),
+            false, // landwalk: ships don't walk on land
+            true,  // waterwalk
+            false, // mountainwalk
+            false, // ignore_goal_terrain_type
+            true,  // allow_attackable_blockers
+        );
+
+        let Some((path, _cost)) = path_result else {
+            error!(
+                "merchant_sailing_system: no water path from {:?} to {:?} for merchant {}",
+                *obj.pos, dest, obj.id.0
+            );
+            continue;
+        };
+
+        if path.len() < 2 {
+            // Already at destination (defensive — pos == dest guard above
+            // should have caught this).
+            continue;
+        }
+
+        let next_pos = &path[1];
+
+        commands.trigger(StateChange {
+            entity,
+            new_state: State::Moving,
+        });
+
+        let move_event = VisibleEvent::MoveEvent {
+            src: *obj.pos,
+            dst: Position {
+                x: next_pos.0,
+                y: next_pos.1,
+            },
+        };
+
+        let move_map_event = map_events.new(obj.id.0, game_tick.0 + move_duration, move_event);
+
+        commands.entity(entity).insert(EventInProgress {
+            event_id: move_map_event.event_id,
+        });
+    }
+}
+
+// Watches for the moment a sailing merchant lands at landing_at (or returns
+// to trade_port) and fires the on-arrival side effects: restock, notice,
+// speech, and scheduling the next lifecycle phase events.
+//
+// Polls every 10 ticks (1 second) — finer granularity than the trade window
+// needs and cheap with at most one merchant per player.
+fn merchant_arrival_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    mut ids: ResMut<Ids>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    templates: Res<Templates>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    mut merchant_query: Query<(&Id, &mut Merchant, &Position, &mut Inventory)>,
+) {
+    if game_tick.0 % 10 != 0 {
+        return;
+    }
+
+    for (id, mut merchant, pos, mut inventory) in merchant_query.iter_mut() {
+        match merchant.sail_state {
+            MerchantSailState::SailingToLanding if *pos == merchant.landing_at => {
+                merchant.sail_state = MerchantSailState::AtLanding;
+
+                // Find the player this merchant serves. With one merchant per
+                // initial-encounter entry today, scan the map for a matching
+                // merchant_id; cheap (at most a handful of entries).
+                let player_id = initial_encounter_state
+                    .iter()
+                    .find(|(_, entry)| entry.merchant_id == id.0)
+                    .map(|(pid, _)| *pid);
+
+                // Refresh wanted-item list (Prices resource is left intact so
+                // supply/demand drift from prior trades persists across cycles).
+                merchant.wanted_items = MERCHANT_WANTED_SUBCLASSES
+                    .iter()
+                    .map(|s| WantedItem::new_by_subclass((*s).to_string()))
+                    .collect();
+
+                // Restock inventory: top up any item that's below its target qty.
+                for (item_name, target_qty) in MERCHANT_INVENTORY.iter() {
+                    let current = inventory
+                        .items
+                        .iter()
+                        .find(|i| i.name == *item_name)
+                        .map(|i| i.quantity)
+                        .unwrap_or(0);
+
+                    if current < *target_qty {
+                        inventory.new(
+                            ids.new_item_id(),
+                            (*item_name).to_string(),
+                            *target_qty - current,
+                            &templates.item_templates,
+                        );
+                    }
+                }
+
+                if let Some(player_id) = player_id {
+                    let notice = ResponsePacket::Notice {
+                        noticemsg: "A traveling merchant has set up a stall by the shore. Bring goods to trade — they will not stay for long.".to_string(),
+                        expiry: Some(8000),
+                    };
+                    send_to_client(player_id, notice, &clients);
+
+                    map_events.new(
+                        id.0,
+                        game_tick.0 + 4,
+                        VisibleEvent::SpeechEvent {
+                            speech: "Wares! Fresh wares from across the sea! Come trade before the tide turns!".to_string(),
+                            intensity: 4,
+                        },
+                    );
+
+                    let leaving_soon_id = ids.new_map_event_id();
+                    game_events.insert(
+                        leaving_soon_id,
+                        GameEvent {
+                            event_id: leaving_soon_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + MERCHANT_LEAVING_SOON_OFFSET,
+                            event_type: GameEventType::MerchantLeavingSoon {
+                                merchant_id: id.0,
+                                player_id,
+                            },
+                        },
+                    );
+                    let departure_id = ids.new_map_event_id();
+                    game_events.insert(
+                        departure_id,
+                        GameEvent {
+                            event_id: departure_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + MERCHANT_DEPARTURE_OFFSET,
+                            event_type: GameEventType::MerchantDeparture {
+                                merchant_id: id.0,
+                                player_id,
+                            },
+                        },
+                    );
+
+                    info!(
+                        "merchant_arrival_system: merchant {} arrived at landing for player {}",
+                        id.0, player_id
+                    );
+                } else {
+                    error!(
+                        "merchant_arrival_system: no player_id found for merchant {}",
+                        id.0
+                    );
+                }
+            }
+            MerchantSailState::SailingToEmpire if *pos == merchant.trade_port => {
+                merchant.sail_state = MerchantSailState::AtEmpire;
+
+                let player_id = initial_encounter_state
+                    .iter()
+                    .find(|(_, entry)| entry.merchant_id == id.0)
+                    .map(|(pid, _)| *pid);
+
+                if let Some(player_id) = player_id {
+                    // Schedule the next return cycle.
+                    let arrival_id = ids.new_map_event_id();
+                    game_events.insert(
+                        arrival_id,
+                        GameEvent {
+                            event_id: arrival_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + MERCHANT_RETURN_GAP,
+                            event_type: GameEventType::MerchantArrival {
+                                merchant_id: id.0,
+                                player_id,
+                            },
+                        },
+                    );
+
+                    info!(
+                        "merchant_arrival_system: merchant {} arrived at empire for player {}; next arrival at tick {}",
+                        id.0,
+                        player_id,
+                        game_tick.0 + MERCHANT_RETURN_GAP
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 }
 

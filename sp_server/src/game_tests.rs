@@ -1032,6 +1032,7 @@ fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
         phase1_unlock_tick: 2600,
         spider_unlock_tick: 3600,
         villager_event_scheduled: false,
+        merchant_id: 0,
     };
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,
