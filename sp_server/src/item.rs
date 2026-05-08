@@ -346,6 +346,13 @@ impl Inventory {
                     source_inventory.items.swap_remove(transfer_index);
                 }
             } else {
+                // Non-mergeable items (Weapon, Armor, Container — e.g. Bucket,
+                // Pick Axe, Sickle) still need their owner field updated, or
+                // the use_item / equip / etc. flows will reject the item with
+                // "Item not owned by player" because they look up the obj
+                // entity by `item.owner`.
+                item_to_transfer.owner = target_inventory.owner;
+
                 target_inventory.items.push(item_to_transfer);
                 source_inventory.items.swap_remove(transfer_index);
             }
