@@ -1,6 +1,7 @@
 
 import * as React from "react";
 import attackspanel from "ui_comp/attacksframe.png"
+import { isWideScreen } from "../config";
 
 const MAX_ATTACKS = 6;
 
@@ -55,7 +56,18 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       position: 'fixed'
     } as React.CSSProperties
 
-    const hintsStyle = {
+    const wide = isWideScreen();
+
+    const hintsStyle = (wide ? {
+      position: 'fixed',
+      bottom: 'calc(50% - 500px)',
+      left: 'calc(50% + 612px)',
+      zIndex: 6,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      alignItems: 'flex-start',
+    } : {
       position: 'fixed',
       bottom: '110px',
       left: '50%',
@@ -64,12 +76,21 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       display: 'flex',
       flexDirection: 'column',
       gap: '2px',
-    } as React.CSSProperties
+    }) as React.CSSProperties
 
-    const intentStyle = {
+    const intentStyle = (wide ? {
+      position: 'fixed',
+      bottom: 'calc(50% - 500px + 90px)',
+      left: 'calc(50% + 612px)',
+      zIndex: 6,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '2px',
+      alignItems: 'flex-start',
+    } : {
       ...hintsStyle,
       bottom: '145px',
-    } as React.CSSProperties
+    }) as React.CSSProperties
 
     const hintRowStyle = {
       display: 'flex',

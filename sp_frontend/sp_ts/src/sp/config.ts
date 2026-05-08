@@ -4,6 +4,28 @@ export const ART = '/static/priv/art'
 export const STAT_BAR_WIDTH = 124;
 export const STAT_BAR_HEIGHT = 14;
 export const LARGE_SCREEN_WIDTH = 1024;
+
+export const DESKTOP_CAMERA_ZOOM = 1.0;
+export const DESKTOP_CANVAS_WIDTH = 1200;
+export const DESKTOP_CANVAS_HEIGHT = 1000;
+export const WIDE_SCREEN_MIN = 1800;
+
+export function isWideScreen(): boolean {
+  if (typeof window === 'undefined') return false;
+  return isDesktop() && window.innerWidth >= WIDE_SCREEN_MIN;
+}
+
+export function isDesktop(): boolean {
+  if (typeof window === 'undefined') return false;
+  if ((window as any).__SP_DESKTOP__ === true) return true;
+  if (window.screen.width <= LARGE_SCREEN_WIDTH) return false;
+  if (window.screen.width === 1366 && window.screen.height === 1024) return false;
+  return true;
+}
+
+export function desktopCameraZoom(): number {
+  return isDesktop() ? DESKTOP_CAMERA_ZOOM : 1;
+}
 export const BUTTON_WIDTH = 50;
 export const TRIGGER_INVENTORY = 'inventory';
 export const TRIGGER_EQUIP = 'equip';

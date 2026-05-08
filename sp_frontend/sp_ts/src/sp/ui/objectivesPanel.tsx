@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Global } from "../global";
 import { NetworkEvent } from "../networkEvent";
+import { isWideScreen } from "../config";
 
 interface ObjectiveProgress {
   id: string;
@@ -220,7 +221,22 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       return null;
     }
 
-    const containerStyle: React.CSSProperties = {
+    const wide = isWideScreen();
+    const containerStyle: React.CSSProperties = wide ? {
+      position: 'fixed',
+      top: 'calc(50% - 500px)',
+      left: 'calc(50% + 612px)',
+      width: '290px',
+      maxHeight: '1000px',
+      overflowY: 'auto',
+      backgroundColor: 'rgba(8, 10, 12, 0.82)',
+      border: '1px solid rgba(201, 170, 113, 0.38)',
+      borderRadius: '4px',
+      padding: '9px 10px',
+      zIndex: 50,
+      pointerEvents: 'auto',
+      boxSizing: 'border-box',
+    } : {
       position: 'fixed',
       bottom: '145px',
       right: '12px',

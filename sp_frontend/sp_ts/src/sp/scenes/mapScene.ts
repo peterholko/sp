@@ -12,6 +12,7 @@ import { GameEvent } from '../gameEvent';
 import { NetworkEvent } from '../networkEvent';
 import { ObjectState } from '../objectState';
 import { TileState } from '../tileState';
+import { desktopCameraZoom } from '../config';
 
 export class MapScene extends Phaser.Scene {
 
@@ -141,6 +142,16 @@ export class MapScene extends Phaser.Scene {
 
   create(): void {
     console.log('Map Scene Create');
+
+    this.cameras.main.setZoom(desktopCameraZoom());
+    Global.gameEmitter.on(GameEvent.CAMERA_ZOOM, (data) => {
+      const duration = data.duration ?? 0;
+      if (duration > 0) {
+        this.cameras.main.zoomTo(data.zoom, duration, 'Sine.easeInOut');
+      } else {
+        this.cameras.main.setZoom(data.zoom);
+      }
+    }, this);
 
     this.base = this.add.container(0, 0);
     this.trans = this.add.container(0, 0);

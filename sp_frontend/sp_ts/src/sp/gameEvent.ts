@@ -53,4 +53,5 @@ export namespace GameEvent {
     export const ACCOUNT_SETUP_SKIP: string = 'ACCOUNT_SETUP_SKIP';
     export const LOGIN_SUBMIT: string = 'LOGIN_SUBMIT';
     export const LOGIN_CANCEL: string = 'LOGIN_CANCEL';
+    export const CAMERA_ZOOM: string = 'CAMERA_ZOOM';
 }

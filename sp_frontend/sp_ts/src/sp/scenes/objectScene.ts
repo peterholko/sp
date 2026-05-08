@@ -14,7 +14,7 @@ import { NetworkEvent } from '../networkEvent';
 import { ObjectState } from '../objectState';
 import { MultiImage } from '../multiImage';
 import { Network } from '../network';
-import { HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE, VILLAGER, HARVESTING, CRAFTING, GATHERING } from '../config';
+import { HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE, VILLAGER, HARVESTING, CRAFTING, GATHERING, desktopCameraZoom } from '../config';
 import { GameImage } from '../objects/gameImage';
 import { GameContainer } from '../objects/gameContainer';
 
@@ -93,6 +93,16 @@ export class ObjectScene extends Phaser.Scene {
 
   create(): void {
     console.log('Object Scene Create');
+
+    this.cameras.main.setZoom(desktopCameraZoom());
+    Global.gameEmitter.on(GameEvent.CAMERA_ZOOM, (data) => {
+      const duration = data.duration ?? 0;
+      if (duration > 0) {
+        this.cameras.main.zoomTo(data.zoom, duration, 'Sine.easeInOut');
+      } else {
+        this.cameras.main.setZoom(data.zoom);
+      }
+    }, this);
 
     var shadowBoltConfig = {
       key: 'shadowboltanim',

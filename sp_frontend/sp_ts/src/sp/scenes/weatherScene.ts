@@ -1,6 +1,8 @@
 import { Global } from "../global";
 import { NetworkEvent } from "../networkEvent";
+import { GameEvent } from "../gameEvent";
 import { Util } from "../util";
+import { desktopCameraZoom } from "../config";
 
 export class WeatherScene extends Phaser.Scene {
 
@@ -22,6 +24,16 @@ export class WeatherScene extends Phaser.Scene {
 
     create(): void {
         console.log('Weather Scene Create');
+
+        this.cameras.main.setZoom(desktopCameraZoom());
+        Global.gameEmitter.on(GameEvent.CAMERA_ZOOM, (data) => {
+            const duration = data.duration ?? 0;
+            if (duration > 0) {
+                this.cameras.main.zoomTo(data.zoom, duration, 'Sine.easeInOut');
+            } else {
+                this.cameras.main.setZoom(data.zoom);
+            }
+        }, this);
 
         //864,2592
         /* var snow = this.add.particles(864, 2592, 'snow', {

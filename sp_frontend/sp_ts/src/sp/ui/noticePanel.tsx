@@ -34,7 +34,7 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
 
   render() {
     const noticeStyle = {
-      bottom: '60px',
+      top: '20px',
       left: '50%',
       width: '315px',
       height: '67px',

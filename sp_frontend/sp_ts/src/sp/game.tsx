@@ -12,7 +12,7 @@ import { Global } from './global';
 import * as React from "react";
 import styles from "./app.module.css";
 
-import { GAME_HEIGHT, GAME_WIDTH } from "./config";
+import { GAME_HEIGHT, GAME_WIDTH, isDesktop, DESKTOP_CANVAS_WIDTH, DESKTOP_CANVAS_HEIGHT } from "./config";
 import { GameEvent } from "./gameEvent";
 
 
@@ -27,11 +27,12 @@ document.addEventListener("visibilitychange", function () {
 
 export default class Game extends React.Component {
   componentDidMount() {
+    const desktop = isDesktop();
     const config: any = {
       title: "Siege Perilous",
       version: "0.0.1",
-      width: window.innerWidth,
-      height: window.innerHeight,
+      width: desktop ? DESKTOP_CANVAS_WIDTH : window.innerWidth,
+      height: desktop ? DESKTOP_CANVAS_HEIGHT : window.innerHeight,
       type: Phaser.AUTO,
       parent: "game",
       scene: [MapScene, ObjectScene, WeatherScene],
@@ -55,7 +56,8 @@ export default class Game extends React.Component {
   }
 
   public render() {
-    return <div id="game" className={styles.game} />;
+    const className = isDesktop() ? `${styles.game} ${styles.gameDesktop}` : styles.game;
+    return <div id="game" className={className} />;
   }
 }
 

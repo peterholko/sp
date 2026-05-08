@@ -78,6 +78,7 @@ import TrueDeathPanel from './ui/trueDeathPanel';
 import RefinePanel from './ui/refinePanel';
 import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
+import ZoomButton from './ui/zoomButton';
 import ObjectivesPanel from './ui/objectivesPanel';
 
 interface UIState {
@@ -186,6 +187,7 @@ interface UIState {
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
   combatState: any,
+  inCombatZoom: boolean,
 }
 
 export default class UI extends React.Component<any, UIState> {
@@ -300,6 +302,7 @@ export default class UI extends React.Component<any, UIState> {
       fatigueStatus: '',
       infoRefineItemTriggered: false,
       combatState: null,
+      inCombatZoom: false,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -801,12 +804,24 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ villagerData: newVillagerData });
     }
 
-
+    if (message.target_id == Global.heroId && !this.state.inCombatZoom) {
+      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
+      this.setState({ inCombatZoom: true });
+    }
   }
 
   handleCombatState(message) {
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
+    const inCombat = attackHistory.length > 0 || hasComboHint;
+
+    if (inCombat && !this.state.inCombatZoom) {
+      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
+      this.setState({ inCombatZoom: true });
+    } else if (!inCombat && this.state.inCombatZoom) {
+      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 1, duration: 350 });
+      this.setState({ inCombatZoom: false });
+    }
 
     this.setState({
       combatState: message,
@@ -1685,6 +1700,8 @@ export default class UI extends React.Component<any, UIState> {
     const abilityHints = this.getAbilityHints();
     return (
       <div id="ui" className={styles.ui}>
+
+        <ZoomButton />
 
         {!this.state.hideLoadingPanel &&
           <LoadingPanel errmsg={Global.accountName ? `Loading ${Global.accountName}...` : "Loading..."} />}
