@@ -150,7 +150,10 @@ export class ObjectScene extends Phaser.Scene {
   processImageDefMessage(message) {
     console.log('image_def')
 
-    if (message.result != '404') {
+    // The server places `result` on `data` (not on the packet root) when the
+    // tileset entry is missing — short-circuit cleanly so we don't try to
+    // load a spritesheet with undefined frame dimensions.
+    if (message.data?.result !== '404') {
       console.log(message.name);
       console.log(message.data);
 

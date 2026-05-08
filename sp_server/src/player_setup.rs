@@ -9,8 +9,8 @@ use crate::effect::Effect;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{
-    InitialEncounterEntry, InitialEncounterState, Merchant, Monolith, ObjQuery, PlayerIntroEntry,
-    PlayerIntroState, SpawnPositions,
+    InitialEncounterEntry, InitialEncounterState, Merchant, MerchantSailState, Monolith, ObjQuery,
+    PlayerIntroEntry, PlayerIntroState, SpawnPositions,
 };
 use crate::item::{Inventory, Slot};
 use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
@@ -923,107 +923,69 @@ pub fn new(
 
     let merchant_id = merchant.id.0;
 
-    let wanted_copper_ore = WantedItem::new_by_subclass("Copper Ore".to_string());
-    let wanted_maple_log = WantedItem::new_by_subclass("Maple Log".to_string());
-    let wanted_maple_timber = WantedItem::new_by_subclass("Maple Timber".to_string());
+    // Wanted items keyed by subclass so any biome/colour variant matches via the
+    // name → subclass → class fallthrough in trade.rs::find_buy_price.
+    let wanted_items = vec![
+        WantedItem::new_by_subclass("Copper Ore".to_string()),
+        WantedItem::new_by_subclass("Iron Ore".to_string()),
+        WantedItem::new_by_subclass("Copper Ingot".to_string()),
+        WantedItem::new_by_subclass("Iron Ingot".to_string()),
+        WantedItem::new_by_subclass("Maple Log".to_string()),
+        WantedItem::new_by_subclass("Maple Timber".to_string()),
+        WantedItem::new_by_subclass("Raw Hide".to_string()),
+        WantedItem::new_by_subclass("Stiff Leather".to_string()),
+        WantedItem::new_by_subclass("Cooked Meat".to_string()),
+        WantedItem::new_by_subclass("Honeybell Cloth".to_string()),
+    ];
 
     let merchant_component = Merchant {
         trade_port: empire_pos,
         landing_at: landing_pos,
-        wanted_items: vec![wanted_copper_ore, wanted_maple_log, wanted_maple_timber],
+        wanted_items,
+        sail_state: MerchantSailState::AtEmpire,
     };
 
     let merchant_template_name = "Meager Merchant".to_string();
 
-    // Merchant Items
-    merchant.inventory.new(
+    // Merchant inventory — the canonical list is in game.rs::MERCHANT_INVENTORY
+    // and is reused by the restock path on each return trip.
+    for (item_name, qty) in crate::game::MERCHANT_INVENTORY.iter() {
+        merchant.inventory.new(
+            ids.new_item_id(),
+            (*item_name).to_string(),
+            *qty,
+            &templates.item_templates,
+        );
+    }
+
+    // Spawn the merchant offshore at empire_pos. They stay there (out of the
+    // player's viewshed) until MerchantArrival fires, scheduled from the
+    // SpawnVillager handler in game.rs ~3 minutes after the villager rescue.
+    // The big-brain Thinker / Transport sail-in is intentionally omitted for
+    // this slice — see plan note "Out of scope".
+    let viewshed_range = Obj::set_viewshed_range(
         merchant_id,
-        "Gold Coins".to_string(),
-        500,
-        &templates.item_templates,
-    );
-    merchant.inventory.new(
-        merchant_id,
-        "Yurt Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    merchant.inventory.new(
-        merchant_id,
-        "Training Pick Axe".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    merchant.inventory.new(
-        merchant_id,
-        "Lumbercamp Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    merchant.inventory.new(
-        merchant_id,
-        "Quarry Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    merchant.inventory.new(
-        merchant_id,
-        "Trapper Deed".to_string(),
-        1,
-        &templates.item_templates,
+        merchant_template_name.clone(),
+        game_tick.0,
+        &merchant.inventory,
+        templates,
+        0.0,
     );
 
-    let route = vec![empire_pos, landing_pos];
+    let merchant_entity_id = commands
+        .spawn((
+            merchant,
+            Viewshed {
+                range: viewshed_range,
+            },
+            merchant_component,
+        ))
+        .id();
 
-    let move_to_and_idle = Steps::build()
-        .label("MoveToPos and Idle")
-        // Set destination will set the move to pos
-        .step(SetDestination)
-        .step(MoveToPos)
-        .step(Idle {
-            start_time: 0,
-            duration: 600,
-        });
-
-    /*let merchant_entity_id = commands
-    .spawn((
-        merchant,
-        Viewshed {
-            range: Obj::set_viewshed_range(
-                merchant_id,
-                merchant_template_name,
-                game_tick.0,
-                &items,
-                &templates,
-                0.0,
-            ),
-        },
-        merchant_component,
-        Transport {
-            route: route,
-            next_stop: 0,
-            hauling: vec![],
-        },
-        Destination {
-            // Set destination will set the move to pos
-            pos: Position { x: -1, y: -1 },
-        },
-        Thinker::build()
-            .label("Merchant")
-            .picker(Highest)
-            .when(MerchantScorer, move_to_and_idle),
-    ))
-    .id();*/
-
-    /*ids.new_obj(merchant_id, merchant_player_id);
+    ids.new_obj(merchant_id, merchant_player_id);
     entity_map.new_obj(merchant_id, merchant_entity_id);
-    debug!("Inserting merchant entity_map: {:?}", entity_map);
 
-    map_events.new(
-        merchant_id,
-        game_tick.0 + 1,
-        VisibleEvent::NewObjEvent { new_player: false },
-    );*/
+    map_events.new(merchant_id, game_tick.0 + 1, VisibleEvent::NewObjEvent);
 
     /*let villager2 = Obj {
         id: Id(villager_id2),
@@ -1267,6 +1229,7 @@ pub fn new(
             phase1_unlock_tick: game_tick.0 + 2600,
             spider_unlock_tick: game_tick.0 + 3600,
             villager_event_scheduled: false,
+            merchant_id,
         },
     );
 

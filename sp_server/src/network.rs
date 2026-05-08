@@ -2214,13 +2214,31 @@ async fn handle_connection(
                                                 let mut name_stripped = name.clone();
                                                 let raw_name = name;
 
-                                                if name_stripped.chars().last().unwrap().is_numeric() {
+                                                // Guard against empty name; only strip a trailing digit when present
+                                                if name_stripped
+                                                    .chars()
+                                                    .last()
+                                                    .map(|c| c.is_numeric())
+                                                    .unwrap_or(false)
+                                                {
                                                     name_stripped.pop();
                                                 }
 
-                                                ResponsePacket::ImageDef{
-                                                    name: raw_name,
-                                                    data: TILESET.get(&name_stripped).unwrap().clone()
+                                                match TILESET.get(&name_stripped) {
+                                                    Some(value) => ResponsePacket::ImageDef {
+                                                        name: raw_name,
+                                                        data: value.clone(),
+                                                    },
+                                                    None => {
+                                                        eprintln!(
+                                                            "ImageDef: missing tileset for '{}' (requested as '{}')",
+                                                            name_stripped, raw_name
+                                                        );
+                                                        ResponsePacket::ImageDef {
+                                                            name: raw_name,
+                                                            data: serde_json::json!({ "result": "404" }),
+                                                        }
+                                                    }
                                                 }
                                             }
                                             NetworkPacket::Move{x, y} => {
