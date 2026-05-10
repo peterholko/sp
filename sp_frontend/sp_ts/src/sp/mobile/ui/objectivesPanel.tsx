@@ -1,7 +1,6 @@
 import * as React from "react";
 import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
-import { isWideScreen } from "../../core/config";
 
 interface ObjectiveProgress {
   id: string;
@@ -221,13 +220,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       return null;
     }
 
-    const wide = isWideScreen();
-    const containerStyle: React.CSSProperties = wide ? {
+    const containerStyle: React.CSSProperties = {
       position: 'fixed',
-      top: 'calc(50% - 500px)',
-      left: 'calc(50% + 612px)',
-      width: '290px',
-      maxHeight: '1000px',
+      bottom: 'calc(145px + env(safe-area-inset-bottom, 0px))',
+      right: 'calc(8px + env(safe-area-inset-right, 0px))',
+      left: 'calc(8px + env(safe-area-inset-left, 0px))',
+      maxWidth: '290px',
+      marginLeft: 'auto',
+      maxHeight: 'calc(100vh - 220px)',
       overflowY: 'auto',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
       border: '1px solid rgba(201, 170, 113, 0.38)',
@@ -235,19 +235,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       padding: '9px 10px',
       zIndex: 50,
       pointerEvents: 'auto',
-      boxSizing: 'border-box',
-    } : {
-      position: 'fixed',
-      bottom: '145px',
-      right: '12px',
-      width: '290px',
-      maxWidth: 'calc(100vw - 24px)',
-      backgroundColor: 'rgba(8, 10, 12, 0.82)',
-      border: '1px solid rgba(201, 170, 113, 0.38)',
-      borderRadius: '4px',
-      padding: '9px 10px',
-      zIndex: 50,
-      pointerEvents: 'none',
       boxSizing: 'border-box',
     };
 

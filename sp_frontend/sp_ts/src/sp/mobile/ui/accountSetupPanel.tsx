@@ -1,5 +1,4 @@
 import * as React from "react";
-import widepanel from "ui_comp/widepanel.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
@@ -78,122 +77,155 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
   render() {
     const errorMessage = this.props.errorMessage || this.state.validationError;
 
-    const panelStyle = {
-      top: '50%',
-      left: '50%',
-      width: '667px',
-      height: '375px',
-      marginTop: '-187px',
-      marginLeft: '-333px',
+    const overlayStyle: React.CSSProperties = {
       position: 'fixed',
+      top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0, 0, 0, 0.7)',
       zIndex: Global.zIndexManager.getTop() + 1,
-    } as React.CSSProperties;
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 'calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))',
+      boxSizing: 'border-box',
+      overflowY: 'auto',
+    };
 
-    const bgStyle = {
-      position: 'fixed',
-    } as React.CSSProperties;
+    const cardStyle: React.CSSProperties = {
+      width: '100%',
+      maxWidth: '400px',
+      background: '#1c1814',
+      border: '1px solid #5a4a38',
+      borderRadius: '8px',
+      padding: '24px 20px',
+      boxSizing: 'border-box',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '14px',
+    };
 
-    const titleStyle = {
-      transform: 'translate(20px, 30px)',
-      position: 'fixed',
+    const titleStyle: React.CSSProperties = {
       textAlign: 'center',
       color: '#ea4c4c',
       fontFamily: 'Cinzel',
       fontSize: '20px',
-      width: '620px',
       letterSpacing: '0.12em',
       textTransform: 'uppercase',
-    } as React.CSSProperties;
+      margin: 0,
+    };
 
-    const descStyle = {
-      transform: 'translate(20px, 70px)',
-      position: 'fixed',
+    const descStyle: React.CSSProperties = {
       textAlign: 'center',
       color: '#FFFFF0',
       fontFamily: 'Cinzel',
       fontSize: '13px',
-      width: '620px',
-    } as React.CSSProperties;
+      lineHeight: 1.4,
+      margin: 0,
+    };
 
-    const labelStyle = {
-      position: 'fixed',
-      textAlign: 'right',
+    const fieldStyle: React.CSSProperties = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+    };
+
+    const labelStyle: React.CSSProperties = {
       color: '#b4bcc4',
       fontFamily: 'Cinzel',
       fontSize: '14px',
-      width: '200px',
-    } as React.CSSProperties;
+    };
 
-    const inputStyle = {
+    const inputStyle: React.CSSProperties = {
       backgroundColor: '#363b41',
-      borderRadius: '3px',
-      color: '#b4bcc4',
-      display: 'block',
-      height: '35px',
-      lineHeight: '35px',
-      textAlign: 'center',
-      width: '200px',
+      borderRadius: '4px',
+      color: '#ffffff',
+      height: '48px',
+      padding: '0 12px',
+      width: '100%',
       border: 'none',
-      fontSize: '14px',
+      fontSize: '16px',
       fontFamily: 'Open Sans, Arial, sans-serif',
-    } as React.CSSProperties;
+      boxSizing: 'border-box',
+    };
 
-    const nameLabel = { ...labelStyle, transform: 'translate(100px, 115px)' } as React.CSSProperties;
-    const nameInput = { ...inputStyle, transform: 'translate(320px, 108px)', position: 'fixed' } as React.CSSProperties;
-
-    const passLabel = { ...labelStyle, transform: 'translate(100px, 165px)' } as React.CSSProperties;
-    const passInput = { ...inputStyle, transform: 'translate(320px, 158px)', position: 'fixed' } as React.CSSProperties;
-
-    const confirmLabel = { ...labelStyle, transform: 'translate(100px, 215px)' } as React.CSSProperties;
-    const confirmInput = { ...inputStyle, transform: 'translate(320px, 208px)', position: 'fixed' } as React.CSSProperties;
-
-    const errorStyle = {
-      transform: 'translate(20px, 255px)',
-      position: 'fixed',
+    const errorStyle: React.CSSProperties = {
       textAlign: 'center',
-      color: 'red',
-      fontSize: '12px',
+      color: '#ea4c4c',
+      fontSize: '13px',
       fontWeight: 'bold',
-      width: '620px',
-    } as React.CSSProperties;
+      margin: 0,
+    };
 
-    const submitStyle = {
-      transform: 'translate(308px, 285px)',
-      position: 'fixed',
+    const submitContainer: React.CSSProperties = {
+      display: 'flex',
+      justifyContent: 'center',
+      paddingTop: '4px',
+    };
+
+    const submitStyle: React.CSSProperties = {
       cursor: 'pointer',
-    } as React.CSSProperties;
+    };
 
-    const skipStyle = {
-      transform: 'translate(20px, 340px)',
-      position: 'fixed',
+    const skipStyle: React.CSSProperties = {
       textAlign: 'center',
-      color: '#606468',
+      color: '#b4bcc4',
       fontFamily: 'Cinzel',
-      fontSize: '12px',
-      width: '620px',
+      fontSize: '14px',
       cursor: 'pointer',
       textDecoration: 'underline',
-    } as React.CSSProperties;
+      padding: '12px',
+      margin: 0,
+      minHeight: '44px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    };
 
     return (
-      <div style={panelStyle}>
-        <img src={widepanel} style={bgStyle} />
-        <span style={titleStyle}>Secure Your Account</span>
-        <span style={descStyle}>Choose an account name and password to secure your progress.</span>
+      <div style={overlayStyle}>
+        <div style={cardStyle}>
+          <h2 style={titleStyle}>Secure Your Account</h2>
+          <p style={descStyle}>Choose an account name and password to secure your progress.</p>
 
-        <span style={nameLabel}>Account Name:</span>
-        <input style={nameInput} type="text" value={this.state.accountName} onChange={this.handleAccountNameChange} />
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Account Name</label>
+            <input
+              style={inputStyle}
+              type="text"
+              value={this.state.accountName}
+              onChange={this.handleAccountNameChange}
+              autoCapitalize="none"
+              autoCorrect="off"
+            />
+          </div>
 
-        <span style={passLabel}>Password:</span>
-        <input style={passInput} type="password" value={this.state.password} onChange={this.handlePasswordChange} />
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Password</label>
+            <input
+              style={inputStyle}
+              type="password"
+              value={this.state.password}
+              onChange={this.handlePasswordChange}
+            />
+          </div>
 
-        <span style={confirmLabel}>Confirm Password:</span>
-        <input style={confirmInput} type="password" value={this.state.confirmPassword} onChange={this.handleConfirmPasswordChange} />
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Confirm Password</label>
+            <input
+              style={inputStyle}
+              type="password"
+              value={this.state.confirmPassword}
+              onChange={this.handleConfirmPasswordChange}
+            />
+          </div>
 
-        {errorMessage && <span style={errorStyle}>{errorMessage}</span>}
+          {errorMessage && <p style={errorStyle}>{errorMessage}</p>}
 
-        <img src={okbutton} style={submitStyle} onClick={this.handleSubmit} />
-        <span style={skipStyle} onClick={this.handleSkip}>Skip for now</span>
+          <div style={submitContainer}>
+            <img src={okbutton} style={submitStyle} onClick={this.handleSubmit} alt="Submit" />
+          </div>
+
+          <span style={skipStyle} onClick={this.handleSkip}>Skip for now</span>
+        </div>
       </div>
     );
   }
