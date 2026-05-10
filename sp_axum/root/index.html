@@ -24,17 +24,19 @@
 
   </body>
     <script>
-      if(window.screen.width > 1024) {
-        //If iPad Pro
-        if(window.screen.width == 1366 && window.screen.height == 1024) {
-          var viewport = document.querySelector("meta[name=viewport]");
-          viewport.setAttribute('content', 'width=device-width, initial-scale=1.333, minimum-scale=1.333, maximum-scale=1.333, user-scalable=0');
-        } else {
-          window.__SP_DESKTOP__ = true;
+      (function () {
+        var w = window.screen.width, h = window.screen.height;
+        // iPad Pro (1366x1024) keeps mobile bundle but uses scaled viewport.
+        var isIpadPro = (w === 1366 && h === 1024);
+        var isMobile = (w <= 1024) || isIpadPro;
+        if (!isMobile) window.__SP_DESKTOP__ = true;
+        if (isIpadPro) {
+          var v = document.querySelector("meta[name=viewport]");
+          v.setAttribute('content', 'width=device-width, initial-scale=1.333, minimum-scale=1.333, maximum-scale=1.333, user-scalable=0');
         }
-      }
-      var script = document.createElement("script");
-      script.src = "/sp2.js";
-      document.head.appendChild(script);
+        var s = document.createElement("script");
+        s.src = isMobile ? "/sp2.mobile.js" : "/sp2.desktop.js";
+        document.head.appendChild(s);
+      })();
     </script>
 </html> 
