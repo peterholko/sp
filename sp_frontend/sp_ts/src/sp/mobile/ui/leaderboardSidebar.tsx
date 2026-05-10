@@ -47,10 +47,12 @@ export default class LeaderboardSidebar extends React.Component<Props, State> {
 
     const containerStyle: React.CSSProperties = {
       position: 'fixed',
-      top: 'calc(50% - 500px)',
-      right: 'calc(50% + 612px)',
-      width: '290px',
-      maxHeight: '1000px',
+      top: 'calc(8px + env(safe-area-inset-top, 0px))',
+      right: 'calc(8px + env(safe-area-inset-right, 0px))',
+      left: 'calc(8px + env(safe-area-inset-left, 0px))',
+      maxWidth: '290px',
+      marginLeft: 'auto',
+      maxHeight: 'calc(100vh - 220px)',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
       border: '1px solid rgba(201, 170, 113, 0.38)',
       borderRadius: '4px',
@@ -60,6 +62,7 @@ export default class LeaderboardSidebar extends React.Component<Props, State> {
       boxSizing: 'border-box',
       display: 'flex',
       flexDirection: 'column',
+      overflowY: 'auto',
     };
 
     const titleStyle: React.CSSProperties = {

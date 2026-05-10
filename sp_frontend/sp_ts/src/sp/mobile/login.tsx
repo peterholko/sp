@@ -18,9 +18,6 @@ import ErrorPanel from "./ui/errorPanel";
 import AccountSetupPanel from "./ui/accountSetupPanel";
 import { GameEvent } from "../core/gameEvent";
 import TrueDeathPanel from "./ui/trueDeathPanel";
-import LeaderboardSidebar from "./ui/leaderboardSidebar";
-import { isDesktop, isWideScreen } from "../core/config";
-import appStyles from "./app.module.css";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
@@ -955,27 +952,8 @@ export default class LoginControl extends React.Component<any, any> {
 
         {!this.state.hideGame && (
           <div id="gameContainer" className="gameContainer">
-            <div className={isDesktop() ? appStyles.uiContainerDesktop : ''}>
-              <UI />
-            </div>
+            <UI />
             <Game />
-            {isWideScreen() && <LeaderboardSidebar entries={this.state.leaderboardEntries} />}
-            {isDesktop() && typeof window !== 'undefined' && window.innerHeight > 1150 && (
-              <img
-                src={logo}
-                style={{
-                  position: 'fixed',
-                  top: '8px',
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  height: 'calc((100vh - 1000px) / 2 - 16px)',
-                  width: 'auto',
-                  maxWidth: '1200px',
-                  pointerEvents: 'none',
-                  zIndex: 2,
-                }}
-              />
-            )}
           </div>
         )
         }

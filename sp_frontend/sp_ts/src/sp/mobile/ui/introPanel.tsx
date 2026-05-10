@@ -1,5 +1,4 @@
 import * as React from "react";
-import widepanel from "ui_comp/widepanel.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
@@ -8,7 +7,6 @@ interface IntroProps {
 }
 
 interface IntroState {
-  windowHeight: number;
   currentPanel: number;
 }
 
@@ -17,24 +15,10 @@ export default class IntroPanel extends React.Component<IntroProps, IntroState> 
     super(props);
 
     this.state = {
-      windowHeight: window.innerHeight,
       currentPanel: 0,
     };
 
     this.handleOkClick = this.handleOkClick.bind(this);
-    this.updateWindowHeight = this.updateWindowHeight.bind(this);
-  }
-
-  componentDidMount() {
-    window.addEventListener("resize", this.updateWindowHeight);
-  }
-
-  componentWillUnmount() {
-    window.removeEventListener("resize", this.updateWindowHeight);
-  }
-
-  updateWindowHeight() {
-    this.setState({ windowHeight: window.innerHeight });
   }
 
   handleOkClick() {
@@ -59,59 +43,60 @@ The wilderness here is unforgiving.`,
 
     const introText = panels[this.state.currentPanel];
 
-    const introStyle = {
-      top: "50%",
-      left: "50%",
-      width: "667px",
-      height: "375px",
-      marginTop: "-193px",
-      marginLeft: "-333px",
-      position: "fixed",
+    const overlayStyle: React.CSSProperties = {
+      position: 'fixed',
+      top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(0, 0, 0, 0.85)',
       zIndex: 20,
-    } as React.CSSProperties;
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 'calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))',
+      boxSizing: 'border-box',
+      overflowY: 'auto',
+    };
 
-    const introPanelStyle = {
-      position: "fixed",
-    } as React.CSSProperties;
+    const cardStyle: React.CSSProperties = {
+      width: '100%',
+      maxWidth: '400px',
+      background: '#1c1814',
+      border: '1px solid #5a4a38',
+      borderRadius: '8px',
+      padding: '24px 20px',
+      boxSizing: 'border-box',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: '20px',
+    };
 
-    const spanNameStyle = {
-      transform: "translate(20px, 180px)",
-      position: "fixed",
-      textAlign: "center",
-      color: "white",
-      fontFamily: "Cinzel",
-      fontSize: "14px",
-      width: "620px",
-      whiteSpace: "pre-wrap",
-    } as React.CSSProperties;
+    const shipwreckStyle: React.CSSProperties = {
+      width: '100%',
+      maxWidth: '275px',
+      height: 'auto',
+    };
 
-    const introShipwreckStyle = {
-      transform: "translate(200px, 20px)",
-      position: "fixed",
-      width: "275px",
-    } as React.CSSProperties;
+    const textStyle: React.CSSProperties = {
+      textAlign: 'center',
+      color: 'white',
+      fontFamily: 'Cinzel',
+      fontSize: '14px',
+      lineHeight: 1.5,
+      whiteSpace: 'pre-wrap',
+      margin: 0,
+    };
 
-
-    let okButtonStyle;
-
-    if (this.state.windowHeight < 400) {
-      okButtonStyle = {
-        transform: `translate(425px, 310px)`,
-        position: "fixed",
-      } as React.CSSProperties;
-    } else {
-      okButtonStyle = {
-      transform: `translate(307px, 350px)`,
-      position: "fixed",
-    } as React.CSSProperties;
-  }
+    const submitStyle: React.CSSProperties = {
+      cursor: 'pointer',
+    };
 
     return (
-      <div style={introStyle}>
-        <img src={widepanel} style={introPanelStyle} />
-        <img src={"/static/art/ui/intro_shipwreck.png"} style={introShipwreckStyle} />
-        <span style={spanNameStyle}>{introText}</span>
-        <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick} />
+      <div style={overlayStyle}>
+        <div style={cardStyle}>
+          <img src={"/static/art/ui/intro_shipwreck.png"} style={shipwreckStyle} alt="Shipwreck" />
+          <p style={textStyle}>{introText}</p>
+          <img src={okbutton} style={submitStyle} onClick={this.handleOkClick} alt="Continue" />
+        </div>
       </div>
     );
   }

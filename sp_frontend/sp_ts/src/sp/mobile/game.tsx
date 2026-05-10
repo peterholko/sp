@@ -12,7 +12,6 @@ import { Global } from '../core/global';
 import * as React from "react";
 import styles from "./app.module.css";
 
-import { GAME_HEIGHT, GAME_WIDTH, isDesktop, DESKTOP_CANVAS_WIDTH, DESKTOP_CANVAS_HEIGHT, getDesktopCanvasSize } from "../core/config";
 import { GameEvent } from "../core/gameEvent";
 
 
@@ -27,17 +26,11 @@ document.addEventListener("visibilitychange", function () {
 
 export default class Game extends React.Component {
   componentDidMount() {
-    const desktop = isDesktop();
-    const { width: dw, height: dh } = getDesktopCanvasSize();
-    if (desktop) {
-      document.documentElement.style.setProperty('--sp-canvas-w', dw + 'px');
-      document.documentElement.style.setProperty('--sp-canvas-h', dh + 'px');
-    }
     const config: any = {
       title: "Siege Perilous",
       version: "0.0.1",
-      width: desktop ? dw : window.innerWidth,
-      height: desktop ? dh : window.innerHeight,
+      width: window.innerWidth,
+      height: window.innerHeight,
       type: Phaser.AUTO,
       parent: "game",
       scene: [MapScene, ObjectScene, WeatherScene],
@@ -61,17 +54,6 @@ export default class Game extends React.Component {
   }
 
   public render() {
-    const className = isDesktop() ? `${styles.game} ${styles.gameDesktop}` : styles.game;
-    return <div id="game" className={className} />;
+    return <div id="game" className={styles.game} />;
   }
 }
-
-/*export function getTileAt(hexX, hexY) {
-  var key = hexX + '_' + hexY;
-
-  if (key in Global.tileStates) {
-    return Global.tileStates[key];
-  } else {
-    return false;
-  }
-}*/

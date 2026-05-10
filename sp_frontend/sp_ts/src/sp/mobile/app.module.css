@@ -1,4 +1,3 @@
-
 .game {
   position: fixed;
   margin: 0 auto;
@@ -7,36 +6,9 @@
   top: 0;
 }
 
-
-
-canvas{
+canvas {
   position: fixed;
   z-index: 0;
   left: 0;
   top: 0;
-}
-
-.gameDesktop > canvas {
-  left: 50%;
-  top: 50%;
-  margin-left: 0;
-  margin-top: 0;
-  transform: translate(-50%, -50%);
-  outline: 2px solid #3a3128;
-  box-shadow: 0 0 0 1px #5a4a38, 0 12px 40px rgba(0, 0, 0, 0.7);
-}
-
-.uiContainerDesktop {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  width: var(--sp-canvas-w, 1200px);
-  height: var(--sp-canvas-h, 1000px);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-  z-index: 1;
-}
-
-.uiContainerDesktop > * {
-  pointer-events: auto;
 }
