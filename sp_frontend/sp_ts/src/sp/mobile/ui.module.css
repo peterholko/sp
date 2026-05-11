@@ -68,8 +68,7 @@
 
 .combobutton {
   bottom: 10px;
-  left: 50%;
-  margin-left: -200px;
+  left: calc(8px + env(safe-area-inset-left, 0px));
   position: fixed;
 }
 
@@ -116,25 +115,31 @@
 }
 
 .abilitybar {
-  bottom: 64px;
-  left: 50%;
-  margin-left: -150px;
+  bottom: 70px;
+  left: calc(8px + env(safe-area-inset-left, 0px));
+  right: calc(8px + env(safe-area-inset-right, 0px));
   position: fixed;
   z-index: 4;
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .abilitybutton {
+  flex: 0 0 auto;
   min-width: 92px;
-  height: 30px;
+  min-height: 44px;
+  padding: 4px 10px;
   border: 1px solid #8a734d;
   border-radius: 3px;
   background: #25282b;
   color: #f3ead7;
   font-family: Cinzel, serif;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .abilitybutton:disabled {
