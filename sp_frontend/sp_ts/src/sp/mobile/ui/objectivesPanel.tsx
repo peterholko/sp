@@ -45,6 +45,7 @@ interface ObjectivesState {
   objectiveState: any;
   threatState: any;
   discoveryEvent: any;
+  expanded: boolean;
 }
 
 const severityRank = {
@@ -67,7 +68,13 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       objectiveState: null,
       threatState: null,
       discoveryEvent: null,
+      expanded: false,
     };
+    this.toggleExpanded = this.toggleExpanded.bind(this);
+  }
+
+  toggleExpanded() {
+    this.setState({ expanded: !this.state.expanded });
   }
 
   componentDidMount() {
@@ -220,22 +227,49 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       return null;
     }
 
+    const expanded = this.state.expanded;
+
     const containerStyle: React.CSSProperties = {
       position: 'fixed',
       bottom: 'calc(145px + env(safe-area-inset-bottom, 0px))',
       right: 'calc(8px + env(safe-area-inset-right, 0px))',
-      left: 'calc(8px + env(safe-area-inset-left, 0px))',
       maxWidth: '290px',
-      marginLeft: 'auto',
-      maxHeight: 'calc(100vh - 220px)',
-      overflowY: 'auto',
+      maxHeight: expanded ? 'calc(100vh - 220px)' : undefined,
+      overflowY: expanded ? 'auto' : 'visible',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
       border: '1px solid rgba(201, 170, 113, 0.38)',
       borderRadius: '4px',
-      padding: '9px 10px',
       zIndex: 50,
       pointerEvents: 'auto',
       boxSizing: 'border-box',
+    };
+
+    const headerStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '8px',
+      color: '#c9aa71',
+      fontFamily: 'Verdana',
+      fontSize: '11px',
+      fontWeight: 'bold',
+      textTransform: 'uppercase',
+      letterSpacing: 0,
+      padding: '12px 12px',
+      minHeight: '44px',
+      boxSizing: 'border-box',
+      cursor: 'pointer',
+      userSelect: 'none',
+    };
+
+    const chevronStyle: React.CSSProperties = {
+      color: '#c9aa71',
+      fontSize: '12px',
+      lineHeight: 1,
+    };
+
+    const bodyStylePanel: React.CSSProperties = {
+      padding: '0 10px 9px',
     };
 
     const titleStyle: React.CSSProperties = {
@@ -308,64 +342,76 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     return (
       <div style={containerStyle}>
-        <div style={titleStyle}>Survival Thread</div>
-
-        {activeObjective &&
-          <div>
-            <div style={categoryStyle}>{activeObjective.category}</div>
-            <div style={activeTitleStyle}>{activeObjective.title}</div>
-            <div style={bodyStyle}>{activeObjective.action_hint}</div>
-            <div style={labelStyle}>Lesson: {activeObjective.lesson}</div>
-            <div style={labelStyle}>Payoff: {activeObjective.reward}</div>
-            {this.renderProgress(activeObjective, labelStyle)}
-          </div>}
-
-        <div style={sectionStyle}>
-          {objectives.map(obj => (
-            <div key={obj.id} style={objectiveRowStyle(obj.state)}>
-              <span>{obj.title}</span>
-              <span>{obj.state == 'complete' ? 'Done' : obj.state == 'active' ? 'Next' : 'Later'}</span>
-            </div>
-          ))}
+        <div
+          style={headerStyle}
+          onClick={this.toggleExpanded}
+          role="button"
+          aria-expanded={expanded}
+        >
+          <span>Survival Thread</span>
+          <span style={chevronStyle} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
         </div>
 
-        {threatState &&
-          <div style={sectionStyle}>
-            <div style={categoryStyle}>Threat Pressure: {threatState.pressure_level}</div>
-            <div style={bodyStyle}>Day {threatState.day}, {threatState.phase}. {threatState.next_night_warning}</div>
-            {risksToShow.map(risk => (
-              <div key={risk.id} style={labelStyle}>
-                <span style={{ color: riskColor(risk.severity), fontWeight: 'bold' }}>{risk.severity.toUpperCase()}</span>
-                {' '}{risk.label}
-                {typeof risk.current == 'number' && typeof risk.threshold == 'number' &&
-                  <span> ({risk.current}/{risk.threshold})</span>}
-                <div>{risk.counter_hint}</div>
-              </div>
-            ))}
-            {legendaryThreats.map(threat => (
-              <div key={threat.name} style={labelStyle}>
-                <span style={{ color: threat.status == 'defeated' ? '#8fbf88' : '#ffb36b', fontWeight: 'bold' }}>
-                  {threat.status.toUpperCase()}
-                </span>
-                {' '}{threat.name}
-                {threat.days_active > 0 && <span> day {threat.days_active}</span>}
-                <div>
-                  {threat.hideout_known
-                    ? `Hideout: ${threat.hideout_location || 'known'}`
-                    : `Followers defeated: ${threat.followers_defeated}, captains: ${threat.captains_defeated}/2`}
-                </div>
-                {typeof threat.next_attack_eta == 'number' &&
-                  <div>Next attack in {threat.next_attack_eta}s</div>}
-              </div>
-            ))}
-          </div>}
+        {expanded && (
+          <div style={bodyStylePanel}>
+            {activeObjective &&
+              <div>
+                <div style={categoryStyle}>{activeObjective.category}</div>
+                <div style={activeTitleStyle}>{activeObjective.title}</div>
+                <div style={bodyStyle}>{activeObjective.action_hint}</div>
+                <div style={labelStyle}>Lesson: {activeObjective.lesson}</div>
+                <div style={labelStyle}>Payoff: {activeObjective.reward}</div>
+                {this.renderProgress(activeObjective, labelStyle)}
+              </div>}
 
-        {discoveryEvent &&
-          <div style={sectionStyle}>
-            <div style={categoryStyle}>Discovery: {discoveryEvent.title}</div>
-            <div style={bodyStyle}>{discoveryEvent.result}</div>
-            <div style={labelStyle}>Source: {discoveryEvent.unlock_source}</div>
-          </div>}
+            <div style={sectionStyle}>
+              {objectives.map(obj => (
+                <div key={obj.id} style={objectiveRowStyle(obj.state)}>
+                  <span>{obj.title}</span>
+                  <span>{obj.state == 'complete' ? 'Done' : obj.state == 'active' ? 'Next' : 'Later'}</span>
+                </div>
+              ))}
+            </div>
+
+            {threatState &&
+              <div style={sectionStyle}>
+                <div style={categoryStyle}>Threat Pressure: {threatState.pressure_level}</div>
+                <div style={bodyStyle}>Day {threatState.day}, {threatState.phase}. {threatState.next_night_warning}</div>
+                {risksToShow.map(risk => (
+                  <div key={risk.id} style={labelStyle}>
+                    <span style={{ color: riskColor(risk.severity), fontWeight: 'bold' }}>{risk.severity.toUpperCase()}</span>
+                    {' '}{risk.label}
+                    {typeof risk.current == 'number' && typeof risk.threshold == 'number' &&
+                      <span> ({risk.current}/{risk.threshold})</span>}
+                    <div>{risk.counter_hint}</div>
+                  </div>
+                ))}
+                {legendaryThreats.map(threat => (
+                  <div key={threat.name} style={labelStyle}>
+                    <span style={{ color: threat.status == 'defeated' ? '#8fbf88' : '#ffb36b', fontWeight: 'bold' }}>
+                      {threat.status.toUpperCase()}
+                    </span>
+                    {' '}{threat.name}
+                    {threat.days_active > 0 && <span> day {threat.days_active}</span>}
+                    <div>
+                      {threat.hideout_known
+                        ? `Hideout: ${threat.hideout_location || 'known'}`
+                        : `Followers defeated: ${threat.followers_defeated}, captains: ${threat.captains_defeated}/2`}
+                    </div>
+                    {typeof threat.next_attack_eta == 'number' &&
+                      <div>Next attack in {threat.next_attack_eta}s</div>}
+                  </div>
+                ))}
+              </div>}
+
+            {discoveryEvent &&
+              <div style={sectionStyle}>
+                <div style={categoryStyle}>Discovery: {discoveryEvent.title}</div>
+                <div style={bodyStyle}>{discoveryEvent.result}</div>
+                <div style={labelStyle}>Source: {discoveryEvent.unlock_source}</div>
+              </div>}
+          </div>
+        )}
       </div>
     );
   }
