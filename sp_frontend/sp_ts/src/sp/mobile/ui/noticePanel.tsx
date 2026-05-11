@@ -19,7 +19,8 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
     this.state = {
 
     };
-   
+
+    this.handleDismiss = this.handleDismiss.bind(this);
   }
 
   componentWillUnmount() {
@@ -32,15 +33,21 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
     }, this.props.noticeExpiry);
   }
 
+  handleDismiss() {
+    clearInterval(this.timer);
+    Global.gameEmitter.emit(GameEvent.NOTICE_EXPIRE, {});
+  }
+
   render() {
     const noticeStyle = {
-      top: '20px',
+      top: 'calc(20px + env(safe-area-inset-top, 0px))',
       left: '50%',
       width: '315px',
       height: '67px',
-      marginLeft: '-148px',
+      marginLeft: '-158px',
       position: 'fixed',
-      zIndex: Global.zIndexManager.getTop() + 1
+      zIndex: Global.zIndexManager.getTop() + 1,
+      cursor: 'pointer',
     } as React.CSSProperties
 
     const noticePanelStyle = {
@@ -58,7 +65,7 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
     } as React.CSSProperties
 
     return (
-      <div style={noticeStyle}>
+      <div style={noticeStyle} onClick={this.handleDismiss} role="button" aria-label="Dismiss notification">
         <img src={errorpanel} style={noticePanelStyle}/>
         <span style={spanNameStyle}>{this.props.noticemsg}</span>
       </div>
