@@ -1,9 +1,20 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
 .game {
   position: fixed;
-  margin: 0 auto;
   z-index: 0;
   left: 0;
   top: 0;
+  width: 100vw;
+  height: 100vh;
+  width: 100dvw;
+  height: 100dvh;
 }
 
 canvas {
@@ -11,4 +22,5 @@ canvas {
   z-index: 0;
   left: 0;
   top: 0;
+  display: block;
 }

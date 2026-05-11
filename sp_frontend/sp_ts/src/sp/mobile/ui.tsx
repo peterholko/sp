@@ -78,7 +78,6 @@ import TrueDeathPanel from './ui/trueDeathPanel';
 import RefinePanel from './ui/refinePanel';
 import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
-import ZoomButton from './ui/zoomButton';
 import ObjectivesPanel from './ui/objectivesPanel';
 
 interface UIState {
@@ -1700,8 +1699,6 @@ export default class UI extends React.Component<any, UIState> {
     const abilityHints = this.getAbilityHints();
     return (
       <div id="ui" className={styles.ui}>
-
-        <ZoomButton />
 
         {!this.state.hideLoadingPanel &&
           <LoadingPanel errmsg={Global.accountName ? `Loading ${Global.accountName}...` : "Loading..."} />}
