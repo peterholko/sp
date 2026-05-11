@@ -63,7 +63,6 @@ import NPCPanel from './ui/npcPanel';
 import HeroAdvancePanel from './ui/heroAdvancePanel';
 import NoticePanel from './ui/noticePanel';
 import SmallButtonClassName from './ui/smallButtonClassName';
-import AttacksPanel from './ui/attacksPanel';
 import ToggleButton from './ui/toggleButton';
 import CooldownButton from './ui/cooldownButton';
 import GatherButton from './ui/gatherButton';
@@ -1770,9 +1769,6 @@ export default class UI extends React.Component<any, UIState> {
             })}
           </div>
         }
-
-        {!this.state.hideAttacksPanel &&
-          <AttacksPanel attacks={Global.attacks} combatState={this.state.combatState} />}
 
         <img src={bracebutton}
           id="bracebutton"
