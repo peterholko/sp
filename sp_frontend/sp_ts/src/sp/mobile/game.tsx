@@ -29,10 +29,14 @@ export default class Game extends React.Component {
     const config: any = {
       title: "Siege Perilous",
       version: "0.0.1",
-      width: window.innerWidth,
-      height: window.innerHeight,
       type: Phaser.AUTO,
       parent: "game",
+      scale: {
+        mode: Phaser.Scale.RESIZE,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: '100%',
+        height: '100%',
+      },
       scene: [MapScene, ObjectScene, WeatherScene],
       input: {
         mouse: true
