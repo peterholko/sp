@@ -4125,15 +4125,26 @@ fn find_item_location_by_class(
     let mut nearest_item = None;
     let mut nearest_pos = None;
 
+    // T3.6: for food, villagers prefer the lowest-Feed item (eat cheap
+    // forage before high-value prepared meals). For other classes, fall
+    // back to the first match.
+    let pick_item = |inv: &Inventory| -> Option<Item> {
+        if item_class == "Food" {
+            inv.get_food_to_eat()
+        } else {
+            inv.get_by_class(item_class.clone())
+        }
+    };
+
     // Check if the villager has any items of the given class
-    if let Some(item) = villager_inventory.get_by_class(item_class.clone()) {
+    if let Some(item) = pick_item(villager_inventory) {
         return Some((ItemLocation::Own, item.clone(), *villager_pos));
     }
 
     // Check if the structures have any items of the given class
     for (id, player_id, pos, inventory) in structure_query.iter() {
         if player_id.0 == villager_player_id {
-            let Some(item) = inventory.get_by_class(item_class.clone()) else {
+            let Some(item) = pick_item(inventory) else {
                 debug!(
                     "Structure does not have any items of class {:?}",
                     item_class

@@ -439,6 +439,18 @@
   image: stick
   weight: 1
 
+- name: Plant Fibers
+  class: Plant Fibers
+  subclass: Plant Fibers
+  image: plantfibers
+  weight: 1
+
+- name: Pebble
+  class: Pebble
+  subclass: Pebble
+  image: pebble
+  weight: 1
+
 ##################
 ##### CLOTH #####
 ##################
@@ -461,11 +473,11 @@
   refine_skill: Butchery
   refine_skill_req: 0
   refine_time: 5
-  produces: 
+  produces:
+    - Bristleback Raw Meat
     - Bristleback Raw Meat
     - Bristleback Raw Hide
-#    - Bristleback Bones
-#    - Bristleback Sinew
+    - bones
 
 - name: Felled Swiftstep Hare
   class: Game Animal
@@ -475,11 +487,9 @@
   refine_skill: Butchery
   refine_skill_req: 0
   refine_time: 30
-  produces: 
+  produces:
     - Swiftstep Raw Meat
     - Swiftstep Raw Hide
-#    - Swiftstep Bones
-#    - Swiftstep Sinew
 
 - name: Felled Frostmane Elk
   class: Game Animal
@@ -489,11 +499,12 @@
   refine_skill: Butchery
   refine_skill_req: 0
   refine_time: 60
-  produces: 
+  produces:
+    - Frostmane Raw Meat
+    - Frostmane Raw Meat
     - Frostmane Raw Meat
     - Frostmane Raw Hide
-#    - Frostmane Bones
-#    - Frostmane Sinew
+    - bones
 
 - name: Felled Dunehorn Antelope
   class: Game Animal
@@ -503,11 +514,11 @@
   refine_skill: Butchery
   refine_skill_req: 0
   refine_time: 60
-  produces: 
+  produces:
+    - Dunehorn Raw Meat
     - Dunehorn Raw Meat
     - Dunehorn Raw Hide
-#    - Dunehorn Bones
-#    - Dunehorn Sinew
+    - bones
 
 - name: Felled Stonegrove Ibex
   class: Game Animal
@@ -517,10 +528,12 @@
   refine_skill: Butchery
   refine_skill_req: 0
   refine_time: 60
-  produces: 
+  produces:
+    - Stonegrove Raw Meat
+    - Stonegrove Raw Meat
     - Stonegrove Raw Meat
     - Stonegrove Raw Hide
-#    - Stonegrove Bones
+    - bones
 #    - Stonegrove Sinew
 
 ##################
@@ -740,6 +753,53 @@
     - name: Feed
       value: 100
 
+- name: Cooked Fish
+  class: Food
+  subclass: Cooked Fish
+  image: cookedfish
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 60
+
+- name: Smoked Meat
+  class: Food
+  subclass: Smoked Meat
+  image: smokedmeat
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 120
+
+- name: Stew
+  class: Food
+  subclass: Stew
+  image: stew
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 200
+    - name: Healing
+      value: 10
+
+- name: Honey
+  class: Food
+  subclass: Honey
+  image: honey
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 30
+
+- name: Jam
+  class: Food
+  subclass: Jam
+  image: jam
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 80
+
 - name: Waterskin (Filled)
   class: Drink
   subclass: Waterskin
@@ -754,12 +814,45 @@
   subclass: Berries
   image: berries
   weight: 1
+  attrs:
+    - name: Feed
+      value: 15
 
 - name: Amitanian Grape
   class: Food
   subclass: Grapes
   image: amitaniangrape
   weight: 1
+  attrs:
+    - name: Feed
+      value: 20
+
+- name: Mushroom
+  class: Food
+  subclass: Mushroom
+  image: mushroom
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 20
+
+- name: Pine Nuts
+  class: Food
+  subclass: Pine Nuts
+  image: pinenuts
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 25
+
+- name: Edible Bark
+  class: Food
+  subclass: Edible Bark
+  image: ediblebark
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 10
 
 - name: bones
   class: Raw
@@ -881,12 +974,71 @@
   subclass: Seeds
   image: seeds
   weight: 1
+  produces:
+    - Wheat
+
+- name: Wheat Seeds
+  class: Seeds
+  subclass: Wheat Seeds
+  image: seeds
+  weight: 1
+  produces:
+    - Wheat
+
+- name: Cabbage Seeds
+  class: Seeds
+  subclass: Cabbage Seeds
+  image: seeds
+  weight: 1
+  produces:
+    - Cabbage
+
+- name: Turnip Seeds
+  class: Seeds
+  subclass: Turnip Seeds
+  image: seeds
+  weight: 1
+  produces:
+    - Turnip
+
+- name: Cabbage
+  class: Food
+  subclass: Vegetable
+  image: cabbage
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 40
+
+- name: Turnip
+  class: Food
+  subclass: Vegetable
+  image: turnip
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 35
 
 - name: Wheat
   class: Food
   subclass: Grain
   image: wheat
-  weight: 1  
+  weight: 1
+
+- name: Flour
+  class: Material
+  subclass: Flour
+  image: flour
+  weight: 1
+
+- name: Bread
+  class: Food
+  subclass: Bread
+  image: bread
+  weight: 1
+  attrs:
+    - name: Feed
+      value: 150
 
 ##################
 ##### DEEDS #####

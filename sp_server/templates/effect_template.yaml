@@ -132,6 +132,22 @@
   vision: 2.0
   duration: -1
 
+######################
+##### Food Buffs #####
+######################
+
+- name: Hearty Meal
+  healing: 0.02
+  duration: 100
+
+- name: Bread Filling
+  stamina: 0.1
+  duration: 150
+
+- name: Wine Cheer
+  defense: 0.5
+  duration: 200
+
   
 #- name: Boosted Quick
 #  quick_damage: 2.0

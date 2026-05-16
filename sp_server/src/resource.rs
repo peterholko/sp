@@ -452,40 +452,65 @@ impl Resource {
         - Plant Fibers
         */
 
-        match tile_type {
-            TileType::Grasslands => {
-                let item_classes = vec![STICK.to_string(), BERRIES.to_string()];
-
-                // Randomly select an item class
-                let item_class = &item_classes[rng.gen_range(0..item_classes.len())];
-                info!("Foraged item class: {:?}", item_class);
-
-                // Get item template by class
-                let mut item_templates = templates.get_item_templates_by_class(&item_class.clone());
-
-                if item_templates.len() == 0 {
-                    item_templates = templates.get_item_templates_by_subclass(&item_class.clone());
-                }
-                info!("Foraged item templates: {:?}", item_templates);
-
-                // Randomly select an item template
-                let item_template = &item_templates[rng.gen_range(0..item_templates.len())];
-                info!("Foraged item template: {:?}", item_template);
-
-                // Create item
-                let item = inventory.new(
-                    new_item_id,
-                    item_template.name.clone(),
-                    1,
-                    &templates.item_templates,
-                );
-                info!("Foraged item: {:?}", item);
-                items_to_update.push(item.packet());
-            }
+        let item_classes: Vec<String> = match tile_type {
+            TileType::Grasslands => vec![
+                STICK.to_string(),
+                BERRIES.to_string(),
+                PLANT_FIBERS.to_string(),
+                PEBBLE.to_string(),
+            ],
+            TileType::Plains => vec![
+                STICK.to_string(),
+                PEBBLE.to_string(),
+                PLANT_FIBERS.to_string(),
+                MUSHROOM.to_string(),
+            ],
+            TileType::DeciduousForest => vec![
+                STICK.to_string(),
+                RESIN.to_string(),
+                BERRIES.to_string(),
+                MUSHROOM.to_string(),
+                HONEY.to_string(),
+            ],
+            TileType::PineForest => vec![
+                STICK.to_string(),
+                RESIN.to_string(),
+                PINE_NUTS.to_string(),
+                PEBBLE.to_string(),
+            ],
+            TileType::FrozenForest => vec![
+                STICK.to_string(),
+                PEBBLE.to_string(),
+                EDIBLE_BARK.to_string(),
+            ],
             _ => {
                 return Err(ResourceGatherError::CannotFindResourceTemplate);
             }
+        };
+
+        let item_class = &item_classes[rng.gen_range(0..item_classes.len())];
+        info!("Foraged item class: {:?}", item_class);
+
+        let mut item_templates = templates.get_item_templates_by_class(item_class);
+        if item_templates.is_empty() {
+            item_templates = templates.get_item_templates_by_subclass(item_class);
         }
+        if item_templates.is_empty() {
+            return Err(ResourceGatherError::CannotFindResourceTemplate);
+        }
+        info!("Foraged item templates: {:?}", item_templates);
+
+        let item_template = &item_templates[rng.gen_range(0..item_templates.len())];
+        info!("Foraged item template: {:?}", item_template);
+
+        let item = inventory.new(
+            new_item_id,
+            item_template.name.clone(),
+            1,
+            &templates.item_templates,
+        );
+        info!("Foraged item: {:?}", item);
+        items_to_update.push(item.packet());
 
         return Ok(items_to_update);
     }

@@ -1,8 +1,32 @@
 use bevy::prelude::*;
 
-use crate::item::Item;
+use crate::item::{Inventory, Item};
 use crate::templates::{ItemAttr, ItemTemplate, RecipeTemplate, ResReq, Templates};
 use crate::{item, network};
+
+/// Pick the first recipe template whose `structure_req` includes the given
+/// structure name and whose ingredient reqs are satisfiable from `inventory`.
+/// Used by villager auto-operation at food-production structures (Bakery,
+/// Smoker, Millhouse, Butchery) so an assigned villager can produce without
+/// the player picking a specific recipe.
+pub fn pick_available_recipe_at(
+    structure_name: &str,
+    inventory: &Inventory,
+    templates: &Templates,
+) -> Option<RecipeTemplate> {
+    for rt in templates.recipe_templates.iter() {
+        let Some(structure_req) = &rt.structure_req else {
+            continue;
+        };
+        if !structure_req.iter().any(|s| s == structure_name) {
+            continue;
+        }
+        if inventory.find_by_reqs(rt.req.clone()).is_some() {
+            return Some(rt.clone());
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone)]
 pub struct Recipe {
