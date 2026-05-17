@@ -1097,8 +1097,8 @@ pub fn new(
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Cragroot Maple Log".to_string(),
-        10,
+        "Cragroot Maple Timber".to_string(),
+        15,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
