@@ -1,11 +1,16 @@
 
 import * as React from "react";
 import { Global } from "../../core/global";
-import HalfPanel from "./halfPanel";
-import itemframe from "ui_comp/itemframe.png";
-import selectitemborder from "ui_comp/selectitemborder.png";
-import ResourceItem from "./resourceItem";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { GameEvent } from "../../core/gameEvent";
+import {
+  MobileCard,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+  resourceImageForName,
+} from "./mobilePanelLayout";
 
 interface TRPProps {
   tileData
@@ -19,7 +24,7 @@ export default class TileResourcesPanel extends React.Component<TRPProps, any> {
     Global.selectedItemOwnerId = -1;  
 
     this.state = {
-      selectItemStyle: false
+      selectedIndex: null
     };
     
     Global.gameEmitter.on(GameEvent.RESOURCE_CLICK, this.handleResourceClick, this);
@@ -27,89 +32,93 @@ export default class TileResourcesPanel extends React.Component<TRPProps, any> {
 
   handleResourceClick(eventData) {
     console.log('handleSelect ' + eventData);
-    var xPos = -293 + ((eventData.index % 5) * 53);
-    var yPos = 83 + (Math.floor(eventData.index / 5) * 53);
-
-    const selectItemStyle = {
-      transform: 'translate(' + xPos + 'px, ' + yPos + 'px)',
-      position: 'fixed'
-    }
 
     this.setState({
-      selectItemStyle: selectItemStyle
+      selectedIndex: eventData.index
     });
   }
 
   render() {
-    var resourceList = [];
-    var itemFrameResources = [];
+    const landscape = isLandscapeMobile();
+    const resources = this.props.tileData.resources || [];
+    const tileSize = landscape ? 58 : 64;
 
-    for (var i = 0; i < 20; i++) {
-      var xPos = -293 + ((i % 5) * 53);
-      var yPos = 83 + (Math.floor(i / 5) * 53);
+    const gridStyle: React.CSSProperties = {
+      display: 'grid',
+      gridTemplateColumns: `repeat(auto-fill, ${tileSize}px)`,
+      gridAutoRows: `${tileSize}px`,
+      gap: landscape ? '6px' : '8px',
+      justifyContent: 'start',
+      alignItems: 'start',
+    };
 
-      var frameResource = {
-        transform: 'translate(' + xPos + 'px, ' + yPos + 'px',
-        position: 'fixed'
-      } as React.CSSProperties
+    const buttonStyle = (selected: boolean): React.CSSProperties => ({
+      width: `${tileSize}px`,
+      height: `${tileSize}px`,
+      minHeight: `${tileSize}px`,
+      border: selected ? '2px solid #c9aa71' : '1px solid rgba(201, 170, 113, 0.24)',
+      borderRadius: '4px',
+      background: selected ? 'rgba(201, 170, 113, 0.18)' : 'rgba(255,255,255,0.05)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '3px',
+      boxSizing: 'border-box',
+    });
 
-      itemFrameResources.push(
-        <img src={itemframe} key={i} style={frameResource} />
-      )
-    }
+    const imageStyle: React.CSSProperties = {
+      width: '48px',
+      height: '48px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
 
-    if (this.props.tileData.resources.length > 0) {
-      for (var i = 0; i < this.props.tileData.resources.length; i++) {
-        var resource = this.props.tileData.resources[i];
-
-        var xPos = 31 + ((i % 5) * 53);
-        var yPos = -275 + (Math.floor(i / 5) * 53);
-
-        resourceList.push(
-          <ResourceItem key={i}
-            resourceName={resource.name}
-            resourceImage={resource.image}
-            yieldLabel={resource.yield_label}
-            quantityLabel={resource.quantity_label}
-            quantity={0}
-            properties={resource.properties}
-            index={i}
-            showQuantity={false}
-            xPos={xPos}
-            yPos={yPos}
-          />
-        )
-      }
-
-    }
-
-    const featureNameStyle = {
-      transform: 'translate(-323px, 30px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
+    const emptyStyle: React.CSSProperties = {
+      color: '#777d82',
       fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
+      fontSize: '11px',
+      textAlign: 'center',
+      padding: '12px 0',
+    };
 
     return (
-      <div>
-        <HalfPanel left={true}
-          panelType={'tile_resources'}
-          hideExitButton={false}>
+      <MobilePanelScreen
+        panelType={'tile_resources'}
+        title={'Resources'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard title="Discovered Resources" subtitle={`${resources.length} found`} />}
+          right={
+            <MobileCard compact={landscape}>
+              {resources.length == 0 && <div style={emptyStyle}>No resources discovered</div>}
+              {resources.length > 0 &&
+                <div style={gridStyle}>
+                  {resources.map((resource, index) => {
+                    const selected = this.state.selectedIndex == index;
+                    const handleClick = () => {
+                      const eventData = {
+                        name: resource.name,
+                        image: resource.image,
+                        yieldLabel: resource.yield_label,
+                        quantityLabel: resource.quantity_label,
+                        properties: resource.properties,
+                        index,
+                      };
+                      Global.gameEmitter.emit(GameEvent.RESOURCE_CLICK, eventData);
+                      this.handleResourceClick(eventData);
+                    };
 
-          <span style={featureNameStyle}>Discovered Resources</span>
-
-          {itemFrameResources}
-          {resourceList}
-
-          {this.state.selectItemStyle &&
-            <img src={selectitemborder} style={this.state.selectItemStyle} />
-          }
-
-        </HalfPanel>
-      </div>
+                    return (
+                      <button key={index} type="button" style={buttonStyle(selected)} onClick={handleClick} title={resource.name}>
+                        <img src={'/static/art/items/' + resourceImageForName(resource.image || resource.name) + '.png'} style={imageStyle} />
+                      </button>
+                    );
+                  })}
+                </div>}
+            </MobileCard>
+          } />
+      </MobilePanelScreen>
     );
   }
 }

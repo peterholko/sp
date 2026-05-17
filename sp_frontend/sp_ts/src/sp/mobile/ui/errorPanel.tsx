@@ -4,6 +4,7 @@ import errorpanel from "ui_comp/errorframe.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface ErrorProps {
   errmsg: string,
@@ -36,7 +37,7 @@ export default class ErrorPanel extends React.Component<ErrorProps, any> {
       marginTop: `${marginTop}px`,
       marginLeft: '-166px',
       position: 'fixed',
-      zIndex: Global.zIndexManager.getTop() + 1
+      zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const errorPanelStyle = {
@@ -67,4 +68,3 @@ export default class ErrorPanel extends React.Component<ErrorProps, any> {
     );
   }
 }
-

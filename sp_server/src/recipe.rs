@@ -28,6 +28,12 @@ pub struct Recipe {
     pub item_name_from_req: Option<bool>,
 }
 
+impl Recipe {
+    pub fn requires_structure(&self) -> bool {
+        self.structure_req.is_some()
+    }
+}
+
 #[derive(Resource, Debug)]
 pub struct Recipes {
     recipes: Vec<Recipe>,
@@ -162,7 +168,7 @@ impl Recipes {
 
         for recipe in self.recipes.iter() {
             info!("Recipe: {:?}", recipe);
-            if recipe.structure_req.is_none() {
+            if !recipe.requires_structure() {
                 info!("Basic Recipe: {:?}", recipe);
                 let recipe_packet = network::Recipe {
                     name: recipe.name.clone(),
@@ -258,6 +264,66 @@ impl Recipes {
         }
 
         return recipes_by_subclass_tier;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_recipe(name: &str, structure_req: Option<Vec<String>>) -> Recipe {
+        Recipe {
+            name: name.to_string(),
+            class: "Test".to_string(),
+            subclass: "Test".to_string(),
+            image: "test".to_string(),
+            weight: 1.0,
+            durability: None,
+            attrs: None,
+            owner: 1,
+            tier: None,
+            slot: None,
+            damage: None,
+            speed: None,
+            armor: None,
+            crafting_time: Some(10),
+            structure_req,
+            stamina_req: None,
+            skill_req: None,
+            amount: Some(1),
+            req: Vec::new(),
+            item_name_from_req: None,
+        }
+    }
+
+    #[test]
+    fn requires_structure_tracks_structure_requirement() {
+        assert!(!test_recipe("Firewood", None).requires_structure());
+        assert!(
+            test_recipe("Cooked Meat", Some(vec!["Crafting Tent".to_string()]))
+                .requires_structure()
+        );
+    }
+
+    #[test]
+    fn basic_recipe_packet_only_includes_hand_recipes() {
+        let recipes = Recipes::from_recipes(vec![
+            test_recipe("Firewood", None),
+            test_recipe("Crude Torch", None),
+            test_recipe("Cooked Meat", Some(vec!["Crafting Tent".to_string()])),
+            test_recipe(
+                "Training Pick Axe",
+                Some(vec!["Crafting Tent".to_string(), "Blacksmith".to_string()]),
+            ),
+        ]);
+
+        let names: Vec<String> = recipes
+            .get_basic_recipes_packet()
+            .into_iter()
+            .map(|recipe| recipe.name)
+            .collect();
+
+        assert_eq!(names, vec!["Firewood", "Crude Torch"]);
     }
 }
 

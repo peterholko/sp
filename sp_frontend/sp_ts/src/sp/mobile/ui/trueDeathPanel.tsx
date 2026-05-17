@@ -3,6 +3,7 @@ import halfpanel from "ui_comp/halfpanel.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface TrueDeathPanelProps {
   heroName: string,
@@ -45,7 +46,7 @@ export default class TrueDeathPanel extends React.Component<TrueDeathPanelProps,
       marginTop: '-215px',
       marginLeft: '-161px',
       position: 'fixed',
-      zIndex: 7
+      zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const heroStyle = {

@@ -1,8 +1,5 @@
 
 import * as React from "react";
-import worldframe from "ui_comp/hpframe.png";
-import { Global } from "../../core/global";
-import { GameEvent } from "../../core/gameEvent";
 
 interface WorldProps {
   worldData,
@@ -18,46 +15,47 @@ export default class WorldPanel extends React.Component<WorldProps, any> {
   }
 
   render() {
+    const isLandscape = window.innerWidth > window.innerHeight;
+    const textAlign = isLandscape ? 'left' : 'center';
 
     const divStyle = {
       position: 'fixed',
-      bottom: '75px',
-      left: '78%',
-      marginLeft: '0px',    
-    } as React.CSSProperties
-
-    const worldFrameStyle = {
-      transform: 'translate(0px, 0px)',
-      position: 'fixed'
+      left: isLandscape ? '155px' : 'calc(158px + env(safe-area-inset-left, 0px))',
+      bottom: 'calc(10px + env(safe-area-inset-bottom, 0px))',
+      width: '88px',
+      minHeight: '36px',
+      zIndex: 4,
+      border: '1px solid rgba(201, 170, 113, 0.38)',
+      borderRadius: '4px',
+      background: 'rgba(8, 10, 12, 0.74)',
+      boxSizing: 'border-box',
+      padding: '4px 6px',
     } as React.CSSProperties
 
     const timeOfDayStyle = {
-      transform: 'translate(15px, 32px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
+      display: 'block',
+      textAlign,
+      color: '#f2e7cf',
       fontFamily: 'Cinzel',
-      fontSize: '16px',
-      width: '160px'
+      fontSize: '12px',
+      lineHeight: 1.2,
     } as React.CSSProperties
 
     const dayStyle = {
-      transform: 'translate(15px, 12px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
+      display: 'block',
+      textAlign,
+      color: '#c9aa71',
       fontFamily: 'Cinzel',
-      fontSize: '16px',
-      width: '160px'
+      fontSize: '11px',
+      lineHeight: 1.2,
+      fontWeight: 'bold',
     } as React.CSSProperties
 
     return (
       <div style={divStyle}>
-        <img src={worldframe} style={worldFrameStyle}/>
-        <span style={timeOfDayStyle}>{this.props.worldData.time_of_day}</span>
         <span style={dayStyle}>Day {this.props.worldData.day}</span>
+        <span style={timeOfDayStyle}>{this.props.worldData.time_of_day}</span>
       </div>
     );
   }
 }
-

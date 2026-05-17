@@ -11,6 +11,7 @@ import transferbutton from "ui_comp/transferbutton.png";
 import { Network } from "../../core/network";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface MQPProps {
   itemData,
@@ -83,7 +84,7 @@ export default class MerchantQuantityPanel extends React.Component<MQPProps, any
       marginTop: '-59px',
       marginLeft: '-166px',
       position: 'fixed',
-      zIndex: 20
+      zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const merchantPanelStyle = {
@@ -162,4 +163,3 @@ export default class MerchantQuantityPanel extends React.Component<MQPProps, any
     );
   }
 }
-

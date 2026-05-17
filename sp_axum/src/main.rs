@@ -1,10 +1,13 @@
 use account::Account;
+use axum::body::Body;
 use axum::debug_handler;
 use axum::extract::State;
+use axum::http::header::{CACHE_CONTROL, EXPIRES, PRAGMA};
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::Request;
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
 use axum::response::Json;
 use axum::response::Response;
@@ -187,7 +190,8 @@ async fn main() {
             rng: shared_rng,
             ws_health_url,
             ws_health_allow_invalid_certs,
-        });
+        })
+        .layer(middleware::from_fn(cache_control_middleware));
 
     // configure certificate and private key used by https
     let config = RustlsConfig::from_pem_file(
@@ -218,6 +222,39 @@ fn parse_env_bool(key: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+async fn cache_control_middleware(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+
+    if is_html_path(&path) {
+        let headers = response.headers_mut();
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+        headers.insert(EXPIRES, HeaderValue::from_static("0"));
+    } else if is_revalidated_asset_path(&path) {
+        let headers = response.headers_mut();
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, must-revalidate, max-age=0"),
+        );
+        headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+        headers.insert(EXPIRES, HeaderValue::from_static("0"));
+    }
+
+    response
+}
+
+fn is_html_path(path: &str) -> bool {
+    path == "/" || path.ends_with(".html")
+}
+
+fn is_revalidated_asset_path(path: &str) -> bool {
+    path.ends_with(".js") || path.ends_with(".css")
 }
 
 async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Response {

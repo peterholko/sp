@@ -15,6 +15,7 @@ export namespace NetworkEvent {
     export const OBJ_PERCEPTION : string = 'OBJ_PERCEPTION';
     export const IMAGE_DEF : string = 'IMAGE_DEF';
     export const STATS : string = 'STATS';
+    export const HERO_DEATH_STATE : string = 'HERO_DEATH_STATE';
     export const INFO_HERO : string = 'INFO_HERO';
     export const INFO_VILLAGER : string = 'INFO_VILLAGER';
     export const INFO_STRUCTURE : string = 'INFO_STRUCTURE';

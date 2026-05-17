@@ -1,6 +1,11 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
-import { Global } from "../../core/global";
+import MobilePanelScreen from "./mobilePanelScreen";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface NPCPanelProps {
   npcData,
@@ -19,47 +24,21 @@ export default class NPCPanel extends React.Component<NPCPanelProps, any> {
     let imagePath = '/static/art/' + this.props.npcData.image  + '_single.png';
 
     var effects = this.props.npcData.effects.join();
-
-
-    const npcStyle = {
-      transform: 'translate(-197px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -250px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
+    const landscape = isLandscapeMobile();
 
     return (
-      <HalfPanel left={true} 
-                 panelType={'npc'} 
-                 hideExitButton={false}>
-
-        <img src={imagePath} style={npcStyle} />
-        <table style={tableStyle}>
-          <tbody>
-          <tr>
-            <td>Name: </td>
-            <td>{this.props.npcData.name}</td>
-          </tr>
-          <tr>
-            <td>State: </td>
-            <td>{this.props.npcData.state}</td>
-          </tr>          
-          <tr>
-            <td>Effects: </td>
-            <td>
-              {effects}
-            </td>
-          </tr>
-          </tbody>
-        </table>
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'npc'}
+        title={'NPC'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={imagePath} title={this.props.npcData.name} imageSize={landscape ? 58 : 82} />}
+          right={<MobileStatsList rows={[
+            { label: 'State', value: this.props.npcData.state },
+            { label: 'Effects', value: effects },
+          ]} />} />
+      </MobilePanelScreen>
     );
   }
 }
-

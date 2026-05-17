@@ -2012,6 +2012,7 @@ pub fn fight_back_system(
                     "quick".to_string(),
                     damage,
                     combo,
+                    false,
                     &villager,
                     &attacker,
                     &mut map_events,

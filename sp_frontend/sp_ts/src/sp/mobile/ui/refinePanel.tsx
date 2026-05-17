@@ -8,6 +8,15 @@ import InventoryItem from "./inventoryItem";
 import okbutton from "ui_comp/okbutton.png";
 import { TRIGGER_REFINING_ITEM } from "../../core/config";
 import { GameEvent } from "../../core/gameEvent";
+import MobilePanelScreen from "./mobilePanelScreen";
+import MobileInventoryGrid from "./mobileInventoryGrid";
+import {
+    MobileCard,
+    MobilePanelActions,
+    MobileSplitPanelLayout,
+    MobileStatsList,
+    MobileSummaryCard,
+} from "./mobilePanelLayout";
 
 interface RefinePanelProps {
     refineItemData: any,
@@ -115,167 +124,93 @@ export default class RefinePanel extends React.Component<RefinePanelProps, any> 
     }
 
     render() {
-        var producedItems = [];
-
-        for (var i = 0; i < this.props.producedItemData.length; i++) {
-            var xPos = i * 60 + 226 - ((this.props.producedItemData.length - 1) * 30);
-            var yPos = -200;
-
-            var itemId = this.props.producedItemData[i].id;
-            var itemName = this.props.producedItemData[i].name;
-            var image = this.props.producedItemData[i].image;
-            var quantity = this.props.producedItemData[i].quantity;
-
-            producedItems.push(
-                <InventoryItem key={i}
-                    ownerId={Global.heroId}
-                    itemId={itemId}
-                    itemName={itemName}
-                    image={image}
-                    quantity={quantity}
-                    index={i}
-                    xPos={xPos}
-                    yPos={yPos}
-                    handleSelect={this.handleProduceItemSelect} />
-            );
-        }
-
+        const producedItems = this.props.producedItemData || [];
         const showProducedItems = producedItems.length > 0;
 
-        const windowHeight = window.innerHeight;
-        const isLargeWindow = windowHeight > 700;
+        const progressCard = (
+            <MobileCard compact>
+                <div style={{ color: '#c9aa71', fontFamily: 'Verdana', fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '7px' }}>
+                    Progress
+                </div>
+                <progress style={{ width: '100%' }} max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress>
+                <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 10px', color: '#f2e7cf', fontSize: '11px', marginTop: '8px' }}>
+                    <span style={{ color: '#c9aa71' }}>Elapsed</span><span>{this.state.progress}</span>
+                    <span style={{ color: '#c9aa71' }}>Total</span><span>{this.state.maxProgress}</span>
+                </div>
+            </MobileCard>
+        );
 
-        const transferSmallY = '110px';
-        const transferLargeY = '370px';
+        const producedCard = (
+            <MobileCard compact>
+                <div style={{ color: '#c9aa71', fontFamily: 'Verdana', fontSize: '11px', fontWeight: 'bold', textTransform: 'uppercase', marginBottom: '7px' }}>
+                    Refined Items
+                </div>
+                <MobileInventoryGrid
+                    ownerId={Number(Global.heroId)}
+                    items={producedItems}
+                    onSelect={this.handleProduceItemSelect}
+                    emptyLabel="No refined items"
+                    compact
+                />
+            </MobileCard>
+        );
 
-        const infoSmallY = '0px';
-        const infoLargeY = '260px';
-
-        const zIndex = Global.zIndexManager.getTop() + 1;
-
-        const wideFrameStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: isLargeWindow ? infoLargeY : infoSmallY,
-            marginLeft: '-30px',
-            position: 'fixed',
-            transform: 'translate(-223px, -155px)',
-            zIndex: zIndex
-        } as React.CSSProperties
-
-        const cancelButtonStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '0px',
-            position: 'fixed',
-            transform: 'translate(-24px, 95px)',
-            zIndex: zIndex
-        } as React.CSSProperties
-
-        const refineItemNameStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '0px',
-            position: 'fixed',
-            transform: 'translate(-150px, -95px)',
-            zIndex: zIndex,
-            textAlign: 'center',
-            color: 'white',
-            fontFamily: 'Verdana',
-            fontSize: '12px',
-            width: '300px'
-        } as React.CSSProperties
-
-        const refineItemStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '0px',
-            position: 'fixed',
-            transform: 'translate(-24px, -60px)',
-            zIndex: zIndex,
-        } as React.CSSProperties
-
-        const refineItemTableStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '0px',
-            position: 'fixed',
-            textAlign: 'left',
-            color: 'white',
-            fontFamily: 'Verdana',
-            fontSize: '12px',
-            width: '200px',
-            transform: 'translate(-135px, 0px)',
-            zIndex: zIndex,
-            userSelect: 'none'
-        } as React.CSSProperties
-
-        const arrowStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '-25px',
-            position: 'fixed',
-            transform: 'translate(0px, -60px)',
-            zIndex: zIndex,
-        } as React.CSSProperties
-
-        const refinedItemNameStyle = {
-            top: '50%',
-            left: '50%',
-            marginTop: '-25px',
-            marginLeft: '0px',
-            position: 'fixed',
-            transform: 'translate(-150px, -95px)',
-            zIndex: zIndex,
-            textAlign: 'center',
-            color: 'white',
-            fontFamily: 'Verdana',
-            fontSize: '12px',
-            width: '300px'
-        } as React.CSSProperties
-
-        const okButtonStyle = {
-            transform: 'translate(225px, -75px)',
-            position: 'fixed'
-          } as React.CSSProperties
+        const actions = (
+            <MobilePanelActions
+                compact
+                actions={showProducedItems ? [
+                    {
+                        key: 'ok',
+                        label: 'OK',
+                        icon: okbutton,
+                        onClick: this.handleOkClick,
+                    },
+                ] : [
+                    {
+                        key: 'cancel',
+                        label: 'Cancel',
+                        icon: cancelbutton,
+                        onClick: this.handleCancelClick,
+                    },
+                ]}
+            />
+        );
 
         return (
-            <div style={wideFrameStyle}>
-                <img src={wideframe} />
-                {!showProducedItems &&
-                    <div>
-
-                        <span style={refineItemNameStyle}>{this.props.refineItemData.name}</span>
-
-                        <img src={'/static/art/items/' + this.props.refineItemData.image + '.png'} style={refineItemStyle} />
-
-                        <table style={refineItemTableStyle}>
-                            <tbody>
-                                <tr>
-                                    <td>Refine Progress: </td>
-                                    <td><progress max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress></td>
-                                </tr>
-                            </tbody>
-                        </table>
-                        <img src={cancelbutton}
-                            style={cancelButtonStyle}
-                            onClick={this.handleCancelClick} />
-                    </div>
-                }
-
-                {showProducedItems &&
-                    <div>
-                        <span style={refinedItemNameStyle}>Refined Items</span>
-                        {producedItems}
-                        <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick}/>
-                    </div>
-                }
-            </div>
+            <MobilePanelScreen panelType="refine" title="Refine" hideExitButton>
+                <MobileSplitPanelLayout
+                    left={
+                        showProducedItems ?
+                            producedCard
+                            :
+                            <React.Fragment>
+                                <MobileSummaryCard
+                                    imageSrc={'/static/art/items/' + this.props.refineItemData.image + '.png'}
+                                    title={this.props.refineItemData.name}
+                                    subtitle="Refining"
+                                />
+                                {progressCard}
+                            </React.Fragment>
+                    }
+                    right={
+                        <React.Fragment>
+                            {showProducedItems ?
+                                <MobileSummaryCard
+                                    title="Refine Complete"
+                                    subtitle={`${producedItems.length} item${producedItems.length == 1 ? '' : 's'} produced`}
+                                />
+                                :
+                                <MobileCard compact>
+                                    <div style={{ color: '#f2e7cf', fontSize: '12px', lineHeight: 1.35 }}>
+                                        Refining is in progress. Cancel stops the current action.
+                                    </div>
+                                </MobileCard>
+                            }
+                            {actions}
+                        </React.Fragment>
+                    }
+                />
+            </MobilePanelScreen>
         );
     }
 }

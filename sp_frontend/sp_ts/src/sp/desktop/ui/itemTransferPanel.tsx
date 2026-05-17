@@ -9,6 +9,7 @@ import { STRUCTURE, FOUNDED, PLANNING_UPGRADE } from "../../core/config";
 import FoundedInventoryPanel from "./foundedInventoryPanel";
 import SmallButton from "./smallButton";
 import UpgradeInventoryPanel from "./upgradeInventoryPanel";
+import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 
 interface ITPProps {
   leftInventoryData,
@@ -90,19 +91,13 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     var isFounded = objState && objState.class == STRUCTURE && objState.state == FOUNDED;
     var isPlanningUpgrade = objState && objState.class == STRUCTURE && objState.state == PLANNING_UPGRADE;
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const transferSmallY = '-25px';
-    const transferLargeY = '235px';
-
-    const itemNameSmallY = '125px';
-    const itemNameLargeY = '385px';
+    const transferY = getHalfPanelOffsetMarginTop(155);
+    const itemNameY = getHalfPanelOffsetMarginTop(305);
 
     const transferStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? transferLargeY : transferSmallY,
+      marginTop: transferY,
       marginLeft: '-25px',
       position: 'fixed',
       zIndex: Global.zIndexManager.getTop() + 3 // 3 layers above top due to multiple panels in this component
@@ -121,7 +116,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       zIndex: itemNameZIndex,
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? itemNameLargeY : itemNameSmallY
+      marginTop: itemNameY
     } as React.CSSProperties
 
     const rightItemNameStyle = {
@@ -134,7 +129,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       zIndex: itemNameZIndex,
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? itemNameLargeY : itemNameSmallY
+      marginTop: itemNameY
     } as React.CSSProperties
 
     return (
@@ -195,4 +190,3 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     );
   }
 }
-

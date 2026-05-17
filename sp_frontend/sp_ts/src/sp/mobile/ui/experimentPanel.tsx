@@ -3,7 +3,6 @@ import * as React from "react";
 import transferbutton from "ui_comp/transferbutton.png";
 import BaseInventoryPanel from "./baseInventoryPanel";
 import { Global } from "../../core/global";
-import HalfPanel from "./halfPanel";
 import itemframe from "ui_comp/itemframe.png";
 import experimentbutton from "ui_comp/experimentbutton.png";
 import okbutton from "ui_comp/okbutton.png";
@@ -12,6 +11,14 @@ import { Network } from "../../core/network";
 import InventoryItem from "./inventoryItem";
 import { EXP_RECIPE_NONE } from "../../core/config";
 import selectitemborder from "ui_comp/selectitemborder.png";
+import MobilePanelScreen from "./mobilePanelScreen";
+import MobileInventoryGrid from "./mobileInventoryGrid";
+import {
+  MobileCard,
+  MobilePanelActions,
+  MobileSplitPanelLayout,
+  MobileSummaryCard,
+} from "./mobilePanelLayout";
 
 interface ETPProps {
   expData
@@ -102,252 +109,139 @@ export default class ExperimentTransferPanel extends React.Component<ETPProps, a
   }
 
   render() {
-    var itemExperiment = []; //Only one item possible 
-    var itemFrameResources = [];
-    var itemExpResources = [];
-
     var showNewRecipe = this.props.expData.hasOwnProperty("recipe");
-    var selectStyle;
-    var hideInventorySelect = false;
-    var hideExpSelect = true;
 
-    const sourceTransferStyle = {
-      transform: 'translate(-250px, 50px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const handleInventorySelect = (eventData) => {
+      Global.selectedItemOwnerId = eventData.ownerId;
+      Global.selectedItemId = eventData.itemId;
+      Global.selectedItemName = eventData.itemName;
+      this.handleSelect(eventData);
+    };
 
-    const reagentsTransferStyle = {
-      transform: 'translate(-280px, 140px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const headingStyle: React.CSSProperties = {
+      color: '#c9aa71',
+      fontFamily: 'Cinzel, Verdana, serif',
+      fontSize: '15px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
 
-    const sourceStyle = {
-      transform: 'translate(-323px, 25px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
+    const stateStyle: React.CSSProperties = {
+      color: '#f2e7cf',
       fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
+      lineHeight: 1.35,
+      marginTop: '8px',
+    };
 
-    const reagentsStyle = {
-      transform: 'translate(-323px, 115px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const expItemStyle = {
-      transform: 'translate(-185px, 50px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const expButtonStyle = {
-      transform: 'translate(-185px, 290px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const okButtonStyle = {
-      transform: 'translate(-185px, 290px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const eurakaStyle = {
-      transform: 'translate(-323px, 40px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const recipeStyle = {
-      transform: 'translate(-185px, 75px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const recipeNameStyle = {
-      transform: 'translate(-323px, 140px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const expStateStyle = {
-      transform: 'translate(-323px, 230px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    if (this.props.expData.expitem.length > 0) {
-      var xPos = 138;
-      var yPos = -310;
-
-      var itemId = this.props.expData.expitem[0].id;
-      var itemName = this.props.expData.expitem[0].name;
-      var image = this.props.expData.expitem[0].image;
-      var quantity = this.props.expData.expitem[0].quantity;
-
-      itemExperiment.push(
-        <InventoryItem key={1}
-          ownerId={this.props.expData.id}
-          itemId={itemId}
-          itemName={itemName}
-          image={image}
-          quantity={quantity}
-          index={i}
-          xPos={xPos}
-          yPos={yPos}
-          handleSelect={this.handleExpItemSelect} />
-      )
-
-      if (itemId == Global.selectedItemId) {
-        selectStyle = {
-          transform: 'translate(-185px, 50px)',
-          position: 'fixed'
-        } as React.CSSProperties
-
-        hideExpSelect = false;
-      }
-
-    }
-
-    for (var i = 0; i < 2; i++) {
-      var xPos = i * 60 - 215;
-      var yPos = 140;
-
-      var itemFrameResource = {
-        transform: 'translate(' + xPos + 'px, ' + yPos + 'px',
-        position: 'fixed'
-      } as React.CSSProperties
-
-      itemFrameResources.push(
-        <img src={itemframe} key={i} style={itemFrameResource} />
-      )
-    }
-
-    for (var i = 0; i < this.props.expData.expresources.length; i++) {
-      var xPos = i * 60 + 109;
-      var yPos = -220;
-
-      var itemId = this.props.expData.expresources[i].id;
-      var itemName = this.props.expData.expresources[i].name;
-      var image = this.props.expData.expresources[i].image;
-      var quantity = this.props.expData.expresources[i].quantity;
-
-      itemExpResources.push(
-        <InventoryItem key={i}
-          ownerId={this.props.expData.id}
-          itemId={itemId}
-          itemName={itemName}
-          image={image}
-          quantity={quantity}
-          index={i}
-          xPos={xPos}
-          yPos={yPos}
-          handleSelect={this.handleExpResSelect} />
-      );
-
-      if (itemId == Global.selectedItemId) {
-
-        var xPos = -215 + ((i % 5) * 60);
-        var yPos = 140 + (Math.floor(i / 5) * 53);
-
-        selectStyle = {
-          transform: 'translate(' + xPos + 'px, ' + yPos + 'px)',
-          position: 'fixed'
-        } as React.CSSProperties
-
-        hideExpSelect = false;
-      }
-    }
-
-    if (showNewRecipe) {
-      return (
-        <div>
-          <BaseInventoryPanel left={true}
-            id={this.props.expData.id}
-            items={this.props.expData.validresources}
-            panelType={'experiment'}
-            hideExitButton={true}
-            hideSelect={false}
-            handleSelect={this.handleSelect}
-            selectedItemId={this.state.inventorySelectedItemId} />
-
-          <HalfPanel left={false}
-            panelType={'experiment'}
-            hideExitButton={false}>
-
-            <span style={eurakaStyle}>Euraka!</span>
-            <img src={recipe} style={recipeStyle} />
-            <span style={recipeNameStyle}>{this.props.expData.recipe.name}</span>
-
-            <img src={okbutton}
-              style={okButtonStyle}
-              onClick={this.handleOkClick} />
-
-          </HalfPanel>
+    const availableResources = (
+      <MobileCard compact>
+        <div style={headingStyle}>Available Resources</div>
+        <div style={{ marginTop: '8px' }}>
+          <MobileInventoryGrid
+            ownerId={this.props.expData.id}
+            items={this.props.expData.validresources || []}
+            selectedItemId={this.state.inventorySelectedItemId}
+            onSelect={handleInventorySelect}
+            compact
+          />
         </div>
-      )
-    } else {
-      return (
-        <div>
-          <BaseInventoryPanel left={true}
-            id={this.props.expData.id}
-            items={this.props.expData.validresources}
-            panelType={'experiment'}
-            hideExitButton={true}
-            hideSelect={false}
-            handleSelect={this.handleSelect}
-            selectedItemId={this.state.inventorySelectedItemId} />
+      </MobileCard>
+    );
 
-          <HalfPanel left={false}
-            panelType={'experiment'}
-            hideExitButton={false}>
-
-            <span style={sourceStyle}>Source Item</span>
-            <img src={itemframe} style={expItemStyle} />
-
-            {itemExperiment}
-
-            <img src={transferbutton}
-              style={sourceTransferStyle}
-              onClick={this.handleSetExpItemClick} />
-
-            <img src={transferbutton}
-              style={reagentsTransferStyle}
-              onClick={this.handleSetExpResourceClick} />
-
-            <span style={reagentsStyle}>Reagents</span>
-
-            {itemFrameResources}
-            {itemExpResources}
-
-            <span style={expStateStyle}>{this.props.expData.expstate}</span>
-
-            <img src={experimentbutton}
-              style={expButtonStyle}
-              onClick={this.handleExperimentClick} />
-
-            {!hideExpSelect &&
-              <img src={selectitemborder} style={selectStyle} />
-            }
-
-          </HalfPanel>
+    const sourceItemCard = (
+      <MobileCard compact>
+        <div style={headingStyle}>Source Item</div>
+        <div style={{ marginTop: '8px' }}>
+          <MobileInventoryGrid
+            ownerId={this.props.expData.id}
+            items={this.props.expData.expitem || []}
+            selectedItemId={Global.selectedItemId}
+            onSelect={this.handleExpItemSelect}
+            emptyLabel="No source item set"
+            compact
+          />
         </div>
-      );
-    }
+      </MobileCard>
+    );
+
+    const reagentCard = (
+      <MobileCard compact>
+        <div style={headingStyle}>Reagents</div>
+        <div style={{ marginTop: '8px' }}>
+          <MobileInventoryGrid
+            ownerId={this.props.expData.id}
+            items={this.props.expData.expresources || []}
+            selectedItemId={Global.selectedItemId}
+            onSelect={this.handleExpResSelect}
+            emptyLabel="No reagents set"
+            compact
+          />
+        </div>
+        <div style={stateStyle}>{this.props.expData.expstate}</div>
+      </MobileCard>
+    );
+
+    const experimentActions = (
+      <MobilePanelActions
+        compact
+        actions={showNewRecipe ? [
+          {
+            key: 'ok',
+            label: 'OK',
+            icon: okbutton,
+            onClick: this.handleOkClick,
+          },
+        ] : [
+          {
+            key: 'set-item',
+            label: 'Set Item',
+            icon: transferbutton,
+            onClick: this.handleSetExpItemClick,
+          },
+          {
+            key: 'set-reagent',
+            label: 'Set Reagent',
+            icon: transferbutton,
+            onClick: this.handleSetExpResourceClick,
+          },
+          {
+            key: 'experiment',
+            label: 'Experiment',
+            icon: experimentbutton,
+            onClick: this.handleExperimentClick,
+          },
+        ]}
+      />
+    );
+
+    return (
+      <MobilePanelScreen panelType="experiment" title="Experiment">
+        <MobileSplitPanelLayout
+          left={
+            <React.Fragment>
+              {availableResources}
+            </React.Fragment>
+          }
+          right={
+            showNewRecipe ?
+              <React.Fragment>
+                <MobileSummaryCard
+                  imageSrc={recipe}
+                  title={this.props.expData.recipe.name}
+                  subtitle="Eureka"
+                  imageSize={48}
+                />
+                {experimentActions}
+              </React.Fragment>
+              :
+              <React.Fragment>
+                {sourceItemCard}
+                {reagentCard}
+                {experimentActions}
+              </React.Fragment>
+          }
+        />
+      </MobilePanelScreen>
+    );
   }
 }

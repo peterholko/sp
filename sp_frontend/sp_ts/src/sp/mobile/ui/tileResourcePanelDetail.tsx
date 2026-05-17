@@ -1,8 +1,15 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
-import ResourceItem from "./resourceItem";
+import {
+  MobilePanelActions,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+  resourceImageForName,
+} from "./mobilePanelLayout";
 
 interface TileResourceDetailPanelProps {
   tileData,
@@ -49,32 +56,10 @@ export default class TileResourceDetailPanel extends React.Component<TileResourc
   }
 
   render() {
-    const resources = []
     const zeroResources = this.props.tileData.resources.length == 0;
 
     var imageName;
     var resourceTitle;
-
-    for (var i = 0; i < this.props.tileData.resources.length; i++) {
-      var resource = this.props.tileData.resources[i];
-      var resourceImage = resource.image.toLowerCase().replace(/\s/g, '');
-
-      resources.push(
-        <ResourceItem key={i}
-          resourceName={resource.name}
-          resourceImage={resourceImage}
-          yieldLabel={resource.yield_label}
-          quantityLabel={resource.quantity_label}
-          quantity={0}
-          properties={resource.properties}
-          index={i}
-          showQuantity={false}
-          spaceDistance={35} />
-        //xPos={10 + (i * 25)}
-        //yPos={150}/>
-      )
-    }
-
     if (!zeroResources) {
       imageName = this.state.resource.name.replace(/\s/g, '').toLowerCase();
       resourceTitle = this.state.resource.name;
@@ -87,110 +72,44 @@ export default class TileResourceDetailPanel extends React.Component<TileResourc
     if (!zeroResources) {
       if (this.state.resource.properties) {
         for (var i = 0; i < this.state.resource.properties.length; i++) {
-          properties.push(<tr key={i}>
-            <td>+{this.state.resource.properties[i].value} {this.state.resource.properties[i].name}</td>
-          </tr>);
+          properties.push(`+${this.state.resource.properties[i].value} ${this.state.resource.properties[i].name}`);
         }
       }
     }
-
-    const tableStyle = {
-      transform: 'translate(20px, -250px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const resDivStyle = {
-      transform: 'translate(40px, -70px)',
-      position: 'fixed',
-    } as React.CSSProperties
-
-    const titleStyle = {
-      transform: 'translate(-323px, 30px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const resourceNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-305px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-65px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    //<span style={titleStyle}>Resources ({x}, {y})</span>
-
-
+    const landscape = isLandscapeMobile();
+    const atFirst = this.state.index == 0;
+    const atLast = this.state.index == (this.props.tileData.resources.length - 1);
 
     return (
-      <HalfPanel left={false}
+      <MobilePanelScreen
         panelType={'tile_resource_detail'}
-        hideExitButton={false}>
-
-        {!zeroResources &&
-          <img src={'/static/art/items/' + imageName + '.png'} style={imageStyle} />}
-
-        <span style={resourceNameStyle}>{resourceTitle}</span>
-
-        {!zeroResources &&
-          <table style={tableStyle}>
-            <tbody>
-              <tr>
-                <td>Quantity: </td>
-                <td>{this.state.resource.quantity_label}</td>
-              </tr>
-
-              <tr>
-                <td>Yield: </td>
-                <td>{this.state.resource.yield_label}</td>
-              </tr>
-              <tr><td></td></tr>
-              <tr>
-                <td colSpan={2}>
-                  <table style={tableStyle2}>
-                    <tbody>
-                      {properties}
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
-            </tbody>
-          </table>}
-
-        {!zeroResources && <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />}
-        {!zeroResources && <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />}
-
-      </HalfPanel>
+        title={'Resource'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <MobileSummaryCard
+              imageSrc={!zeroResources ? '/static/art/items/' + imageName + '.png' : undefined}
+              title={resourceTitle}
+              subtitle={!zeroResources ? `${this.state.index + 1} / ${this.props.tileData.resources.length}` : null}
+              imageSize={48} />
+          }
+          right={
+            <>
+              {!zeroResources &&
+                <MobileStatsList rows={[
+                  { label: 'Quantity', value: this.state.resource.quantity_label },
+                  { label: 'Yield', value: this.state.resource.yield_label },
+                  { label: 'Properties', value: properties.join(', '), hidden: properties.length == 0 },
+                ]} />}
+              {!zeroResources &&
+                <MobilePanelActions actions={[
+                  { key: 'previous', label: 'Previous resource', icon: leftbutton, onClick: this.handleLeftClick, disabled: atFirst },
+                  { key: 'next', label: 'Next resource', icon: rightbutton, onClick: this.handleRightClick, disabled: atLast },
+                ]} />}
+            </>
+          } />
+      </MobilePanelScreen>
     );
   }
 }

@@ -6,6 +6,7 @@ import upgradebutton from "ui_comp/upgradebutton.png";
 import { Global } from "../../core/global";
 import { Network } from "../../core/network";
 import SmallButton from "./smallButton";
+import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 
 interface HeroPanelProps {
   heroData,
@@ -39,11 +40,9 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
     let imagePath = '/static/art/' + imageName + '_single.png';
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const heroSmallY = -100;
-    const heroLargeY = 160;
+    const attrsY = getHalfPanelOffsetMarginTop(80);
+    const skillsY = getHalfPanelOffsetMarginTop(130);
+    const advanceY = getHalfPanelOffsetMarginTop(180);
 
     const heroStyle = {
       transform: 'translate(-195px, 25px)',
@@ -74,7 +73,7 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     const attrsStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? heroLargeY.toString() + 'px' : heroSmallY.toString() + 'px',
+      marginTop: attrsY,
       marginLeft: '-68px',
       position: 'fixed',
       zIndex: 7
@@ -83,7 +82,7 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     const skillsStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? (heroLargeY + 50).toString() + 'px' : (heroSmallY + 50).toString() + 'px',
+      marginTop: skillsY,
       marginLeft: '-68px',
       position: 'fixed',
       zIndex: 7
@@ -92,7 +91,7 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     const advanceStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? (heroLargeY + 100).toString() + 'px' : (heroSmallY + 100).toString() + 'px',
+      marginTop: advanceY,
       marginLeft: '-68px',
       position: 'fixed',
       zIndex: 7

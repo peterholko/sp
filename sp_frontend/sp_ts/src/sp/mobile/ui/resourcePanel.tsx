@@ -1,6 +1,11 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
-import { Global } from "../../core/global";
+import MobilePanelScreen from "./mobilePanelScreen";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface ResourceProps {
   resourceData,
@@ -16,81 +21,30 @@ export default class ResourcePanel extends React.Component<ResourceProps, any> {
   }
 
   render() {
-    //const imageName = this.props.resourceData.name.replace(/\s/g, '').toLowerCase();
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -240px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      //transform: 'translate(-5px, -5px)',
-      //position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    var properties = [];
+    const landscape = isLandscapeMobile();
+    const properties = [];
 
     if(this.props.resourceData.properties) {
       for(var i = 0; i < this.props.resourceData.properties.length; i++) {
-        properties.push(<tr key={i}>
-                      <td>+{this.props.resourceData.properties[i].value} {this.props.resourceData.properties[i].name}</td>
-                    </tr>);
+        properties.push(`+${this.props.resourceData.properties[i].value} ${this.props.resourceData.properties[i].name}`);
       }
     }
 
 
     return (
-      <HalfPanel left={false} 
-                 panelType={'resource'} 
-                 hideExitButton={false}>
-        <img src={'/static/art/items/' + this.props.resourceData.image + '.png'} style={imageStyle} />
-        <span style={spanNameStyle}>{this.props.resourceData.name}</span>
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <td>Quantity: </td>
-              <td>{this.props.resourceData.quantityLabel}</td>
-            </tr>
-
-            <tr>
-              <td>Yield: </td>
-              <td>{this.props.resourceData.yieldLabel}</td>
-            </tr>
-            <tr><td></td></tr>
-            <tr>
-              <td colSpan={2}>
-                <table style={tableStyle2}>
-                  <tbody>
-                    {properties}
-                  </tbody>
-                </table>
-              </td>
-            </tr>        
-          </tbody>
-        </table>
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'resource'}
+        title={'Resource'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={'/static/art/items/' + this.props.resourceData.image + '.png'} title={this.props.resourceData.name} imageSize={48} />}
+          right={<MobileStatsList rows={[
+            { label: 'Quantity', value: this.props.resourceData.quantityLabel },
+            { label: 'Yield', value: this.props.resourceData.yieldLabel },
+            { label: 'Properties', value: properties.join(', '), hidden: properties.length == 0 },
+          ]} />} />
+      </MobilePanelScreen>
     );
   }
 }
-

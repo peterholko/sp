@@ -258,6 +258,9 @@ impl SkillData {
             item::ARMOR => Some(Skill::Armorsmithing),
             item::GATHERING => Some(Skill::Toolmaking),
             item::TORCH => Some(Skill::Toolmaking),
+            item::MATERIAL => Some(Skill::Processing),
+            item::MEDICAL => Some(Skill::Processing),
+            item::POTION => Some(Skill::Cooking),
             item::ITEM_FOOD => Some(Skill::Cooking),
             _ => None,
         }

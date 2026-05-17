@@ -8,6 +8,7 @@ import SmallButton from "./smallButton";
 import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
 import { getNeedStatusIcon, NeedKind } from "./needStatus";
+import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 
 interface VillagerPanelProps {
   villagerData,
@@ -52,11 +53,8 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
   }
 
   render() {
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const smallY = -100;
-    const largeY = 160;
+    const attrsY = getHalfPanelOffsetMarginTop(80);
+    const skillsY = getHalfPanelOffsetMarginTop(130);
 
     var imageName = this.props.villagerData.image;
     imageName = imageName.replace(/ /g, '') + '_single.png';
@@ -119,7 +117,7 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     const attrsStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? largeY.toString() + 'px' : smallY.toString() + 'px',
+      marginTop: attrsY,
       marginLeft: '-68px',
       position: 'fixed',
       zIndex: 7
@@ -128,7 +126,7 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     const skillsStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? (largeY + 50).toString() + 'px' : (smallY + 50).toString() + 'px',
+      marginTop: skillsY,
       marginLeft: '-68px',
       position: 'fixed',
       zIndex: 7

@@ -80,7 +80,7 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
 
     const spanStyle = {
       transform: 'translate(12px, 13px)',
-      position: 'fixed',
+      position: 'absolute',
       fontFamily: 'Verdana',
       fontSize: '36px',
       width: '50px',
@@ -92,7 +92,7 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
     } as React.CSSProperties
 
     const cooldownBgStyle = {
-      position: 'fixed',
+      position: 'absolute',
       opacity: 0.5,
     } as React.CSSProperties
 

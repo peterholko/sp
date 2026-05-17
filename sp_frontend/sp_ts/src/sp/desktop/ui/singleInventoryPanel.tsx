@@ -7,6 +7,7 @@ import usebutton from "ui_comp/usebutton.png";
 import { Network } from "../../core/network";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 
 
 export default class SingleInventoryPanel extends React.Component<any, any> {
@@ -79,16 +80,12 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
       }*/
     }
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const smallY = '-25px';
-    const largeY = '235px';
+    const equipY = getHalfPanelOffsetMarginTop(155);
 
     const equipStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? largeY : smallY,
+      marginTop: equipY,
       marginLeft: '1px',
       position: 'fixed',
       transform: 'translate(-188px, 135px)',
@@ -98,7 +95,7 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
     /*const useStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? largeY : smallY,
+      marginTop: equipY,
       marginLeft: '-25px',
       position: 'fixed',
       transform: 'translate(-134px, 135px)',
@@ -127,4 +124,3 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
     );
   }
 }
-

@@ -20,6 +20,9 @@ import { GameContainer } from '../objects/gameContainer';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
+const UNIT_DAMAGE_TEXT_COLOR = '#FF0000';
+const STRUCTURE_DAMAGE_TEXT_COLOR = '#B87333';
+
 interface PendingImageTask {
   objectId: string;
   image: string;
@@ -841,6 +844,15 @@ export class ObjectScene extends Phaser.Scene {
     // Guard against destroyed sprites still present in objectList (scene is undefined after destroy)
     const spriteReady = sprite != null && sprite.scene != null;
 
+    if (spriteReady && objectState.state != DEAD && (sprite as any).__spDeadRenderLocked) {
+      delete (sprite as any).__spDeadRenderLocked;
+    }
+
+    if (spriteReady && objectState.state == DEAD) {
+      this.updateDeadRenderState(objectState.id, sprite);
+      return;
+    }
+
     if (objectState.state == 'moving') {
       if (spriteReady) {
         sprite.play(objectState.image + '_moving');
@@ -1221,7 +1233,7 @@ export class ObjectScene extends Phaser.Scene {
     Global.gameEmitter.emit(GameEvent.LOADING_FINISHED, {});
   }
 
-  private updateDeadRenderState(targetId: string, target: RenderObject): void {
+  private forceDeadFinalFrame(targetId: string, target: RenderObject): void {
     var targetState = Global.objectStates[targetId];
 
     if (!targetState) {
@@ -1230,13 +1242,13 @@ export class ObjectScene extends Phaser.Scene {
 
     if (targetState.class == UNIT) {
       if (target instanceof GameSprite) {
-        var anim = target.imageName + '_die';
+        var deadAnim = target.imageName + '_dead';
 
-        if (this.anims.exists(anim)) {
-          console.log("Playing Die animation from Damage");
-          target.play(anim);
+        if (this.anims.exists(deadAnim)) {
+          target.play(deadAnim);
         } else {
           target.setTexture('gravestone');
+          target.setDepth(2);
         }
       } else if (target instanceof GameImage) {
         target.setTexture('gravestone');
@@ -1262,6 +1274,49 @@ export class ObjectScene extends Phaser.Scene {
     }
   }
 
+  private updateDeadRenderState(targetId: string, target: RenderObject): void {
+    var targetState = Global.objectStates[targetId];
+
+    if (!targetState) {
+      return;
+    }
+
+    if (targetState.class == UNIT) {
+      if (target instanceof GameSprite) {
+        if ((target as any).__spDeadRenderLocked) {
+          return;
+        }
+
+        (target as any).__spDeadRenderLocked = true;
+        var anim = target.imageName + '_die';
+
+        if (this.anims.exists(anim)) {
+          console.log("Playing Die animation from Damage");
+          target.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+            this.forceDeadFinalFrame(targetId, target);
+          });
+          target.play(anim);
+        } else {
+          this.forceDeadFinalFrame(targetId, target);
+        }
+      } else if (target instanceof GameImage) {
+        this.forceDeadFinalFrame(targetId, target);
+      }
+    } else if (targetState.class == STRUCTURE) {
+      this.forceDeadFinalFrame(targetId, target);
+    }
+  }
+
+  private getDamageTextColor(targetId): string {
+    var targetState = Global.objectStates[targetId];
+
+    if (targetState && targetState.class == STRUCTURE) {
+      return STRUCTURE_DAMAGE_TEXT_COLOR;
+    }
+
+    return UNIT_DAMAGE_TEXT_COLOR;
+  }
+
   processDmgMessage(message) {
     console.log('Dmg Message: ' + message.source_id + ' -> ' + message.target_id);
     if (message.source_id in Global.objectStates && message.target_id in Global.objectStates) {
@@ -1274,6 +1329,8 @@ export class ObjectScene extends Phaser.Scene {
 
         if (source == null || target == null)
           return;
+
+        var sourceIsDead = Global.objectStates[message.source_id].state == DEAD;
 
         // What is this for? Is this in the wrong spot
         if (Global.objectStates[message.source_id].subclass == HERO) {
@@ -1288,7 +1345,7 @@ export class ObjectScene extends Phaser.Scene {
           this.updateDeadRenderState(message.target_id, target);
         }
 
-        if (message.attack_type == 'Shadow Bolt') {
+        if (!sourceIsDead && message.attack_type == 'Shadow Bolt') {
           source.play(source.imageName + '_cast');
           source.anims.chain(source.imageName + '_none');
 
@@ -1309,7 +1366,7 @@ export class ObjectScene extends Phaser.Scene {
             duration: 1000,
           });
 
-        } else {
+        } else if (!sourceIsDead) {
           console.log('Play attack');
           source.play(source.imageName + '_attack');
           source.anims.chain(source.imageName + '_none');
@@ -1326,20 +1383,23 @@ export class ObjectScene extends Phaser.Scene {
             y: destY,
             ease: 'Power2',
             duration: 750,
-            onComplete: this.onJumpComplete
+            onComplete: this.onJumpComplete,
+            callbackScope: this
           });
 
           tween.play();
         }
 
         var dmgMsg = ''
-        if ('combo' in message) {
+        if (message.missed) {
+          dmgMsg = 'Miss';
+        } else if ('combo' in message) {
           dmgMsg = message.combo + ' ' + message.dmg + '!';
         } else {
           dmgMsg = message.dmg;
         }
 
-        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FF0000', stroke: '#000000', strokeThickness: 4 });
+        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: this.getDamageTextColor(message.target_id), stroke: '#000000', strokeThickness: 4 });
         dmgText.setDepth(10);
         dmgText.setOrigin(0.5, 0.5);
 
@@ -1402,7 +1462,7 @@ export class ObjectScene extends Phaser.Scene {
         dmgMsg = message.dmg;
       }
 
-      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FF0000' });
+      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: this.getDamageTextColor(message.target_id) });
       dmgText.setDepth(10);
       dmgText.setOrigin(0.5, 0.5);
 
@@ -1427,6 +1487,11 @@ export class ObjectScene extends Phaser.Scene {
       return;
     }
 
+    if (objectState.state == DEAD) {
+      this.forceDeadFinalFrame(targets[0].id, targets[0]);
+      return;
+    }
+
     var origin = Util.hex_to_pixel(objectState.x, objectState.y);
 
     var returnTween = this.tweens.add({
@@ -1435,7 +1500,8 @@ export class ObjectScene extends Phaser.Scene {
       y: origin.y,
       ease: 'Power2',
       duration: 200,
-      onComplete: this.onReturnComplete
+      onComplete: this.onReturnComplete,
+      callbackScope: this
     });
 
     returnTween.play();
@@ -1450,9 +1516,7 @@ export class ObjectScene extends Phaser.Scene {
     console.log('onReturnComplete');
     var objectState = Global.objectStates[targets[0].id];
     if (objectState && objectState.state == DEAD) {
-      targets[0].anims.stop();
-      console.log('Setting to gravestone');
-      targets[0].setTexture('gravestone');
+      this.forceDeadFinalFrame(targets[0].id, targets[0]);
     }
   }
 
@@ -1517,7 +1581,8 @@ export class ObjectScene extends Phaser.Scene {
         y: destY,
         ease: 'Power2',
         duration: 750,
-        onComplete: this.onJumpComplete
+        onComplete: this.onJumpComplete,
+        callbackScope: this
       });
 
       tween.play();
@@ -1574,7 +1639,8 @@ export class ObjectScene extends Phaser.Scene {
         y: destY,
         ease: 'Power2',
         duration: 750,
-        onComplete: this.onJumpComplete
+        onComplete: this.onJumpComplete,
+        callbackScope: this
       });
 
       tween.play();
@@ -1631,7 +1697,8 @@ export class ObjectScene extends Phaser.Scene {
         y: destY,
         ease: 'Power2',
         duration: 750,
-        onComplete: this.onJumpComplete
+        onComplete: this.onJumpComplete,
+        callbackScope: this
       });
 
       tween.play();

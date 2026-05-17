@@ -1,14 +1,20 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import rightarrow from "ui_comp/rightarrow.png";
 import '../ui.module.css';
 import { FOUNDED, STALLED, NONE, CRAFT, UPGRADING, PLANNING_UPGRADE, RESOURCE, BUILDING } from "../../core/config";
 import { NetworkEvent } from "../../core/networkEvent";
 import { GameEvent } from "../../core/gameEvent";
-import ResourceItem from "./resourceItem";
-import SmallButton from "./smallButton";
-import ToggleLinkedButton from './toggleLinkedButton';
+import {
+  MobileCard,
+  MobilePanelActions,
+  MobileRequirementGrid,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface StructurePanelProps {
   structureData,
@@ -333,17 +339,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       for (var i = 0; i < this.props.structureData.req.length; i++) {
         var req = this.props.structureData.req[i];
 
-        var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
-
-        reqs.push(
-          <ResourceItem key={i}
-            index={i}
-            resourceName={req.type}
-            resourceImage={resourceImage}
-            quantity={req.quantity}
-            currentQuantity={req.cquantity}
-            showQuantity={true} />
-        )
+        reqs.push(req)
       }
     }
 
@@ -351,349 +347,98 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       for (var i = 0; i < this.props.structureData.upgrade_req.length; i++) {
         var req = this.props.structureData.upgrade_req[i];
 
-        var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
-
-        upgradeReqs.push(
-          <ResourceItem key={i}
-            index={i}
-            resourceName={req.type}
-            resourceImage={resourceImage}
-            quantity={req.quantity}
-            currentQuantity={req.cquantity}
-            showQuantity={true} />
-        )
+        upgradeReqs.push(req)
       }
     }
-
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const imageUpgradingStyle = {
-      transform: 'translate(-272px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-195px, 35px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const upgradeToStyle = {
-      transform: 'translate(-138px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 100px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -230px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const divReqsStyle = {
-      transform: 'translate(-100px, 15px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const startUpgradeStyle = {
-      transform: 'translate(-250px, 38px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const queueStyle = {
-      transform: 'translate(-312px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const experimentStyle = {
-      transform: 'translate(-262px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const plantStyle = {
-      transform: 'translate(-262px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const craftStyle = {
-      transform: 'translate(-212px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const tendStyle = {
-      transform: 'translate(-212px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const refineStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const operateStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const harvestStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const buildStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const upgradeStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const assignStyle = {
-      transform: 'translate(-112px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const deleteStyle = {
-      transform: 'translate(-62px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const campfireStyle = {
-      transform: 'translate(-162px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const sleepStyle = {
-      transform: 'translate(-212px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
 
     console.log("buildUpgradeCost: " + this.state.buildUpgradeCost);
     console.log("workDone: " + this.state.workDone);
     console.log("workPerSecond: " + this.state.workPerSecond);
 
+    const landscape = isLandscapeMobile();
+    const panelTitle = isUpgrading ? `Upgrading to ${this.props.structureData.selected_upgrade || Global.selectedUpgrade}` : `${this.props.structureData.name} Level ${this.props.structureData.level}`;
+    const activeRequirements = isUpgrading ? upgradeReqs : reqs;
+    const progress = <progress max={this.state.buildUpgradeCost} value={this.state.workDone}>{this.state.workDone}</progress>;
+    const iconPath = (name: string) => name.indexOf('.') != -1 ? `/static/art/ui/${name}` : `/static/art/ui/${name}.png`;
+    const actions = [
+      showQueueButton && { key: 'queue', label: 'Queue', icon: iconPath('queuebutton'), onClick: this.handleQueueClick },
+      showOperateButton && { key: 'operate', label: 'Operate', icon: iconPath('gatherbutton'), onClick: this.handleOperateClick },
+      showStartUpgradeButton && { key: 'start-upgrade', label: 'Start upgrade', icon: iconPath('upgradebutton'), onClick: this.handleStartUpgradeClick },
+      showExperimentButton && { key: 'experiment', label: 'Experiment', icon: iconPath('experimentbutton'), onClick: this.handleExperimentClick },
+      showCraftButton && { key: 'craft', label: 'Craft', icon: iconPath('craftbutton'), onClick: this.handleCraftClick },
+      showRefineButton && { key: 'refine', label: 'Refine', icon: iconPath('refinebutton'), onClick: this.handleRefineClick, selected: this.state.refineButtonSelected },
+      showBuildButton && { key: 'build', label: 'Build', icon: iconPath('buildbutton'), onClick: this.handleBuildClick },
+      showUpgradeButton && { key: 'upgrade', label: 'Upgrade', icon: iconPath('upgradebutton'), onClick: this.handleStartUpgradeClick },
+      showAssignButton && { key: 'assign', label: 'Assign', icon: iconPath('assignbutton'), onClick: this.handleAssignClick },
+      showPlantButton && { key: 'plant', label: 'Plant', icon: iconPath('plant.png'), onClick: this.handlePlantClick },
+      showTendButton && { key: 'tend', label: 'Tend', icon: iconPath('plant.png'), onClick: this.handleTendClick },
+      showHarvestButton && { key: 'harvest', label: 'Harvest', icon: iconPath('plant.png'), onClick: this.handleHarvestClick },
+      showCampfireButton && { key: 'campfire', label: 'Campfire', icon: iconPath('sleepbutton'), onClick: this.handleCampfireClick },
+      showSleepButton && { key: 'sleep', label: 'Sleep', icon: iconPath('sleepbutton'), onClick: this.handleSleepClick },
+      { key: 'delete', label: 'Delete', icon: iconPath('deletebutton'), onClick: this.handleDeleteClick },
+    ].filter(Boolean);
+
+    const upgradeVisualStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '8px',
+    };
+
+    const smallImageStyle: React.CSSProperties = {
+      width: landscape ? '48px' : '64px',
+      height: landscape ? '48px' : '64px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
+
+    const arrowStyle: React.CSSProperties = {
+      width: '32px',
+      height: '32px',
+      objectFit: 'contain',
+    };
+
     return (
-      <HalfPanel left={true}
+      <MobilePanelScreen
         panelType={'structure'}
-        hideExitButton={false}>
-
-        {isUpgrading &&
-          <span>
-            <img src={'/static/art/' + imageName} style={imageUpgradingStyle} />
-            <img src={rightarrow} style={rightStyle} />
-            <img src={'/static/art/' + upgradeToImageName} style={upgradeToStyle} />
-          </span>
-        }
-
-        {isUpgrading &&
-          <span style={spanNameStyle}>
-            Upgrading to {this.props.structureData.selected_upgrade}
-          </span>
-        }
-
-        {!isUpgrading &&
-          <img src={'/static/art/' + imageName} style={imageStyle} />
-        }
-
-        {!isUpgrading &&
-          <span style={spanNameStyle}>
-            {this.props.structureData.name} Level {this.props.structureData.level}
-          </span>
-        }
-
-        <table style={tableStyle}>
-          <tbody>
-
-            <tr>
-              <td>State:</td>
-              <td>{stateText}</td>
-            </tr>
-            <tr>
-              <td>Class:</td>
-              <td>{this.props.structureData.subclass}</td>
-            </tr>
-
-            {isFinished &&
-              <tr>
-                <td>HP:</td>
-                <td>{this.props.structureData.hp} / {this.props.structureData.base_hp}</td>
-              </tr>
-            }
-
-            {isFinished &&
-              <tr>
-                <td>Defense:</td>
-                <td>{this.props.structureData.base_def}</td>
-              </tr>
-            }
-
-            {isFinished && isShelter &&
-              <tr>
-                <td>Residents:</td>
-                <td>{this.props.structureData.residents} / {this.props.structureData.max_residents}</td>
-              </tr>
-            }
-
-            {!isFinished &&
-              <tr>
-                <td>{progressLabel} Cost:</td>
-                <td>{this.state.buildUpgradeCost}</td>
-              </tr>
-            }
-
-            {showProgress &&
-              <tr>
-                <td>{progressLabel} Progress: </td>
-                <td><progress max={this.state.buildUpgradeCost}
-                  value={this.state.workDone}>{this.state.workDone}
-                </progress></td>
-              </tr>
-            }
-
-            {!isFinished && !isUpgrading &&
-              <tr>
-                <td>Requirements:</td>
-                <td>
-                  <div style={divReqsStyle}>
-                    {reqs}
+        title={'Structure'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <>
+              {isUpgrading
+                ? <MobileCard compact={landscape}>
+                  <div style={upgradeVisualStyle}>
+                    <img src={'/static/art/' + imageName} style={smallImageStyle} />
+                    <img src={rightarrow} style={arrowStyle} />
+                    <img src={'/static/art/' + upgradeToImageName} style={smallImageStyle} />
                   </div>
-                </td>
-              </tr>
-            }
-
-            {isUpgrading &&
-              <tr>
-                <td>Requirements:</td>
-                <td>
-                  <div style={divReqsStyle}>
-                    {upgradeReqs}
-                  </div>
-                </td>
-              </tr>
-            }
-
-            {(isFinished && isFarm) &&
-              <tr>
-                <td>Crop Type:</td>
-                <td>{this.props.structureData.crop_type}</td>
-              </tr>
-            }
-
-            {(isFinished && isFarm) &&
-              <tr>
-                <td>Crop Quantity:</td>
-                <td>{this.props.structureData.crop_quantity}</td>
-              </tr>
-            }
-
-            {(isFinished && isFarm) &&
-              <tr>
-                <td>Crop Stage:</td>
-                <td>{this.props.structureData.crop_stage}</td>
-              </tr>
-            }
-          </tbody>
-        </table>
-
-        {showQueueButton &&
-          <SmallButton handler={this.handleQueueClick}
-            imageName="queuebutton"
-            style={queueStyle} />}
-
-        {showOperateButton &&
-          <SmallButton handler={this.handleOperateClick}
-            imageName="gatherbutton"
-            style={operateStyle} />}
-
-        {showStartUpgradeButton &&
-          <SmallButton handler={this.handleStartUpgradeClick}
-            imageName="upgradebutton"
-            style={startUpgradeStyle} />}
-
-        {showExperimentButton &&
-          <SmallButton handler={this.handleExperimentClick}
-            imageName="experimentbutton"
-            style={experimentStyle} />}
-
-
-        {showCraftButton &&
-          <SmallButton handler={this.handleCraftClick}
-            imageName="craftbutton"
-            style={craftStyle} />}
-
-        {showRefineButton &&
-          <ToggleLinkedButton handler={this.handleRefineClick}
-            imageName="refinebutton"
-            style={refineStyle}
-            displayInline={true}
-            toggleIconBorder={this.state.refineButtonSelected} />}
-
-        {showBuildButton &&
-          <SmallButton handler={this.handleBuildClick}
-            imageName="buildbutton"
-            style={buildStyle} />}
-
-        {showUpgradeButton &&
-          <SmallButton handler={this.handleStartUpgradeClick}
-          imageName="upgradebutton"
-          style={upgradeStyle} />}        
-
-        {showAssignButton &&
-          <SmallButton handler={this.handleAssignClick}
-            imageName="assignbutton"
-            style={assignStyle} />}
-
-        {showPlantButton &&
-          <SmallButton handler={this.handlePlantClick}
-            imageName="plantbutton"
-            style={plantStyle} />}
-
-        {showTendButton &&
-          <SmallButton handler={this.handleTendClick}
-            imageName="tendbutton"
-            style={tendStyle} />}
-
-        {showHarvestButton &&
-          <SmallButton handler={this.handleHarvestClick}
-            imageName="harvestbutton"
-            style={harvestStyle} />}
-
-        {showCampfireButton &&
-          <SmallButton handler={this.handleCampfireClick}
-            imageName="campfirebutton"
-            style={campfireStyle} />}
-
-        {showSleepButton &&
-          <SmallButton handler={this.handleSleepClick}
-            imageName="sleepbutton"
-            style={sleepStyle} />}
-
-        <SmallButton handler={this.handleDeleteClick}
-          imageName="deletebutton"
-          style={deleteStyle} />
-      </HalfPanel>
+                </MobileCard>
+                : <MobileSummaryCard imageSrc={'/static/art/' + imageName} title={panelTitle} imageSize={landscape ? 58 : 82} />}
+              <MobileStatsList rows={[
+                { label: 'State', value: stateText },
+                { label: 'Class', value: this.props.structureData.subclass },
+                { label: 'HP', value: `${this.props.structureData.hp} / ${this.props.structureData.base_hp}`, hidden: !isFinished },
+                { label: 'Defense', value: this.props.structureData.base_def, hidden: !isFinished },
+                { label: 'Residents', value: `${this.props.structureData.residents} / ${this.props.structureData.max_residents}`, hidden: !(isFinished && isShelter) },
+                { label: `${progressLabel} Cost`, value: this.state.buildUpgradeCost, hidden: isFinished },
+                { label: `${progressLabel} Progress`, value: progress, hidden: !showProgress },
+                { label: 'Crop Type', value: this.props.structureData.crop_type, hidden: !(isFinished && isFarm) },
+                { label: 'Crop Qty', value: this.props.structureData.crop_quantity, hidden: !(isFinished && isFarm) },
+                { label: 'Crop Stage', value: this.props.structureData.crop_stage, hidden: !(isFinished && isFarm) },
+              ]} />
+            </>
+          }
+          right={
+            <>
+              {activeRequirements.length > 0 &&
+                <MobileRequirementGrid title="Requirements" requirements={activeRequirements} showCurrent={true} />}
+              <MobilePanelActions actions={actions as any} align="start" />
+            </>
+          } />
+      </MobilePanelScreen>
     );
   }
 }
-
-
 

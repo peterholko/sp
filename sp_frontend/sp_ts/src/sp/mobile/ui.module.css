@@ -66,57 +66,100 @@
   position: fixed;
 }
 
-.combobutton {
-  bottom: 10px;
-  left: calc(8px + env(safe-area-inset-left, 0px));
+.mobileActionGrid {
   position: fixed;
+  left: calc(8px + env(safe-area-inset-left, 0px));
+  top: calc(118px + env(safe-area-inset-top, 0px));
+  z-index: 8;
+  display: grid;
+  grid-template-columns: repeat(4, 50px);
+  grid-auto-rows: 49px;
+  gap: 1px;
+  pointer-events: auto;
+}
+
+.mobileActionIconButton {
+  width: 50px;
+  height: 49px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobileActionIconButton img {
+  width: 50px;
+  height: 49px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+@media (orientation: landscape) {
+  .mobileActionGrid {
+    left: 3px;
+  }
+}
+
+.combobutton {
+  bottom: calc(110px + env(safe-area-inset-bottom, 0px));
+  right: calc(61px + env(safe-area-inset-right, 0px));
+  position: fixed;
+  z-index: 4;
+  width: 50px;
+  height: 49px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.combobutton img {
+  width: 50px;
+  height: 49px;
+  object-fit: contain;
+  image-rendering: pixelated;
 }
 
 .quickattackbutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: -150px;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+  right: calc(112px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .preciseattackbutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: -100px;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+  right: calc(61px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .fierceattackbutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: -50px;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+  right: calc(10px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .bracebutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: 20px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  right: calc(112px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .parrybutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: 70px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  right: calc(61px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .dodgebutton {
-  bottom: 10px;
-  left: 50%;
-  margin-left: 120px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  right: calc(10px + env(safe-area-inset-right, 0px));
   position: fixed;
 }
 
 .abilitybar {
-  bottom: 70px;
-  left: calc(8px + env(safe-area-inset-left, 0px));
+  bottom: calc(166px + env(safe-area-inset-bottom, 0px));
+  left: calc(104px + env(safe-area-inset-left, 0px));
   right: calc(8px + env(safe-area-inset-right, 0px));
   position: fixed;
   z-index: 4;

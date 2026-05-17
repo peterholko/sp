@@ -1168,6 +1168,7 @@
   image: watchtower
   base_hp: 50
   base_def: 0
+  base_vision: 5
   build_cost: 100
   capacity: 100
   level: 0

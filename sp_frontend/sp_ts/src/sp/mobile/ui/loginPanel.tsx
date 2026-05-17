@@ -2,6 +2,7 @@ import * as React from "react";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface LoginPanelProps {
   errorMessage: string;
@@ -64,7 +65,7 @@ export default class LoginPanel extends React.Component<LoginPanelProps, LoginPa
       position: 'fixed',
       top: 0, left: 0, right: 0, bottom: 0,
       background: 'rgba(0, 0, 0, 0.7)',
-      zIndex: Global.zIndexManager.getTop() + 1,
+      zIndex: MOBILE_DIALOG_Z,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',

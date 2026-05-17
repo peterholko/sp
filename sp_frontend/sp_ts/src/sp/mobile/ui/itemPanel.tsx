@@ -1,10 +1,9 @@
 
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import dividebutton from "ui_comp/dividebutton.png";
 import buybutton from "ui_comp/buybutton.png";
 import sellbutton from "ui_comp/sellbutton.png";
-import equipbutton from "ui_comp/equipbutton.png";
 import refineorebutton from "ui_comp/refinebutton.png";
 import refinewoodbutton from "ui_comp/refinewoodbutton.png";
 import refinestonebutton from "ui_comp/refinestonebutton.png";
@@ -14,8 +13,15 @@ import usebutton from "ui_comp/usebutton.png";
 
 import { GameEvent } from "../../core/gameEvent";
 import { Global } from "../../core/global";
-import { TRIGGER_PLAYER_SELLING_ITEM, TRIGGER_INVENTORY, TRIGGER_PLAYER_BUYING_ITEM, FALSE, TRIGGER_EQUIP, TRIGGER_REFINING_ITEM, TRIGGER_STRUCTURE_REFINING_ITEM } from "../../core/config";
-import { Network } from "../../core/network";
+import { TRIGGER_PLAYER_SELLING_ITEM, TRIGGER_INVENTORY, TRIGGER_PLAYER_BUYING_ITEM, TRIGGER_REFINING_ITEM, TRIGGER_STRUCTURE_REFINING_ITEM } from "../../core/config";
+import {
+  MobileCard,
+  MobilePanelActions,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface ItemPanelProps {
   triggerAction,
@@ -32,7 +38,6 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     this.handleDivideClick = this.handleDivideClick.bind(this);
     this.handleBuyClick = this.handleBuyClick.bind(this);
     this.handleSellClick = this.handleSellClick.bind(this);
-    this.handleEquipClick = this.handleEquipClick.bind(this);
     this.handleRefineClick = this.handleRefineClick.bind(this);
     this.handleUseClick = this.handleUseClick.bind(this);
     this.handleDeleteClick = this.handleDeleteClick.bind(this);
@@ -66,14 +71,6 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     };
 
     Global.gameEmitter.emit(GameEvent.MERCHANT_BUYSELL_CLICK, eventData);
-  }
-
-  handleEquipClick() {
-    if (this.props.itemData.equipped == false) {
-      Global.network.sendEquip(this.props.itemData.owner, this.props.itemData.id, true);
-    } else {
-      Global.network.sendEquip(this.props.itemData.owner, this.props.itemData.id, false);
-    }
   }
 
   handleUseClick() {
@@ -119,14 +116,6 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     const imageName = this.props.itemData.image + '.png'
     const effects = [];
     const produces = [];
-
-    const isLeftPanel =
-      (this.props.triggerAction == TRIGGER_PLAYER_BUYING_ITEM) ||
-      (this.props.triggerAction == TRIGGER_EQUIP) ||
-      (this.props.triggerAction == TRIGGER_STRUCTURE_REFINING_ITEM);
-
-    const isMiddlePanel =
-      (this.props.triggerAction == TRIGGER_REFINING_ITEM);
 
     const showDivideButton = (this.props.itemData.quantity > 1) &&
       (this.props.triggerAction == TRIGGER_INVENTORY) &&
@@ -186,9 +175,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
           attrValue = String(attrValue);
         }
 
-        attrs.push(<tr key={attrKey}>
-          <td colSpan={2}>{attrValue} {attrKey}</td>
-        </tr>)
+        attrs.push({ key: attrKey, value: attrValue });
       }
     }
 
@@ -213,9 +200,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
           value = type + effect.value;
         }
 
-        effects.push(<tr key={i}>
-          <td>{value}</td>
-        </tr>)
+        effects.push(value);
       }
     }
 
@@ -224,9 +209,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
 
 
       for (var i = 0; i < this.props.itemData.produces.length; i++) {
-        produces.push(<tr key={i}>
-          <td>{this.props.itemData.produces[i]}</td>
-        </tr>)
+        produces.push(this.props.itemData.produces[i]);
       }
     }
 
@@ -243,184 +226,157 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     } else {
       refineItemIcon = refineorebutton;
     }
-    const itemStyle = {
-      transform: 'translate(-185px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const actionButtons = [];
 
-    const spanNameStyle = {
-      transform: 'translate(-323px, 85px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
+    if (showDivideButton) {
+      actionButtons.push({ key: 'divide', label: 'Divide', icon: dividebutton, onClick: this.handleDivideClick });
+    }
+
+    if (showBuyButton) {
+      actionButtons.push({ key: 'buy', label: 'Buy', icon: buybutton, onClick: this.handleBuyClick });
+    }
+
+    if (showSellButton) {
+      actionButtons.push({ key: 'sell', label: 'Sell', icon: sellbutton, onClick: this.handleSellClick });
+    }
+
+    if (showUseButton) {
+      actionButtons.push({ key: 'use', label: 'Use', icon: usebutton, onClick: this.handleUseClick });
+    }
+
+    if (hasProduces) {
+      actionButtons.push({ key: 'refine', label: 'Refine', icon: refineItemIcon, onClick: this.handleRefineClick });
+    }
+
+    if (showDeleteButton) {
+      actionButtons.push({ key: 'delete', label: 'Delete', icon: deletebutton, onClick: this.handleDeleteClick });
+    }
+
+    const landscape = isLandscapeMobile();
+    const weightTotal = this.props.itemData.quantity * this.props.itemData.weight;
+
+    const coreRows = [
+      { label: 'Class', value: this.props.itemData.class },
+      { label: 'Subclass', value: this.props.itemData.subclass, hidden: this.props.itemData.subclass == null },
+      { label: 'Quantity', value: this.props.itemData.quantity },
+      { label: 'Weight', value: `${this.props.itemData.weight} each / ${weightTotal} total` },
+      { label: 'Equipped', value: this.props.itemData.equipped ? 'Yes' : 'No', hidden: !hasEquipable },
+      { label: 'Durability', value: this.props.itemData.durability, hidden: !hasDurability },
+      { label: 'Price', value: this.props.itemData.price, hidden: !hasPrice },
+    ];
+
+    const sectionTitleStyle: React.CSSProperties = {
+      color: '#c9aa71',
       fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
+      fontSize: '11px',
+      fontWeight: 'bold',
+      textTransform: 'uppercase',
+      marginBottom: '7px',
+    };
 
-    const tableStyle = {
-      transform: 'translate(20px, -250px)',
-      position: 'fixed',
-      color: 'white',
+    const chipGridStyle: React.CSSProperties = {
+      display: 'grid',
+      gridTemplateColumns: landscape
+        ? 'repeat(auto-fit, minmax(112px, 1fr))'
+        : 'repeat(auto-fit, minmax(128px, 1fr))',
+      gap: '6px',
+    };
+
+    const chipStyle: React.CSSProperties = {
+      border: '1px solid rgba(201, 170, 113, 0.24)',
+      borderRadius: '4px',
+      background: 'rgba(255,255,255,0.05)',
+      color: '#f2e7cf',
       fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '300px'
-    } as React.CSSProperties
+      fontSize: '11px',
+      lineHeight: 1.2,
+      padding: '6px 7px',
+      overflowWrap: 'anywhere',
+    };
 
-    const tableStyle2 = {
-      transform: 'translate(-50px, 15px)',
-      position: 'fixed',
-      color: 'white',
+    const emptyStyle: React.CSSProperties = {
+      color: '#777d82',
       fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
+      fontSize: '11px',
+      lineHeight: 1.35,
+    };
 
-    const tableStyleProduces = {
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
+    const attrsCard = attrs.length > 0 ? (
+      <MobileCard compact>
+        <div style={sectionTitleStyle}>Properties</div>
+        <div style={chipGridStyle}>
+          {attrs.map(attr =>
+            <div key={attr.key} style={chipStyle}>{attr.key}: {attr.value}</div>
+          )}
+        </div>
+      </MobileCard>
+    ) : null;
 
-    const divideStyle = {
-      transform: 'translate(-137px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const effectsCard = hasEffects ? (
+      <MobileCard compact>
+        <div style={sectionTitleStyle}>Effects</div>
+        <div style={chipGridStyle}>
+          {effects.map((effect, index) =>
+            <div key={index} style={chipStyle}>{effect}</div>
+          )}
+        </div>
+      </MobileCard>
+    ) : null;
 
-    const buyStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const producesCard = hasProduces ? (
+      <MobileCard compact>
+        <div style={sectionTitleStyle}>Produces</div>
+        <div style={chipGridStyle}>
+          {produces.map((produce, index) =>
+            <div key={index} style={chipStyle}>{produce}</div>
+          )}
+        </div>
+      </MobileCard>
+    ) : null;
 
-    const sellStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const actionsCard = actionButtons.length > 0 ? (
+      <MobileCard compact>
+        <div style={sectionTitleStyle}>Actions</div>
+        <MobilePanelActions actions={actionButtons} compact align={landscape ? 'start' : 'center'} />
+      </MobileCard>
+    ) : null;
 
-    const equipStyle = {
-      transform: 'translate(-137px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const refineStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const useStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const deleteStyle = {
-      transform: 'translate(-87px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const secondaryInfo = attrsCard || effectsCard || producesCard ? (
+      <React.Fragment>
+        {attrsCard}
+        {effectsCard}
+        {producesCard}
+      </React.Fragment>
+    ) : (
+      <MobileCard compact>
+        <div style={sectionTitleStyle}>Details</div>
+        <div style={emptyStyle}>No special properties.</div>
+      </MobileCard>
+    );
 
     return (
-      <HalfPanel left={isLeftPanel}
+      <MobilePanelScreen
         panelType={'item'}
+        title={'Item'}
         hideExitButton={false}
-        middle={isMiddlePanel}
-        zIndexBonus={topLevel ? 3 : 0}>
-
-        <img src={'/static/art/items/' + imageName} style={itemStyle} />
-        <span style={spanNameStyle}>
-          {itemName} x {this.props.itemData.quantity}
-        </span>
-        <table style={tableStyle}>
-          <tbody>
-            {hasEquipable &&
-              <tr>
-                <td>Equipped: </td>
-                <td>{String(this.props.itemData.equipped)}</td>
-              </tr>
-            }
-            <tr>
-              <td>Class: </td>
-              <td>{this.props.itemData.subclass} ({this.props.itemData.class})</td>
-            </tr>
-            <tr>
-              <td>Weight: </td>
-              <td>
-                {this.props.itemData.weight} per unit
-                ({this.props.itemData.quantity * this.props.itemData.weight})
-              </td>
-            </tr>
-
-            {hasDurability &&
-              <tr>
-                <td>Durability: </td>
-                <td>{this.props.itemData.durability}</td>
-              </tr>
-            }
-
-            {attrs}
-
-            {hasProduces &&
-              <tr>
-                <td>Produces: </td>
-                <td>
-                  <table style={tableStyleProduces}>
-                    <tbody>
-                      {produces}
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
-            }
-            {hasEffects &&
-              <tr>
-                <td>Effects: </td>
-                <td>
-                  <table style={tableStyle2}>
-                    <tbody>
-                      {effects}
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
-            }
-            {hasPrice &&
-              <tr>
-                <td>Price: </td>
-                <td>{this.props.itemData.price}</td>
-              </tr>
-            }
-          </tbody>
-        </table>
-
-        {showDivideButton &&
-          <img src={dividebutton}
-            style={divideStyle}
-            onClick={this.handleDivideClick} />}
-
-        {showBuyButton &&
-          <img src={buybutton}
-            style={buyStyle}
-            onClick={this.handleBuyClick} />}
-
-        {showSellButton &&
-          <img src={sellbutton}
-            style={sellStyle}
-            onClick={this.handleSellClick} />}
-
-        {showUseButton &&
-          <img src={usebutton}
-            style={useStyle}
-            onClick={this.handleUseClick} />}
-
-        {hasProduces &&
-          <img src={refineItemIcon}
-            style={refineStyle}
-            onClick={this.handleRefineClick} />}
-
-        {showDeleteButton &&
-          <img src={deletebutton}
-            style={deleteStyle}
-            onClick={this.handleDeleteClick} />}
-
-      </HalfPanel>
+        zIndexBonus={topLevel ? 3 : 0}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <React.Fragment>
+              <MobileSummaryCard
+                imageSrc={'/static/art/items/' + imageName}
+                title={itemName}
+                subtitle={`Quantity ${this.props.itemData.quantity}`}
+                imageSize={48}
+              />
+              <MobileStatsList rows={coreRows} compact />
+              {actionsCard}
+            </React.Fragment>
+          }
+          right={secondaryInfo}
+        />
+      </MobilePanelScreen>
     );
   }
 }
-

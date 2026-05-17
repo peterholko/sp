@@ -389,6 +389,8 @@ pub fn new(
             let mut bow_attrs = HashMap::new();
             bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
             bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
+            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(3.0));
+            bow_attrs.insert(item::AttrKey::Accuracy, item::AttrVal::Num(85.0));
 
             let bow = inventory.new_with_attrs(
                 ids.new_item_id(),
@@ -870,12 +872,21 @@ pub fn new(
     recipes.create(player_id, "Training Pick Axe".to_string(), &templates);
     //recipes.create(player_id, "Copper Training Axe".to_string(), &templates);
     recipes.create(player_id, "Firewood".to_string(), &templates);
+    recipes.create(player_id, "Sharpened Stick".to_string(), &templates);
     recipes.create(player_id, "Crude Torch".to_string(), &templates);
+    recipes.create(player_id, "Crude Bandage".to_string(), &templates);
+    recipes.create(player_id, "Twine".to_string(), &templates);
+    recipes.create(player_id, "Improvised Sling".to_string(), &templates);
+    recipes.create(player_id, "Stone Knife".to_string(), &templates);
+    recipes.create(player_id, "Resin Torch".to_string(), &templates);
+    recipes.create(player_id, "Herbal Poultice".to_string(), &templates);
+    recipes.create(player_id, "Hide Wraps".to_string(), &templates);
 
     // Starting plans (survival basics only — more plans acquired through exploration and villager)
     plans.add(player_id, "Campfire".to_string(), 0, 0);
     plans.add(player_id, "Burrow".to_string(), 0, 0);
     plans.add(player_id, "Stockade".to_string(), 0, 0);
+    plans.add(player_id, "Crafting Tent".to_string(), 0, 0);
 
     let mut thirst_attr = HashMap::new();
     thirst_attr.insert(item::AttrKey::Thirst, item::AttrVal::Num(90.0));

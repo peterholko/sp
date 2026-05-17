@@ -1,6 +1,11 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
-import { Global } from "../../core/global";
+import MobilePanelScreen from "./mobilePanelScreen";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface ObjPanelProps {
   objData,
@@ -23,46 +28,21 @@ export default class ObjPanel extends React.Component<ObjPanelProps, any> {
     if (this.props.objData.subclass == 'monolith') {
       hideSoulshards = false;
     }
-
-    const imageStyle = {
-      transform: 'translate(-197px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -250px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
+    const landscape = isLandscapeMobile();
 
     return (
-      <HalfPanel left={true}
+      <MobilePanelScreen
         panelType={'obj'}
-        hideExitButton={false}>
-
-        <img src={imagePath} style={imageStyle} />
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <td>Name: </td>
-              <td>{this.props.objData.name}</td>
-            </tr>
-            <tr>
-              <td>State: </td>
-              <td>{this.props.objData.state}</td>
-            </tr>
-            {!hideSoulshards &&
-              <tr>
-                <td>Soulshards: </td>
-                <td>{this.props.objData.soulshards}</td>
-              </tr>
-            }
-          </tbody>
-        </table>
-      </HalfPanel>
+        title={'Object'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={imagePath} title={this.props.objData.name} imageSize={landscape ? 58 : 82} />}
+          right={<MobileStatsList rows={[
+            { label: 'State', value: this.props.objData.state },
+            { label: 'Soulshards', value: this.props.objData.soulshards, hidden: hideSoulshards },
+          ]} />} />
+      </MobilePanelScreen>
     );
   }
 }
-

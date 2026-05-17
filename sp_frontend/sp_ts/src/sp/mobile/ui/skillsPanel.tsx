@@ -1,7 +1,13 @@
 
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface SkillsPanelProps {
   skillsData,
@@ -22,70 +28,24 @@ export default class SkillsPanel extends React.Component<SkillsPanelProps, any> 
     imageName = imageName.replace(/ /g, '') + '_single.png';
     var name = Global.objectStates[objId].name;
 
-    const skills = [];
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -240px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      borderCollapse: 'separate',
-      borderSpacing: '20px 0'
-    } as React.CSSProperties
-
-    const thStyle = {
-      width: '75px'
-    } as React.CSSProperties
-
-
-    var key = 0;
+    const rows = [];
+    const landscape = isLandscapeMobile();
 
     for(var skill in this.props.skillsData.skills) {
-      skills.push(<tr key={key}>
-                    <td>{skill}</td>
-                    <td>{this.props.skillsData.skills[skill].level}</td>
-                    <td>{this.props.skillsData.skills[skill].xp}</td>
-                    <td>{this.props.skillsData.skills[skill].next}</td>
-                  </tr>);
-
-      key++;
+      const data = this.props.skillsData.skills[skill];
+      rows.push({ label: skill, value: `Lvl ${data.level} | ${data.xp}/${data.next}` });
     }
 
     return (
-      <HalfPanel left={false} 
-                 panelType={'skills'} 
-                 hideExitButton={false}>
-        <img src={'/static/art/' + imageName} style={imageStyle} />
-        <span style={spanNameStyle}>{name}</span>
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <th>Name</th>
-              <th>Level</th>
-              <th>Xp</th>
-              <th>Next Level</th>
-            </tr>
-            {skills}      
-          </tbody>
-        </table>
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'skills'}
+        title={'Skills'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={'/static/art/' + imageName} title={name} imageSize={landscape ? 58 : 82} />}
+          right={<MobileStatsList rows={rows} />} />
+      </MobilePanelScreen>
     );
   }
 }
-

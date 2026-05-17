@@ -4,6 +4,7 @@ import errorpanel from "ui_comp/buttonsframe.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_NOTICE_Z } from "./mobileLayers";
 
 interface NoticeProps {
   noticemsg,
@@ -46,7 +47,7 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
       height: '67px',
       marginLeft: '-158px',
       position: 'fixed',
-      zIndex: Global.zIndexManager.getTop() + 1,
+      zIndex: MOBILE_NOTICE_Z,
       cursor: 'pointer',
     } as React.CSSProperties
 
@@ -72,4 +73,3 @@ export default class NoticePanel extends React.Component<NoticeProps, any> {
     );
   }
 }
-

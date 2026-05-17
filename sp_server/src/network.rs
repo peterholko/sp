@@ -373,6 +373,16 @@ pub enum ResponsePacket {
     Stats {
         data: StatsData,
     },
+    #[serde(rename = "hero_death_state")]
+    HeroDeathState {
+        phase: String,
+        hero_id: i32,
+        hero_name: String,
+        resurrect_cost: i32,
+        soulshards_available: i32,
+        seconds_remaining: i32,
+        message: String,
+    },
     #[serde(rename = "info_hero")]
     InfoHero {
         id: i32,
@@ -1038,6 +1048,7 @@ pub enum BroadcastEvents {
         state: String,
         combo: Option<String>,
         countered: Option<String>,
+        missed: Option<bool>,
     },
     #[serde(rename = "spoil")]
     Spoil {

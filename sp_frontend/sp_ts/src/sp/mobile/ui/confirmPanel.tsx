@@ -5,6 +5,7 @@ import exitbutton from "ui_comp/exitbutton.png";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface ConfirmProps {
   msg
@@ -40,7 +41,7 @@ export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
       marginTop: '-59px',
       marginLeft: '-166px',
       position: 'fixed',
-      zIndex: Global.zIndexManager.getTop() + 1
+      zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const confirmPanelStyle = {
@@ -79,4 +80,3 @@ export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
     );
   }
 }
-

@@ -21,6 +21,16 @@ fn combat_lock_helper_uses_three_second_window() {
 }
 
 #[test]
+fn first_resurrection_uses_starting_soulshard_cost() {
+    assert_eq!(resurrection_attempt_cost(1, 0), 10);
+}
+
+#[test]
+fn later_resurrections_scale_from_completed_deaths() {
+    assert_eq!(resurrection_attempt_cost(2, 0), 12);
+}
+
+#[test]
 fn combat_lock_interrupt_cancels_active_peaceful_work() {
     let mut app = App::new();
     app.add_systems(Update, combat_lock_interrupt_system);
@@ -296,6 +306,94 @@ fn is_watchtower_light_removed_after_dead_watchtower() {
         .unwrap()
         .0
         .contains_key(&Effect::WatchtowerLight));
+}
+
+#[test]
+fn watchtower_reveals_enemy_hidden_units_inside_current_viewshed() {
+    let mut app = App::new();
+    app.add_systems(Update, watchtower_reveal_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(TICKS_PER_SEC));
+    app.insert_resource(PerceptionUpdates(HashSet::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    app.world_mut().spawn((
+        Id(1),
+        PlayerId(1),
+        Position { x: 0, y: 0 },
+        Viewshed { range: 3 },
+        State::None,
+        Watchtower,
+    ));
+
+    let hidden_enemy = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(2),
+            Position { x: 2, y: 0 },
+            Class(CLASS_UNIT.to_string()),
+            State::Hiding,
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(app.world().get::<State>(hidden_enemy), Some(&State::None));
+    let perception_updates = app.world().resource::<PerceptionUpdates>();
+    assert!(perception_updates.contains(&(1, PerceptionUpdateType::UpdatePerception)));
+    assert!(perception_updates.contains(&(2, PerceptionUpdateType::UpdatePerception)));
+}
+
+#[test]
+fn watchtower_does_not_reveal_out_of_range_or_friendly_hidden_units() {
+    let mut app = App::new();
+    app.add_systems(Update, watchtower_reveal_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(TICKS_PER_SEC));
+    app.insert_resource(PerceptionUpdates(HashSet::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    app.world_mut().spawn((
+        Id(1),
+        PlayerId(1),
+        Position { x: 0, y: 0 },
+        Viewshed { range: 2 },
+        State::None,
+        Watchtower,
+    ));
+
+    let hidden_enemy_outside = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(2),
+            Position { x: 3, y: 0 },
+            Class(CLASS_UNIT.to_string()),
+            State::Hiding,
+        ))
+        .id();
+    let friendly_hidden = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            Class(CLASS_UNIT.to_string()),
+            State::Hiding,
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        app.world().get::<State>(hidden_enemy_outside),
+        Some(&State::Hiding)
+    );
+    assert_eq!(
+        app.world().get::<State>(friendly_hidden),
+        Some(&State::Hiding)
+    );
 }
 
 #[test]

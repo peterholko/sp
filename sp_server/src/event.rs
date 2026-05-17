@@ -123,6 +123,7 @@ pub enum VisibleEvent {
         damage: i32,
         combo: Option<String>,
         state: String,
+        missed: bool,
     },
     StealEvent {
         target_id: i32,

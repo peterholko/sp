@@ -229,22 +229,44 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     const expanded = this.state.expanded;
 
-    const containerStyle: React.CSSProperties = {
+    const chipStyle: React.CSSProperties = {
       position: 'fixed',
-      bottom: 'calc(145px + env(safe-area-inset-bottom, 0px))',
-      right: 'calc(8px + env(safe-area-inset-right, 0px))',
-      maxWidth: '290px',
-      maxHeight: expanded ? 'calc(100vh - 220px)' : undefined,
-      overflowY: expanded ? 'auto' : 'visible',
+      right: 'calc(20px + env(safe-area-inset-right, 0px))',
+      bottom: 'calc(166px + env(safe-area-inset-bottom, 0px))',
+      width: '132px',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
       border: '1px solid rgba(201, 170, 113, 0.38)',
       borderRadius: '4px',
       zIndex: 50,
       pointerEvents: 'auto',
       boxSizing: 'border-box',
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      lineHeight: 1.25,
+      padding: '8px 9px',
+      textAlign: 'center',
+      boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+    };
+
+    const drawerStyle: React.CSSProperties = {
+      position: 'fixed',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      zIndex: 70,
+      pointerEvents: 'auto',
+      boxSizing: 'border-box',
+      display: 'flex',
+      flexDirection: 'column',
+      padding: 'calc(12px + env(safe-area-inset-top, 0px)) calc(10px + env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) calc(10px + env(safe-area-inset-left, 0px))',
+      backgroundColor: 'rgba(8, 10, 12, 0.97)',
+      color: '#f2e7cf',
     };
 
     const headerStyle: React.CSSProperties = {
+      flex: '0 0 auto',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -255,21 +277,31 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       fontWeight: 'bold',
       textTransform: 'uppercase',
       letterSpacing: 0,
-      padding: '12px 12px',
+      padding: '0 0 9px',
       minHeight: '44px',
       boxSizing: 'border-box',
-      cursor: 'pointer',
       userSelect: 'none',
+      borderBottom: '1px solid rgba(201, 170, 113, 0.35)',
     };
 
-    const chevronStyle: React.CSSProperties = {
-      color: '#c9aa71',
+    const closeButtonStyle: React.CSSProperties = {
+      flex: '0 0 auto',
+      minHeight: '36px',
+      minWidth: '64px',
+      border: '1px solid rgba(201, 170, 113, 0.55)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
       fontSize: '12px',
-      lineHeight: 1,
     };
 
     const bodyStylePanel: React.CSSProperties = {
-      padding: '0 10px 9px',
+      flex: '1 1 auto',
+      minHeight: 0,
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      padding: '12px 0 0',
     };
 
     const titleStyle: React.CSSProperties = {
@@ -340,20 +372,28 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       return '#9aa0a6';
     };
 
-    return (
-      <div style={containerStyle}>
-        <div
-          style={headerStyle}
+    if (!expanded) {
+      return (
+        <button
+          type="button"
+          style={chipStyle}
           onClick={this.toggleExpanded}
-          role="button"
-          aria-expanded={expanded}
+          aria-expanded={false}
         >
+          <div style={{ color: '#c9aa71', fontWeight: 'bold', textTransform: 'uppercase' }}>Survival</div>
+          {activeObjective && <div>{activeObjective.title}</div>}
+        </button>
+      );
+    }
+
+    return (
+      <div style={drawerStyle}>
+        <div style={headerStyle}>
           <span>Survival Thread</span>
-          <span style={chevronStyle} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          <button type="button" style={closeButtonStyle} onClick={this.toggleExpanded}>Close</button>
         </div>
 
-        {expanded && (
-          <div style={bodyStylePanel}>
+        <div style={bodyStylePanel}>
             {activeObjective &&
               <div>
                 <div style={categoryStyle}>{activeObjective.category}</div>
@@ -410,8 +450,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
                 <div style={bodyStyle}>{discoveryEvent.result}</div>
                 <div style={labelStyle}>Source: {discoveryEvent.unlock_source}</div>
               </div>}
-          </div>
-        )}
+        </div>
       </div>
     );
   }

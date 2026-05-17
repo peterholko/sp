@@ -25,6 +25,7 @@ import BaseInventoryPanel from "./baseInventoryPanel";
 import SmallButton from "./smallButton";
 import { Network } from "../../core/network";
 import cancelbutton from "ui_comp/exitbutton.png";
+import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 
 interface EquipPanelProps {
   equipData
@@ -423,20 +424,15 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 880;
-    const transferSmallY = '-50px';
-    const transferLargeY = '210px';
-
-    const infoSmallY = '0px';
-    const infoLargeY = '260px';
+    const transferY = getHalfPanelOffsetMarginTop(130);
+    const infoY = getHalfPanelOffsetMarginTop(180);
 
     const zIndex = Global.zIndexManager.getTop() + 3;
 
     const transferStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? transferLargeY : transferSmallY,
+      marginTop: transferY,
       marginLeft: '-25px',
       position: 'fixed',
       zIndex: zIndex
@@ -445,7 +441,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     const infoStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? infoLargeY : infoSmallY,
+      marginTop: infoY,
       marginLeft: '-25px',
       position: 'fixed',
       zIndex: zIndex
@@ -454,7 +450,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     const wideFrameStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? infoLargeY : infoSmallY,
+      marginTop: infoY,
       marginLeft: '-30px',
       position: 'fixed',
       transform: 'translate(-270px, -155px)',
@@ -856,4 +852,3 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     );
   }
 }
-

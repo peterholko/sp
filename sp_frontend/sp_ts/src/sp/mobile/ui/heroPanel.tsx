@@ -1,11 +1,9 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
 import attrsbutton from "ui_comp/attrsbutton.png";
 import skillsbutton from "ui_comp/skillsbutton.png";
 import upgradebutton from "ui_comp/upgradebutton.png";
 import { Global } from "../../core/global";
-import { Network } from "../../core/network";
-import SmallButton from "./smallButton";
+import MobilePanelScreen from "./mobilePanelScreen";
 
 interface HeroPanelProps {
   heroData,
@@ -14,13 +12,9 @@ interface HeroPanelProps {
 export default class HeroPanel extends React.Component<HeroPanelProps, any> {
   constructor(props) {
     super(props);
-
-    this.state = {
-    };
-
-    this.handleAttrsClick = this.handleAttrsClick.bind(this)
-    this.handleSkillsClick = this.handleSkillsClick.bind(this)
-    this.handleAdvanceClick = this.handleAdvanceClick.bind(this)
+    this.handleAttrsClick = this.handleAttrsClick.bind(this);
+    this.handleSkillsClick = this.handleSkillsClick.bind(this);
+    this.handleAdvanceClick = this.handleAdvanceClick.bind(this);
   }
 
   handleAttrsClick() {
@@ -35,174 +29,127 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     Global.network.sendInfoAdvance(Global.heroId);
   }
 
+  renderActionButton(image, label, handler) {
+    const buttonStyle: React.CSSProperties = {
+      minHeight: '44px',
+      border: '1px solid rgba(201, 170, 113, 0.55)',
+      borderRadius: '4px',
+      background: '#25282b',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    };
+
+    return (
+      <button type="button" style={buttonStyle} aria-label={label} title={label} onClick={handler}>
+        <img src={image} style={{ width: '40px', height: '40px' }} />
+      </button>
+    );
+  }
+
   render() {
-    let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
-    let imagePath = '/static/art/' + imageName + '_single.png';
+    const imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
+    const imagePath = '/static/art/' + imageName + '_single.png';
+    const effects = [];
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
+    for (let i = 0; i < this.props.heroData.effects.length; i++) {
+      const effectInfo = this.props.heroData.effects[i];
+      const effectName = effectInfo.effect;
+      let duration;
 
-    const heroSmallY = -100;
-    const heroLargeY = 160;
+      for (const effectKey in effectInfo.attrs) {
+        const effectValue = effectInfo.attrs[effectKey];
+        if (effectKey == "Duration") {
+          duration = effectValue < 0 ? '' : String(effectValue);
+        }
+      }
 
-    const heroStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
+      for (const effectKey in effectInfo.attrs) {
+        let effectValue = effectInfo.attrs[effectKey];
+        if (effectKey == "Duration") continue;
 
+        if (typeof effectValue === "number") {
+          effectValue = effectValue < 0 ? '-' + String(effectValue) : '+' + String(effectValue);
+        } else {
+          effectValue = String(effectValue);
+        }
 
-    const spanNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
+        effects.push(
+          <tr key={effectName + effectKey}>
+            <td colSpan={2}>{effectName} [{effectValue} {effectKey} {duration}]</td>
+          </tr>
+        );
+      }
+    }
 
-    const tableStyle = {
-      transform: 'translate(20px, -240px)',
-      position: 'fixed',
+    const summaryStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '12px',
+      marginBottom: '14px',
+    };
+
+    const heroStyle: React.CSSProperties = {
+      width: '58px',
+      height: '58px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
+
+    const nameStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Cinzel, Verdana, serif',
+      fontSize: '18px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
+
+    const tableStyle: React.CSSProperties = {
+      width: '100%',
       color: 'white',
       fontFamily: 'Verdana',
       fontSize: '12px',
       borderCollapse: 'separate',
-      borderSpacing: '10px 0'
-    } as React.CSSProperties
+      borderSpacing: '0 7px',
+    };
 
-    const attrsStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: isLargeWindow ? heroLargeY.toString() + 'px' : heroSmallY.toString() + 'px',
-      marginLeft: '-68px',
-      position: 'fixed',
-      zIndex: 7
-    } as React.CSSProperties
-
-    const skillsStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: isLargeWindow ? (heroLargeY + 50).toString() + 'px' : (heroSmallY + 50).toString() + 'px',
-      marginLeft: '-68px',
-      position: 'fixed',
-      zIndex: 7
-    } as React.CSSProperties
-
-    const advanceStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: isLargeWindow ? (heroLargeY + 100).toString() + 'px' : (heroSmallY + 100).toString() + 'px',
-      marginLeft: '-68px',
-      position: 'fixed',
-      zIndex: 7
-    } as React.CSSProperties
-
-    var effects = [];
-
-    for (var i = 0; i < this.props.heroData.effects.length; i++) {
-      var effectInfo = this.props.heroData.effects[i];
-      var effectName = effectInfo.effect;
-      var duration;
-
-      for (var effectKey in effectInfo.attrs) {
-        var effectValue = effectInfo.attrs[effectKey];
-        
-        if(effectKey == "Duration") {
-          if(effectValue < 0) {
-            duration = '';
-          } else {
-            duration = String(effectValue);
-          }
-        }
-      }
-
-      for (var effectKey in effectInfo.attrs) {
-        var effectValue = effectInfo.attrs[effectKey];
-
-        // Skip duration
-        if(effectKey == "Duration") {
-          continue;
-        }
-
-        if (typeof effectValue === "number") {
-          if (effectValue < 0) {
-            effectValue = '-' + String(effectValue);
-          } else {
-            effectValue = '+' + String(effectValue);
-          }
-        } else {
-          effectValue = String(effectValue);
-        }        
-
-        effects.push(<tr key={effectName}>
-          <td colSpan={2}>{effectName} [{effectValue} {effectKey} {duration}]</td>
-        </tr>)
-      }
-    }
+    const footerStyle: React.CSSProperties = {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(3, 1fr)',
+      gap: '8px',
+    };
 
     return (
-      <HalfPanel left={true}
-        panelType={'hero'}
-        hideExitButton={false}>
-        <img src={imagePath} style={heroStyle} />
-        <span style={spanNameStyle}>{this.props.heroData.name}</span>
+      <MobilePanelScreen
+        panelType="hero"
+        title="Hero"
+        footer={
+          <div style={footerStyle}>
+            {this.renderActionButton(attrsbutton, 'Attributes', this.handleAttrsClick)}
+            {this.renderActionButton(skillsbutton, 'Skills', this.handleSkillsClick)}
+            {this.renderActionButton(upgradebutton, 'Advance', this.handleAdvanceClick)}
+          </div>
+        }
+      >
+        <div style={summaryStyle}>
+          <img src={imagePath} style={heroStyle} />
+          <div style={nameStyle}>{this.props.heroData.name}</div>
+        </div>
         <table style={tableStyle}>
           <tbody>
-            <tr>
-              <td>Health: </td>
-              <td>{this.props.heroData.hp}</td>
-            </tr>
-            <tr>
-              <td>Stamina: </td>
-              <td>{this.props.heroData.stamina}</td>
-            </tr>
-            <tr>
-              <td>Thirst: </td>
-              <td>{this.props.heroData.thirst}</td>
-            </tr>
-            <tr>
-              <td>Hunger: </td>
-              <td>{this.props.heroData.hunger}</td>
-            </tr>
-            <tr>
-              <td>Fatigue: </td>
-              <td>{this.props.heroData.tiredness}</td>
-            </tr>
-            <tr>
-              <td>State: </td>
-              <td>{this.props.heroData.state}</td>
-            </tr>
-            <tr>
-              <td>Damage: </td>
-              <td>{this.props.heroData.total_dmg}</td>
-            </tr>
-            <tr>
-              <td>Defense: </td>
-              <td>{this.props.heroData.total_def}</td>
-            </tr>
-            <tr>
-              <td>Vision: </td>
-              <td>{this.props.heroData.vision}</td>
-            </tr>            
+            <tr><td>Health:</td><td>{this.props.heroData.hp}</td></tr>
+            <tr><td>Stamina:</td><td>{this.props.heroData.stamina}</td></tr>
+            <tr><td>Thirst:</td><td>{this.props.heroData.thirst}</td></tr>
+            <tr><td>Hunger:</td><td>{this.props.heroData.hunger}</td></tr>
+            <tr><td>Fatigue:</td><td>{this.props.heroData.tiredness}</td></tr>
+            <tr><td>State:</td><td>{this.props.heroData.state}</td></tr>
+            <tr><td>Damage:</td><td>{this.props.heroData.total_dmg}</td></tr>
+            <tr><td>Defense:</td><td>{this.props.heroData.total_def}</td></tr>
+            <tr><td>Vision:</td><td>{this.props.heroData.vision}</td></tr>
             {effects}
-
           </tbody>
         </table>
-
-        <SmallButton handler={this.handleAttrsClick}
-          imageName="attrsbutton"
-          style={attrsStyle} />
-
-        <SmallButton handler={this.handleSkillsClick}
-          imageName="skillsbutton"
-          style={skillsStyle} />
-
-        <SmallButton handler={this.handleAdvanceClick}
-          imageName="upgradebutton"
-          style={advanceStyle} />
-
-      </HalfPanel>
+      </MobilePanelScreen>
     );
   }
 }

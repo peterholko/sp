@@ -1,9 +1,11 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
-import { Global } from "../../core/global";
-import WorkQueueEntry from "./workQueueEntry";
-import { Util } from "../../core/util";
-import { GameEvent } from "../../core/gameEvent";
+import MobilePanelScreen from "./mobilePanelScreen";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface WorkQueueEntryPanelProps {
   workQueueEntryData,
@@ -57,75 +59,31 @@ export default class WorkQueueEntryPanel extends React.Component<WorkQueueEntryP
   }
 
   render() {
-    const spanNameStyle = {
-      transform: 'translate(-323px, 25px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const itemStyle = {
-      transform: 'translate(-185px, 75px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const itemNameStyle = {
-      transform: 'translate(-323px, 125px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const workQueueEntryTableStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: '-25px',
-      marginLeft: '0px',
-      position: 'fixed',
-      textAlign: 'left',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '200px',
-      transform: 'translate(50px, 300px)',
-      zIndex: 8,
-      userSelect: 'none'
-    } as React.CSSProperties
+    const landscape = isLandscapeMobile();
+    const progress = <progress max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress>;
 
     return (
-      <HalfPanel left={false}
+      <MobilePanelScreen
         panelType={'workqueueentry'}
-        hideExitButton={false}>
-        <span style={spanNameStyle}>
-          {this.props.workQueueEntryData.work_type}
-        </span>
-
-        <img src={'/static/art/items/' + this.props.workQueueEntryData.item_image + '.png'} style={itemStyle} />
-
-        <span style={itemNameStyle}>
-          {this.props.workQueueEntryData.item_name}
-        </span>
-
-        <table style={workQueueEntryTableStyle}>
-          <tbody>
-            <tr>
-              <td>Progress: </td>
-              <td><progress max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress></td>
-            </tr>
-          </tbody>
-        </table>
-
-      </HalfPanel>
+        title={'Work Entry'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <MobileSummaryCard
+              imageSrc={'/static/art/items/' + this.props.workQueueEntryData.item_image + '.png'}
+              title={this.props.workQueueEntryData.item_name}
+              subtitle={this.props.workQueueEntryData.work_type}
+              imageSize={48} />
+          }
+          right={
+            <MobileStatsList rows={[
+              { label: 'Progress', value: progress },
+            ]} />
+          } />
+      </MobilePanelScreen>
     );
   }
 }
-
-
 
 

@@ -14,7 +14,8 @@ use crate::map::Map;
 use crate::obj::Obj;
 use crate::obj::{
     is_peaceful_interruptible_state, CancelEvents, Class, HeroClass, Id, LastAttacker,
-    LastCombatTick, Misc, PlayerId, Position, State, StateDead, Stats, Subclass, Template,
+    LastCombatTick, Misc, PlayerId, Position, State, StateChange, StateDead, Stats, Subclass,
+    Template,
 };
 use crate::skill::{SkillUpdated, Skills};
 use crate::templates::{ComboTemplate, ObjTemplate, Templates};
@@ -31,6 +32,21 @@ pub enum AttackType {
     Quick,
     Precise,
     Fierce,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttackOptions {
+    pub stamina_cost: i32,
+    pub damage_bonus: i32,
+}
+
+impl Default for AttackOptions {
+    fn default() -> Self {
+        Self {
+            stamina_cost: 5,
+            damage_bonus: 0,
+        }
+    }
 }
 
 impl AttackType {
@@ -173,12 +189,8 @@ impl Combat {
             }
         }
 
-        if !attacker_effects.has(Effect::WatchtowerLight) {
-            return Some("A watchtower is required to attack from behind a wall.".to_string());
-        }
-
         if !ranged_attack {
-            return Some("Only ranged attacks can be used from a watchtower.".to_string());
+            return Some("Only ranged attacks can be used from behind a wall.".to_string());
         }
 
         None
@@ -222,6 +234,32 @@ impl Combat {
         _ids: &mut ResMut<Ids>,
         game_tick: &Res<GameTick>,
         _map_events: &mut ResMut<MapEvents>,
+    ) -> (i32, Option<String>, Option<SkillUpdated>) {
+        Self::process_attack_with_options(
+            attack_type,
+            attacker,
+            target,
+            commands,
+            templates,
+            map,
+            _ids,
+            game_tick,
+            _map_events,
+            AttackOptions::default(),
+        )
+    }
+
+    pub fn process_attack_with_options(
+        attack_type: AttackType,
+        attacker: &mut CombatQueryItem,
+        target: &mut CombatQueryItem,
+        commands: &mut Commands,
+        templates: &Res<Templates>,
+        map: &Res<Map>,
+        _ids: &mut ResMut<Ids>,
+        game_tick: &Res<GameTick>,
+        _map_events: &mut ResMut<MapEvents>,
+        options: AttackOptions,
     ) -> (i32, Option<String>, Option<SkillUpdated>) {
         let mut rng = rand::thread_rng();
 
@@ -285,7 +323,7 @@ impl Combat {
         let roll_damage = rng.gen_range(0.0..damage_range) + base_damage;
 
         // 18 Calculate total damage
-        let total_damage = (roll_damage + damage_from_items)
+        let total_damage = (roll_damage + damage_from_items + options.damage_bonus as f32)
             * damage_effects_mod
             * attack_type_damage_mod
             * skill_damage_mod;
@@ -318,7 +356,7 @@ impl Combat {
 
         // 27 Update stamina - reduce by 5 per attack
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
-        attacker.stats.stamina = Some(attacker_stamina - 5);
+        attacker.stats.stamina = Some(attacker_stamina - options.stamina_cost);
 
         // Update last combat tick for both attacker and target (used for stamina regen rate)
         attacker.last_combat_tick.0 = game_tick.0;
@@ -369,6 +407,10 @@ impl Combat {
             commands.entity(target.entity).insert(StateDead {
                 dead_at: game_tick.0,
                 killer: attacker.template.0.clone(),
+            });
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::Dead,
             });
 
             commands.entity(target.entity).remove::<ThinkerBuilder>();
@@ -544,6 +586,10 @@ impl Combat {
                 dead_at: game_tick.0,
                 killer: attacker.template.0.clone(),
             });
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::Dead,
+            });
 
             commands.entity(target.entity).remove::<ThinkerBuilder>();
             //commands.entity(target.entity).despawn();
@@ -588,6 +634,10 @@ impl Combat {
             commands.entity(target.entity).insert(StateDead {
                 dead_at: game_tick.0,
                 killer: caster.template.0.clone(),
+            });
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::Dead,
             });
         }
 
@@ -834,6 +884,7 @@ impl Combat {
         attack_type: String,
         damage: i32,
         combo: Option<String>,
+        missed: bool,
         attacker: &CombatQueryItem,
         target: &CombatQueryItem,
         map_events: &mut ResMut<MapEvents>,
@@ -847,6 +898,7 @@ impl Combat {
             damage: damage,
             combo: combo,
             state: target_state_str,
+            missed,
         };
 
         map_events.new(attacker.id.0, game_tick, damage_event);
@@ -914,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn fortified_outbound_attacks_require_watchtower_and_range() {
+    fn fortified_outbound_attacks_require_range_not_watchtower() {
         let none = effects(Vec::new());
         let fortified = effects(vec![Effect::Fortified]);
         let tower = effects(vec![Effect::Fortified, Effect::WatchtowerLight]);
@@ -930,9 +982,19 @@ mod tests {
                 Some(&Fortified { id: 7 }),
                 &outside,
                 None,
+                false,
+            ),
+            Some("Only ranged attacks can be used from behind a wall.".to_string())
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &fortified,
+                Some(&Fortified { id: 7 }),
+                &outside,
+                None,
                 true,
             ),
-            Some("A watchtower is required to attack from behind a wall.".to_string())
+            None
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(
@@ -942,7 +1004,7 @@ mod tests {
                 None,
                 false,
             ),
-            Some("Only ranged attacks can be used from a watchtower.".to_string())
+            Some("Only ranged attacks can be used from behind a wall.".to_string())
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(

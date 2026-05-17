@@ -12,9 +12,6 @@ import styles from "./ui.module.css";
 import SingleInventoryPanel from './ui/singleInventoryPanel';
 import ItemPanel from './ui/itemPanel';
 
-import explorebutton from "ui/explorebutton.png";
-
-
 import movecompass from "ui/movecompass.png";
 import movecompass_click from "ui/movecompass_click.png"
 
@@ -24,6 +21,7 @@ import dodgebutton from "ui/dodgebutton.png";
 
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
+import HeroDeathOverlay from '../core/heroDeathOverlay';
 import {
   TRIGGER_INVENTORY,
   QUICK,
@@ -62,10 +60,6 @@ import ActionButton from './ui/actionButton';
 import NPCPanel from './ui/npcPanel';
 import HeroAdvancePanel from './ui/heroAdvancePanel';
 import NoticePanel from './ui/noticePanel';
-import SmallButtonClassName from './ui/smallButtonClassName';
-import ToggleButton from './ui/toggleButton';
-import CooldownButton from './ui/cooldownButton';
-import GatherButton from './ui/gatherButton';
 import WantedItemPanel from './ui/wantedItemPanel';
 import WorkQueuePanel from './ui/workQueuePanel';
 import WorkQueueEntryPanel from './ui/workQueueEntryPanel';
@@ -173,23 +167,24 @@ interface UIState {
   noticeExpiry: integer,
   confirmMsg: string,
   confirmData: any,
-  showMoveCompassClick: boolean
+  showMoveCompassClick: boolean,
   activityData: any,
   needsData: any,
   worldData: any,
   showLeftInventoryPanel: boolean
   trueDeathData: any,
+  heroDeathData: any,
   heroStats: any,
   hungerStatus: string,
   thirstStatus: string,
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
   combatState: any,
-  inCombatZoom: boolean,
 }
 
 export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
+  private heroDeathOverlayTimer: any = null;
 
   constructor(props) {
     super(props);
@@ -294,13 +289,13 @@ export default class UI extends React.Component<any, UIState> {
       worldData: {},
       showLeftInventoryPanel: true,
       trueDeathData: {},
+      heroDeathData: null,
       heroStats: {},
       hungerStatus: '',
       thirstStatus: '',
       fatigueStatus: '',
       infoRefineItemTriggered: false,
       combatState: null,
-      inCombatZoom: false,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -401,6 +396,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.INFO_EXPERIMENT_STATE, this.handleInfoExperimentState, this);
     Global.gameEmitter.on(NetworkEvent.INFO_CROP, this.handleInfoCrop, this);
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleInfoTrueDeath, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_DEATH_STATE, this.handleHeroDeathState, this);
     Global.gameEmitter.on(NetworkEvent.ITEM_TRANSFER, this.handleItemTransfer, this);
     Global.gameEmitter.on(NetworkEvent.INFO_REFINE, this.handleInfoRefine, this);
     Global.gameEmitter.on(NetworkEvent.INFO_STRUCTURE_REFINE, this.handleInfoStructureRefine, this);
@@ -802,24 +798,11 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ villagerData: newVillagerData });
     }
 
-    if (message.target_id == Global.heroId && !this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
-      this.setState({ inCombatZoom: true });
-    }
   }
 
   handleCombatState(message) {
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
-    const inCombat = attackHistory.length > 0 || hasComboHint;
-
-    if (inCombat && !this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
-      this.setState({ inCombatZoom: true });
-    } else if (!inCombat && this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 1, duration: 350 });
-      this.setState({ inCombatZoom: false });
-    }
 
     this.setState({
       combatState: message,
@@ -970,6 +953,23 @@ export default class UI extends React.Component<any, UIState> {
       noticemsg: Global.objectStates[Global.heroId].name + " has fallen.  The Monolith weighs their soul...",
       noticeExpiry: 12000
     });
+  }
+
+  handleHeroDeathState(message) {
+    if (this.heroDeathOverlayTimer) {
+      clearTimeout(this.heroDeathOverlayTimer);
+      this.heroDeathOverlayTimer = null;
+    }
+
+    Global.heroDead = message.phase != 'resurrected';
+    this.setState({ heroDeathData: message });
+
+    if (message.phase == 'resurrected') {
+      this.heroDeathOverlayTimer = setTimeout(() => {
+        this.setState({ heroDeathData: null });
+        this.heroDeathOverlayTimer = null;
+      }, 3500);
+    }
   }
 
   handleResourceClick(eventData) {
@@ -1457,7 +1457,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoTrueDeath(message) {
     console.log("UI handleInfoTrueDeath");
-    this.setState({ hideTrueDeathPanel: false, trueDeathData: message });
+    this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
   }
 
   /*handleNearbyResources(message) {
@@ -1668,7 +1668,7 @@ export default class UI extends React.Component<any, UIState> {
 
   getAbilityHints() {
     const combatAbilities = this.state.combatState && this.state.combatState.abilities
-      ? this.state.combatState.abilities
+      ? this.state.combatState.abilities.filter((ability) => ability.id != "shield_bash")
       : [];
 
     if (combatAbilities.length > 0) {
@@ -1677,7 +1677,7 @@ export default class UI extends React.Component<any, UIState> {
 
     switch (Global.heroClass) {
       case "Warrior":
-        return [{ id: "shield_bash", label: "Guard Bash", cost_type: "stamina", cost: 10, range: 1, hint: "Stun an adjacent threat and raise your guard." }];
+        return [];
       case "Ranger":
         return [
           { id: "aimed_shot", label: "Aimed Shot", cost_type: "stamina", cost: 8, range: 3, hint: "Deal reliable bow damage before enemies reach you." },
@@ -1696,47 +1696,37 @@ export default class UI extends React.Component<any, UIState> {
   render() {
     console.log("styles", styles);
     const abilityHints = this.getAbilityHints();
+    const mobileActionButton = (imageName: string, title: string, handler: any) => (
+      <button
+        type="button"
+        className={styles.mobileActionIconButton}
+        title={title}
+        aria-label={title}
+        onClick={handler}
+      >
+        <img src={'/static/art/ui/' + imageName + '.png'} />
+      </button>
+    );
     return (
       <div id="ui" className={styles.ui}>
 
         {!this.state.hideLoadingPanel &&
           <LoadingPanel errmsg={Global.accountName ? `Loading ${Global.accountName}...` : "Loading..."} />}
 
-        <SmallButtonClassName handler={this.handleHeroAttrsClick}
-          imageName="attrsbutton"
-          className={styles.heroattrsbutton} />
+        <div className={styles.mobileActionGrid}>
+          {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
+          {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
+          {mobileActionButton('explorebutton', 'Explore', this.handleHeroExploreClick)}
+          {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick)}
+          {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
+          {mobileActionButton('resourcesbutton', 'Rest', this.handleHeroSleepClick)}
+          {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
+          {mobileActionButton('craftbutton', 'Craft', this.handleHeroCraftClick)}
+        </div>
 
-        <SmallButtonClassName handler={this.handleHeroInventoryClick}
-          imageName="inventorybutton"
-          className={styles.heroinventorybutton} />
-
-        <CooldownButton imageName='explorebutton'
-          imageButton={explorebutton}
-          handler={this.handleHeroExploreClick}
-          className={styles.heroexplorebutton} />
-
-        <GatherButton handler={this.handleHeroGatherClick}
-          className={styles.herogatherbutton} />
-
-        <SmallButtonClassName handler={this.handleHeroBuildClick}
-          imageName="buildbutton"
-          className={styles.herobuildbutton} />
-
-        <ToggleButton handler={this.handleHeroSleepClick}
-          imageName="resourcesbutton"
-          className={styles.herosleepbutton} />
-
-        <SmallButtonClassName handler={this.handleHeroEquipClick}
-          imageName="equipbutton"
-          className={styles.heroequipbutton} />
-
-        <SmallButtonClassName handler={this.handleHeroCraftClick}
-          imageName="craftbutton"
-          className={styles.herocraftbutton} />
-
-        <SmallButtonClassName handler={this.handleComboClick}
-          imageName="combobutton"
-          className={styles.combobutton} />
+        <button type="button" className={styles.combobutton} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
+          <img src="/static/art/ui/combobutton.png" />
+        </button>
 
         <ActionButton type={QUICK}
           handler={this.handleQuickAttack} />
@@ -1936,6 +1926,8 @@ export default class UI extends React.Component<any, UIState> {
 
         {!this.state.hideConfirmPanel &&
           <ConfirmPanel msg={this.state.confirmMsg} />}
+
+        <HeroDeathOverlay data={this.state.heroDeathData} />
 
         {!this.state.hideTrueDeathPanel &&
           <TrueDeathPanel

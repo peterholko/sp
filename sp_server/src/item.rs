@@ -45,6 +45,8 @@ pub enum AttrKey {
     SpearDamage,
     AxeSpeed,
     BowDamage,
+    AttackRange,
+    Accuracy,
     HeavyArmorDefense,
     HeavyArmorDurability,
     MediumArmorDefense,
@@ -126,6 +128,8 @@ impl AttrKey {
             "Spear Damage" => AttrKey::SpearDamage,
             "Axe Speed" => AttrKey::AxeSpeed,
             "Bow Damage" => AttrKey::BowDamage,
+            "Attack Range" => AttrKey::AttackRange,
+            "Accuracy" => AttrKey::Accuracy,
             "Heavy Armor Defense" => AttrKey::HeavyArmorDefense,
             "Heavy Armor Durability" => AttrKey::HeavyArmorDurability,
             "Medium Armor Defense" => AttrKey::MediumArmorDefense,
@@ -197,6 +201,8 @@ pub const ITEM_FOOD: &str = "Food";
 
 pub const GATHERING: &str = "Gathering";
 pub const TORCH: &str = "Torch";
+pub const MATERIAL: &str = "Material";
+pub const MEDICAL: &str = "Medical";
 
 pub const POTION: &str = "Potion";
 pub const HEALTH: &str = "Health";

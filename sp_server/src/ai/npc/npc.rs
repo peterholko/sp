@@ -18,7 +18,7 @@ use crate::ids::EntityObjMap;
 use crate::ids::Ids;
 use crate::item;
 use crate::item::*;
-use crate::map::{Map, MapPos};
+use crate::map::{Map, MapPos, TileType};
 use crate::obj::{
     BaseQuery, BaseQueryMutState, Blocker, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
     StateChange, Stats, Subclass, SubclassNPC, Template, Viewshed,
@@ -40,6 +40,19 @@ pub struct NPCTarget {
     pub pos: Position,
     pub distance: u32,
     pub fortified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimalFallbackKind {
+    Wander,
+    HideInForest,
+}
+
+#[derive(Debug, Component, Clone)]
+pub struct AnimalFallback {
+    pub kind: AnimalFallbackKind,
+    pub target_id: i32,
+    pub last_seen_pos: Position,
 }
 
 #[derive(Clone)]
@@ -166,6 +179,7 @@ mod tests {
             test_obj_template("Necromancer", "cunning"),
             test_obj_template("Fire Dragon", "cunning"),
             test_obj_template("Wolf", "animal"),
+            test_obj_template("Giant Rat", "animal"),
         ])
     }
 
@@ -264,6 +278,60 @@ mod tests {
         app
     }
 
+    fn spawn_rat_blocked_wander_scorer(
+        app: &mut App,
+        npc_state: State,
+        visible_target: i32,
+    ) -> (Entity, Entity) {
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                AnimalFallback {
+                    kind: AnimalFallbackKind::Wander,
+                    target_id: 1,
+                    last_seen_pos: Position { x: 1, y: 0 },
+                },
+                VisibleTarget::new(visible_target),
+                npc_state,
+                SubclassNPC,
+            ))
+            .id();
+
+        let scorer_entity = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&RatBlockedWanderScorer, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+
+        (npc_entity, scorer_entity)
+    }
+
+    #[test]
+    fn rat_blocked_wander_scorer_stays_zero_while_hidden() {
+        let mut app = App::new();
+        app.add_systems(Update, rat_blocked_wander_scorer_system);
+        let (_npc_entity, scorer_entity) =
+            spawn_rat_blocked_wander_scorer(&mut app, State::Hiding, NO_TARGET);
+
+        app.update();
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn rat_blocked_wander_scorer_resumes_when_not_hidden_and_no_target() {
+        let mut app = App::new();
+        app.add_systems(Update, rat_blocked_wander_scorer_system);
+        let (_npc_entity, scorer_entity) =
+            spawn_rat_blocked_wander_scorer(&mut app, State::None, NO_TARGET);
+
+        app.update();
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.5);
+    }
+
     #[test]
     fn target_scorer_picks_nearest_visible_player() {
         let mut app = setup_target_scorer_app();
@@ -336,6 +404,45 @@ mod tests {
     }
 
     #[test]
+    fn giant_rat_target_scorer_marks_wander_for_fortified_target() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Giant Rat", Position { x: 0, y: 0 }, 10);
+
+        app.world_mut().spawn((
+            Id(18),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::from_str("soldier"),
+            fortified_effects(),
+            test_stats(),
+            Fortified { id: 99 },
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, NO_TARGET);
+
+        let fallback = app
+            .world()
+            .entity(npc_entity)
+            .get::<AnimalFallback>()
+            .unwrap();
+        assert_eq!(fallback.kind, AnimalFallbackKind::Wander);
+        assert_eq!(fallback.target_id, 18);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
     fn animal_target_scorer_skips_fortified_living_targets() {
         let mut app = setup_target_scorer_app();
         let (npc_entity, scorer_entity) =
@@ -361,6 +468,14 @@ mod tests {
             .get::<VisibleTarget>()
             .unwrap();
         assert_eq!(visible_target.target, NO_TARGET);
+
+        let fallback = app
+            .world()
+            .entity(npc_entity)
+            .get::<AnimalFallback>()
+            .unwrap();
+        assert_eq!(fallback.kind, AnimalFallbackKind::HideInForest);
+        assert_eq!(fallback.target_id, 11);
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), 0.0);
@@ -433,6 +548,14 @@ mod tests {
             .get::<VisibleTarget>()
             .unwrap();
         assert_eq!(visible_target.target, NO_TARGET);
+
+        let fallback = app
+            .world()
+            .entity(npc_entity)
+            .get::<AnimalFallback>()
+            .unwrap();
+        assert_eq!(fallback.kind, AnimalFallbackKind::HideInForest);
+        assert_eq!(fallback.target_id, 13);
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), 0.0);
@@ -651,6 +774,18 @@ pub struct NpcMoveToTarget;
 #[derive(Debug, Clone, Component, ActionBuilder)]
 pub struct NpcMoveNearTarget;
 
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct RatBlockedWanderScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct WolfBlockedHideScorer;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct RandomWander;
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct MoveToForest;
+
 pub struct NPCPlugin;
 
 impl Plugin for NPCPlugin {
@@ -667,6 +802,8 @@ impl Plugin for NPCPlugin {
                 set_corpse_target_system.in_set(BigBrainSet::Actions),
                 set_home_system.in_set(BigBrainSet::Actions),
                 raise_dead_system.in_set(BigBrainSet::Actions),
+                random_wander_action_system.in_set(BigBrainSet::Actions),
+                move_to_forest_action_system.in_set(BigBrainSet::Actions),
                 move_to_system.in_set(BigBrainSet::Actions),
                 move_to_target_system.in_set(BigBrainSet::Actions),
                 move_near_target_system.in_set(BigBrainSet::Actions),
@@ -688,6 +825,8 @@ impl Plugin for NPCPlugin {
             Update,
             (
                 target_scorer_system.in_set(BigBrainSet::Scorers),
+                rat_blocked_wander_scorer_system.in_set(BigBrainSet::Scorers),
+                wolf_blocked_hide_scorer_system.in_set(BigBrainSet::Scorers),
                 no_target_scorer_system.in_set(BigBrainSet::Scorers),
                 nearby_corpses_scorer_system.in_set(BigBrainSet::Scorers),
                 flee_scorer_system.in_set(BigBrainSet::Scorers),
@@ -703,6 +842,7 @@ impl Plugin for NPCPlugin {
 // SCORER SYSTEMS
 
 pub fn target_scorer_system(
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     map: Res<Map>,
     entity_map: Res<EntityObjMap>,
@@ -776,6 +916,7 @@ pub fn target_scorer_system(
             distance: u32::MAX,
             fortified: false,
         };
+        let mut animal_fallback: Option<(u32, AnimalFallback)> = None;
 
         let npc_template = templates
             .obj_templates
@@ -905,7 +1046,16 @@ pub fn target_scorer_system(
                 target_fortified = true;
             }
 
+            let distance = Map::dist(*npc_pos, *target_pos);
+
             if animal && target_fortified {
+                remember_animal_fallback(
+                    &mut animal_fallback,
+                    npc_template_name.0.as_str(),
+                    target_id.0,
+                    *target_pos,
+                    distance,
+                );
                 span.span().in_scope(|| {
                     npc_debug!(
                         *actor,
@@ -923,8 +1073,6 @@ pub fn target_scorer_system(
             {
                 continue;
             }*/
-
-            let distance = Map::dist(*npc_pos, *target_pos);
 
             span.span().in_scope(|| {
                 npc_trace!(
@@ -956,6 +1104,13 @@ pub fn target_scorer_system(
 
                 if !reachable_without_attacking_blockers {
                     if animal {
+                        remember_animal_fallback(
+                            &mut animal_fallback,
+                            npc_template_name.0.as_str(),
+                            target_id.0,
+                            *target_pos,
+                            distance,
+                        );
                         span.span().in_scope(|| {
                             npc_debug!(
                                 *actor,
@@ -1020,6 +1175,7 @@ pub fn target_scorer_system(
             );
         });
         if selected_target.fortified && !bypass_fortified_wall {
+            commands.entity(*actor).remove::<AnimalFallback>();
             span.span().in_scope(|| {
                 npc_debug!(
                     *actor,
@@ -1058,6 +1214,7 @@ pub fn target_scorer_system(
             npc_visible_target.target = fortifier.id;
             score.set(NORMAL_SCORE / 100.0);
         } else if selected_target.id != NO_TARGET {
+            commands.entity(*actor).remove::<AnimalFallback>();
             span.span().in_scope(|| {
                 npc_info!(
                     *actor,
@@ -1070,6 +1227,9 @@ pub fn target_scorer_system(
             npc_visible_target.target = selected_target.id;
             score.set(NORMAL_SCORE / 100.0);
         } else {
+            if let Some((_distance, fallback)) = animal_fallback {
+                commands.entity(*actor).insert(fallback);
+            }
             span.span().in_scope(|| {
                 npc_debug!(
                     *actor,
@@ -1587,6 +1747,48 @@ pub fn no_target_scorer_system(
     }
 }
 
+pub fn rat_blocked_wander_scorer_system(
+    npc_query: Query<(&AnimalFallback, &VisibleTarget, &State), With<SubclassNPC>>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<RatBlockedWanderScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        let Ok((fallback, visible_target, npc_state)) = npc_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+
+        if fallback.kind == AnimalFallbackKind::Wander
+            && visible_target.target == NO_TARGET
+            && *npc_state != State::Hiding
+        {
+            score.set(0.5);
+        } else {
+            score.set(0.0);
+        }
+    }
+}
+
+pub fn wolf_blocked_hide_scorer_system(
+    npc_query: Query<(&AnimalFallback, &VisibleTarget, &State), With<SubclassNPC>>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<WolfBlockedHideScorer>>,
+) {
+    for (Actor(actor), mut score, _span) in &mut query {
+        let Ok((fallback, visible_target, state)) = npc_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+
+        if fallback.kind == AnimalFallbackKind::HideInForest
+            && visible_target.target == NO_TARGET
+            && *state != State::Hiding
+        {
+            score.set(0.5);
+        } else {
+            score.set(0.0);
+        }
+    }
+}
+
 // ACTION SYSTEMS
 
 pub fn set_attack_target_system(
@@ -1844,6 +2046,337 @@ pub fn set_home_system(
                     None,
                     "Set Home action was cancelled. Considering this a failure."
                 );
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn random_wander_action_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    templates: Res<Templates>,
+    mut obj_query: Query<ObjStatQuery>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut wandering_query: Query<&mut WanderingBehavior>,
+    mut query: Query<(&Actor, &mut ActionState, &RandomWander, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _random_wander, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Some(npc_id) = obj_id else {
+                    npc_error!(*actor, None, None, "Cannot find obj id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(npc_player_id) = ids.get_player(npc_id) else {
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let collision_list = Obj::blocking_list_objstatquery(npc_player_id, &obj_query);
+                let Ok(mut npc) = obj_query.get_mut(*actor) else {
+                    npc_error!(*actor, obj_id, None, "Query failed to find npc");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if npc.effects.has(Effect::Stunned) {
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
+                    continue;
+                }
+
+                if *npc.state == State::Hiding {
+                    npc_debug!(*actor, obj_id, None, "Hidden NPC will not wander");
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                let Some(next_pos) =
+                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
+                else {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, None, "No random wander step available");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let move_duration =
+                    npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.75, 1.25);
+
+                *npc.state = State::Moving;
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Moving,
+                });
+
+                map_events.new(
+                    npc.id.0,
+                    game_tick.0 + move_duration,
+                    VisibleEvent::MoveEvent {
+                        src: *npc.pos,
+                        dst: Position {
+                            x: next_pos.0,
+                            y: next_pos.1,
+                        },
+                    },
+                );
+
+                if let Ok(mut wandering_behavior) = wandering_query.get_mut(*actor) {
+                    wandering_behavior.num_moves += 1;
+                }
+
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+                event_executing.state = EventExecutingState::Executing;
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if !event_executing.state.is_finished() {
+                    continue;
+                }
+
+                if event_executing.state.is_failed() {
+                    npc_debug!(*actor, obj_id, None, "Random wander move failed");
+                    *state = ActionState::Failure;
+                } else {
+                    *state = ActionState::Success;
+                }
+            }
+            ActionState::Cancelled => {
+                let Some(npc_id) = obj_id else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                cancel_npc_events(npc_id, game_tick.0, &mut ids, &mut game_events);
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn move_to_forest_action_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
+    mut map_events: ResMut<MapEvents>,
+    mut game_events: ResMut<GameEvents>,
+    templates: Res<Templates>,
+    mut obj_query: Query<ObjStatQuery>,
+    fallback_query: Query<&AnimalFallback>,
+    mut event_executing_query: Query<&mut EventExecuting>,
+    mut query: Query<(&Actor, &mut ActionState, &MoveToForest, &ActionSpan)>,
+) {
+    for (Actor(actor), mut state, _move_to_forest, span) in &mut query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+        match *state {
+            ActionState::Requested => {
+                let Some(npc_id) = obj_id else {
+                    npc_error!(*actor, None, None, "Cannot find obj id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(npc_player_id) = ids.get_player(npc_id) else {
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(fallback) = fallback_query.get(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let collision_list = Obj::blocking_list_objstatquery(npc_player_id, &obj_query);
+                let Ok(mut npc) = obj_query.get_mut(*actor) else {
+                    npc_error!(*actor, obj_id, None, "Query failed to find npc");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if is_forest_position(&map, *npc.pos) {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, None, "Wolf reached forest cover");
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                if npc.effects.has(Effect::Stunned) {
+                    npc_debug!(*actor, obj_id, None, "NPC is stunned");
+                    continue;
+                }
+
+                let Some(next_pos) = find_nearest_forest_path(
+                    *npc.pos,
+                    fallback.last_seen_pos,
+                    npc_player_id,
+                    &map,
+                    &collision_list,
+                )
+                .and_then(|(path, _cost)| path.get(1).cloned())
+                .or_else(|| {
+                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
+                }) else {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, None, "No forest or fallback move found");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let move_duration =
+                    npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.85, 1.15);
+
+                *npc.state = State::Moving;
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Moving,
+                });
+
+                map_events.new(
+                    npc.id.0,
+                    game_tick.0 + move_duration,
+                    VisibleEvent::MoveEvent {
+                        src: *npc.pos,
+                        dst: Position {
+                            x: next_pos.0,
+                            y: next_pos.1,
+                        },
+                    },
+                );
+
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+                event_executing.state = EventExecutingState::Executing;
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                {
+                    let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+
+                    if !event_executing.state.is_finished() {
+                        continue;
+                    }
+
+                    if event_executing.state.is_failed() {
+                        npc_debug!(*actor, obj_id, None, "Move to forest failed");
+                        *state = ActionState::Failure;
+                        continue;
+                    }
+                }
+
+                let Some(npc_id) = obj_id else {
+                    npc_error!(*actor, None, None, "Cannot find obj id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Some(npc_player_id) = ids.get_player(npc_id) else {
+                    npc_error!(*actor, obj_id, None, "Cannot find player id");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(fallback) = fallback_query.get(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let collision_list = Obj::blocking_list_objstatquery(npc_player_id, &obj_query);
+                let Ok(mut npc) = obj_query.get_mut(*actor) else {
+                    npc_error!(*actor, obj_id, None, "Query failed to find npc");
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if is_forest_position(&map, *npc.pos) {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, None, "Wolf reached forest cover");
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                let Some(next_pos) = find_nearest_forest_path(
+                    *npc.pos,
+                    fallback.last_seen_pos,
+                    npc_player_id,
+                    &map,
+                    &collision_list,
+                )
+                .and_then(|(path, _cost)| path.get(1).cloned())
+                .or_else(|| {
+                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
+                }) else {
+                    span.span().in_scope(|| {
+                        npc_debug!(*actor, obj_id, None, "No forest or fallback move found");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let move_duration =
+                    npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.85, 1.15);
+
+                *npc.state = State::Moving;
+                commands.trigger(StateChange {
+                    entity: *actor,
+                    new_state: State::Moving,
+                });
+
+                map_events.new(
+                    npc.id.0,
+                    game_tick.0 + move_duration,
+                    VisibleEvent::MoveEvent {
+                        src: *npc.pos,
+                        dst: Position {
+                            x: next_pos.0,
+                            y: next_pos.1,
+                        },
+                    },
+                );
+
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+                event_executing.state = EventExecutingState::Executing;
+            }
+            ActionState::Cancelled => {
+                let Some(npc_id) = obj_id else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                cancel_npc_events(npc_id, game_tick.0, &mut ids, &mut game_events);
                 *state = ActionState::Failure;
             }
             _ => {}
@@ -3177,6 +3710,7 @@ pub fn attack_target_system(
                     "quick".to_string(),
                     damage,
                     combo,
+                    false,
                     &npc,
                     &target,
                     &mut map_events,
@@ -4543,6 +5077,152 @@ pub fn cast_spell_target_system(
         score.set(1.0);
     }
 }*/
+
+const WOLF_FOREST_SEARCH_RADIUS: u32 = 10;
+
+fn remember_animal_fallback(
+    fallback: &mut Option<(u32, AnimalFallback)>,
+    template: &str,
+    target_id: i32,
+    target_pos: Position,
+    distance: u32,
+) {
+    let Some(kind) = animal_fallback_kind_for_template(template) else {
+        return;
+    };
+
+    if fallback
+        .as_ref()
+        .map_or(true, |(existing_distance, _)| distance < *existing_distance)
+    {
+        *fallback = Some((
+            distance,
+            AnimalFallback {
+                kind,
+                target_id,
+                last_seen_pos: target_pos,
+            },
+        ));
+    }
+}
+
+fn animal_fallback_kind_for_template(template: &str) -> Option<AnimalFallbackKind> {
+    if template == "Giant Rat" {
+        Some(AnimalFallbackKind::Wander)
+    } else if template.contains("Wolf") {
+        Some(AnimalFallbackKind::HideInForest)
+    } else {
+        None
+    }
+}
+
+fn npc_move_duration(
+    base_speed: Option<i32>,
+    effects: &Effects,
+    templates: &Res<Templates>,
+    random_min: f32,
+    random_max: f32,
+) -> i32 {
+    let npc_speed = base_speed.unwrap_or(1).max(1);
+    let effect_speed_mod = effects.get_speed_effects(templates);
+    let random_factor = rand::thread_rng().gen_range(random_min..random_max);
+
+    (BASE_MOVE_TICKS * (BASE_SPEED / npc_speed as f32) * (1.0 / effect_speed_mod) * random_factor)
+        as i32
+}
+
+fn select_random_adjacent_step(
+    npc_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: &Vec<Blocker>,
+) -> Option<MapPos> {
+    let steps = Map::get_neighbour_tiles(
+        npc_pos.x,
+        npc_pos.y,
+        map,
+        npc_player_id,
+        blocking_list,
+        true,
+        false,
+        false,
+        false,
+        false,
+        MapPos(npc_pos.x, npc_pos.y),
+    );
+
+    if steps.is_empty() {
+        return None;
+    }
+
+    let mut rng = rand::thread_rng();
+    steps
+        .get(rng.gen_range(0..steps.len()))
+        .map(|(map_pos, _cost)| map_pos.clone())
+}
+
+fn find_nearest_forest_path(
+    npc_pos: Position,
+    threat_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: &Vec<Blocker>,
+) -> Option<(Vec<MapPos>, u32)> {
+    let mut best_path: Option<(Vec<MapPos>, u32, u32)> = None;
+
+    for (x, y) in Map::range((npc_pos.x, npc_pos.y), WOLF_FOREST_SEARCH_RADIUS) {
+        let forest_pos = Position { x, y };
+        if forest_pos == npc_pos || !is_forest_position(map, forest_pos) {
+            continue;
+        }
+
+        let Some((path, cost)) = Map::find_fast_path(
+            npc_pos,
+            forest_pos,
+            map,
+            npc_player_id,
+            blocking_list.clone(),
+            true,
+            false,
+            false,
+            false,
+            false,
+        ) else {
+            continue;
+        };
+
+        if path.len() < 2 {
+            continue;
+        }
+
+        let threat_distance = Map::dist(forest_pos, threat_pos);
+        let should_replace = best_path
+            .as_ref()
+            .map_or(true, |(_, best_cost, best_threat)| {
+                cost < *best_cost || (cost == *best_cost && threat_distance > *best_threat)
+            });
+
+        if should_replace {
+            best_path = Some((path, cost, threat_distance));
+        }
+    }
+
+    best_path.map(|(path, cost, _threat_distance)| (path, cost))
+}
+
+fn is_forest_position(map: &Map, pos: Position) -> bool {
+    tile_type_at(map, pos).map_or(false, TileType::is_forest)
+}
+
+fn tile_type_at(map: &Map, pos: Position) -> Option<TileType> {
+    if pos.x < 0 || pos.y < 0 || pos.x >= map.width || pos.y >= map.height {
+        return None;
+    }
+
+    map.base
+        .get((pos.y * map.width + pos.x) as usize)
+        .map(|tile| tile.tile_type)
+}
 
 pub fn is_mindless(int: &String) -> bool {
     return *int == "mindless".to_string();

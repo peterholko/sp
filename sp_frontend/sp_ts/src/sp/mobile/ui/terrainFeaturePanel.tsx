@@ -1,5 +1,11 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface TerrainFeaturePanelProps {
   tileData,
@@ -13,69 +19,22 @@ export default class TerrainFeaturePanel extends React.Component<TerrainFeatureP
     };
 
   }
-
-
   render() {
-    const tableStyle = {
-      transform: 'translate(100px, -70px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const featureNameStyle = {
-      transform: 'translate(-323px, 30px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const imageStyle = {
-      transform: 'translate(-260px, 75px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      //transform: 'translate(-5px, -5px)',
-      //position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-305px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-65px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
+    const feature = this.props.tileData.terrain_features[0];
+    const landscape = isLandscapeMobile();
 
     return (
-      <HalfPanel left={false}
+      <MobilePanelScreen
         panelType={'terrain_features'}
-        hideExitButton={false}>
-        
-        <span style={featureNameStyle}>{this.props.tileData.terrain_features[0].name}</span>
-        
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-                <td>{this.props.tileData.terrain_features[0].bonus}</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <img src={'/static/art/features/' + this.props.tileData.terrain_features[0].image + '.png'} style={imageStyle} />
-
-      </HalfPanel>
+        title={'Terrain Feature'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={'/static/art/features/' + feature.image + '.png'} title={feature.name} imageSize={landscape ? 72 : 96} />}
+          right={<MobileStatsList rows={[
+            { label: 'Bonus', value: feature.bonus },
+          ]} />} />
+      </MobilePanelScreen>
     );
   }
 }

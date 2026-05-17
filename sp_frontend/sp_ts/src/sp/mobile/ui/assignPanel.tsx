@@ -1,12 +1,19 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
 import cancelbutton from "ui_comp/exitbutton.png";
 import okbutton from "ui_comp/okbutton.png";
-import unitframe from "ui_comp/itemframe.png";
 import { BUILDING, FOUNDED, UPGRADING } from "../../core/config";
+import {
+  MobileCard,
+  MobilePanelActions,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface AssignPanelProps {
   structureData,
@@ -79,180 +86,92 @@ export default class AssignPanel extends React.Component<AssignPanelProps, any> 
       totalWorkspaces = this.props.structureData.workspaces;
     }
 
-    for (var i = 0; i < totalWorkspaces; i++) {
+    const landscape = isLandscapeMobile();
+    const atFirst = this.state.index == 0;
+    const atLast = this.state.index == (this.props.assignData.length - 1);
 
-      const frameStyle = {
-        transform: 'translate(0px, 0px)',
-        position: 'fixed'
-      } as React.CSSProperties
+    const listStyle: React.CSSProperties = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '7px',
+    };
 
-      const imageStyle = {
-        transform: 'translate(-14px, -12px)',
-        position: 'fixed'
-      } as React.CSSProperties
+    const rowStyle: React.CSSProperties = {
+      display: 'grid',
+      gridTemplateColumns: '28px 42px 1fr',
+      alignItems: 'center',
+      gap: '8px',
+      minHeight: '48px',
+      borderBottom: '1px solid rgba(255,255,255,0.08)',
+      paddingBottom: '6px',
+    };
 
-      const workspaceStyle = {
-        transform: 'translate(58px, ' + (-250 + (i * 80)) + 'px)',
-        position: 'fixed'
-      } as React.CSSProperties
+    const workerIconStyle: React.CSSProperties = {
+      width: '38px',
+      height: '38px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
 
-      if (assignments.length > 0) {
-        // Pop an assignment off the assignments array
-        const assignment = assignments.shift();
+    const cancelStyle: React.CSSProperties = {
+      width: '24px',
+      height: '24px',
+    };
 
-        const workspaceSpanNameStyle = {
-          transform: 'translate(70px, 15px)',
-          position: 'fixed',
-          textAlign: 'left',
-          color: 'white',
-          fontFamily: 'Verdana',
-          fontSize: '12px',
-          width: '200px'
-        } as React.CSSProperties
-
-        var cancelStyle = {
-          transform: 'translate(-36px, 8px)',
-          position: 'fixed',
-          width: '30px',
-          height: '30px'
-        } as React.CSSProperties
-
-        workspaces.push(
-          <div key={i} style={workspaceStyle}>
-            <img src={cancelbutton} style={cancelStyle} onClick={this.handleCancelClick} />
-            <img src={unitframe} style={frameStyle} />
-            <img src={'/static/art/' + assignment.image + '_single.png'} style={imageStyle} />
-            <span style={workspaceSpanNameStyle}>
-              {assignment.name}
-            </span>
-          </div>);
-      }
-      else {
-        const workspaceSpanNameStyle = {
-          transform: 'translate(20px, 15px)',
-          position: 'fixed',
-          textAlign: 'left',
-          color: 'white',
-          fontFamily: 'Verdana',
-          fontSize: '12px',
-          width: '200px'
-        } as React.CSSProperties
-
-        workspaces.push(
-          <div key={i} style={workspaceStyle}>
-            <img src={unitframe} />
-            <span style={workspaceSpanNameStyle}>
-              No Worker Assigned
-            </span>
-          </div>);
-      }
-    }
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 100px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
+    const emptyStyle: React.CSSProperties = {
+      color: '#777d82',
       fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -230px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      transform: 'translate(-80px, 10px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-250px, 40px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-115px, 40px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const okButtonStyle = {
-      transform: 'translate(-186px, 265px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const structureSpriteStyle = {
-      transform: 'translate(-275px, 15px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const structureSpanNameStyle = {
-      transform: 'translate(-200px, 40px)',
-      position: 'fixed',
-      textAlign: 'left',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '200px'
-    } as React.CSSProperties
-
-    var cancelStyle = {
-      transform: 'translate(-200px, 175px)',
-      position: 'fixed',
-      width: '20px',
-      height: '20px'
-    } as React.CSSProperties
+      fontSize: '11px',
+      lineHeight: 1.3,
+    };
 
     return (
-      <div>
-        <HalfPanel left={true}
-          panelType={'assign'}
-          hideExitButton={true}>
-          <img src={'/static/art/' + this.props.structureData.image + '.png'} style={structureSpriteStyle} />
-          <span style={structureSpanNameStyle}>
-            {this.props.structureData.name}
-          </span>
+      <MobilePanelScreen
+        panelType={'assign'}
+        title={'Assign'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <>
+              <MobileSummaryCard imageSrc={'/static/art/' + this.props.structureData.image + '.png'} title={this.props.structureData.name} subtitle={`${assignments.length} / ${totalWorkspaces} assigned`} imageSize={landscape ? 58 : 82} />
+              <MobileCard compact={landscape}>
+                <div style={listStyle}>
+                  {Array.from({ length: totalWorkspaces }).map((_, index) => {
+                    const assignment = assignments[index];
 
-          {workspaces}
+                    if (!assignment) {
+                      return <div key={index} style={emptyStyle}>Workspace {index + 1}: No worker assigned</div>;
+                    }
 
-        </HalfPanel>
-        <HalfPanel left={false}
-          panelType={'assign'}
-          hideExitButton={false}>
-          <img src={'/static/art/' + imageName} style={imageStyle} />
-          <span style={spanNameStyle}>
-            {this.state.worker.name}
-          </span>
-          <table style={tableStyle}>
-            <tbody>
-              <tr>
-                <td>Assigned To:</td>
-                <td>{this.state.worker.structure}</td>
-              </tr>
-            </tbody>
-          </table>
-          <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />
-          <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />
-
-          <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick} />
-        </HalfPanel>
-      </div>
+                    return (
+                      <div key={index} style={rowStyle}>
+                        <img src={cancelbutton} style={cancelStyle} onClick={() => Global.network.sendRemoveAssign(assignment.id, this.props.structureData.id)} />
+                        <img src={'/static/art/' + assignment.image + '_single.png'} style={workerIconStyle} />
+                        <div style={emptyStyle}>{assignment.name}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </MobileCard>
+            </>
+          }
+          right={
+            <>
+              <MobileSummaryCard imageSrc={'/static/art/' + imageName} title={this.state.worker.name} subtitle="Selected Worker" imageSize={landscape ? 58 : 82} />
+              <MobileStatsList rows={[
+                { label: 'Assigned To', value: this.state.worker.structure },
+              ]} />
+              <MobilePanelActions actions={[
+                { key: 'previous', label: 'Previous worker', icon: leftbutton, onClick: this.handleLeftClick, disabled: atFirst },
+                { key: 'assign', label: 'Assign worker', icon: okbutton, onClick: this.handleOkClick },
+                { key: 'next', label: 'Next worker', icon: rightbutton, onClick: this.handleRightClick, disabled: atLast },
+              ]} />
+            </>
+          } />
+      </MobilePanelScreen>
     );
   }
 }
-
 
 

@@ -797,6 +797,38 @@
     - name: Hunting  
       value: 1
 
+- name: Improvised Sling
+  class: Weapon
+  subclass: Ranged
+  slot: Main Hand
+  image: sling
+  weight: 1
+  attrs:
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+    - name: Hunting
+      value: 1
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 75
+
+- name: Stone Knife
+  class: Weapon
+  subclass: Dagger
+  slot: Main Hand
+  image: stoneknife
+  weight: 2
+  attrs:
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+    - name: Hunting
+      value: 1
+
 - name: Copper Training Axe
   class: Weapon
   subclass: Axe
@@ -822,6 +854,10 @@
       value: 8
     - name: Hunting
       value: 2
+    - name: Attack Range
+      value: 3
+    - name: Accuracy
+      value: 85
 
 - name: Copper Broad Axe
   class: Weapon
@@ -848,6 +884,16 @@
   image: copperhelm
   weight: 2
 
+- name: Hide Wraps
+  class: Armor
+  subclass: Chest
+  slot: Chest
+  image: hidewraps
+  weight: 2
+  attrs:
+    - name: Defense
+      value: 1
+
 ##################
 ##### CLOTHING ######
 ##################
@@ -869,6 +915,21 @@
 ##################
 ##### OTHER ######
 ##################
+
+- name: Crude Bandage
+  class: Medical
+  subclass: Bandage
+  image: crudebandage
+  weight: 1
+
+- name: Herbal Poultice
+  class: Potion
+  subclass: Health
+  image: herbalpoultice
+  weight: 1
+  attrs:
+    - name: Healing
+      value: 5
 
 - name: Health Potion
   class: Potion
@@ -994,6 +1055,12 @@
 ###### MISC  #####
 ##################
 
+- name: Twine
+  class: Material
+  subclass: Cordage
+  image: twine
+  weight: 1
+
 - name: Soulshard
   class: Soulshard
   subclass: Soulshard
@@ -1016,6 +1083,7 @@
   class: Torch
   subclass: Resin Torch
   image: torch
+  slot: Off Hand
   weight: 5
   attrs:
     - name: Vision

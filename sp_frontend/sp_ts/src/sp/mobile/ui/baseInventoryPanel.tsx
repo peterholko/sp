@@ -1,15 +1,8 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
-import InventoryItem from "./inventoryItem";
 import { Global } from "../../core/global";
-
-import itemframe from "ui_comp/itemframe.png";
-import selectitemborder from "ui_comp/selectitemborder.png";
-import leftbutton from "ui_comp/leftbutton.png";
-import rightbutton from "ui_comp/rightbutton.png";
 import { Util } from "../../core/util";
-import ResourceItem from "./resourceItem";
-import { STRUCTURE, FOUNDED } from "../../core/config";
+import MobilePanelScreen from "./mobilePanelScreen";
+import MobileInventoryGrid from "./mobileInventoryGrid";
 
 interface BaseInventoryProps {
   left: boolean,
@@ -23,77 +16,49 @@ interface BaseInventoryProps {
   showEquippedOnly?: boolean
   handleSelect: Function,
   selectedItemId?: integer,
-  disabledItems?: any
+  disabledItems?: any,
+  footer?: React.ReactNode,
 }
 
 export default class BaseInventoryPanel extends React.Component<BaseInventoryProps, any> {
   constructor(props) {
     super(props);
-
-    const selectItemStyle = {
-      position: "fixed"
-    } as React.CSSProperties
-
     this.state = {
-      selectItemStyle: selectItemStyle,
       page: 0,
       selectedItemId: this.props.selectedItemId
     };
 
-    this.handleSelect = this.handleSelect.bind(this)
+    this.handleSelect = this.handleSelect.bind(this);
     this.handleLeftClick = this.handleLeftClick.bind(this);
     this.handleRightClick = this.handleRightClick.bind(this);
   }
 
   handleSelect(eventData) {
-    console.log('handleSelect ' + eventData);
-    var xPos = -293 + ((eventData.index % 5) * 53);
-    var yPos = 73 + (Math.floor(eventData.index / 5) * 53);
-
-    const selectItemStyle = {
-      transform: 'translate(' + xPos + 'px, ' + yPos + 'px)',
-      position: 'fixed'
-    }
-
     Global.selectedItemOwnerId = eventData.ownerId;
     Global.selectedItemId = eventData.itemId;
     Global.selectedItemName = eventData.itemName;
 
-    this.setState({ selectItemStyle: selectItemStyle });
-
+    this.setState({ selectedItemId: eventData.itemId });
     this.props.handleSelect(eventData);
   }
 
-  handleLeftClick(event) {
-    console.log("Left Click - page: " + this.state.page);
+  handleLeftClick() {
     if (this.state.page != 0) {
-      const newPage = this.state.page - 1;
-      this.setState({ page: newPage })
+      this.setState({ page: this.state.page - 1 });
     }
   }
 
-  handleRightClick(event) {
-    console.log("Right Click - page: " + this.state.page);
-    if (this.state.page != (Math.ceil(this.props.items.length / 20) - 1)) {
-      const newPage = this.state.page + 1;
-      this.setState({ page: newPage })
+  handleRightClick(totalPages?: number) {
+    const maxPage = Math.max((totalPages || 1) - 1, 0);
+    if (this.state.page < maxPage) {
+      this.setState({ page: this.state.page + 1 });
     }
   }
 
   render() {
     const objId = this.props.id;
-    const itemFrames = []
-    const items = []
-    const reqs = []
-
-    var imageName = '';
-    var name = '';
-    var capacityText;
-    var selectItemStyle = this.state.selectItemStyle;
-    var hideLeftButton = false;
-    var hideRightButton = false;
-
-    var itemsData = this.props.items.filter((item) => item.equipped == false);
+    let imageName = '';
+    let name = '';
 
     if (Global.objectStates[objId]) {
       if (Util.isSprite(Global.objectStates[objId].image)) {
@@ -101,160 +66,121 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
       } else {
         imageName = Global.objectStates[objId].image + '.png';
       }
-
       name = Global.objectStates[objId].name;
     }
 
-    if (this.props.capacity != null && this.props.totalWeight != null) {
-      capacityText = this.props.totalWeight + '/' + this.props.capacity + ' lbs';
-    } else {
-      capacityText = '';
-    }
-
-    for (var i = 0; i < 20; i++) {
-      var xPos = -293 + ((i % 5) * 53);
-      var yPos = 73 + (Math.floor(i / 5) * 53);
-
-      var itemFrameStyle = {
-        transform: 'translate(' + xPos + 'px, ' + yPos + 'px)',
-        position: 'fixed'
-      } as React.CSSProperties
-
-      itemFrames.push(<img src={itemframe} key={i} style={itemFrameStyle} />)
-    }
-
+    let itemsData = (this.props.items || []).filter((item) => item.equipped == false);
     if (this.props.showEquippedOnly) {
-      // Filter out items that are not equippeable         
-      itemsData = itemsData.filter((item) => item.class == "Weapon" || item.class == "Armor" || item.class == "Tool" || item.class == "Torch");
+      itemsData = itemsData.filter((item) =>
+        item.class == "Weapon" || item.class == "Armor" || item.class == "Tool" || item.class == "Torch"
+      );
     }
 
-    var anyItemSelected = false;
-    var maxItemIndex = (this.state.page + 1) * 20;
-
-    if (maxItemIndex > (itemsData.length - 1)) {
-      maxItemIndex = itemsData.length;
-    }
-
-    console.log("maxItemIndex: " + maxItemIndex);
-    console.log("state page: " + this.state)
-
-    var itemPageIndex = 0;
-
+    const pageSize = 30;
+    const totalPages = Math.max(1, Math.ceil(itemsData.length / pageSize));
+    const page = Math.min(this.state.page, totalPages - 1);
+    const pageItems = itemsData.slice(page * pageSize, (page + 1) * pageSize);
     const selectedItemId = this.props.selectedItemId ?? this.state.selectedItemId;
 
-    for (var itemIndex = this.state.page * 20; itemIndex < maxItemIndex; itemIndex++) {
-      console.log('Item: ' + JSON.stringify(itemsData[itemIndex]));
-      var itemId = itemsData[itemIndex].id;
-      var itemName = itemsData[itemIndex].name;
-      var image = itemsData[itemIndex].image;
-      var quantity = itemsData[itemIndex].quantity;
+    const capacityText = this.props.capacity != null && this.props.totalWeight != null
+      ? this.props.totalWeight + '/' + this.props.capacity + ' lbs'
+      : '';
 
-      var xPos = 31 + ((itemPageIndex % 5) * 53);
-      var yPos = -286 + (Math.floor(itemPageIndex / 5) * 53);
+    const summaryStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      marginBottom: '12px',
+      minHeight: '54px',
+    };
 
-      var disabled = false;
+    const spriteStyle: React.CSSProperties = {
+      width: '46px',
+      height: '46px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+      flex: '0 0 auto',
+    };
 
-      if (this.props.disabledItems != null && this.props.disabledItems.includes(itemId)) {
-        disabled = true;
-      }
+    const nameStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Cinzel, Verdana, serif',
+      fontSize: '16px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
 
-      items.push(<InventoryItem key={itemPageIndex}
-        ownerId={objId}
-        itemId={itemId}
-        itemName={itemName}
-        image={image}
-        quantity={quantity}
-        index={itemPageIndex}
-        xPos={xPos}
-        yPos={yPos}
-        handleSelect={this.handleSelect}
-        disabled={disabled} />);
+    const capacityStyle: React.CSSProperties = {
+      color: '#9aa0a6',
+      fontSize: '11px',
+      marginTop: '3px',
+    };
 
-      if (selectedItemId == itemId) {
-        var xPos = -293 + ((itemPageIndex % 5) * 53);
-        var yPos = 73 + (Math.floor(itemPageIndex / 5) * 53);
+    const pagerStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: '10px',
+      marginTop: '12px',
+      color: '#9aa0a6',
+      fontSize: '11px',
+    };
 
-        const style = {
-          transform: 'translate(' + xPos + 'px, ' + yPos + 'px)',
-          position: 'fixed'
-        };
-
-        selectItemStyle = style;
-        anyItemSelected = true;
-      }
-
-      itemPageIndex++;
-    }
-
-
-    if (this.state.page == 0) {
-      hideLeftButton = true;
-    }
-
-    if (itemsData.length == 0) {
-      hideRightButton = true;
-    } else if ((Math.ceil(itemsData.length / 20) - 1) == this.state.page) {
-      hideRightButton = true;
-    }
-
-    const spriteStyle = {
-      transform: 'translate(-290px, 5px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-225px, 20px)',
-      position: 'fixed',
-      textAlign: 'left',
-      color: 'white',
+    const pagerButtonStyle: React.CSSProperties = {
+      minHeight: '40px',
+      minWidth: '74px',
+      border: '1px solid rgba(201, 170, 113, 0.45)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
       fontFamily: 'Verdana',
       fontSize: '12px',
-      width: '200px'
-    } as React.CSSProperties
-
-    const capacityTextStyle = {
-      transform: 'translate(-225px, 40px)',
-      position: 'fixed',
-      textAlign: 'left',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '200px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-305px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-65px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    };
 
     return (
-      <HalfPanel left={this.props.left}
+      <MobilePanelScreen
         panelType={this.props.panelType}
-        hideExitButton={this.props.hideExitButton}>
-        <img src={'/static/art/' + imageName} style={spriteStyle} />
-        <span style={spanNameStyle}>
-          {name}
-        </span>
+        title={name || 'Inventory'}
+        hideExitButton={this.props.hideExitButton}
+        footer={this.props.footer}
+      >
+        <div style={summaryStyle}>
+          {imageName && <img src={'/static/art/' + imageName} style={spriteStyle} />}
+          <div>
+            <div style={nameStyle}>{name || 'Inventory'}</div>
+            {capacityText && <div style={capacityStyle}>{capacityText}</div>}
+          </div>
+        </div>
 
-        <span style={capacityTextStyle}>
-          {capacityText}
-        </span>
+        <MobileInventoryGrid
+          ownerId={objId}
+          items={pageItems}
+          selectedItemId={selectedItemId}
+          disabledItems={this.props.disabledItems}
+          onSelect={this.handleSelect}
+        />
 
-        {itemFrames}
-        {items}
-        {reqs}
-        {anyItemSelected &&
-          <img src={selectitemborder} style={selectItemStyle} />
-        }
-        {!hideLeftButton && <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />}
-        {!hideRightButton && <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />}
-      </HalfPanel>
+        {totalPages > 1 &&
+          <div style={pagerStyle}>
+            <button
+              type="button"
+              style={pagerButtonStyle}
+              disabled={page == 0}
+              onClick={this.handleLeftClick}
+            >
+              Prev
+            </button>
+            <span>Page {page + 1} of {totalPages}</span>
+            <button
+              type="button"
+              style={pagerButtonStyle}
+              disabled={page >= totalPages - 1}
+              onClick={() => this.handleRightClick(totalPages)}
+            >
+              Next
+            </button>
+          </div>}
+      </MobilePanelScreen>
     );
   }
 }
-

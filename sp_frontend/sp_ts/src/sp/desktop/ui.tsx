@@ -24,6 +24,7 @@ import dodgebutton from "ui/dodgebutton.png";
 
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
+import HeroDeathOverlay from '../core/heroDeathOverlay';
 import {
   TRIGGER_INVENTORY,
   QUICK,
@@ -181,6 +182,7 @@ interface UIState {
   worldData: any,
   showLeftInventoryPanel: boolean
   trueDeathData: any,
+  heroDeathData: any,
   heroStats: any,
   hungerStatus: string,
   thirstStatus: string,
@@ -192,6 +194,7 @@ interface UIState {
 
 export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
+  private heroDeathOverlayTimer: any = null;
 
   constructor(props) {
     super(props);
@@ -296,6 +299,7 @@ export default class UI extends React.Component<any, UIState> {
       worldData: {},
       showLeftInventoryPanel: true,
       trueDeathData: {},
+      heroDeathData: null,
       heroStats: {},
       hungerStatus: '',
       thirstStatus: '',
@@ -403,6 +407,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.INFO_EXPERIMENT_STATE, this.handleInfoExperimentState, this);
     Global.gameEmitter.on(NetworkEvent.INFO_CROP, this.handleInfoCrop, this);
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleInfoTrueDeath, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_DEATH_STATE, this.handleHeroDeathState, this);
     Global.gameEmitter.on(NetworkEvent.ITEM_TRANSFER, this.handleItemTransfer, this);
     Global.gameEmitter.on(NetworkEvent.INFO_REFINE, this.handleInfoRefine, this);
     Global.gameEmitter.on(NetworkEvent.INFO_STRUCTURE_REFINE, this.handleInfoStructureRefine, this);
@@ -974,6 +979,23 @@ export default class UI extends React.Component<any, UIState> {
     });
   }
 
+  handleHeroDeathState(message) {
+    if (this.heroDeathOverlayTimer) {
+      clearTimeout(this.heroDeathOverlayTimer);
+      this.heroDeathOverlayTimer = null;
+    }
+
+    Global.heroDead = message.phase != 'resurrected';
+    this.setState({ heroDeathData: message });
+
+    if (message.phase == 'resurrected') {
+      this.heroDeathOverlayTimer = setTimeout(() => {
+        this.setState({ heroDeathData: null });
+        this.heroDeathOverlayTimer = null;
+      }, 3500);
+    }
+  }
+
   handleResourceClick(eventData) {
     this.setState({
       hideResourcePanel: false,
@@ -1459,7 +1481,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoTrueDeath(message) {
     console.log("UI handleInfoTrueDeath");
-    this.setState({ hideTrueDeathPanel: false, trueDeathData: message });
+    this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
   }
 
   /*handleNearbyResources(message) {
@@ -1670,7 +1692,7 @@ export default class UI extends React.Component<any, UIState> {
 
   getAbilityHints() {
     const combatAbilities = this.state.combatState && this.state.combatState.abilities
-      ? this.state.combatState.abilities
+      ? this.state.combatState.abilities.filter((ability) => ability.id != "shield_bash")
       : [];
 
     if (combatAbilities.length > 0) {
@@ -1679,7 +1701,7 @@ export default class UI extends React.Component<any, UIState> {
 
     switch (Global.heroClass) {
       case "Warrior":
-        return [{ id: "shield_bash", label: "Guard Bash", cost_type: "stamina", cost: 10, range: 1, hint: "Stun an adjacent threat and raise your guard." }];
+        return [];
       case "Ranger":
         return [
           { id: "aimed_shot", label: "Aimed Shot", cost_type: "stamina", cost: 8, range: 3, hint: "Deal reliable bow damage before enemies reach you." },
@@ -1943,6 +1965,8 @@ export default class UI extends React.Component<any, UIState> {
 
         {!this.state.hideConfirmPanel &&
           <ConfirmPanel msg={this.state.confirmMsg} />}
+
+        <HeroDeathOverlay data={this.state.heroDeathData} />
 
         {!this.state.hideTrueDeathPanel &&
           <TrueDeathPanel

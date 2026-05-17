@@ -1253,6 +1253,12 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                watchtower_reveal_system
+                    .run_if(in_state(AppState::Running))
+                    .before(perception_system),
+            )
+            .add_systems(
+                Update,
                 work_queue_update_system.run_if(in_state(AppState::Running)),
             )
             .add_observer(state_change_observer)
@@ -1662,9 +1668,14 @@ fn move_event_system(
                         continue;
                     };
 
-                    let mut event_executing = event_executing_query
-                        .get_mut(mover_entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(mover_entity)
+                    else {
+                        error!(
+                            "Missing EventExecuting component for mover entity {:?} (obj_id {})",
+                            mover_entity, map_event.obj_id
+                        );
+                        continue;
+                    };
 
                     let mut is_dst_open = true;
                     let mut objs_on_tile = Vec::new();
@@ -5767,6 +5778,7 @@ fn spell_damage_event_system(
                         damage,
                         combo: None,
                         state: target_state_str,
+                        missed: false,
                     };
 
                     let damage_map_event = MapEvent {
@@ -5897,9 +5909,13 @@ fn cooldown_event_system(
                         continue;
                     };
 
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
                 }
                 _ => {}
@@ -6354,9 +6370,13 @@ fn drink_eat_system(
                     };
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
                 }
                 VisibleEvent::FindFoodEvent { obj_id } => {
@@ -6369,9 +6389,13 @@ fn drink_eat_system(
                     };
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
                 }
                 VisibleEvent::DrinkEvent { item_id, obj_id } => {
@@ -6445,9 +6469,13 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     // TODO move this to a Changed<Thirst, Hunger, Tired> system
@@ -6541,9 +6569,13 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     if ids.is_hero(map_event.obj_id) {
@@ -6605,9 +6637,13 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     // TODO move this to a Changed<Thirst, Hunger, Tired> system
@@ -6705,9 +6741,13 @@ fn find_shelter_system(
                     }
 
                     info!("Setting EventExecutingState to Completed");
-                    let mut event_executing = event_executing_query
-                        .get_mut(entity)
-                        .expect("Missing EventExecuting component");
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
                     event_executing.state = EventExecutingState::Completed;
                 }
                 _ => {}
@@ -7207,6 +7247,7 @@ fn visible_event_system(
                             damage,
                             combo,
                             state,
+                            missed,
                         } => {
                             let attacker_distance = Map::distance(
                                 (event_obj.pos.x, event_obj.pos.y),
@@ -7222,6 +7263,7 @@ fn visible_event_system(
                                     state: state.to_string(),
                                     combo: combo.clone(),
                                     countered: None,
+                                    missed: if *missed { Some(true) } else { None },
                                 };
 
                                 all_broadcast_events
@@ -7244,6 +7286,7 @@ fn visible_event_system(
                                     state: state.to_string(),
                                     combo: combo.clone(),
                                     countered: None,
+                                    missed: if *missed { Some(true) } else { None },
                                 };
 
                                 all_broadcast_events
@@ -7582,6 +7625,52 @@ fn visible_event_system(
     }
 
     visible_events.clear();
+}
+
+fn watchtower_reveal_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut perception_updates: ResMut<PerceptionUpdates>,
+    watchtower_query: Query<(&PlayerId, &Position, &Viewshed, &State), With<Watchtower>>,
+    hidden_query: Query<(Entity, &PlayerId, &Position, &State, &Class), Without<Watchtower>>,
+) {
+    if game_tick.0 % TICKS_PER_SEC != 0 {
+        return;
+    }
+
+    let mut revealed_entities = HashSet::new();
+    let mut updated_players = HashSet::new();
+
+    for (tower_player, tower_pos, tower_viewshed, tower_state) in watchtower_query.iter() {
+        if !tower_state.is_active() {
+            continue;
+        }
+
+        for (enemy_entity, enemy_player, enemy_pos, enemy_state, enemy_class) in hidden_query.iter()
+        {
+            if enemy_player.0 == tower_player.0
+                || *enemy_state != State::Hiding
+                || enemy_class.0 != CLASS_UNIT
+                || Map::dist(*tower_pos, *enemy_pos) > tower_viewshed.range
+            {
+                continue;
+            }
+
+            if revealed_entities.insert(enemy_entity) {
+                commands.trigger(StateChange {
+                    entity: enemy_entity,
+                    new_state: State::None,
+                });
+            }
+
+            updated_players.insert(tower_player.0);
+            updated_players.insert(enemy_player.0);
+        }
+    }
+
+    for player_id in updated_players {
+        perception_updates.insert((player_id, PerceptionUpdateType::UpdatePerception));
+    }
 }
 
 fn perception_system(
@@ -8034,24 +8123,21 @@ fn game_event_system(
                     };
                     map_events.new(villager_id.0, game_tick.0 + 10, speech_event);
 
-                    // Villager teaches construction plans
-                    extras
-                        .plans
-                        .add(*player_id, "Crafting Tent".to_string(), 0, 0);
+                    // Villager teaches the first dedicated lookout plan.
                     extras.plans.add(*player_id, "Watchtower".to_string(), 0, 0);
 
                     let discovery_packet = ResponsePacket::DiscoveryEvent {
                         version: 1,
                         discovery_type: "plan".to_string(),
-                        title: "Plans shared".to_string(),
+                        title: "Watchtower plan shared".to_string(),
                         unlock_source: "Rescued villager".to_string(),
                         location: Some(format!("{},{}", pos.x, pos.y)),
-                        result: "Crafting Tent turns scavenged supplies into tools; Watchtower turns warning time into safety.".to_string(),
+                        result: "A Watchtower turns warning time into safety before night pressure reaches camp.".to_string(),
                     };
                     send_to_client(*player_id, discovery_packet, &clients);
 
                     let plan_speech = VisibleEvent::SpeechEvent {
-                        speech: "I know how to build a few things. Let me share what I know."
+                        speech: "I can show you how to raise a watchtower. Seeing trouble early keeps a camp alive."
                             .to_string(),
                         intensity: 3,
                     };
@@ -10042,9 +10128,9 @@ fn build_objective_state_packet(
             &current_id,
             "Villager",
             Some("Shipwreck survivor"),
-            "Keep the survivor alive and use their knowledge to unlock early plans.",
+            "Keep the survivor alive and use their lookout knowledge to improve camp safety.",
             "Villagers are not just workers; they reveal needs, skills, and settlement loops.",
-            "Crafting Tent and Watchtower plans.",
+            "Watchtower plan and another pair of hands.",
             None,
             None,
         ),
@@ -10704,6 +10790,41 @@ fn victory_check_system(
     }
 }
 
+fn soulshard_count(inventory: &Inventory) -> i32 {
+    inventory
+        .get_by_class(SOULSHARD.to_string())
+        .map(|soulshards| soulshards.quantity)
+        .unwrap_or(0)
+}
+
+fn resurrection_attempt_cost(num_deaths: u32, total_xp: i32) -> i32 {
+    soulshard_res_cost(num_deaths.saturating_sub(1), total_xp)
+}
+
+fn send_hero_death_state(
+    clients: &Res<Clients>,
+    player_id: i32,
+    phase: &str,
+    hero_id: i32,
+    hero_name: &str,
+    resurrect_cost: i32,
+    soulshards_available: i32,
+    seconds_remaining: i32,
+    message: String,
+) {
+    let packet = ResponsePacket::HeroDeathState {
+        phase: phase.to_string(),
+        hero_id,
+        hero_name: hero_name.to_string(),
+        resurrect_cost,
+        soulshards_available,
+        seconds_remaining,
+        message,
+    };
+
+    send_to_client(player_id, packet, clients);
+}
+
 fn resurrect_system(
     mut commands: Commands,
     clients: Res<Clients>,
@@ -10746,11 +10867,32 @@ fn resurrect_system(
         };
 
         if (game_tick.0 - dead_state.dead_at) > 15 * TICKS_PER_SEC {
+            let num_deaths = player_stats
+                .get(&hero.player_id.0)
+                .expect("Player stats not found")
+                .num_deaths;
+            let total_xp = hero.skills.get_total_xp();
+            let resurrect_cost = resurrection_attempt_cost(num_deaths, total_xp);
+
             let Ok(revival_monolith) = revival_monolith_query.get(hero.entity) else {
                 error!(
                     "Revival monolith no longer exists, cannot resurrect entity {:?}",
                     hero.entity
                 );
+                send_hero_death_state(
+                    &clients,
+                    hero.player_id.0,
+                    "true_death_pending",
+                    hero.id.0,
+                    &hero.name.0,
+                    resurrect_cost,
+                    0,
+                    10,
+                    "The Monolith bond is broken. True Death is near.".to_string(),
+                );
+                commands.entity(hero.entity).insert(TrueDeath {
+                    true_death_at: game_tick.0,
+                });
                 continue;
             };
 
@@ -10761,30 +10903,66 @@ fn resurrect_system(
 
             let Some(monolith_entity) = entity_map.get_entity(revival_monolith.id) else {
                 error!("No entity found for monolith id {:?}", revival_monolith.id);
+                send_hero_death_state(
+                    &clients,
+                    hero.player_id.0,
+                    "true_death_pending",
+                    hero.id.0,
+                    &hero.name.0,
+                    resurrect_cost,
+                    0,
+                    10,
+                    "The bound Monolith is gone. True Death is near.".to_string(),
+                );
+                commands.entity(hero.entity).insert(TrueDeath {
+                    true_death_at: game_tick.0,
+                });
                 continue;
             };
 
             let Ok(mut monolith_inventory) = monolith_inventory_query.get_mut(monolith_entity)
             else {
                 error!("No inventory found for entity {:?}", monolith_entity);
+                send_hero_death_state(
+                    &clients,
+                    hero.player_id.0,
+                    "true_death_pending",
+                    hero.id.0,
+                    &hero.name.0,
+                    resurrect_cost,
+                    0,
+                    10,
+                    "The Monolith cannot find its Soulshards. True Death is near.".to_string(),
+                );
+                commands.entity(hero.entity).insert(TrueDeath {
+                    true_death_at: game_tick.0,
+                });
                 continue;
             };
 
-            // Get num deaths for player
-            let num_deaths = player_stats
-                .get(&hero.player_id.0)
-                .expect("Player stats not found")
-                .num_deaths;
-            let total_xp = hero.skills.get_total_xp();
-            let resurrect_cost = soulshard_res_cost(num_deaths, total_xp);
+            let soulshards_available = soulshard_count(&monolith_inventory);
 
             debug!("Resurrect cost: {:?}", resurrect_cost);
 
             let Some(soulshards) = monolith_inventory.get_by_class(SOULSHARD.to_string()) else {
                 debug!("Hero {:?} has no soulshards, cannot resurrect", hero.id);
+                send_hero_death_state(
+                    &clients,
+                    hero.player_id.0,
+                    "true_death_pending",
+                    hero.id.0,
+                    &hero.name.0,
+                    resurrect_cost,
+                    soulshards_available,
+                    10,
+                    format!(
+                        "The Monolith finds no Soulshards to bind. {} is lost to True Death.",
+                        hero.name.0
+                    ),
+                );
                 let packet = ResponsePacket::Notice {
                     noticemsg: format!(
-                        "The Monolith finds no soulshards to bind. {:?} is lost to True Death.",
+                        "The Monolith finds no soulshards to bind. {} is lost to True Death.",
                         hero.name.0
                     ),
                     expiry: Some(10000),
@@ -10805,9 +10983,23 @@ fn resurrect_system(
                     "Hero {:?} has insufficient soulshards, cannot resurrect",
                     hero.id
                 );
+                send_hero_death_state(
+                    &clients,
+                    hero.player_id.0,
+                    "true_death_pending",
+                    hero.id.0,
+                    &hero.name.0,
+                    resurrect_cost,
+                    soulshards_available,
+                    10,
+                    format!(
+                        "The Monolith lacks Soulshards ({}/{}). True Death claims {}.",
+                        soulshards.quantity, resurrect_cost, hero.name.0
+                    ),
+                );
                 let packet = ResponsePacket::Notice {
                     noticemsg: format!(
-                        "The Monolith lacks shards ({:?}/{:?}). True Death claims {:?}.",
+                        "The Monolith lacks shards ({}/{}). True Death claims {}.",
                         soulshards.quantity, resurrect_cost, hero.name.0
                     ),
                     expiry: Some(10000),
@@ -10824,6 +11016,10 @@ fn resurrect_system(
             // Remove soulshards from monolith
             let updated_soulshards =
                 monolith_inventory.remove_quantity(soulshards.id, resurrect_cost);
+            let remaining_soulshards = updated_soulshards
+                .as_ref()
+                .map(|soulshards| soulshards.quantity)
+                .unwrap_or(0);
 
             let active_info_key = (
                 MONOLITH_PLAYER_ID,
@@ -10851,6 +11047,20 @@ fn resurrect_system(
             }*/
 
             debug!("Resurrecting hero {:?}", hero.id);
+            send_hero_death_state(
+                &clients,
+                hero.player_id.0,
+                "resurrected",
+                hero.id.0,
+                &hero.name.0,
+                resurrect_cost,
+                remaining_soulshards,
+                0,
+                format!(
+                    "The Monolith spends {} Soulshards and binds {} again.",
+                    resurrect_cost, hero.name.0
+                ),
+            );
 
             // Create human corpse
             let (corpse_id, _entity) = Obj::create(
@@ -12009,12 +12219,54 @@ fn remove_worker_from_work_queue_observer(
 }
 
 fn hero_dead_system(
+    clients: Res<Clients>,
     mut player_stats: ResMut<PlayerStats>,
-    hero_query: Query<&PlayerId, (With<SubclassHero>, Added<StateDead>)>,
+    entity_map: Res<EntityObjMap>,
+    hero_query: Query<
+        (&PlayerId, &Id, &Name, &Skills, Option<&BoundMonolith>),
+        (With<SubclassHero>, Added<StateDead>),
+    >,
+    monolith_inventory_query: Query<&Inventory, With<Monolith>>,
 ) {
-    for player_id in hero_query.iter() {
+    for (player_id, id, name, skills, bound_monolith) in hero_query.iter() {
         info!("Hero dead: {:?}", player_id.0);
-        player_stats.get_mut(&player_id.0).unwrap().num_deaths += 1;
+        let player_stat = player_stats.entry(player_id.0).or_insert(PlayerStat {
+            player_id: player_id.0,
+            num_deaths: 0,
+            damage_records: VecDeque::new(),
+        });
+        player_stat.num_deaths += 1;
+
+        let resurrect_cost =
+            resurrection_attempt_cost(player_stat.num_deaths, skills.get_total_xp());
+        let soulshards_available = bound_monolith
+            .and_then(|monolith| entity_map.get_entity(monolith.id))
+            .and_then(|monolith_entity| monolith_inventory_query.get(monolith_entity).ok())
+            .map(soulshard_count)
+            .unwrap_or(0);
+        let message = if soulshards_available >= resurrect_cost {
+            format!(
+                "The Monolith weighs your soul. Resurrection will cost {} Soulshards.",
+                resurrect_cost
+            )
+        } else {
+            format!(
+                "The Monolith weighs your soul, but it holds {}/{} Soulshards.",
+                soulshards_available, resurrect_cost
+            )
+        };
+
+        send_hero_death_state(
+            &clients,
+            player_id.0,
+            "weighing",
+            id.0,
+            &name.0,
+            resurrect_cost,
+            soulshards_available,
+            15,
+            message,
+        );
     }
 }
 

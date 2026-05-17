@@ -3,6 +3,7 @@ import exitbutton from "ui_comp/exitbutton.png";
 import halfpanel from "ui_comp/halfpanel.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { getHalfPanelMarginTop } from "../../core/uiLayout";
 
 interface HalfPanelProps {
   left : boolean,
@@ -42,19 +43,14 @@ export default class HalfPanel extends React.Component<HalfPanelProps, any> {
   }
 
   render() {
-    // Get window height
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 880;
-
-    const marginTopSmall = '-180px';
-    const marginTopLarge = '80px';
+    const marginTop = `${getHalfPanelMarginTop()}px`;
 
     const baseStyle = {
       top: '50%',
       left: '50%',
       width: '323px',
       height: '360px',
-      marginTop: isLargeWindow ? marginTopLarge : marginTopSmall,
+      marginTop: marginTop,
       position: 'fixed',
       zIndex: this.state.z + (this.props.zIndexBonus || 0),
     } as React.CSSProperties;

@@ -1,11 +1,17 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
 import hirebutton from "ui_comp/okbutton.png";
-import { Network } from "../../core/network";
 import { GameEvent } from "../../core/gameEvent";
+import {
+  MobilePanelActions,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface MHPProps {
   hireData,
@@ -62,100 +68,39 @@ export default class MerchantHirePanel extends React.Component<MHPProps, any> {
 
     topStats.sort((a, b) => (a.value < b.value) ? 1 : -1);
 
-    var skills = [];
-    var key = 0;
+    var skillRows = [];
 
     for(var skill in this.state.villager.skills) {
-      skills.push(<tr key={key}>
-                    <td>{skill}</td>
-                    <td>{this.state.villager.skills[skill]}</td>
-                  </tr>);
-
-      key++;
+      skillRows.push(`${skill} ${this.state.villager.skills[skill]}`);
     }
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 100px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -230px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-320px, 60px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-50px, 60px)',
-      position: 'fixed'
-    } as React.CSSProperties
-  
-    const assignStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const landscape = isLandscapeMobile();
+    const atFirst = this.state.index == 0;
+    const atLast = this.state.index == (this.props.hireData.length - 1);
 
     return (
-      <HalfPanel left={false} 
-                 panelType={'hire'} 
-                 hideExitButton={false}>
-        <img src={'/static/art/' + imageName} style={imageStyle} />
-        <span style={spanNameStyle}>
-          {this.state.villager.name}
-        </span>
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <td>Wage:</td>
-              <td>{this.state.villager.wage}</td>
-            </tr>
-            <tr>
-              <td>Primary Skills:</td>
-              <td><table style={tableStyle2}>
-                <tbody>
-                  {skills}
-                </tbody>
-                </table></td>
-            </tr>
-            <tr>
-              <td>Primary Stats:</td>
-              <td>{topStats[0].name} ({topStats[0].value}) <br/>
-                  {topStats[1].name} ({topStats[1].value}) <br/>
-                  {topStats[2].name} ({topStats[2].value})
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />
-        <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />
-        <img src={hirebutton} style={assignStyle} onClick={this.handleHireClick} />
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'hire'}
+        title={'Hire'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={'/static/art/' + imageName} title={this.state.villager.name} subtitle={`Wage ${this.state.villager.wage}`} imageSize={landscape ? 58 : 82} />}
+          right={
+            <>
+              <MobileStatsList rows={[
+                { label: 'Skills', value: skillRows.join(', ') },
+                { label: 'Top Stats', value: `${topStats[0].name} (${topStats[0].value}), ${topStats[1].name} (${topStats[1].value}), ${topStats[2].name} (${topStats[2].value})` },
+              ]} />
+              <MobilePanelActions actions={[
+                { key: 'previous', label: 'Previous hire', icon: leftbutton, onClick: this.handleLeftClick, disabled: atFirst },
+                { key: 'hire', label: 'Hire', icon: hirebutton, onClick: this.handleHireClick },
+                { key: 'next', label: 'Next hire', icon: rightbutton, onClick: this.handleRightClick, disabled: atLast },
+              ]} />
+            </>
+          } />
+      </MobilePanelScreen>
     );
   }
 }
-
 
 

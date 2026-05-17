@@ -1,9 +1,14 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
-import WorkQueueEntry from "./workQueueEntry";
 import { Util } from "../../core/util";
-import { GameEvent } from "../../core/gameEvent";
+import cancelbutton from "ui_comp/exitbutton.png";
+import {
+  MobileCard,
+  MobileSplitPanelLayout,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface WorkQueuePanelProps {
   structureData,
@@ -33,7 +38,7 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
 
   render() {
     console.log('WorkQueuePanel render');
-    const workQueue = [];
+    const landscape = isLandscapeMobile();
     let structureImageName;
     let structureName;
 
@@ -47,105 +52,109 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       structureName = Global.objectStates[this.props.structureData.id].name;
     }
 
-    for (var i = 0; i < this.props.workQueue.length; i++) {
+    const listStyle: React.CSSProperties = {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '7px',
+    };
 
-      var xPos = 15;
-      var yPos = -200 + (i * 60);
+    const rowStyle: React.CSSProperties = {
+      display: 'grid',
+      gridTemplateColumns: '28px 42px 1fr 70px',
+      alignItems: 'center',
+      gap: '8px',
+      minHeight: '50px',
+      borderBottom: '1px solid rgba(255,255,255,0.08)',
+      paddingBottom: '6px',
+    };
 
-      const workType = this.props.workQueue[i].work_type;
+    const cancelStyle: React.CSSProperties = {
+      width: '24px',
+      height: '24px',
+    };
 
-      if (workType == 'Craft') {
-        const recipeName = this.props.workQueue[i].recipe_name;
-        const imageName = this.props.workQueue[i].recipe_image + '.png';
+    const imageStyle: React.CSSProperties = {
+      width: '38px',
+      height: '38px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
 
-        workQueue.push(<WorkQueueEntry
-          key={i}
-          index={i}
-          workType={workType}
-          villagerId={this.props.workQueue[i].villager_id}
-          name={recipeName}
-          imageName={imageName}
-          xPos={xPos}
-          yPos={yPos}
-          maxProgress={this.props.workQueue[i].work_time}
-          progress={this.props.workQueue[i].progress}
-          handleCancel={this.handleCancel} />)
-      } else if (workType == 'Refine') {
-        const refineItemId = this.props.workQueue[i].refine_item_id;
-        const imageName = this.props.workQueue[i].refine_item_image + '.png';
+    const nameStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '11px',
+      lineHeight: 1.25,
+      overflowWrap: 'anywhere',
+    };
 
-        workQueue.push(<WorkQueueEntry
-          key={i}
-          index={i}
-          workType={workType}
-          villagerId={this.props.workQueue[i].villager_id}
-          name={refineItemId}
-          imageName={imageName}
-          xPos={xPos}
-          yPos={yPos}
-          refineItemClass={this.props.workQueue[i].refine_item_class}
-          maxProgress={this.props.workQueue[i].work_time}
-          progress={this.props.workQueue[i].progress}
-          handleCancel={this.handleCancel} />)
-      } else if (workType == 'Operate') {
+    const metaStyle: React.CSSProperties = {
+      color: '#c9aa71',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      lineHeight: 1.2,
+    };
 
-        workQueue.push(<WorkQueueEntry
-          key={i}
-          index={i}
-          workType={workType}
-          villagerId={this.props.workQueue[i].villager_id}
-          name={'valleyruncopperore'}
-          imageName={'valleyruncopperore.png'}
-          xPos={xPos}
-          yPos={yPos}
-          maxProgress={this.props.workQueue[i].work_time}
-          progress={this.props.workQueue[i].progress}
-          handleCancel={this.handleCancel} />)
-        }
-      }
+    const progressStyle: React.CSSProperties = {
+      width: '70px',
+    };
 
-      const spanNameStyle = {
-        transform: 'translate(-323px, 25px)',
-        position: 'fixed',
-        textAlign: 'center',
-        color: 'white',
-        fontFamily: 'Verdana',
-        fontSize: '12px',
-        width: '323px'
-      } as React.CSSProperties
-
-      const spanNoWorkStyle = {
-        transform: 'translate(-323px, 75px)',
-        position: 'fixed',
-        textAlign: 'center',
-        color: 'white',
-        fontFamily: 'Verdana',
-        fontSize: '12px',
-        width: '323px'
-      } as React.CSSProperties
-
-      const structureSpriteStyle = {
-        transform: 'translate(-290px, 5px)',
-        position: 'fixed'
-      } as React.CSSProperties
+    const emptyStyle: React.CSSProperties = {
+      color: '#777d82',
+      fontFamily: 'Verdana',
+      fontSize: '11px',
+      textAlign: 'center',
+      padding: '12px 0',
+    };
 
       return (
-        <HalfPanel left={true}
+        <MobilePanelScreen
           panelType={'workqueue'}
-          hideExitButton={false}>
-          <img src={'/static/art/' + structureImageName} style={structureSpriteStyle} />
-          <span style={spanNameStyle}>
-            {structureName} Queue
-          </span>
+          title={'Work Queue'}
+          hideExitButton={false}
+          contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+          <MobileSplitPanelLayout
+            left={<MobileSummaryCard imageSrc={'/static/art/' + structureImageName} title={structureName || 'Structure'} subtitle="Queue" imageSize={landscape ? 58 : 82} />}
+            right={
+              <MobileCard compact={landscape}>
+                {this.props.workQueue.length == 0 && <div style={emptyStyle}>No work in queue</div>}
+                {this.props.workQueue.length > 0 &&
+                  <div style={listStyle}>
+                    {this.props.workQueue.map((entry, index) => {
+                      const workType = entry.work_type;
+                      let name = workType;
+                      let imageName = 'recipe.png';
 
-          {workQueue.length > 0 && workQueue}
-          {workQueue.length == 0 && <span style={spanNoWorkStyle}>No work in queue</span>}
+                      if (workType == 'Craft') {
+                        name = entry.recipe_name;
+                        imageName = entry.recipe_image + '.png';
+                      } else if (workType == 'Refine') {
+                        name = entry.refine_item_id;
+                        imageName = entry.refine_item_image + '.png';
+                      } else if (workType == 'Operate') {
+                        name = 'Operate';
+                        imageName = 'valleyruncopperore.png';
+                      }
 
-        </HalfPanel>
+                      return (
+                        <div key={index} style={rowStyle}>
+                          <img src={cancelbutton} style={cancelStyle} onClick={() => this.handleCancel(index)} />
+                          <img src={'/static/art/items/' + imageName} style={imageStyle} onClick={() => Global.network.sendInfoItemByName(name)} />
+                          <div>
+                            <div style={nameStyle}>{name}</div>
+                            <div style={metaStyle}>{workType}</div>
+                          </div>
+                          {entry.work_time > 0 && <progress max={entry.work_time} value={entry.progress} style={progressStyle}>{entry.progress}</progress>}
+                        </div>
+                      );
+                    })}
+                  </div>}
+              </MobileCard>
+            } />
+        </MobilePanelScreen>
       );
     }
   }
-
 
 
 

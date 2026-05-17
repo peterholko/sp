@@ -111,6 +111,7 @@ export type ResponsePacket =
   | { packet: 'new_obj_perception'; new_objs: MapObj[]; new_tiles: MapTile[] }
   | { packet: 'perception_changes'; events: ChangeEvents[] }
   | { packet: 'stats'; data: StatsData }
+  | { packet: 'hero_death_state'; phase: string; hero_id: number; hero_name: string; resurrect_cost: number; soulshards_available: number; seconds_remaining: number; message: string }
   | InfoHeroPacket
   | InfoVillagerPacket
   | InfoStructurePacket
@@ -280,7 +281,7 @@ export interface StatsData {
 }
 
 export type BroadcastEvents =
-  | { packet: 'dmg'; source_id: number; target_id: number; attack_type: string; dmg: number; state: string; combo?: string; countered?: string }
+  | { packet: 'dmg'; source_id: number; target_id: number; attack_type: string; dmg: number; state: string; combo?: string; countered?: string; missed?: boolean }
   | { packet: 'spoil'; source_id: number; target_id: number; itemtype: string; itemquantity: number }
   | { packet: 'steal'; source_id: number; target_id: number }
   | { packet: 'torch'; source_id: number; target_id: number }
@@ -1580,6 +1581,8 @@ export class Network {
       } else if (jsonData.packet == 'stats') {
         this.processGetStats(jsonData.data);
         Global.gameEmitter.emit(NetworkEvent.STATS, jsonData.data);
+      } else if (jsonData.packet == 'hero_death_state') {
+        Global.gameEmitter.emit(NetworkEvent.HERO_DEATH_STATE, jsonData);
       } else if (jsonData.packet == "info_hero") {
         Global.gameEmitter.emit(NetworkEvent.INFO_HERO, jsonData);
       } else if (jsonData.packet == "info_villager") {
@@ -2057,14 +2060,25 @@ export class Network {
     Global.heroMaxStamina = data.base_stamina;
     Global.heroMana = data.mana || 0;
     Global.heroMaxMana = data.base_mana || 0;
+    if (Global.heroHp > 0) {
+      Global.heroDead = false;
+    }
   }
 
 
   processDmg(data) {
     //Set object state to dead because an update is not sent to save on messages
-    if (data.state == DEAD) {
+    if (!data.missed && data.state == DEAD) {
       if (Global.objectStates[data.target_id]) {
-        Global.objectStates[data.target_id].state = DEAD;
+        var targetState = Global.objectStates[data.target_id];
+        if (targetState.state != DEAD) {
+          targetState.prevstate = targetState.state || NONE;
+        }
+        targetState.state = DEAD;
+        targetState.op = 'updated';
+        targetState.updateAttr = 'state';
+        targetState.eventType = 'dmg';
+        Global.gameEmitter.emit(GameEvent.OBJ_UPDATE, data.target_id);
       } else {
         console.error('ObjectState not found for ' + data.target_id);
       }
@@ -2072,16 +2086,23 @@ export class Network {
 
     if (data.target_id == Global.heroId) {
 
-      if (data.dmg > Global.heroHp) {
+      if (!data.missed && (data.state == DEAD || data.dmg >= Global.heroHp)) {
+        var wasHeroDead = Global.heroDead;
         Global.heroHp = 0;
         Global.heroDead = true;
-        Global.gameEmitter.emit(GameEvent.HERO_DEAD, {});
-      } else {
-        Global.heroHp -= data.dmg;
+        if (!wasHeroDead) {
+          Global.gameEmitter.emit(GameEvent.HERO_DEAD, {});
+        }
+      } else if (!data.missed) {
+        Global.heroHp = Math.max(0, Global.heroHp - data.dmg);
       }
 
       Global.gameEmitter.emit(GameEvent.HERO_STATS_UPDATE, { hp: Global.heroHp, stamina: Global.heroStamina, mana: Global.heroMana });
     } else if (data.source_id == Global.heroId) {
+
+      if (data.missed) {
+        return;
+      }
 
       if (data.attack_type == 'combo') {
         Global.attacks.length = 0;

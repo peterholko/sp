@@ -8,6 +8,7 @@ import rightbutton from "ui_comp/rightbutton.png";
 import { Network } from "../../core/network";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface ItemDivideProps {
   itemData,
@@ -66,7 +67,7 @@ export default class ItemDividePanel extends React.Component<ItemDivideProps, an
       marginTop: '-59px',
       marginLeft: '-166px',
       position: 'fixed',
-      zIndex: 20
+      zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const dividePanelStyle = {
@@ -126,4 +127,3 @@ export default class ItemDividePanel extends React.Component<ItemDivideProps, an
     );
   }
 }
-

@@ -79,26 +79,22 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
       }*/
     }
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const smallY = '-25px';
-    const largeY = '235px';
-
     const equipStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: isLargeWindow ? largeY : smallY,
-      marginLeft: '1px',
-      position: 'fixed',
-      transform: 'translate(-188px, 135px)',
-      zIndex: 6
+      width: '100%',
+      minHeight: '44px',
+      border: '1px solid rgba(201, 170, 113, 0.55)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
     } as React.CSSProperties
 
     /*const useStyle = {
       top: '50%',
       left: '50%',
-      marginTop: isLargeWindow ? largeY : smallY,
+      marginTop: equipY,
       marginLeft: '-25px',
       position: 'fixed',
       transform: 'translate(-134px, 135px)',
@@ -116,15 +112,13 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
           hideExitButton={false}
           hideSelect={this.state.hideSelect}
           handleSelect={this.handleSelect}
-          selectedItemId={this.state.selectedItemId} />
-
-        {showEquipButton &&
-          <img src={equipbutton}
-            style={equipStyle}
-            onClick={this.handleEquipClick} />}
+          selectedItemId={this.state.selectedItemId}
+          footer={showEquipButton &&
+            <button type="button" style={equipStyle} onClick={this.handleEquipClick}>
+              <img src={equipbutton} style={{ width: '40px', height: '40px' }} />
+            </button>} />
 
       </div>
     );
   }
 }
-

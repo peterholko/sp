@@ -1,5 +1,6 @@
 use bevy::ecs::query::{QueryData, WorldQuery};
 use bevy::prelude::*;
+use rand::Rng;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -15,7 +16,7 @@ use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, Visib
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
 
-use crate::combat::{Combat, CombatQuery, CombatQueryItem};
+use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
@@ -1085,6 +1086,128 @@ const STANDARD_BRACE_DURATION_TICKS: i32 = 50;
 const STANDARD_BRACE_AMPLIFIER: f32 = 1.0;
 const MAGE_WARD_DURATION_TICKS: i32 = 75;
 const MAGE_WARD_AMPLIFIER: f32 = 1.0;
+const BASIC_ATTACK_STAMINA_COST: i32 = 5;
+const WATCHTOWER_RANGED_STAMINA_COST: i32 = 4;
+const WATCHTOWER_AIMED_SHOT_STAMINA_COST: i32 = 7;
+const WATCHTOWER_RANGED_RANGE_BONUS: u32 = 1;
+const WATCHTOWER_RANGED_ACCURACY_BONUS: i32 = 10;
+const WATCHTOWER_RANGED_DAMAGE_BONUS: i32 = 1;
+const DEFAULT_RANGED_ACCURACY: i32 = 75;
+const MIN_RANGED_HIT_CHANCE: i32 = 35;
+const MAX_RANGED_HIT_CHANCE: i32 = 95;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AttackProfile {
+    range: u32,
+    is_ranged: bool,
+    accuracy: Option<i32>,
+    damage_bonus: i32,
+    stamina_cost: i32,
+}
+
+impl Default for AttackProfile {
+    fn default() -> Self {
+        Self {
+            range: 1,
+            is_ranged: false,
+            accuracy: None,
+            damage_bonus: 0,
+            stamina_cost: BASIC_ATTACK_STAMINA_COST,
+        }
+    }
+}
+
+fn numeric_attr(item: &Item, attr: &AttrKey) -> Option<i32> {
+    match item.attrs.get(attr) {
+        Some(AttrVal::Num(value)) => Some(*value as i32),
+        _ => None,
+    }
+}
+
+fn equipped_ranged_weapon_profile(
+    inventory: &Inventory,
+    effects: &Effects,
+) -> Option<AttackProfile> {
+    let main_hand = inventory.get_equipped_main_hand()?;
+
+    if main_hand.class != WEAPON {
+        return None;
+    }
+
+    let base_range = numeric_attr(&main_hand, &AttrKey::AttackRange)?;
+    if base_range <= 1 {
+        return None;
+    }
+
+    let stationed = effects.has(Effect::WatchtowerLight);
+    let mut profile = AttackProfile {
+        range: base_range as u32,
+        is_ranged: true,
+        accuracy: Some(
+            numeric_attr(&main_hand, &AttrKey::Accuracy).unwrap_or(DEFAULT_RANGED_ACCURACY),
+        ),
+        damage_bonus: 0,
+        stamina_cost: BASIC_ATTACK_STAMINA_COST,
+    };
+
+    if stationed {
+        profile.range += WATCHTOWER_RANGED_RANGE_BONUS;
+        profile.accuracy = profile
+            .accuracy
+            .map(|accuracy| accuracy + WATCHTOWER_RANGED_ACCURACY_BONUS);
+        profile.damage_bonus += WATCHTOWER_RANGED_DAMAGE_BONUS;
+        profile.stamina_cost = WATCHTOWER_RANGED_STAMINA_COST;
+    }
+
+    Some(profile)
+}
+
+fn basic_attack_profile(actor: &CombatQueryItem) -> AttackProfile {
+    equipped_ranged_weapon_profile(&actor.inventory, &actor.effects).unwrap_or_default()
+}
+
+fn ranged_hit_chance(profile: AttackProfile, distance: u32) -> i32 {
+    let accuracy = profile.accuracy.unwrap_or(DEFAULT_RANGED_ACCURACY);
+    let distance_penalty = (distance as i32 - 1).max(0) * 10;
+    (accuracy - distance_penalty).clamp(MIN_RANGED_HIT_CHANCE, MAX_RANGED_HIT_CHANCE)
+}
+
+fn ranged_attack_hits(profile: AttackProfile, distance: u32) -> bool {
+    if !profile.is_ranged {
+        return true;
+    }
+
+    let hit_chance = ranged_hit_chance(profile, distance);
+    rand::thread_rng().gen_range(0..100) < hit_chance
+}
+
+fn ability_effective_cost(ability: AbilityDef, actor: &CombatQueryItem) -> i32 {
+    if ability.effect == AbilityEffect::AimedShot
+        && equipped_ranged_weapon_profile(&actor.inventory, &actor.effects).is_some()
+        && actor.effects.has(Effect::WatchtowerLight)
+    {
+        WATCHTOWER_AIMED_SHOT_STAMINA_COST
+    } else {
+        ability.cost
+    }
+}
+
+fn ability_effective_range(ability: AbilityDef, actor: &CombatQueryItem) -> u32 {
+    if ability.effect == AbilityEffect::AimedShot
+        && equipped_ranged_weapon_profile(&actor.inventory, &actor.effects).is_some()
+        && actor.effects.has(Effect::WatchtowerLight)
+    {
+        ability.range + WATCHTOWER_RANGED_RANGE_BONUS
+    } else {
+        ability.range
+    }
+}
+
+fn aimed_shot_profile(actor: &CombatQueryItem) -> Option<AttackProfile> {
+    let mut profile = equipped_ranged_weapon_profile(&actor.inventory, &actor.effects)?;
+    profile.stamina_cost = ability_effective_cost(ability_def("aimed_shot")?, actor);
+    Some(profile)
+}
 
 #[derive(Clone, Copy)]
 struct AbilityDef {
@@ -1217,7 +1340,8 @@ fn ability_disabled_reason(
         ));
     }
 
-    if ability_cost_value(actor, ability.cost_type) < ability.cost {
+    let ability_cost = ability_effective_cost(ability, actor);
+    if ability_cost_value(actor, ability.cost_type) < ability_cost {
         return Some(match ability.cost_type {
             AbilityCostType::Stamina => "Not enough stamina".to_string(),
             AbilityCostType::Mana => "Not enough mana".to_string(),
@@ -1256,7 +1380,7 @@ fn ability_disabled_reason(
             }
         }
 
-        if Map::dist(*actor.pos, *target.pos) > ability.range {
+        if Map::dist(*actor.pos, *target.pos) > ability_effective_range(ability, actor) {
             return Some("Out of range".to_string());
         }
     }
@@ -1295,39 +1419,39 @@ fn ability_hints_for(
                 AbilityCostType::Stamina => "stamina".to_string(),
                 AbilityCostType::Mana => "mana".to_string(),
             },
-            cost: ability.cost,
-            range: ability.range as i32,
+            cost: ability_effective_cost(*ability, actor),
+            range: ability_effective_range(*ability, actor) as i32,
             disabled_reason: ability_disabled_reason(*ability, actor, target),
             hint: ability.hint.to_string(),
         })
         .collect()
 }
 
-fn spend_ability_cost(actor: &mut CombatQueryItem, ability: AbilityDef) {
+fn spend_ability_cost(actor: &mut CombatQueryItem, ability: AbilityDef, cost: i32) {
     match ability.cost_type {
         AbilityCostType::Stamina => {
             let stamina = actor.stats.stamina.unwrap_or(0);
-            actor.stats.stamina = Some(stamina - ability.cost);
+            actor.stats.stamina = Some(stamina - cost);
         }
         AbilityCostType::Mana => {
             let mana = actor.stats.mana.unwrap_or(0);
-            actor.stats.mana = Some(mana - ability.cost);
+            actor.stats.mana = Some(mana - cost);
         }
     }
 }
 
-fn ability_response_packet(source_id: i32, ability: AbilityDef) -> ResponsePacket {
+fn ability_response_packet(source_id: i32, ability: AbilityDef, cost: i32) -> ResponsePacket {
     ResponsePacket::Ability {
         source_id,
         ability_id: ability.id.to_string(),
         cooldown: ability.cooldown,
         stamina_cost: match ability.cost_type {
-            AbilityCostType::Stamina => Some(ability.cost),
+            AbilityCostType::Stamina => Some(cost),
             AbilityCostType::Mana => None,
         },
         mana_cost: match ability.cost_type {
             AbilityCostType::Stamina => None,
-            AbilityCostType::Mana => Some(ability.cost),
+            AbilityCostType::Mana => Some(cost),
         },
     }
 }
@@ -1538,10 +1662,12 @@ fn attack_system(
                     continue;
                 }
 
-                // Is target adjacent
-                if Map::dist(*attacker.pos, *target.pos) > 1 {
+                let attack_profile = basic_attack_profile(&attacker);
+                let target_distance = Map::dist(*attacker.pos, *target.pos);
+
+                if target_distance > attack_profile.range {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Target is not adjacent.".to_string(),
+                        errmsg: "Out of range.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -1562,15 +1688,19 @@ fn attack_system(
                     continue;
                 }
 
-                if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
-                    let packet = ResponsePacket::Error { errmsg };
-                    send_to_client(*player_id, packet, &clients);
-                    continue;
+                if !attack_profile.is_ranged {
+                    if let Some(errmsg) = Combat::fortified_target_melee_error(&target) {
+                        let packet = ResponsePacket::Error { errmsg };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
                 }
 
-                if let Some(errmsg) =
-                    Combat::fortified_outbound_attack_error_from_combat(&attacker, &target, false)
-                {
+                if let Some(errmsg) = Combat::fortified_outbound_attack_error_from_combat(
+                    &attacker,
+                    &target,
+                    attack_profile.is_ranged,
+                ) {
                     let packet = ResponsePacket::Error { errmsg };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -1578,7 +1708,7 @@ fn attack_system(
 
                 // Check if attacker has enough stamina
                 let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
-                if attacker_stamina < 5 {
+                if attacker_stamina < attack_profile.stamina_cost {
                     let packet = ResponsePacket::Error {
                         errmsg: "Not enough stamina to attack.".to_string(),
                     };
@@ -1608,11 +1738,50 @@ fn attack_system(
                             .collect::<Vec<String>>()
                     })
                     .unwrap_or_else(Vec::new);
-                attack_history.push(attack_type.clone());
                 let target_template = target.template.0.clone();
 
+                if attack_profile.is_ranged && !ranged_attack_hits(attack_profile, target_distance)
+                {
+                    attacker.stats.stamina = Some(attacker_stamina - attack_profile.stamina_cost);
+                    attacker.last_combat_tick.0 = game_tick.0;
+                    last_player_attack.insert(*player_id, game_tick.0);
+
+                    Combat::add_damage_event(
+                        game_tick.0,
+                        attack_type.to_string(),
+                        0,
+                        None,
+                        true,
+                        &attacker,
+                        &target,
+                        &mut map_events,
+                    );
+
+                    let packet = ResponsePacket::Attack {
+                        source_id: *source_id,
+                        attack_type: attack_type.clone(),
+                        cooldown: 5,
+                        stamina_cost: attack_profile.stamina_cost,
+                    };
+
+                    send_to_client(*player_id, packet, &clients);
+                    send_combat_state(
+                        *player_id,
+                        *target_id,
+                        target_template,
+                        attack_history,
+                        &attacker,
+                        &target,
+                        &templates,
+                        &clients,
+                    );
+                    continue;
+                }
+
+                attack_history.push(attack_type.clone());
+
                 // Calculate and process damage
-                let (damage, combo, skill_updated) = Combat::process_attack(
+                let (damage, combo, skill_updated) = Combat::process_attack_with_options(
                     Combat::attack_type_to_enum(attack_type.to_string()),
                     &mut attacker,
                     &mut target,
@@ -1622,6 +1791,10 @@ fn attack_system(
                     &mut ids,
                     &game_tick,
                     &mut map_events,
+                    AttackOptions {
+                        stamina_cost: attack_profile.stamina_cost,
+                        damage_bonus: attack_profile.damage_bonus,
+                    },
                 );
 
                 // Add visible damage event to broadcast to everyone nearby
@@ -1630,6 +1803,7 @@ fn attack_system(
                     attack_type.to_string(),
                     damage,
                     combo,
+                    false,
                     &attacker,
                     &target,
                     &mut map_events,
@@ -1644,7 +1818,7 @@ fn attack_system(
                     source_id: *source_id,
                     attack_type: attack_type.clone(),
                     cooldown: 5,
-                    stamina_cost: 5,
+                    stamina_cost: attack_profile.stamina_cost,
                 };
 
                 send_to_client(*player_id, packet, &clients);
@@ -1731,7 +1905,8 @@ fn attack_system(
                         continue;
                     }
 
-                    spend_ability_cost(&mut attacker, ability);
+                    let ability_cost = ability_effective_cost(ability, &attacker);
+                    spend_ability_cost(&mut attacker, ability, ability_cost);
                     match ability.effect {
                         AbilityEffect::Ward => {
                             add_timed_effect(
@@ -1755,7 +1930,7 @@ fn attack_system(
                     last_player_attack.insert(*player_id, game_tick.0);
                     send_to_client(
                         *player_id,
-                        ability_response_packet(*source_id, ability),
+                        ability_response_packet(*source_id, ability, ability_cost),
                         &clients,
                     );
                     continue;
@@ -1839,11 +2014,12 @@ fn attack_system(
                 }
 
                 let target_template = target.template.0.clone();
+                let ability_cost = ability_effective_cost(ability, &attacker);
 
                 match ability.effect {
                     AbilityEffect::ShieldBash => {
                         let damage_amount = 3 + attacker.stats.base_damage.unwrap_or(0);
-                        spend_ability_cost(&mut attacker, ability);
+                        spend_ability_cost(&mut attacker, ability, ability_cost);
                         let damage = apply_ability_damage(
                             &mut commands,
                             &game_tick,
@@ -1874,32 +2050,58 @@ fn attack_system(
                             "Guard Bash".to_string(),
                             damage,
                             None,
+                            false,
                             &attacker,
                             &target,
                             &mut map_events,
                         );
                     }
                     AbilityEffect::AimedShot => {
-                        let damage_amount = 4
-                            + attacker.stats.base_damage.unwrap_or(0)
-                            + equipped_damage(&attacker, Some("Bow"));
-                        spend_ability_cost(&mut attacker, ability);
-                        let damage = apply_ability_damage(
-                            &mut commands,
-                            &game_tick,
-                            &mut attacker,
-                            &mut target,
-                            damage_amount,
-                        );
-                        Combat::add_damage_event(
-                            game_tick.0,
-                            "Aimed Shot".to_string(),
-                            damage,
-                            None,
-                            &attacker,
-                            &target,
-                            &mut map_events,
-                        );
+                        let distance = Map::dist(*attacker.pos, *target.pos);
+                        let Some(profile) = aimed_shot_profile(&attacker) else {
+                            let packet = ResponsePacket::Error {
+                                errmsg: "Equip a Bow".to_string(),
+                            };
+                            send_to_client(*player_id, packet, &clients);
+                            continue;
+                        };
+
+                        spend_ability_cost(&mut attacker, ability, ability_cost);
+                        if ranged_attack_hits(profile, distance) {
+                            let damage_amount = 4
+                                + attacker.stats.base_damage.unwrap_or(0)
+                                + equipped_damage(&attacker, Some("Bow"))
+                                + profile.damage_bonus;
+                            let damage = apply_ability_damage(
+                                &mut commands,
+                                &game_tick,
+                                &mut attacker,
+                                &mut target,
+                                damage_amount,
+                            );
+                            Combat::add_damage_event(
+                                game_tick.0,
+                                "Aimed Shot".to_string(),
+                                damage,
+                                None,
+                                false,
+                                &attacker,
+                                &target,
+                                &mut map_events,
+                            );
+                        } else {
+                            attacker.last_combat_tick.0 = game_tick.0;
+                            Combat::add_damage_event(
+                                game_tick.0,
+                                "Aimed Shot".to_string(),
+                                0,
+                                None,
+                                true,
+                                &attacker,
+                                &target,
+                                &mut map_events,
+                            );
+                        }
                     }
                     AbilityEffect::Disengage => {
                         let Some(dst) = disengage_destination(*attacker.pos, *target.pos) else {
@@ -1920,7 +2122,7 @@ fn attack_system(
                             continue;
                         }
 
-                        spend_ability_cost(&mut attacker, ability);
+                        spend_ability_cost(&mut attacker, ability, ability_cost);
                         commands.trigger(StateChange {
                             entity: attacker.entity,
                             new_state: State::Moving,
@@ -1936,7 +2138,7 @@ fn attack_system(
                         attacker.last_combat_tick.0 = game_tick.0;
                     }
                     AbilityEffect::ArcaneBolt => {
-                        spend_ability_cost(&mut attacker, ability);
+                        spend_ability_cost(&mut attacker, ability, ability_cost);
                         map_events.new(
                             attacker.id.0,
                             game_tick.0,
@@ -1954,7 +2156,7 @@ fn attack_system(
                 last_player_attack.insert(*player_id, game_tick.0);
                 send_to_client(
                     *player_id,
-                    ability_response_packet(*source_id, ability),
+                    ability_response_packet(*source_id, ability, ability_cost),
                     &clients,
                 );
                 send_combat_state(
@@ -2106,6 +2308,7 @@ fn attack_system(
                     "combo".to_string(),
                     damage,
                     combo.clone(),
+                    false,
                     &attacker,
                     &target,
                     &mut map_events,
@@ -2860,6 +3063,15 @@ fn refine_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 };
+
+                if recipe.requires_structure() {
+                    error!("Recipe requires a crafting structure {:?}", *recipe_name);
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Recipe requires a crafting structure".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
 
                 if !hero_inventory.has_reqs(recipe.req.clone()) {
                     error!("Insufficient resources to craft {:?}", *recipe_name);
@@ -3673,7 +3885,6 @@ fn info_monolith_system(
     info_monolith_event: On<InfoMonolithEvent>,
     clients: Res<Clients>,
     mut queries: ParamSet<(Query<CoreQuery>, Query<&mut Inventory, With<SubclassHero>>)>,
-    monolith_query: Query<&Monolith>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     mut monolith_investigation: ResMut<MonolithInvestigation>,
@@ -3694,11 +3905,6 @@ fn info_monolith_system(
             return;
         };
 
-        let Ok(monolith) = monolith_query.get(obj.entity) else {
-            error!("Cannot find monolith component for {:?}", obj.entity);
-            return;
-        };
-
         (
             obj.id.0,
             obj.name.0.to_string(),
@@ -3706,7 +3912,10 @@ fn info_monolith_system(
             obj.subclass.to_string(),
             obj.template.0.to_string(),
             obj.misc.image.clone(),
-            monolith.soulshards,
+            obj.inventory
+                .get_by_class(item::SOULSHARD.to_string())
+                .map(|soulshards| soulshards.quantity)
+                .unwrap_or(0),
         )
     };
 
@@ -10003,6 +10212,36 @@ mod tests {
         }
     }
 
+    fn equipped_test_weapon(name: &str, subclass: &str, range: i32, accuracy: i32) -> Item {
+        Item {
+            id: 1,
+            owner: 1,
+            name: name.to_string(),
+            quantity: 1,
+            durability: None,
+            class: WEAPON.to_string(),
+            subclass: subclass.to_string(),
+            slot: Some(item::Slot::MainHand),
+            image: String::new(),
+            weight: 1.0,
+            equipped: true,
+            experiment: None,
+            start_time: 0,
+            attrs: HashMap::from([
+                (AttrKey::AttackRange, AttrVal::Num(range as f32)),
+                (AttrKey::Accuracy, AttrVal::Num(accuracy as f32)),
+            ]),
+            produces: Vec::new(),
+        }
+    }
+
+    fn inventory_with(item: Item) -> Inventory {
+        Inventory {
+            owner: 1,
+            items: vec![item],
+        }
+    }
+
     #[test]
     fn class_ability_lists_are_distinct() {
         let warrior = ability_defs_for_class(HeroClass::Warrior);
@@ -10238,7 +10477,42 @@ mod tests {
     }
 
     #[test]
-    fn ranged_damage_abilities_require_watchtower_when_attacker_is_fortified() {
+    fn ranged_weapon_profiles_use_item_attrs() {
+        let no_effects = Effects(HashMap::new());
+        let bow_inventory = inventory_with(equipped_test_weapon("Training Bow", "Bow", 3, 85));
+        let sling_inventory =
+            inventory_with(equipped_test_weapon("Improvised Sling", "Sling", 2, 75));
+
+        let bow_profile =
+            equipped_ranged_weapon_profile(&bow_inventory, &no_effects).expect("bow profile");
+        let sling_profile =
+            equipped_ranged_weapon_profile(&sling_inventory, &no_effects).expect("sling profile");
+
+        assert_eq!(bow_profile.range, 3);
+        assert_eq!(bow_profile.accuracy, Some(85));
+        assert_eq!(bow_profile.stamina_cost, BASIC_ATTACK_STAMINA_COST);
+        assert_eq!(sling_profile.range, 2);
+        assert_eq!(sling_profile.accuracy, Some(75));
+    }
+
+    #[test]
+    fn watchtower_stationed_profile_buffs_ranged_weapons() {
+        let effects = Effects(HashMap::from([(Effect::WatchtowerLight, (0, 1.0, 1))]));
+        let bow_inventory = inventory_with(equipped_test_weapon("Training Bow", "Bow", 3, 85));
+
+        let profile =
+            equipped_ranged_weapon_profile(&bow_inventory, &effects).expect("watchtower profile");
+
+        assert_eq!(profile.range, 4);
+        assert_eq!(profile.accuracy, Some(95));
+        assert_eq!(profile.damage_bonus, WATCHTOWER_RANGED_DAMAGE_BONUS);
+        assert_eq!(profile.stamina_cost, WATCHTOWER_RANGED_STAMINA_COST);
+        assert_eq!(ranged_hit_chance(profile, 4), 65);
+    }
+
+    #[test]
+    fn ranged_damage_abilities_are_not_watchtower_gated_when_attacker_is_fortified() {
+        let guard_bash = ability_def("shield_bash").expect("guard bash ability");
         let aimed_shot = ability_def("aimed_shot").expect("aimed shot ability");
         let arcane_bolt = ability_def("arcane_bolt").expect("arcane bolt ability");
         let ward = ability_def("ward").expect("ward ability");
@@ -10256,9 +10530,19 @@ mod tests {
                 Some(&Fortified { id: 9 }),
                 &outside,
                 None,
+                ability_is_ranged_attack(guard_bash),
+            ),
+            Some("Only ranged attacks can be used from behind a wall.".to_string())
+        );
+        assert_eq!(
+            Combat::fortified_outbound_attack_error(
+                &wall_only,
+                Some(&Fortified { id: 9 }),
+                &outside,
+                None,
                 ability_is_ranged_attack(aimed_shot),
             ),
-            Some("A watchtower is required to attack from behind a wall.".to_string())
+            None
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(

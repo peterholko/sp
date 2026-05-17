@@ -1,12 +1,18 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
 import buildbutton from "ui_comp/buildbutton.png";
-import { Network } from "../../core/network";
 import { GameEvent } from "../../core/gameEvent";
-import ResourceItem from "./resourceItem";
+import {
+  MobilePanelActions,
+  MobileRequirementGrid,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface BuildPanelProps {
   structuresData,
@@ -49,116 +55,48 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
 
   render() {
     var imageName = this.state.structure.image + '.png';
-    const reqs = [];
-
-    for(var i = 0; i < this.state.structure.req.length; i++) {
-      var req = this.state.structure.req[i];
-
-      var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
-
-      reqs.push(
-        <ResourceItem key={i}
-                      resourceName={req.type}
-                      resourceImage={resourceImage}
-                      quantity={req.quantity}
-                      index={i}
-                      showQuantity={true}/>
-      )
-    }
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 100px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -230px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      transform: 'translate(-80px, 10px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(-305px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(-65px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-  
-    const buildStyle = {
-      transform: 'translate(-187px, 295px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const reqDivStyle = {
-      transform: 'translate(20px, -120px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const reqs = this.state.structure.req || [];
+    const atFirst = this.state.index == 0;
+    const atLast = this.state.index == (this.props.structuresData.length - 1);
+    const landscape = isLandscapeMobile();
+    const level = this.state.structure.level != null ? `Level ${this.state.structure.level}` : null;
+    const actions = [
+      { key: 'previous', label: 'Previous structure', icon: leftbutton, onClick: this.handleLeftClick, disabled: atFirst },
+      { key: 'build', label: 'Build structure', icon: buildbutton, onClick: this.handleBuildClick },
+      { key: 'next', label: 'Next structure', icon: rightbutton, onClick: this.handleRightClick, disabled: atLast },
+    ];
 
 
     return (
-      <HalfPanel left={true} 
-                 panelType={'build'} 
-                 hideExitButton={false}>
-        <img src={'/static/art/' + imageName} style={imageStyle} />
-        <span style={spanNameStyle}>
-          {this.state.structure.name} Level {this.state.structure.level}
-        </span>
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <td>Class:</td>
-              <td>{this.state.structure.subclass}</td>
-            </tr>
-            <tr>
-              <td>HP:</td>
-              <td>{this.state.structure.base_hp}</td>
-            </tr>
-            <tr>
-              <td>Defense:</td>
-              <td>{this.state.structure.base_def}</td>
-            </tr>
-            <tr>
-              <td>Build Time:</td>
-              <td>{this.state.structure.build_time}</td>
-            </tr>
-            <tr>
-              <td>Materials:</td>
-            </tr>
-          </tbody>
-        </table>
-        <div style={reqDivStyle}>
-          {reqs}
-        </div>
-        <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />
-        <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />
-        <img src={buildbutton} style={buildStyle} onClick={this.handleBuildClick} />
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'build'}
+        title={'Build'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={
+            <>
+              <MobileSummaryCard
+                imageSrc={'/static/art/' + imageName}
+                title={this.state.structure.name}
+                subtitle={level}
+                imageSize={landscape ? 64 : 88} />
+              <MobileStatsList rows={[
+                { label: 'Class', value: this.state.structure.subclass },
+                { label: 'HP', value: this.state.structure.base_hp },
+                { label: 'Defense', value: this.state.structure.base_def },
+                { label: 'Build Time', value: this.state.structure.build_time },
+              ]} />
+            </>
+          }
+          right={
+            <>
+              <MobileRequirementGrid title="Materials" requirements={reqs} />
+              <MobilePanelActions actions={actions} />
+            </>
+          } />
+      </MobilePanelScreen>
     );
   }
 }
-
-
 

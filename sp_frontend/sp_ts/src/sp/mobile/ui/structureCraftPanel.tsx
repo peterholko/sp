@@ -2,7 +2,6 @@ import * as React from "react";
 import 'overlayscrollbars/overlayscrollbars.css';
 import { OverlayScrollbarsComponent } from 'overlayscrollbars-react';
 
-import HalfPanel from "./halfPanel";
 import { Global } from "../../core/global";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
@@ -18,6 +17,16 @@ import wideframe from "ui_comp/wide_frame2.png";
 import ResourceItem from "./resourceItem";
 import BaseInventoryPanel from "./baseInventoryPanel";
 import SmallButton from "./smallButton";
+import MobilePanelScreen from "./mobilePanelScreen";
+import MobileInventoryGrid from "./mobileInventoryGrid";
+import {
+  MobileCard,
+  MobilePanelActions,
+  MobileRequirementGrid,
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+} from "./mobilePanelLayout";
 
 interface StructureCraftPanelProp {
   structureId,
@@ -178,14 +187,6 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
   render() {
     var imageName = this.state.recipe.image + '.png';
 
-    const windowHeight = window.innerHeight;
-    const isLargeWindow = windowHeight > 700;
-
-    const infoSmallY = '0px';
-    const infoLargeY = '260px';
-
-    const zIndex = Global.zIndexManager.getTop() + 1;
-
     var craftingItemName = '';
     var craftingItemImage = '';
 
@@ -199,263 +200,138 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
 
     var showCraftingItemPanel = this.state.progress > -1;
 
-    const reqs = [];
+    const handleMobileSelect = (eventData) => {
+      Global.selectedItemOwnerId = eventData.ownerId;
+      Global.selectedItemId = eventData.itemId;
+      Global.selectedItemName = eventData.itemName;
+      this.handleSelect(eventData);
+    };
 
-    for (var i = 0; i < this.state.recipe.req.length; i++) {
-      var req = this.state.recipe.req[i];
-      var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
+    const headerStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      marginBottom: '10px',
+    };
 
-      var addHeight = i == this.state.recipe.req.length - 1;
+    const imageMobileStyle: React.CSSProperties = {
+      width: '48px',
+      height: '48px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+      flex: '0 0 auto',
+    };
 
-      reqs.push(
-        <ResourceItem key={i}
-          resourceName={req.type}
-          resourceImage={resourceImage}
-          quantity={req.quantity}
-          index={i}
-          showQuantity={true}
-          fixedPos={true}
-          addHeight={addHeight} />
-      );
-    }
+    const headingStyle: React.CSSProperties = {
+      color: '#c9aa71',
+      fontFamily: 'Cinzel, Verdana, serif',
+      fontSize: '15px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
 
+    const recipeStats = [
+      { label: 'Class', value: this.state.recipe.class },
+      { label: 'Subclass', value: this.state.recipe.subclass },
+      { label: 'Slot', value: this.state.recipe.slot, hidden: !this.state.recipe.slot },
+      { label: 'Damage', value: this.state.recipe.damage, hidden: !this.state.recipe.damage },
+      { label: 'Speed', value: this.state.recipe.speed, hidden: !this.state.recipe.speed },
+      { label: 'Skill Req', value: this.state.recipe.skill_req, hidden: !this.state.recipe.skill_req },
+      { label: 'Stamina Req', value: this.state.recipe.stamina_req, hidden: !this.state.recipe.stamina_req },
+      { label: 'Armor', value: this.state.recipe.armor, hidden: !this.state.recipe.armor },
+    ];
 
+    const progressCard = showCraftingItemPanel ? (
+      <MobileCard compact>
+        <div style={headerStyle}>
+          <img src={'/static/art/items/' + craftingItemImage + '.png'} style={imageMobileStyle} />
+          <div style={headingStyle}>{craftingItemName}</div>
+        </div>
+        <progress style={{ width: '100%' }} max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress>
+        <MobilePanelActions
+          compact
+          actions={[{
+            key: 'cancel',
+            label: 'Cancel',
+            icon: cancelbutton,
+            onClick: this.handleCancelClick,
+          }]}
+        />
+      </MobileCard>
+    ) : null;
 
-    const imageStyle = {
-      transform: 'translate(-187px, 35px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const inventoryCard = (
+      <MobileCard compact>
+        <div style={headingStyle}>Structure Inventory</div>
+        <div style={{ color: '#9aa0a6', fontSize: '11px', marginTop: '2px', marginBottom: '8px' }}>
+          {this.props.structureInventory.tw}/{this.props.structureInventory.cap} lbs
+        </div>
+        <MobileInventoryGrid
+          ownerId={this.props.structureId}
+          items={(this.props.structureInventory.items || []).filter((item) => item.equipped == false)}
+          onSelect={handleMobileSelect}
+          compact
+        />
+      </MobileCard>
+    );
 
-    const spanNameStyle = {
-      transform: 'translate(-323px, 100px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
+    const recipeActions = (
+      <MobilePanelActions
+        compact
+        actions={[
+          {
+            key: 'prev',
+            label: 'Previous',
+            icon: leftbutton,
+            onClick: this.handleLeftClick,
+            disabled: this.state.index == 0,
+          },
+          {
+            key: 'craft',
+            label: 'Craft',
+            icon: craftbutton,
+            onClick: this.handleCraftClick,
+          },
+          {
+            key: 'queue',
+            label: 'Queue',
+            icon: addqueuebutton,
+            onClick: this.handleCraftQueueClick,
+          },
+          {
+            key: 'next',
+            label: 'Next',
+            icon: rightbutton,
+            onClick: this.handleRightClick,
+            disabled: this.state.index == this.props.recipesData.length - 1,
+          },
+        ]}
+      />
+    );
 
-    const tableStyle = {
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const tableStyle2 = {
-      transform: 'translate(-80px, 10px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    const leftStyle = {
-      transform: 'translate(15px, -215px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const rightStyle = {
-      transform: 'translate(259px, -215px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const craftStyle = {
-      transform: 'translate(110px, -215px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const craftQueueStyle = {
-      transform: 'translate(160px, -215px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const simpleStyle = {
-      transform: 'translate(20px, -230px)',
-      width: '280px',
-      height: '150px',
-      maxHeight: '150px'
-    } as React.CSSProperties
-
-    const wideFrameStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: isLargeWindow ? infoLargeY : infoSmallY,
-      marginLeft: '-30px',
-      position: 'fixed',
-      transform: 'translate(-223px, -155px)',
-      zIndex: zIndex + 1
-    } as React.CSSProperties
-
-    const craftingItemNameStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: '-25px',
-      marginLeft: '0px',
-      position: 'fixed',
-      transform: 'translate(-150px, -95px)',
-      zIndex: zIndex + 1,
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '300px'
-    } as React.CSSProperties
-
-    const craftingItemStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: '-25px',
-      marginLeft: '0px',
-      position: 'fixed',
-      transform: 'translate(-24px, -60px)',
-      zIndex: zIndex + 1,
-    } as React.CSSProperties
-
-    const craftingItemTableStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: '-25px',
-      marginLeft: '0px',
-      position: 'fixed',
-      textAlign: 'left',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '200px',
-      transform: 'translate(-135px, 0px)',
-      zIndex: zIndex + 1,
-      userSelect: 'none'
-    } as React.CSSProperties
-
-    const cancelButtonStyle = {
-      top: '50%',
-      left: '50%',
-      marginTop: '-25px',
-      marginLeft: '0px',
-      position: 'fixed',
-      transform: 'translate(-24px, 95px)',
-      zIndex: zIndex + 1,
-    } as React.CSSProperties
     return (
-      <div>
-        <BaseInventoryPanel left={true}
-          id={this.props.structureId}
-          items={this.props.structureInventory.items}
-          capacity={this.props.structureInventory.cap}
-          totalWeight={this.props.structureInventory.tw}
-          panelType={'structure_craft'}
-          hideExitButton={true}
-          hideSelect={false}
-          handleSelect={this.handleSelect} />
-
-        <HalfPanel left={false}
-          panelType={'structure_craft'}
-          hideExitButton={false}>
-          <img src={'/static/art/items/' + imageName} style={imageStyle} />
-          <span style={spanNameStyle}>
-            {this.state.recipe.name}
-          </span>
-          <OverlayScrollbarsComponent style={simpleStyle}>
-
-            <table style={tableStyle}>
-              <tbody>
-                <tr>
-                  <td>Class:</td>
-                  <td>{this.state.recipe.class}</td>
-                </tr>
-                <tr>
-                  <td>Subclass:</td>
-                  <td>{this.state.recipe.subclass}</td>
-                </tr>
-
-                {this.state.recipe.slot &&
-                  <tr>
-                    <td>Slot: </td>
-                    <td>{this.state.recipe.slot}</td>
-                  </tr>
-                }
-
-                {this.state.recipe.damage &&
-                  <tr>
-                    <td>Damage:</td>
-                    <td>{this.state.recipe.damage}</td>
-                  </tr>
-                }
-
-                {this.state.recipe.speed &&
-                  <tr>
-                    <td>Speed:</td>
-                    <td>{this.state.recipe.speed}</td>
-                  </tr>
-                }
-
-                {this.state.recipe.skill_req &&
-                  <tr>
-                    <td>Skill Req:</td>
-                    <td>{this.state.recipe.skill_req}</td>
-                  </tr>
-                }
-
-                {this.state.recipe.stamina_req &&
-                  <tr>
-                    <td>Stamina Req:</td>
-                    <td>{this.state.recipe.stamina_req}</td>
-                  </tr>
-                }
-
-                {this.state.recipe.armor &&
-                  <tr>
-                    <td>Armor:</td>
-                    <td>{this.state.recipe.armor}</td>
-                  </tr>
-                }
-
-                <tr>
-                  <td>Requirements:</td>
-                  <td></td>
-                </tr>
-                <tr>
-                  <td colSpan={2}>
-                    {reqs}
-                  </td>
-                </tr>
-
-              </tbody>
-            </table>
-
-          </OverlayScrollbarsComponent>
-          <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />
-          <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />
-          <img src={craftbutton} style={craftStyle} onClick={this.handleCraftClick} />
-          <img src={addqueuebutton} style={craftQueueStyle} onClick={this.handleCraftQueueClick} />
-        </HalfPanel>
-
-        {showCraftingItemPanel &&
-          <div style={wideFrameStyle}>
-            <img src={wideframe} />
-
-            <div>
-
-              <span style={craftingItemNameStyle}>{craftingItemName}</span>
-
-              <img src={'/static/art/items/' + craftingItemImage + '.png'} style={craftingItemStyle} />
-
-              <table style={craftingItemTableStyle}>
-                <tbody>
-                  <tr>
-                    <td>Crafting Progress: </td>
-                    <td><progress max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress></td>
-                  </tr>
-                </tbody>
-              </table>
-              <img src={cancelbutton}
-                style={cancelButtonStyle}
-                onClick={this.handleCancelClick} />
-            </div>
-          </div>
-        }
-      </div>
+      <MobilePanelScreen panelType="structure_craft" title="Structure Craft">
+        <MobileSplitPanelLayout
+          left={
+            <React.Fragment>
+              {progressCard}
+              {inventoryCard}
+            </React.Fragment>
+          }
+          right={
+            <React.Fragment>
+              <MobileSummaryCard
+                imageSrc={'/static/art/items/' + imageName}
+                title={this.state.recipe.name}
+                subtitle={`Recipe ${this.state.index + 1} of ${this.props.recipesData.length}`}
+              />
+              <MobileStatsList rows={recipeStats} compact />
+              <MobileRequirementGrid title="Materials" requirements={this.state.recipe.req || []} />
+              {recipeActions}
+            </React.Fragment>
+          }
+        />
+      </MobilePanelScreen>
     );
   }
 }

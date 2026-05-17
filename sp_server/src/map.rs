@@ -56,6 +56,20 @@ pub enum TileType {
     Unknown,
 }
 
+impl TileType {
+    pub fn is_forest(self) -> bool {
+        matches!(
+            self,
+            TileType::DeciduousForest
+                | TileType::Rainforest
+                | TileType::Jungle
+                | TileType::FrozenForest
+                | TileType::PineForest
+                | TileType::PalmForest
+        )
+    }
+}
+
 impl fmt::Display for TileType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {

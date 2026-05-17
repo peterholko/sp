@@ -137,6 +137,15 @@
   image: bow
   slot: Main Hand
   weight: 10
+  attrs:
+    - name: Damage
+      value: 8
+    - name: Hunting
+      value: 2
+    - name: Attack Range
+      value: 3
+    - name: Accuracy
+      value: 85
   structure_req: 
     - Workshop
   req:
@@ -152,9 +161,7 @@
   subclass: Firewood
   image: firewood
   weight: 1
-  crafting_time: 200
-  structure_req: 
-    - Crafting Tent
+  crafting_time: 60
   amount: 5
   req:
     - type: Log
@@ -204,11 +211,11 @@
 - name: Crude Bandage
   class: Medical
   subclass: Bandage
-  image: bandage
+  image: crudebandage
   weight: 1
   crafting_time: 25
   req:
-    - type: Cloth Scrap
+    - type: Cloth
       quantity: 1
 
 - name: Hand Campfire
@@ -230,8 +237,8 @@
   weight: 1
   crafting_time: 30
   req:
-    - type: Plant Fibers
-      quantity: 3
+    - type: Cloth
+      quantity: 1
 
 - name: Improvised Sling
   class: Weapon
@@ -240,10 +247,87 @@
   slot: Main Hand
   weight: 1
   crafting_time: 60
+  attrs:
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+    - name: Hunting
+      value: 1
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 75
   req:
     - type: Twine
       quantity: 1
-    - type: Cloth Scrap
+    - type: Cloth
+      quantity: 1
+
+- name: Stone Knife
+  class: Weapon
+  subclass: Dagger
+  image: stoneknife
+  slot: Main Hand
+  weight: 2
+  crafting_time: 50
+  req:
+    - type: Flint Shard
+      quantity: 1
+    - type: Stick
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+##################
+### TENT CRAFT ###
+##################
+
+- name: Resin Torch
+  class: Torch
+  subclass: Resin Torch
+  image: torch
+  slot: Off Hand
+  weight: 5
+  crafting_time: 60
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Crude Torch
+      quantity: 1
+    - type: Resin
+      quantity: 1
+
+- name: Herbal Poultice
+  class: Potion
+  subclass: Health
+  image: herbalpoultice
+  weight: 1
+  crafting_time: 50
+  structure_req:
+    - Crafting Tent
+  attrs:
+    - name: Healing
+      value: 5
+  req:
+    - type: Berries
+      quantity: 1
+    - type: Cloth
+      quantity: 1
+
+- name: Hide Wraps
+  class: Armor
+  subclass: Chest
+  image: hidewraps
+  slot: Chest
+  weight: 2
+  crafting_time: 75
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Hide
+      quantity: 2
+    - type: Twine
       quantity: 1
 
 ##################

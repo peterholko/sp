@@ -1,6 +1,12 @@
 import * as React from "react";
-import HalfPanel from "./halfPanel";
+import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
+import {
+  MobileSplitPanelLayout,
+  MobileStatsList,
+  MobileSummaryCard,
+  isLandscapeMobile,
+} from "./mobilePanelLayout";
 
 interface AttrsPanelProps {
   attrsData,
@@ -21,55 +27,23 @@ export default class AttrPanel extends React.Component<AttrsPanelProps, any> {
     imageName = imageName.replace(/ /g, '') + '_single.png';
     var name = Global.objectStates[objId].name;
 
-    const attrs = [];
-
-    const imageStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -240px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px'
-    } as React.CSSProperties
-
-    var key = 0;
+    const rows = [];
+    const landscape = isLandscapeMobile();
 
     for(var attr in this.props.attrsData.attrs) {
-      attrs.push(<tr key={key}>
-                    <td>{attr}</td>
-                    <td>{this.props.attrsData.attrs[attr]}</td>
-                  </tr>);
-
-      key++;
+      rows.push({ label: attr, value: this.props.attrsData.attrs[attr] });
     }
 
     return (
-      <HalfPanel left={false} 
-                 panelType={'attrs'} 
-                 hideExitButton={false}>
-        <img src={'/static/art/' + imageName} style={imageStyle} />
-        <span style={spanNameStyle}>{name}</span>
-        <table style={tableStyle}>
-          <tbody>
-            {attrs}      
-          </tbody>
-        </table>
-      </HalfPanel>
+      <MobilePanelScreen
+        panelType={'attrs'}
+        title={'Attributes'}
+        hideExitButton={false}
+        contentStyle={landscape ? { padding: '8px 0' } : undefined}>
+        <MobileSplitPanelLayout
+          left={<MobileSummaryCard imageSrc={'/static/art/' + imageName} title={name} imageSize={landscape ? 58 : 82} />}
+          right={<MobileStatsList rows={rows} />} />
+      </MobilePanelScreen>
     );
   }
 }
-

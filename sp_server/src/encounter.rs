@@ -21,11 +21,11 @@ use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, Inventory};
 use crate::map::{Map, TileType};
 use crate::npc::{
-    CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, NpcMoveNearTarget,
-    NpcMoveTo, NpcMoveToTarget, RaiseDead, SetCorpseTarget, SetHome, SetSpoilTarget,
-    SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer,
-    TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget,
-    VisibleTargetScorer,
+    CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, MoveToForest,
+    NpcMoveNearTarget, NpcMoveTo, NpcMoveToTarget, RaiseDead, RandomWander, RatBlockedWanderScorer,
+    SetCorpseTarget, SetHome, SetSpoilTarget, SetStealTarget, SetTorchTarget, SpoilTarget,
+    SpoilTargetScorer, StealTarget, StealTargetScorer, TorchTarget, TorchTargetScorer,
+    VisibleCorpse, VisibleCorpseScorer, VisibleTarget, VisibleTargetScorer, WolfBlockedHideScorer,
 };
 use crate::obj::{
     ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager,
@@ -204,6 +204,13 @@ impl Encounter {
             .step(SetAttackTarget)
             .step(NpcMoveToTarget)
             .step(AttackTarget);
+        let rat_blocked_wander = Steps::build()
+            .label("Rat Blocked Wander")
+            .step(RandomWander);
+        let wolf_forest_hide = Steps::build()
+            .label("Wolf Forest Hide")
+            .step(MoveToForest)
+            .step(Hide);
 
         let entity = commands
             .spawn((
@@ -219,7 +226,9 @@ impl Encounter {
                 Thinker::build()
                     .label("NPC Chase")
                     .picker(Highest)
-                    .when(VisibleTargetScorer, chase_and_attack),
+                    .when(VisibleTargetScorer, chase_and_attack)
+                    .when(WolfBlockedHideScorer, wolf_forest_hide)
+                    .when(RatBlockedWanderScorer, rat_blocked_wander),
             ))
             .id();
 
@@ -740,6 +749,13 @@ impl Encounter {
             .step(SetAttackTarget)
             .step(NpcMoveToTarget)
             .step(AttackTarget);
+        let rat_blocked_wander = Steps::build()
+            .label("Rat Blocked Wander")
+            .step(RandomWander);
+        let wolf_forest_hide = Steps::build()
+            .label("Wolf Forest Hide")
+            .step(MoveToForest)
+            .step(Hide);
 
         let entity = commands
             .spawn((
@@ -756,7 +772,9 @@ impl Encounter {
                     .label("Spoil Settlement Crisis")
                     .picker(Highest)
                     .when(SpoilTargetScorer, spoil_target)
-                    .when(VisibleTargetScorer, chase_and_attack), //.when(NoTargetScorer, Wander)
+                    .when(VisibleTargetScorer, chase_and_attack)
+                    .when(WolfBlockedHideScorer, wolf_forest_hide)
+                    .when(RatBlockedWanderScorer, rat_blocked_wander), //.when(NoTargetScorer, Wander)
             ))
             .id();
 

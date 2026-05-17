@@ -69,7 +69,7 @@ export default class GatherButton extends React.Component<GatherButtonProps, any
   render() {
     const spanStyle = {
       transform: 'translate(0px, 13px)',
-      position: 'fixed',
+      position: 'absolute',
       fontFamily: 'Verdana',
       fontSize: '30px',
       width: '50px',
@@ -80,7 +80,7 @@ export default class GatherButton extends React.Component<GatherButtonProps, any
     } as React.CSSProperties
 
     const cooldownBgStyle = {
-      position: 'fixed',
+      position: 'absolute',
       opacity: 0.5,
     } as React.CSSProperties
 
