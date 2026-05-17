@@ -77,11 +77,11 @@ impl Crops {
                 structure,
                 Crop {
                     structure,
-                    crop_type: "Wheat".to_string(),
+                    crop_type: seed,
                     quantity,
                     stage: CropStages::Seed,
                     stage_start: game_tick,
-                    stage_end: game_tick + 120, // TODO Determine this based on crop type / player skill
+                    stage_end: game_tick + 120,
                 },
             );
             info!("New Crop: {:?}", self);

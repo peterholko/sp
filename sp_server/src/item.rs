@@ -1274,6 +1274,24 @@ impl Inventory {
         self.items.iter().find(|item| item.class == class).cloned()
     }
 
+    /// Pick the food item with the lowest Feed value — villagers should eat
+    /// cheap, plentiful food (berries, mushrooms) before consuming high-value
+    /// prepared meals (bread, stew) intended for the hero or emergencies.
+    pub fn get_food_to_eat(&self) -> Option<Item> {
+        self.items
+            .iter()
+            .filter(|item| item.class == "Food")
+            .filter_map(|item| {
+                let feed = match item.attrs.get(&AttrKey::Feed)? {
+                    AttrVal::Num(v) => *v,
+                    _ => return None,
+                };
+                Some((feed, item))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, item)| item.clone())
+    }
+
     pub fn get_by_name(&self, name: String) -> Option<Item> {
         self.items.iter().find(|item| item.name == name).cloned()
     }

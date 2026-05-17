@@ -341,10 +341,102 @@
   weight: 1
   item_name_from_req: true
   crafting_time: 50
-  structure_req: 
+  structure_req:
+    - Campfire
     - Crafting Tent
   req:
     - type: Raw Meat
+      quantity: 1
+
+- name: Cooked Fish
+  class: Food
+  subclass: Cooked Fish
+  image: cookedfish
+  weight: 1
+  crafting_time: 50
+  structure_req:
+    - Campfire
+    - Crafting Tent
+  req:
+    - type: Fish
+      quantity: 1
+
+- name: Flour
+  class: Material
+  subclass: Flour
+  image: flour
+  weight: 1
+  crafting_time: 80
+  structure_req:
+    - Millhouse
+  req:
+    - type: Grain
+      quantity: 3
+
+- name: Bread
+  class: Food
+  subclass: Bread
+  image: bread
+  weight: 1
+  crafting_time: 100
+  structure_req:
+    - Bakery
+  req:
+    - type: Flour
+      quantity: 1
+
+- name: Smoked Meat
+  class: Food
+  subclass: Smoked Meat
+  image: smokedmeat
+  weight: 1
+  crafting_time: 200
+  structure_req:
+    - Smoker
+  req:
+    - type: Raw Meat
+      quantity: 1
+    - type: Firewood
+      quantity: 1
+
+- name: Salted Meat Strip
+  class: Food
+  subclass: Meat Strip
+  image: saltedmeatstrip
+  weight: 1
+  crafting_time: 250
+  structure_req:
+    - Smoker
+  req:
+    - type: Raw Meat
+      quantity: 1
+
+- name: Stew
+  class: Food
+  subclass: Stew
+  image: stew
+  weight: 1
+  crafting_time: 120
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Cooked Meat
+      quantity: 1
+    - type: Mushroom
+      quantity: 1
+
+- name: Jam
+  class: Food
+  subclass: Jam
+  image: jam
+  weight: 1
+  crafting_time: 80
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Berries
+      quantity: 3
+    - type: Honey
       quantity: 1
 
 # Monolith Investigation

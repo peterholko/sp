@@ -318,7 +318,7 @@ pub fn new(
     inventory.new(
         ids.new_item_id(),
         "Salted Meat Strip".to_string(),
-        5,
+        2,
         &templates.item_templates,
     );
     let sharpened_stick = inventory.new(

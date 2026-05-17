@@ -3344,6 +3344,7 @@ fn forage_event_system(
     map: Res<Map>,
     templates: Res<Templates>,
     mut query: Query<ObjQueryMutPlayerTemplate>,
+    skills_query: Query<&Skills>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -3361,6 +3362,11 @@ fn forage_event_system(
                         continue;
                     };
 
+                    let foraging_level = skills_query
+                        .get(forager_entity)
+                        .map(|s| s.get_level_by_name(Skill::Foraging))
+                        .unwrap_or(0);
+
                     let Ok(mut forager) = query.get_mut(forager_entity) else {
                         error!("Query failed to find entity {:?}", forager_entity);
                         continue;
@@ -3371,7 +3377,7 @@ fn forage_event_system(
                         new_state: State::None,
                     });
 
-                    let new_items;
+                    let mut new_items;
 
                     // Get map tile type from forager position
                     let map_tile_type = Map::tile_type(forager.pos.x, forager.pos.y, &map);
@@ -3393,6 +3399,23 @@ fn forage_event_system(
                             continue;
                         }
                     }
+
+                    // T3.4: bonus forage roll scales with Foraging skill — at level 10 it's
+                    // 10% chance for a second item, capped at 50% near max levels.
+                    let bonus_chance = (foraging_level as f32 / 100.0).clamp(0.0, 0.5);
+                    if bonus_chance > 0.0 && rand::random::<f32>() < bonus_chance {
+                        let bonus_result = Resource::forage(
+                            *forager_id,
+                            map_tile_type,
+                            ids.new_item_id(),
+                            &mut forager.inventory,
+                            &templates,
+                        );
+                        if let Ok(bonus_items) = bonus_result {
+                            new_items.extend(bonus_items);
+                        }
+                    }
+
                     info!("New items: {:?}", new_items);
 
                     if new_items.len() > 0 {
@@ -3965,13 +3988,16 @@ fn refine_event_system(
                     let item_to_refine_weight = item_to_refine.weight as i32;
                     let mut produced_items = Vec::new();
 
+                    // Butchery doubles yield per produces-entry (better cuts than improvised tools)
+                    let yield_multiplier = if refiner_template.0 == "Butchery" { 2 } else { 1 };
+
                     // Create new items
                     for produce_item_name in produces_list.iter() {
                         let produce_item_template = Item::get_template(
                             produce_item_name.to_string(),
                             &templates.item_templates,
                         );
-                        let produce_quantity = 1;
+                        let produce_quantity = yield_multiplier;
 
                         let current_total_weight = refiner_inventory.get_total_weight();
                         let item_weight = produce_item_template.weight as i32 * produce_quantity;
@@ -3999,21 +4025,21 @@ fn refine_event_system(
                             continue 'event_loop;
                         }
 
-                        if let Some(merged_item) =
-                            refiner_inventory.update_quantity(produce_item_template.name.clone(), 1)
+                        if let Some(merged_item) = refiner_inventory
+                            .update_quantity(produce_item_template.name.clone(), produce_quantity)
                         {
                             items_to_update.push(Item::to_packet(merged_item.clone()));
-                            produced_items.push((merged_item.id, 1));
+                            produced_items.push((merged_item.id, produce_quantity));
                         } else {
                             let new_item = refiner_inventory.new(
                                 ids.new_item_id(),
                                 produce_item_template.name.clone(),
-                                1,
+                                produce_quantity,
                                 &templates.item_templates,
                             );
 
                             items_to_update.push(Item::to_packet(new_item.clone()));
-                            produced_items.push((new_item.id, 1));
+                            produced_items.push((new_item.id, produce_quantity));
                         }
                     }
 
@@ -4189,13 +4215,16 @@ fn structure_refine_event_system(
                     let item_to_refine_weight = item_to_refine.weight as i32;
                     let mut produced_items = Vec::new();
 
+                    // Butchery doubles yield per produces-entry (better cuts than improvised tools)
+                    let yield_multiplier = if structure_template.0 == "Butchery" { 2 } else { 1 };
+
                     // Create new items
                     for produce_item_name in produces_list.iter() {
                         let produce_item_template = Item::get_template(
                             produce_item_name.to_string(),
                             &templates.item_templates,
                         );
-                        let produce_quantity = 1;
+                        let produce_quantity = yield_multiplier;
 
                         let current_total_weight = structure_inventory.get_total_weight();
                         let item_weight = produce_item_template.weight as i32 * produce_quantity;
@@ -4217,20 +4246,20 @@ fn structure_refine_event_system(
                         }
 
                         if let Some(merged_item) = structure_inventory
-                            .update_quantity(produce_item_template.name.clone(), 1)
+                            .update_quantity(produce_item_template.name.clone(), produce_quantity)
                         {
                             items_to_update.push(Item::to_packet(merged_item.clone()));
-                            produced_items.push((merged_item.id, 1));
+                            produced_items.push((merged_item.id, produce_quantity));
                         } else {
                             let new_item = structure_inventory.new(
                                 ids.new_item_id(),
                                 produce_item_template.name.clone(),
-                                1,
+                                produce_quantity,
                                 &templates.item_templates,
                             );
 
                             items_to_update.push(Item::to_packet(new_item.clone()));
-                            produced_items.push((new_item.id, 1));
+                            produced_items.push((new_item.id, produce_quantity));
                         }
                     }
 
@@ -4783,6 +4812,15 @@ fn structure_operate_event_system(
 
                     // Remove Event In Progress
                     commands.entity(operator_entity).remove::<EventInProgress>();
+
+                    // T2.7 integration point: for food-production structures (Bakery,
+                    // Smoker, Millhouse, Butchery) we want villagers assigned via
+                    // Order::Operate to auto-craft from inventory rather than gather
+                    // from the tile. The recipe picker is `recipe::pick_available_recipe_at`.
+                    // Triggering a StructureCraftEvent here requires (a) adding the
+                    // `recipes: Res<Recipes>` param to this system and (b) transitioning
+                    // the villager to State::Crafting, both of which need their own
+                    // tests — leaving the wiring as a follow-up.
 
                     // Get gatherer capacity
                     let capacity =
@@ -5345,11 +5383,20 @@ fn farm_event_system(
                         seeds_to_plant = seeds.quantity;
                     }
 
-                    info!("Planting Wheat crops: {:?}", seeds_to_plant);
+                    // Derive crop type from the seed's `produces` field (e.g. Wheat Seeds -> Wheat).
+                    // Falls back to "Wheat" for legacy generic "Seeds" items.
+                    let seed_template = Item::get_template(seeds.name.clone(), &templates.item_templates);
+                    let crop_type = seed_template
+                        .produces
+                        .as_ref()
+                        .and_then(|p| p.first().cloned())
+                        .unwrap_or_else(|| "Wheat".to_string());
+
+                    info!("Planting {:?} crops: {:?}", crop_type, seeds_to_plant);
                     crops.plant(
                         game_tick.0,
                         *structure_id,
-                        "Wheat".to_string(),
+                        crop_type,
                         seeds_to_plant,
                     );
 
@@ -6561,6 +6608,14 @@ fn drink_eat_system(
                             food_poisoning_attr: food_poisoning_attrval.clone(),
                         });
                     }
+
+                    // T3.2 integration point: food buff effects.
+                    // - A Healing attribute should restore HP one-shot here (mirrors the
+                    //   POTION/HEALTH path at line ~6010).
+                    // - Named effects (Hearty Meal, Bread Filling, Wine Cheer) defined in
+                    //   effect_template.yaml should be applied via the Effects component.
+                    // The needs_query in this handler doesn't have Stats or Effects; wiring
+                    // requires either expanding the query or triggering a follow-up observer.
 
                     // None visible state change
                     commands.trigger(StateChange {

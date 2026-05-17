@@ -200,6 +200,11 @@ pub const STICK: &str = "Stick";
 pub const PLANT_FIBERS: &str = "Plant Fibers";
 pub const PEBBLE: &str = "Pebble";
 pub const BERRIES: &str = "Berries";
+pub const MUSHROOM: &str = "Mushroom";
+pub const PINE_NUTS: &str = "Pine Nuts";
+pub const EDIBLE_BARK: &str = "Edible Bark";
+pub const RESIN: &str = "Resin";
+pub const HONEY: &str = "Honey";
 
 pub const CONTAINER: &str = "Container";
 pub const WATERSKIN_SUBCLASS: &str = "Waterskin";
