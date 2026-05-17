@@ -3645,12 +3645,22 @@ fn gather_event_system(
                         }
                     }
 
-                    if items_to_update.is_empty() && gatherer.subclass.is_hero() {
-                        let packet = ResponsePacket::Notice {
-                            noticemsg: "You gathered nothing.".to_string(),
-                            expiry: Some(2000),
-                        };
-                        send_to_client(gatherer.player_id.0, packet, &clients);
+                    if gatherer.subclass.is_hero() {
+                        if let Some(first) = items_to_update.first() {
+                            let packet = ResponsePacket::NewItems {
+                                action: STATE_GATHERING.to_string(),
+                                source_id: *gatherer_id,
+                                item_name: first.name.clone(),
+                                amount: 1,
+                            };
+                            send_to_client(gatherer.player_id.0, packet, &clients);
+                        } else {
+                            let packet = ResponsePacket::Notice {
+                                noticemsg: "You gathered nothing.".to_string(),
+                                expiry: Some(2000),
+                            };
+                            send_to_client(gatherer.player_id.0, packet, &clients);
+                        }
                     }
 
                     commands.entity(gatherer_entity).insert(EventCompleted {

@@ -872,6 +872,13 @@ impl Inventory {
             item_attrs.extend(consumed_item.attrs.clone());
         }
 
+        // Preparing food (cooking, smoking, salting, stewing) neutralizes raw-meat
+        // food poisoning. Without this, the FoodPoisoning attr on Raw Meat carries
+        // through into Cooked Meat / Smoked Meat / Salted Meat Strip / Stew.
+        if recipe.class == "Food" {
+            item_attrs.remove(&AttrKey::FoodPoisoning);
+        }
+
         // Check if recipe has attrs and merge into item attrs
         if let Some(recipe_attrs) = &recipe.attrs {
             for attr in recipe_attrs.iter() {
