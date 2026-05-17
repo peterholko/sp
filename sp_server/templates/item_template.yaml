@@ -1203,6 +1203,18 @@
   image: firewood
   weight: 1
 
+- name: Charcoal
+  class: Fuel
+  subclass: Charcoal
+  image: charcoal
+  weight: 1
+
+- name: Arrows
+  class: Ammo
+  subclass: Arrow
+  image: arrows
+  weight: 1
+
 ##################
 ###### MISC  #####
 ##################

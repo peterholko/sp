@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::constants::*;
-use crate::item::{Inventory, Item};
+use crate::item::{req_matches_build, Inventory, Item};
 use crate::obj::{Class, State};
 use crate::templates::{ObjTemplate, ObjTemplates, ResReq, Templates};
 use crate::{network, obj};
@@ -111,15 +111,18 @@ impl Structure {
         structure_items: Vec<Item>,
         mut req_items: Vec<ResReq>,
     ) -> Vec<ResReq> {
-        // Check current required quantity from structure items
+        // Check current required quantity from structure items.
+        // Build context: refined materials (Timber) may substitute for raw (Log).
         for req_item in req_items.iter_mut() {
             let mut req_quantity = req_item.quantity;
 
             for structure_item in structure_items.iter() {
-                if req_item.req_type == structure_item.name
-                    || req_item.req_type == structure_item.class
-                    || req_item.req_type == structure_item.subclass
-                {
+                if req_matches_build(
+                    &req_item.req_type,
+                    &structure_item.name,
+                    &structure_item.class,
+                    &structure_item.subclass,
+                ) {
                     if req_quantity - structure_item.quantity > 0 {
                         req_quantity -= structure_item.quantity;
                     } else {
@@ -152,15 +155,18 @@ impl Structure {
                     .req
                     .expect("Template should have req field.");
 
-                // Check current required quantity from structure items
+                // Check current required quantity from structure items.
+                // Build context allows Timber to substitute for Log.
                 for req_item in req_items.iter_mut() {
                     let mut req_quantity = req_item.quantity;
 
                     for target_item in target_items.iter() {
-                        if req_item.req_type == target_item.name
-                            || req_item.req_type == target_item.class
-                            || req_item.req_type == target_item.subclass
-                        {
+                        if req_matches_build(
+                            &req_item.req_type,
+                            &target_item.name,
+                            &target_item.class,
+                            &target_item.subclass,
+                        ) {
                             if req_quantity - target_item.quantity > 0 {
                                 req_quantity -= target_item.quantity;
                             } else {
@@ -183,15 +189,16 @@ impl Structure {
                     .upgrade_req
                     .expect("Template should have upgrade_req field.");
 
-                // Check current required quantity from structure items
                 for req_item in req_items.iter_mut() {
                     let mut req_quantity = req_item.quantity;
 
                     for target_item in target_items.iter() {
-                        if req_item.req_type == target_item.name
-                            || req_item.req_type == target_item.class
-                            || req_item.req_type == target_item.subclass
-                        {
+                        if req_matches_build(
+                            &req_item.req_type,
+                            &target_item.name,
+                            &target_item.class,
+                            &target_item.subclass,
+                        ) {
                             if req_quantity - target_item.quantity > 0 {
                                 req_quantity -= target_item.quantity;
                             } else {
