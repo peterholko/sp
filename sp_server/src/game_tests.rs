@@ -569,6 +569,7 @@ fn gather_event_system_marks_gatherer_event_completed() {
             Position { x: 0, y: 0 },
             Name("Test Miner".to_string()),
             Template("Human Villager".to_string()),
+            Subclass::Villager,
             State::Gathering,
             Effects(HashMap::new()),
             Inventory {
@@ -592,6 +593,86 @@ fn gather_event_system_marks_gatherer_event_completed() {
 
     let game_events = app.world().resource::<GameEvents>();
     assert!(game_events.is_empty());
+}
+
+#[test]
+fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
+    let mut app = App::new();
+    app.add_systems(Update, gather_event_system);
+    app.add_plugins(ResourcePlugin);
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(4);
+    let client_id = Uuid::new_v4();
+    let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
+        client_id,
+        Client {
+            id: client_id,
+            player_id: 1,
+            sender,
+        },
+    )]))));
+    app.insert_resource(clients);
+    app.insert_resource(GameTick(10));
+
+    let mut ids = Ids::default();
+    ids.new_hero(1, 1);
+    app.insert_resource(ids);
+
+    app.insert_resource(Map::default());
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(Recipes::from_recipes(vec![]));
+    app.insert_resource(Templates::from_obj_templates(vec![]));
+    app.insert_resource(ActiveInfos(HashMap::new()));
+
+    let mut game_events = HashMap::new();
+    game_events.insert(
+        7,
+        GameEvent {
+            event_id: 7,
+            start_tick: 0,
+            run_tick: 0,
+            event_type: GameEventType::GatherEvent {
+                gatherer_id: 1,
+                res_type: ORE.to_string(),
+            },
+        },
+    );
+    app.insert_resource(GameEvents(game_events));
+
+    let hero_entity = app
+        .world_mut()
+        .spawn((
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            Name("Test Hero".to_string()),
+            Template("Novice Warrior".to_string()),
+            Subclass::Hero,
+            State::Gathering,
+            Effects(HashMap::new()),
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
+            },
+            Skills::new(),
+        ))
+        .id();
+
+    app.insert_resource(EntityObjMap(HashMap::from([(1, hero_entity)])));
+
+    app.update();
+
+    let message = receiver
+        .try_recv()
+        .expect("expected gather failure notice for hero");
+    let packet: ResponsePacket = serde_json::from_str(&message).unwrap();
+
+    assert_eq!(
+        packet,
+        ResponsePacket::Notice {
+            noticemsg: "You gathered nothing.".to_string(),
+            expiry: Some(2000),
+        }
+    );
 }
 
 #[test]
