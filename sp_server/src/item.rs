@@ -190,10 +190,28 @@ pub const HIDE: &str = "Hide";
 
 pub const FUEL: &str = "Fuel";
 pub const FIREWOOD: &str = "Firewood";
+pub const CHARCOAL: &str = "Charcoal";
 
 pub const INGOT: &str = "Ingot";
 pub const DUST: &str = "Dust";
 pub const TIMBER: &str = "Timber";
+
+/// Returns true if an item (described by name/class/subclass) satisfies a
+/// structure requirement of the given type. Matches by name, class, or
+/// subclass, and additionally allows substitution of refined materials for
+/// raw materials at 1:1 — currently Timber may satisfy a Log requirement.
+///
+/// Used only for structure build/upgrade/upkeep checks. Recipe ingredient
+/// matching uses strict equality (no substitution) to preserve recipe intent.
+pub fn req_matches_build(req_type: &str, item_name: &str, item_class: &str, item_subclass: &str) -> bool {
+    if req_type == item_name || req_type == item_class || req_type == item_subclass {
+        return true;
+    }
+    if req_type == LOG && item_class == TIMBER {
+        return true;
+    }
+    false
+}
 
 pub const WEAPON: &str = "Weapon";
 pub const ARMOR: &str = "Armor";
@@ -1372,6 +1390,39 @@ impl Inventory {
         return consumed_items;
     }
 
+    /// Like `consume_reqs`, but accepts refined materials as substitutes for raw
+    /// materials (Timber for Log). Use only for structure build/upgrade.
+    pub fn consume_reqs_for_build(&mut self, req_items: Vec<ResReq>) -> Vec<Item> {
+        let mut consumed_items = Vec::new();
+        let mut items_to_remove = Vec::new();
+
+        for req_item in req_items.iter() {
+            let mut remaining = req_item.quantity;
+            for structure_item in self.items.iter() {
+                if remaining == 0 {
+                    break;
+                }
+                if req_matches_build(
+                    &req_item.req_type,
+                    &structure_item.name,
+                    &structure_item.class,
+                    &structure_item.subclass,
+                ) {
+                    let take = remaining.min(structure_item.quantity);
+                    consumed_items.push(structure_item.clone());
+                    items_to_remove.push((structure_item.id, take));
+                    remaining -= take;
+                }
+            }
+        }
+
+        for (item_id, quantity) in items_to_remove {
+            self.remove_quantity(item_id, quantity);
+        }
+
+        return consumed_items;
+    }
+
     pub fn process_req_items(&self, mut req_items: Vec<ResReq>) -> Vec<ResReq> {
         // Check current required quantity from structure items
         for req_item in req_items.iter_mut() {
@@ -1382,6 +1433,28 @@ impl Inventory {
                     || req_item.req_type == item.class
                     || req_item.req_type == item.subclass
                 {
+                    if req_quantity - item.quantity > 0 {
+                        req_quantity -= item.quantity;
+                    } else {
+                        req_quantity = 0;
+                    }
+                }
+            }
+
+            req_item.cquantity = Some(req_quantity);
+        }
+
+        return req_items;
+    }
+
+    /// Like `process_req_items`, but allows refined materials to substitute for
+    /// raw materials (Timber for Log). Use only for structure build/upgrade.
+    pub fn process_req_items_for_build(&self, mut req_items: Vec<ResReq>) -> Vec<ResReq> {
+        for req_item in req_items.iter_mut() {
+            let mut req_quantity = req_item.quantity;
+
+            for item in self.items.iter() {
+                if req_matches_build(&req_item.req_type, &item.name, &item.class, &item.subclass) {
                     if req_quantity - item.quantity > 0 {
                         req_quantity -= item.quantity;
                     } else {
@@ -1600,6 +1673,39 @@ impl Inventory {
                 }
             } else {
                 // If cquantity is None
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// Like `has_reqs`, but accepts refined materials as substitutes for raw
+    /// materials (Timber for Log). Use only for structure build/upgrade.
+    pub fn has_reqs_for_build(&self, source_req_items: Vec<ResReq>) -> bool {
+        let mut req_items = source_req_items.clone();
+
+        for req_item in req_items.iter_mut() {
+            let mut req_quantity = req_item.quantity;
+
+            for item in self.items.iter() {
+                if req_matches_build(&req_item.req_type, &item.name, &item.class, &item.subclass) {
+                    if req_quantity - item.quantity > 0 {
+                        req_quantity -= item.quantity;
+                    } else {
+                        req_quantity = 0;
+                    }
+                }
+            }
+            req_item.cquantity = Some(req_quantity);
+        }
+
+        for req_item in req_items.iter() {
+            if let Some(current_req_quantity) = req_item.cquantity {
+                if current_req_quantity != 0 {
+                    return false;
+                }
+            } else {
                 return false;
             }
         }
@@ -2435,6 +2541,18 @@ impl Item {
                 || req.req_type == item.class
                 || req.req_type == item.subclass
             {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// Like `is_req`, but accepts refined materials as substitutes for raw
+    /// materials (Timber for Log). Use only for structure build/upgrade.
+    pub fn is_req_for_build(item: Item, reqs: Vec<ResReq>) -> bool {
+        for req in reqs.iter() {
+            if req_matches_build(&req.req_type, &item.name, &item.class, &item.subclass) {
                 return true;
             }
         }

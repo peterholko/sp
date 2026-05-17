@@ -11606,7 +11606,7 @@ fn start_build_observer(
             info!("Structure is already completed, skipping build observer");
         }
         State::Founded => {
-            let has_reqs = structure_inventory.has_reqs(structure_req.clone());
+            let has_reqs = structure_inventory.has_reqs_for_build(structure_req.clone());
 
             if !has_reqs {
                 info!("Not enough items to build structure, skipping build observer");
@@ -11614,7 +11614,7 @@ fn start_build_observer(
             }
 
             info!("Consuming required items for structure...");
-            structure_inventory.consume_reqs(structure_req.clone());
+            structure_inventory.consume_reqs_for_build(structure_req.clone());
 
             // Add StateBuilding component
             commands.entity(start_build.entity).insert(StateBuilding);
@@ -11865,7 +11865,7 @@ fn start_upgrade_observer(
             info!("Structure is already upgraded, skipping upgrade observer");
         }
         State::PlanningUpgrade => {
-            let has_reqs = structure_inventory.has_reqs(structure_upgrade_req.clone());
+            let has_reqs = structure_inventory.has_reqs_for_build(structure_upgrade_req.clone());
 
             if !has_reqs {
                 info!("Not enough items to upgrade structure, skipping upgrade observer");
@@ -11873,7 +11873,7 @@ fn start_upgrade_observer(
             }
 
             info!("Consuming required items for structure...");
-            structure_inventory.consume_reqs(structure_upgrade_req.clone());
+            structure_inventory.consume_reqs_for_build(structure_upgrade_req.clone());
 
             // Add StateUpgrading component
             commands.entity(start_upgrade.entity).insert(StateUpgrading);
@@ -13535,8 +13535,20 @@ pub fn fuel_system(
                 continue;
             };
 
-            info!("Removing 1 fuel from tent");
-            let updated_item = inventory.remove_quantity(fuel_item.id, 1);
+            // Charcoal burns 5x longer than Firewood: only consume one Charcoal
+            // unit every 50s (5 fuel-system cycles) instead of every 10s.
+            let consume_this_tick = if fuel_item.subclass == item::CHARCOAL {
+                game_tick.0 % (TICKS_PER_SEC * 50) == 0
+            } else {
+                true
+            };
+
+            let updated_item = if consume_this_tick {
+                info!("Removing 1 fuel from tent");
+                inventory.remove_quantity(fuel_item.id, 1)
+            } else {
+                Some(fuel_item.clone())
+            };
 
             /*let active_info_key = (player_id.0, id.0, "inventory".to_string());
 

@@ -146,11 +146,26 @@
       value: 3
     - name: Accuracy
       value: 85
-  structure_req: 
+  structure_req:
     - Workshop
   req:
     - type: Timber
       quantity: 5
+
+- name: Arrows
+  class: Ammo
+  subclass: Arrow
+  image: arrows
+  weight: 1
+  crafting_time: 60
+  amount: 5
+  structure_req:
+    - Workshop
+  req:
+    - type: Stick
+      quantity: 1
+    - type: Resin
+      quantity: 1
 
 ##################
 ##### FUEL #####
@@ -169,13 +184,15 @@
 
 - name: Charcoal
   class: Fuel
-  subclass: Fuel
+  subclass: Charcoal
   image: charcoal
-  weight: 10
-  structure_req: 
+  weight: 1
+  crafting_time: 90
+  amount: 3
+  structure_req:
     - Workshop
   req:
-    - type: Wood
+    - type: Log
       quantity: 1
 
 ##################
@@ -347,6 +364,8 @@
   req:
     - type: Raw Meat
       quantity: 1
+    - type: Firewood
+      quantity: 1
 
 - name: Cooked Fish
   class: Food
@@ -359,6 +378,8 @@
     - Crafting Tent
   req:
     - type: Fish
+      quantity: 1
+    - type: Firewood
       quantity: 1
 
 - name: Flour
@@ -383,6 +404,8 @@
     - Bakery
   req:
     - type: Flour
+      quantity: 1
+    - type: Firewood
       quantity: 1
 
 - name: Smoked Meat

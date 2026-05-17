@@ -5164,7 +5164,7 @@ fn item_transfer_system(
                     }
 
                     // Check if item is required for structure construction
-                    if !Item::is_req(item.clone(), req.clone()) {
+                    if !Item::is_req_for_build(item.clone(), req.clone()) {
                         info!("Item not required for construction: {:?}", item);
                         let packet = ResponsePacket::Error {
                             errmsg: "Item not required for construction.".to_string(),
@@ -5173,13 +5173,11 @@ fn item_transfer_system(
                         continue;
                     }
 
-                    let mut req_items = target.inventory.process_req_items(req);
+                    let mut req_items = target.inventory.process_req_items_for_build(req);
 
-                    // Find first matching req item
+                    // Find first matching req item (substitution-aware)
                     let matching_req_item = req_items.iter_mut().find(|r| {
-                        r.req_type == item.name
-                            || r.req_type == item.class
-                            || r.req_type == item.subclass
+                        crate::item::req_matches_build(&r.req_type, &item.name, &item.class, &item.subclass)
                     });
 
                     if let Some(matching_req_item) = matching_req_item {
@@ -5301,7 +5299,7 @@ fn item_transfer_system(
 
                     Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
 
-                    let req_items = owner.inventory.process_req_items(req);
+                    let req_items = owner.inventory.process_req_items_for_build(req);
 
                     let source_capacity =
                         Obj::get_capacity(&owner.template.0, &templates.obj_templates);
@@ -5422,7 +5420,7 @@ fn item_transfer_system(
                         .get_by_name_template(owner.name.0.clone(), owner.template.0.clone());
 
                     let req_items = if let Some(req) = structure_template.req {
-                        owner.inventory.process_req_items(req)
+                        owner.inventory.process_req_items_for_build(req)
                     } else {
                         Vec::new()
                     };
@@ -6444,7 +6442,7 @@ fn build_system(
                         .expect("Template should have req field");
 
                     // Check if structure is missing required items
-                    if !structure_inventory.has_reqs(structure_req.clone()) {
+                    if !structure_inventory.has_reqs_for_build(structure_req.clone()) {
                         let packet = ResponsePacket::Error {
                             errmsg: "Structure is missing required items.".to_string(),
                         };
@@ -6733,7 +6731,7 @@ fn upgrade_system(
                     .expect("Template should have upgrade_req field");
 
                 // Check if structure is missing required items
-                if !structure_inventory.has_reqs(structure_upgrade_req.clone()) {
+                if !structure_inventory.has_reqs_for_build(structure_upgrade_req.clone()) {
                     let packet = ResponsePacket::Error {
                         errmsg: "Structure is missing required items to upgrade.".to_string(),
                     };

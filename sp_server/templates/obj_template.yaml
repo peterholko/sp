@@ -898,7 +898,7 @@
   capacity: 21
   profession: the Innkeeper
   req:
-    - type: Log
+    - type: Timber
       quantity: 10
     - type: Hide
       quantity: 5
