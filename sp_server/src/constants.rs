@@ -78,6 +78,12 @@ pub const FIND_DRINK_TICKS: i32 = TICKS_PER_SEC * 3;
 pub const FIND_FOOD_TICKS: i32 = TICKS_PER_SEC * 3;
 pub const FIND_SHELTER_TICKS: i32 = TICKS_PER_SEC * 3;
 
+/// How long a hero gather action takes, in real seconds. Used for both the
+/// server-side event schedule (multiplied by TICKS_PER_SEC) and the client-side
+/// cooldown countdown (which ticks once per real second), so the two stay in
+/// sync — the client previously locked for 40s while the server completed in 4s.
+pub const GATHER_TIME_SEC: i32 = 15;
+
 pub const NO_SHELTER: i32 = -1;
 
 pub const IMAGE: &str = "image";

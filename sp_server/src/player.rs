@@ -2514,88 +2514,70 @@ fn gather_system(
                     continue;
                 }
 
-                if let Some(equipped_main_hand) = hero_inventory.get_equipped_main_hand() {
-                    let mut resource_type = None;
-
-                    if equipped_main_hand.attrs.get(&AttrKey::Mining).is_some() {
-                        resource_type = Some(ORE.to_string());
-                    } else if equipped_main_hand.attrs.get(&AttrKey::Logging).is_some() {
-                        resource_type = Some(LOG.to_string());
-                    } else if equipped_main_hand
-                        .attrs
-                        .get(&AttrKey::Stonecutting)
-                        .is_some()
-                    {
-                        resource_type = Some(STONE.to_string());
-                    } else if equipped_main_hand.attrs.get(&AttrKey::Fishing).is_some() {
-                        resource_type = Some(FISH.to_string());
-                    } else if equipped_main_hand.attrs.get(&AttrKey::Farming).is_some() {
-                        resource_type = Some(FOOD.to_string());
-                    } else if equipped_main_hand.attrs.get(&AttrKey::Foraging).is_some() {
-                        resource_type = Some(PLANT.to_string());
-                    } else if equipped_main_hand.attrs.get(&AttrKey::Hunting).is_some() {
-                        resource_type = Some(GAME_ANIMAL.to_string());
-                    }
-
-                    if let Some(resource_type) = resource_type {
-                        debug!("Resource type: {:?}", resource_type);
-                        // Check if resource exists on tile
-                        if !Resource::is_valid_type(resource_type.clone(), *hero_pos, &resources) {
-                            error!("No {:?} found on tile {:?}", resource_type, *hero_pos);
-                            let packet = ResponsePacket::Error {
-                                errmsg: format!("No {} found on tile", resource_type),
-                            };
-                            send_to_client(*player_id, packet, &clients);
-                            continue;
-                        }
-
-                        commands.trigger(StateChange {
-                            entity: hero_entity,
-                            new_state: State::Gathering,
-                        });
-
-                        // Add Gather Event
-                        let event = GameEvent {
-                            event_id: ids.new_map_event_id(),
-                            start_tick: game_tick.0,
-                            run_tick: game_tick.0 + 40,
-                            event_type: GameEventType::GatherEvent {
-                                gatherer_id: hero_id,
-                                res_type: resource_type.clone(),
-                            },
-                        };
-
-                        game_events.insert(event.event_id, event);
-
-                        let packet = ResponsePacket::Gather { gather_time: 40 };
-                        send_to_client(*player_id, packet, &clients);
+                // Map equipped main-hand tool to its preferred resource type. The tool
+                // gets priority *if* its resource is actually on the tile; otherwise we
+                // fall through to plant-picking / forage so the player isn't forced to
+                // unequip just to grab grapes or berries with a sword in hand.
+                let tool_resource_type = hero_inventory.get_equipped_main_hand().and_then(|t| {
+                    if t.attrs.get(&AttrKey::Mining).is_some() {
+                        Some(ORE.to_string())
+                    } else if t.attrs.get(&AttrKey::Logging).is_some() {
+                        Some(LOG.to_string())
+                    } else if t.attrs.get(&AttrKey::Stonecutting).is_some() {
+                        Some(STONE.to_string())
+                    } else if t.attrs.get(&AttrKey::Fishing).is_some() {
+                        Some(FISH.to_string())
+                    } else if t.attrs.get(&AttrKey::Farming).is_some() {
+                        Some(FOOD.to_string())
+                    } else if t.attrs.get(&AttrKey::Foraging).is_some() {
+                        Some(PLANT.to_string())
+                    } else if t.attrs.get(&AttrKey::Hunting).is_some() {
+                        Some(GAME_ANIMAL.to_string())
                     } else {
-                        error!("Invalid resource type for gathering");
+                        None
+                    }
+                });
+
+                // Decide what to do, in priority order:
+                //   1. Tool's preferred resource is on the tile -> gather that.
+                //   2. A Plant resource (grapes, berries) is on the tile -> pick it.
+                //   3. Nothing specific -> terrain-based forage.
+                let event_type = if let Some(rt) = tool_resource_type
+                    .filter(|rt| Resource::is_valid_type(rt.clone(), *hero_pos, &resources))
+                {
+                    GameEventType::GatherEvent {
+                        gatherer_id: hero_id,
+                        res_type: rt,
+                    }
+                } else if Resource::is_valid_type(PLANT.to_string(), *hero_pos, &resources) {
+                    GameEventType::GatherEvent {
+                        gatherer_id: hero_id,
+                        res_type: PLANT.to_string(),
                     }
                 } else {
-                    // If no tool is equipped, default to foraging
+                    GameEventType::ForageEvent {
+                        forager_id: hero_id,
+                    }
+                };
 
-                    //Gathering state change
-                    commands.trigger(StateChange {
-                        entity: hero_entity,
-                        new_state: State::Gathering,
-                    });
+                commands.trigger(StateChange {
+                    entity: hero_entity,
+                    new_state: State::Gathering,
+                });
 
-                    // Add Forage Event
-                    let event = GameEvent {
-                        event_id: ids.new_map_event_id(),
-                        start_tick: game_tick.0,
-                        run_tick: game_tick.0 + 40,
-                        event_type: GameEventType::ForageEvent {
-                            forager_id: hero_id,
-                        },
-                    };
+                let event = GameEvent {
+                    event_id: ids.new_map_event_id(),
+                    start_tick: game_tick.0,
+                    run_tick: game_tick.0 + GATHER_TIME_SEC * TICKS_PER_SEC,
+                    event_type,
+                };
 
-                    game_events.insert(event.event_id, event);
+                game_events.insert(event.event_id, event);
 
-                    let packet = ResponsePacket::Gather { gather_time: 40 };
-                    send_to_client(*player_id, packet, &clients);
-                }
+                let packet = ResponsePacket::Gather {
+                    gather_time: GATHER_TIME_SEC,
+                };
+                send_to_client(*player_id, packet, &clients);
             }
             _ => {}
         }
