@@ -294,7 +294,7 @@ export default class UI extends React.Component<any, UIState> {
       confirmMsg: '',
       confirmData: {},
       showMoveCompassClick: false,
-      activityData: false,
+      activityData: {},
       needsData: false,
       worldData: {},
       showLeftInventoryPanel: true,
@@ -1150,7 +1150,11 @@ export default class UI extends React.Component<any, UIState> {
   handleInfoVillager(message) {
     console.log('UI handleInfoVillager');
     if (Util.isPlayerObj(message.id)) {
-      this.setState({ hideVillagerPanel: false, villagerData: message });
+      const activityData = { ...(this.state.activityData || {}) };
+      if (message.activity != null) {
+        activityData[message.id] = message.activity;
+      }
+      this.setState({ hideVillagerPanel: false, villagerData: message, activityData });
     }
   }
 
@@ -1382,7 +1386,9 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleActivityUpdate(message) {
-    this.setState({ activityData: message });
+    const activityData = { ...(this.state.activityData || {}) };
+    activityData[message.id] = message.activity;
+    this.setState({ activityData });
   }
 
   handleInfoNeedsUpdate(message) {

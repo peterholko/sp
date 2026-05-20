@@ -105,7 +105,7 @@ export default class MobileInventoryGrid extends React.Component<MobileInventory
               style={cellStyle}
               disabled={disabled}
               onClick={() => this.handleSelect(item, index)}
-              title={item.name}
+              title={item.equipped ? item.name + ' (equipped)' : item.name}
             >
               <img src={'/static/art/items/' + item.image + '.png'} style={imageStyle} />
               <span style={quantityStyle}>{this.formatQuantity(item.quantity)}</span>

@@ -14,6 +14,7 @@ interface BaseInventoryProps {
   hideExitButton: boolean,
   hideSelect: boolean,
   showEquippedOnly?: boolean
+  showEquipped?: boolean
   handleSelect: Function,
   selectedItemId?: integer,
   disabledItems?: any,
@@ -59,17 +60,23 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     const objId = this.props.id;
     let imageName = '';
     let name = '';
+    const ownerState = Global.objectStates[objId];
+    const ownerCanEquip = ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
 
-    if (Global.objectStates[objId]) {
-      if (Util.isSprite(Global.objectStates[objId].image)) {
-        imageName = Global.objectStates[objId].image + '_single.png';
+    if (ownerState) {
+      if (Util.isSprite(ownerState.image)) {
+        imageName = ownerState.image + '_single.png';
       } else {
-        imageName = Global.objectStates[objId].image + '.png';
+        imageName = ownerState.image + '.png';
       }
-      name = Global.objectStates[objId].name;
+      name = ownerState.name;
     }
 
-    let itemsData = (this.props.items || []).filter((item) => item.equipped == false);
+    let itemsData = (this.props.items || []);
+    if (!this.props.showEquipped) {
+      itemsData = itemsData.filter((item) => item.equipped == false);
+    }
+
     if (this.props.showEquippedOnly) {
       itemsData = itemsData.filter((item) =>
         item.class == "Weapon" || item.class == "Armor" || item.class == "Tool" || item.class == "Torch"
@@ -81,6 +88,13 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     const page = Math.min(this.state.page, totalPages - 1);
     const pageItems = itemsData.slice(page * pageSize, (page + 1) * pageSize);
     const selectedItemId = this.props.selectedItemId ?? this.state.selectedItemId;
+    const disabledItems = this.props.disabledItems ? [...this.props.disabledItems] : [];
+
+    pageItems.forEach(item => {
+      if (ownerCanEquip && item.equipped == true && !disabledItems.includes(item.id)) {
+        disabledItems.push(item.id);
+      }
+    });
 
     const capacityText = this.props.capacity != null && this.props.totalWeight != null
       ? this.props.totalWeight + '/' + this.props.capacity + ' lbs'
@@ -156,7 +170,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
           ownerId={objId}
           items={pageItems}
           selectedItemId={selectedItemId}
-          disabledItems={this.props.disabledItems}
+          disabledItems={disabledItems}
           onSelect={this.handleSelect}
         />
 

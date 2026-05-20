@@ -111,6 +111,7 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
           panelType={'inventory'}
           hideExitButton={false}
           hideSelect={this.state.hideSelect}
+          showEquipped={true}
           handleSelect={this.handleSelect}
           selectedItemId={this.state.selectedItemId}
           footer={showEquipButton &&

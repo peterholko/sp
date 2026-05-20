@@ -142,6 +142,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
           panelType={'itemTransfer'}
           hideExitButton={true}
           hideSelect={this.state.hideLeftSelect}
+          showEquipped={true}
           handleSelect={this.handleSelect}
           selectedItemId={this.state.leftSelectedItemId} />
           
@@ -154,6 +155,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
             panelType={'itemTransfer'}
             hideExitButton={false}
             hideSelect={this.state.hideRightSelect}
+            showEquipped={true}
             handleSelect={this.handleSelect}
             selectedItemId={this.state.rightSelectedItemId} />}
 

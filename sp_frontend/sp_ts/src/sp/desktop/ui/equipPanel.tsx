@@ -57,6 +57,11 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     this.handleItemInfoClick = this.handleItemInfoClick.bind(this);
   }
 
+  isVillager() {
+    const objState = Global.objectStates[this.props.equipData.id];
+    return objState && objState.subclass == 'villager';
+  }
+
   handleSelect(eventData) {
     Global.selectedItemOwnerId = eventData.ownerId;
     Global.selectedItemId = eventData.itemId;
@@ -152,6 +157,11 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
   }
 
   handleOkClick() {
+    if (this.isVillager()) {
+      this.setState({ showItemTransferPanel: false });
+      return;
+    }
+
     var selectedItem;
 
     for (var i = 0; i < this.props.equipData.items.length; i++) {
@@ -193,6 +203,10 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
   }
 
   handleItemTransferClick() {
+    if (this.isVillager()) {
+      return;
+    }
+
     if (Global.selectedItemId != -1) {
       this.setState({ showItemTransferPanel: true });
     }
@@ -213,6 +227,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
   }
 
   render() {
+    const isVillager = this.isVillager();
     let imageName = Global.objectStates[this.props.equipData.id].image;
 
     let imagePath = '/static/art/' + imageName + '_single.png';
@@ -749,9 +764,10 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
           handleSelect={this.handleSelect}
           selectedItemId={this.state.inventorySelectedItemId} />
 
-        <SmallButton handler={this.handleItemTransferClick}
-          imageName="transferbutton"
-          style={transferStyle} />
+        {!isVillager &&
+          <SmallButton handler={this.handleItemTransferClick}
+            imageName="transferbutton"
+            style={transferStyle} />}
 
         <SmallButton handler={this.handleItemInfoClick}
           imageName="infobutton"
@@ -760,7 +776,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
         {this.state.showSelectedName &&
           <span style={rightItemNameStyle}>{selectedItem.name}</span>}
 
-        {this.state.showItemTransferPanel &&
+        {!isVillager && this.state.showItemTransferPanel &&
           <div style={wideFrameStyle}>
             <img src={wideframe} />
 

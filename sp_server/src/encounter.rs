@@ -23,9 +23,10 @@ use crate::map::{Map, TileType};
 use crate::npc::{
     CastSpellTarget, ChaseAndCast, FleeScorer, FleeToHome, ItemsToSteal, MoveToForest,
     NpcMoveNearTarget, NpcMoveTo, NpcMoveToTarget, RaiseDead, RandomWander, RatBlockedWanderScorer,
-    SetCorpseTarget, SetHome, SetSpoilTarget, SetStealTarget, SetTorchTarget, SpoilTarget,
-    SpoilTargetScorer, StealTarget, StealTargetScorer, TorchTarget, TorchTargetScorer,
-    VisibleCorpse, VisibleCorpseScorer, VisibleTarget, VisibleTargetScorer, WolfBlockedHideScorer,
+    ScriptedCorpseHunt, ScriptedCorpseHuntScorer, SetCorpseTarget, SetHome, SetSpoilTarget,
+    SetStealTarget, SetTorchTarget, SpoilTarget, SpoilTargetScorer, StealTarget, StealTargetScorer,
+    TorchTarget, TorchTargetScorer, VisibleCorpse, VisibleCorpseScorer, VisibleTarget,
+    VisibleTargetScorer, WolfBlockedHideScorer,
 };
 use crate::obj::{
     ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager,
@@ -247,6 +248,43 @@ impl Encounter {
         entity_map: &mut ResMut<EntityObjMap>,
         templates: &Res<Templates>,
     ) -> (Entity, Id, PlayerId, Position) {
+        Self::spawn_necromancer_internal(
+            player_id, pos, home_pos, None, commands, ids, entity_map, templates,
+        )
+    }
+
+    pub fn spawn_necromancer_hunting_corpse(
+        player_id: i32,
+        pos: Position,
+        home_pos: Position,
+        corpse_anchor: Position,
+        commands: &mut Commands,
+        ids: &mut ResMut<Ids>,
+        entity_map: &mut ResMut<EntityObjMap>,
+        templates: &Res<Templates>,
+    ) -> (Entity, Id, PlayerId, Position) {
+        Self::spawn_necromancer_internal(
+            player_id,
+            pos,
+            home_pos,
+            Some(corpse_anchor),
+            commands,
+            ids,
+            entity_map,
+            templates,
+        )
+    }
+
+    fn spawn_necromancer_internal(
+        player_id: i32,
+        pos: Position,
+        home_pos: Position,
+        corpse_anchor: Option<Position>,
+        commands: &mut Commands,
+        ids: &mut ResMut<Ids>,
+        entity_map: &mut ResMut<EntityObjMap>,
+        templates: &Res<Templates>,
+    ) -> (Entity, Id, PlayerId, Position) {
         let necro_id = ids.new_obj_id();
 
         let mut necro_obj = Obj::create_nospawn(
@@ -279,6 +317,12 @@ impl Encounter {
             .step(NpcMoveToTarget)
             .step(RaiseDead);
 
+        let scripted_raise_dead = Steps::build()
+            .label("Scripted Corpse Hunt")
+            .step(SetCorpseTarget)
+            .step(NpcMoveToTarget)
+            .step(RaiseDead);
+
         let flee_and_hide = Steps::build()
             .label("Flee and Hide")
             .step(SetHome)
@@ -289,30 +333,48 @@ impl Encounter {
                 duration: MAX,
             });
 
+        let necro_thinker = if corpse_anchor.is_some() {
+            Thinker::build()
+                .label("Necromancer")
+                .picker(Highest)
+                .when(ScriptedCorpseHuntScorer, scripted_raise_dead)
+                .when(VisibleTargetScorer, cast_spell_target)
+                .when(VisibleCorpseScorer, raise_dead)
+                .when(FleeScorer, flee_and_hide)
+        } else {
+            Thinker::build()
+                .label("Necromancer")
+                .picker(Highest)
+                .when(VisibleTargetScorer, cast_spell_target)
+                .when(VisibleCorpseScorer, raise_dead)
+                .when(FleeScorer, flee_and_hide)
+        };
+
         // Spawn Necromancer
-        let necro_entity = commands
-            .spawn((
-                necro_obj.clone(),
-                Viewshed {
-                    range: template.base_vision.expect("Necromancer has no vision"),
-                },
-                SubclassNPC,
-                Minions { ids: Vec::new() },
-                Home { pos: home_pos },
-                VisibleTarget::new(NO_TARGET),
-                TaskTarget::new(NO_TARGET),
-                EventExecuting {
-                    event_type: "".to_string(),
-                    state: EventExecutingState::None,
-                },
-                Thinker::build()
-                    .label("Necromancer")
-                    .picker(Highest)
-                    .when(VisibleTargetScorer, cast_spell_target) //Normal score
-                    .when(VisibleCorpseScorer, raise_dead) //Priority 2 score
-                    .when(FleeScorer, flee_and_hide), //Priority 1 score
-            ))
-            .id();
+        let mut spawned_necro = commands.spawn((
+            necro_obj.clone(),
+            Viewshed {
+                range: template.base_vision.expect("Necromancer has no vision"),
+            },
+            SubclassNPC,
+            Minions { ids: Vec::new() },
+            Home { pos: home_pos },
+            VisibleTarget::new(NO_TARGET),
+            TaskTarget::new(NO_TARGET),
+            EventExecuting {
+                event_type: "".to_string(),
+                state: EventExecutingState::None,
+            },
+            necro_thinker,
+        ));
+        let necro_entity = spawned_necro.id();
+
+        if let Some(corpse_anchor) = corpse_anchor {
+            spawned_necro.insert(ScriptedCorpseHunt {
+                corpse_anchor,
+                search_radius: 5,
+            });
+        }
 
         ids.new_obj(necro_obj.id.0, player_id);
         entity_map.new_obj(necro_obj.id.0, necro_entity);

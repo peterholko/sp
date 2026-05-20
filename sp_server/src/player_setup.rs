@@ -24,9 +24,9 @@ use crate::common::{
 use crate::villager::{
     ArmedRetaliationScorer, CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer,
     FightBack, FindDrink, FindFood, FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer,
-    LoadItems, Morale, ProcessOrder, SetFleeDestination, SetOrderDestination,
-    SetStorageDestination, StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood,
-    UnloadItems,
+    LoadItems, MaybeTransferGatherTool, Morale, ProcessOrder, SetFleeDestination,
+    SetOrderDestination, SetStorageDestination, StructureCapacityScorer, ThirstyScorer,
+    TransferDrink, TransferFood, UnloadItems,
 };
 
 use crate::{
@@ -688,6 +688,8 @@ pub fn new(
         .label("ProcessOrder")
         .step(SetOrderDestination)
         .step(MoveTo)
+        .step(MaybeTransferGatherTool)
+        .step(MoveTo)
         .step(ProcessOrder);
 
     let unload_items = Steps::build()
@@ -1311,15 +1313,14 @@ pub fn new(
         game_tick.0 + (GAME_TICKS_PER_DAY - ticks_in_day + EVENING)
     };
 
+    let mausoleum_pos = Position {
+        x: start_location.mausoleum_pos[0],
+        y: start_location.mausoleum_pos[1],
+    };
     let event_type = GameEventType::NecroEvent {
-        pos: Position {
-            x: start_location.necromancer_pos[0],
-            y: start_location.necromancer_pos[1],
-        },
-        home: Position {
-            x: start_location.mausoleum_pos[0],
-            y: start_location.mausoleum_pos[1],
-        },
+        spawn_anchor: mausoleum_pos,
+        corpse_anchor: shipwreck_pos,
+        home: mausoleum_pos,
     };
     let event_id = ids.new_map_event_id();
 

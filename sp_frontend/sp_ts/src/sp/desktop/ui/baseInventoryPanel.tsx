@@ -21,6 +21,7 @@ interface BaseInventoryProps {
   hideExitButton: boolean,
   hideSelect: boolean,
   showEquippedOnly?: boolean
+  showEquipped?: boolean
   handleSelect: Function,
   selectedItemId?: integer,
   disabledItems?: any
@@ -93,16 +94,22 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     var hideLeftButton = false;
     var hideRightButton = false;
 
-    var itemsData = this.props.items.filter((item) => item.equipped == false);
+    var itemsData = (this.props.items || []);
+    const ownerState = Global.objectStates[objId];
+    const ownerCanEquip = ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
 
-    if (Global.objectStates[objId]) {
-      if (Util.isSprite(Global.objectStates[objId].image)) {
-        imageName = Global.objectStates[objId].image + '_single.png';
+    if (!this.props.showEquipped) {
+      itemsData = itemsData.filter((item) => item.equipped == false);
+    }
+
+    if (ownerState) {
+      if (Util.isSprite(ownerState.image)) {
+        imageName = ownerState.image + '_single.png';
       } else {
-        imageName = Global.objectStates[objId].image + '.png';
+        imageName = ownerState.image + '.png';
       }
 
-      name = Global.objectStates[objId].name;
+      name = ownerState.name;
     }
 
     if (this.props.capacity != null && this.props.totalWeight != null) {
@@ -153,6 +160,10 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
       var yPos = -286 + (Math.floor(itemPageIndex / 5) * 53);
 
       var disabled = false;
+
+      if (ownerCanEquip && itemsData[itemIndex].equipped == true) {
+        disabled = true;
+      }
 
       if (this.props.disabledItems != null && this.props.disabledItems.includes(itemId)) {
         disabled = true;
@@ -257,4 +268,3 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     );
   }
 }
-

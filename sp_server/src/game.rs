@@ -82,7 +82,7 @@ use crate::villager::{Morale, VillagerPlugin};
 use crate::world::{Weather, WeatherAreas, WorldPlugin};
 use crate::{villager_util, AppState};
 
-#[derive(Resource, Deref, DerefMut, Clone, Debug)]
+#[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug)]
@@ -657,6 +657,7 @@ const MERCHANT_LEAVING_SOON_OFFSET: i32 = 2400; // 4 min after arrival
 const MERCHANT_DEPARTURE_OFFSET: i32 = 3000; // 5 min after arrival
 const MERCHANT_RETURN_GAP: i32 = 6000; // 10 min away at the empire
 const MERCHANT_FIRST_ARRIVAL_DELAY: i32 = 1800; // 3 min after villager rescue
+const NECROMANCER_SPAWN_SEARCH_RADIUS: i32 = 5;
 
 // Bundle of game_event_system parameters that don't fit in the 16-param limit.
 #[derive(SystemParam)]
@@ -4008,7 +4009,11 @@ fn refine_event_system(
                     let mut produced_items = Vec::new();
 
                     // Butchery doubles yield per produces-entry (better cuts than improvised tools)
-                    let yield_multiplier = if refiner_template.0 == "Butchery" { 2 } else { 1 };
+                    let yield_multiplier = if refiner_template.0 == "Butchery" {
+                        2
+                    } else {
+                        1
+                    };
 
                     // Create new items
                     for produce_item_name in produces_list.iter() {
@@ -4235,7 +4240,11 @@ fn structure_refine_event_system(
                     let mut produced_items = Vec::new();
 
                     // Butchery doubles yield per produces-entry (better cuts than improvised tools)
-                    let yield_multiplier = if structure_template.0 == "Butchery" { 2 } else { 1 };
+                    let yield_multiplier = if structure_template.0 == "Butchery" {
+                        2
+                    } else {
+                        1
+                    };
 
                     // Create new items
                     for produce_item_name in produces_list.iter() {
@@ -5404,7 +5413,8 @@ fn farm_event_system(
 
                     // Derive crop type from the seed's `produces` field (e.g. Wheat Seeds -> Wheat).
                     // Falls back to "Wheat" for legacy generic "Seeds" items.
-                    let seed_template = Item::get_template(seeds.name.clone(), &templates.item_templates);
+                    let seed_template =
+                        Item::get_template(seeds.name.clone(), &templates.item_templates);
                     let crop_type = seed_template
                         .produces
                         .as_ref()
@@ -5412,12 +5422,7 @@ fn farm_event_system(
                         .unwrap_or_else(|| "Wheat".to_string());
 
                     info!("Planting {:?} crops: {:?}", crop_type, seeds_to_plant);
-                    crops.plant(
-                        game_tick.0,
-                        *structure_id,
-                        crop_type,
-                        seeds_to_plant,
-                    );
+                    crops.plant(game_tick.0, *structure_id, crop_type, seeds_to_plant);
 
                     // Consume item to refine
                     let new_seeds = structure
@@ -7926,7 +7931,7 @@ fn game_event_system(
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
-    mut query: Query<ObjQueryMut>,
+    mut query: Query<AllObjsQueryMut>,
     mut perception_updates: ResMut<PerceptionUpdates>,
     mut player_intro_state: ResMut<PlayerIntroState>,
     mut extras: GameEventExtras,
@@ -8132,19 +8137,41 @@ fn game_event_system(
                         },
                     );
                 }
-                GameEventType::NecroEvent { pos, home } => {
+                GameEventType::NecroEvent {
+                    spawn_anchor,
+                    corpse_anchor,
+                    home,
+                } => {
                     debug!("Processing NecroEvent");
                     events_to_remove.push(*event_id);
 
-                    let (necro_entity, npc_id, _player_id, _pos) = Encounter::spawn_necromancer(
-                        1000,
-                        *pos,
-                        *home,
-                        &mut commands,
-                        &mut ids,
-                        &mut entity_map,
-                        &templates,
-                    );
+                    let occupied_positions: HashSet<Position> =
+                        query.iter().map(|obj| *obj.pos).collect();
+
+                    let Some(spawn_pos) = resolve_necromancer_spawn_pos(
+                        *spawn_anchor,
+                        &occupied_positions,
+                        &map,
+                        NECROMANCER_SPAWN_SEARCH_RADIUS,
+                    ) else {
+                        warn!(
+                            "NecroEvent skipped: no open spawn tile near {:?}",
+                            spawn_anchor
+                        );
+                        continue;
+                    };
+
+                    let (necro_entity, npc_id, _player_id, _pos) =
+                        Encounter::spawn_necromancer_hunting_corpse(
+                            NPC_PLAYER_ID,
+                            spawn_pos,
+                            *home,
+                            *corpse_anchor,
+                            &mut commands,
+                            &mut ids,
+                            &mut entity_map,
+                            &templates,
+                        );
 
                     // Create a new object event
                     commands.trigger(NewObj {
@@ -13711,6 +13738,37 @@ pub fn is_pos_empty(player_id: i32, x: i32, y: i32, query: &Query<ObjQuery>) -> 
     }
 
     return objs.len() == 0;
+}
+
+fn resolve_necromancer_spawn_pos(
+    spawn_anchor: Position,
+    occupied_positions: &HashSet<Position>,
+    map: &Map,
+    search_radius: i32,
+) -> Option<Position> {
+    let mut candidates = vec![(spawn_anchor.x, spawn_anchor.y)];
+
+    for radius in 1..=search_radius {
+        candidates.extend(Map::ring((spawn_anchor.x, spawn_anchor.y), radius));
+    }
+
+    candidates.sort_by_key(|(x, y)| (Map::dist(spawn_anchor, Position { x: *x, y: *y }), *y, *x));
+    candidates.dedup();
+
+    candidates
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .find(|pos| is_necromancer_spawn_tile_open(*pos, occupied_positions, map))
+}
+
+fn is_necromancer_spawn_tile_open(
+    pos: Position,
+    occupied_positions: &HashSet<Position>,
+    map: &Map,
+) -> bool {
+    Map::is_valid_pos((pos.x, pos.y))
+        && Map::is_passable(pos.x, pos.y, map)
+        && !occupied_positions.contains(&pos)
 }
 
 /*impl GameEvents {

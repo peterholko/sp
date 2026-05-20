@@ -108,7 +108,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
   }
 
   pagedItems(items, page, pageSize) {
-    const filtered = (items || []).filter((item) => item.equipped == false);
+    const filtered = (items || []);
     const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
     const safePage = Math.min(page, totalPages - 1);
     return {
@@ -116,6 +116,11 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       totalPages,
       page: safePage,
     };
+  }
+
+  ownerCanEquip(inventoryData) {
+    const ownerState = Global.objectStates[inventoryData.id];
+    return ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
   }
 
   renderPager(side: 'left' | 'right', page: number, totalPages: number) {
@@ -264,6 +269,11 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     const pageSize = 12;
     const pageState = side == 'left' ? this.state.leftPage : this.state.rightPage;
     const pageData = this.pagedItems(inventoryData.items, pageState, pageSize);
+    const disabledItems = this.ownerCanEquip(inventoryData)
+      ? pageData.items
+        .filter(item => item.equipped == true)
+        .map(item => item.id)
+      : [];
     const summary = this.objectSummary(inventoryData);
     const capacityText = inventoryData.cap != null && inventoryData.tw != null
       ? inventoryData.tw + '/' + inventoryData.cap + ' lbs'
@@ -330,6 +340,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
           ownerId={inventoryData.id}
           items={pageData.items}
           selectedItemId={selectedItemId}
+          disabledItems={disabledItems}
           onSelect={this.handleSelect}
           compact={true}
         />

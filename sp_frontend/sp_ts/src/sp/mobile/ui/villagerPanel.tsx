@@ -66,8 +66,8 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     imageName = imageName.replace(/ /g, '') + '_single.png';
 
     const effects = this.props.villagerData.effects.join();
-    const activity = this.props.activity && this.props.activity.id == this.props.villagerData.id
-      ? this.props.activity.activity
+    const activity = this.props.activity && this.props.activity[this.props.villagerData.id] != null
+      ? this.props.activity[this.props.villagerData.id]
       : this.props.villagerData.activity;
     const needs = this.props.needsData && this.props.needsData.id == this.props.villagerData.id
       ? this.props.needsData

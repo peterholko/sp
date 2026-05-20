@@ -1,6 +1,9 @@
-use bevy::{ecs::query::QueryData, prelude::*};
+use bevy::{
+    ecs::query::{Or, QueryData},
+    prelude::*,
+};
 use big_brain::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     ai_logging::entity_display,
@@ -19,7 +22,7 @@ use crate::{
     experiment::{self, Experiment, Experiments},
     game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
-    item::{Inventory, Item, ItemLocation},
+    item::{self, AttrKey, Inventory, Item, ItemLocation},
     map::{Map, MapPos},
     network::{send_to_client, ResponsePacket},
     obj::{Name, StartBuild, State, *},
@@ -86,6 +89,22 @@ pub struct SetOrderDestination;
 
 #[derive(Debug, Clone, Component, ActionBuilder)]
 pub struct SetStorageDestination;
+
+#[derive(Debug, Clone, Component)]
+pub struct ToolFetchTarget {
+    pub storage_id: i32,
+    pub item_id: i32,
+    pub res_type: String,
+    pub required_attr: AttrKey,
+}
+
+#[derive(Debug, Clone, Component)]
+pub struct BlockedWork {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Component, ActionBuilder)]
+pub struct MaybeTransferGatherTool;
 
 #[derive(Debug, Clone, Component, ActionBuilder)]
 pub struct FindDrink;
@@ -246,6 +265,7 @@ pub struct ActiveTaskActionQuery {
     sleep: Option<&'static Sleep>,
     find_shelter: Option<&'static FindShelter>,
     set_order_destination: Option<&'static SetOrderDestination>,
+    maybe_transfer_gather_tool: Option<&'static MaybeTransferGatherTool>,
     set_storage_destination: Option<&'static SetStorageDestination>,
     unload_items: Option<&'static UnloadItems>,
     set_flee_destination: Option<&'static SetFleeDestination>,
@@ -283,6 +303,55 @@ fn order_activity(state: &State, order: &Order) -> ActiveTask {
     }
 }
 
+fn gather_active_task_for_display(
+    state: &State,
+    res_type: &str,
+    inventory: &Inventory,
+    blocked_work: Option<&BlockedWork>,
+    tool_fetch_target: Option<&ToolFetchTarget>,
+) -> Option<ActiveTask> {
+    let active_task = ActiveTask::get_activity_from_res_type(res_type.to_string());
+    let Some(required_attr) = item::required_tool_attr_for_res_type(res_type) else {
+        return Some(active_task);
+    };
+
+    if *state == State::Gathering || inventory.has_equipped_tool_for_attr(&required_attr) {
+        return Some(active_task);
+    }
+
+    if tool_fetch_target
+        .map(|target| target.res_type.as_str() == res_type && target.required_attr == required_attr)
+        .unwrap_or(false)
+    {
+        return Some(ActiveTask::MovingToGatherPos);
+    }
+
+    if blocked_work.is_some() {
+        return Some(ActiveTask::Unknown);
+    }
+
+    None
+}
+
+fn order_activity_for_display(
+    state: &State,
+    order: &Order,
+    inventory: &Inventory,
+    blocked_work: Option<&BlockedWork>,
+    tool_fetch_target: Option<&ToolFetchTarget>,
+) -> Option<ActiveTask> {
+    match order {
+        Order::Gather { res_type, .. } => gather_active_task_for_display(
+            state,
+            res_type,
+            inventory,
+            blocked_work,
+            tool_fetch_target,
+        ),
+        _ => Some(order_activity(state, order)),
+    }
+}
+
 fn movement_activity_from_previous(previous: ActiveTask) -> Option<ActiveTask> {
     match previous {
         ActiveTask::Fleeing
@@ -312,7 +381,13 @@ fn movement_activity_from_previous(previous: ActiveTask) -> Option<ActiveTask> {
 fn visible_activity_for_action(
     action: &ActiveTaskActionQueryItem,
     previous: ActiveTask,
-    order_state: Option<(&State, &Order)>,
+    order_context: Option<(
+        &State,
+        &Order,
+        &Inventory,
+        Option<&BlockedWork>,
+        Option<&ToolFetchTarget>,
+    )>,
 ) -> Option<ActiveTask> {
     if action.fight_back.is_some() {
         Some(ActiveTask::FightingBack)
@@ -332,25 +407,115 @@ fn visible_activity_for_action(
     } else if action.find_shelter.is_some() {
         Some(ActiveTask::FindingShelter)
     } else if action.set_order_destination.is_some() {
-        Some(
-            order_state
-                .map(|(state, order)| order_activity(state, order))
-                .unwrap_or(ActiveTask::Operating),
-        )
+        match order_context {
+            Some((state, order, inventory, blocked_work, tool_fetch_target)) => {
+                order_activity_for_display(state, order, inventory, blocked_work, tool_fetch_target)
+            }
+            None => Some(ActiveTask::Operating),
+        }
+    } else if action.maybe_transfer_gather_tool.is_some() {
+        match order_context {
+            Some((state, order, inventory, blocked_work, tool_fetch_target)) => {
+                order_activity_for_display(state, order, inventory, blocked_work, tool_fetch_target)
+            }
+            None => Some(ActiveTask::Operating),
+        }
     } else if action.set_storage_destination.is_some() {
         Some(ActiveTask::Unloading)
     } else if action.unload_items.is_some() {
         Some(ActiveTask::Unloading)
     } else if action.process_order.is_some() {
-        Some(
-            order_state
-                .map(|(state, order)| order_activity(state, order))
-                .unwrap_or(ActiveTask::Operating),
-        )
+        match order_context {
+            Some((state, order, inventory, blocked_work, tool_fetch_target)) => {
+                order_activity_for_display(state, order, inventory, blocked_work, tool_fetch_target)
+            }
+            None => Some(ActiveTask::Operating),
+        }
     } else if action.idle.is_some() {
         Some(ActiveTask::Idle)
     } else {
         None
+    }
+}
+
+fn active_task_priority(task: &ActiveTask) -> i32 {
+    match task {
+        ActiveTask::Fleeing | ActiveTask::FightingBack => 100,
+        ActiveTask::GettingDrink
+        | ActiveTask::GettingFood
+        | ActiveTask::FindingShelter
+        | ActiveTask::Eating
+        | ActiveTask::Drinking
+        | ActiveTask::Sleeping => 80,
+        ActiveTask::Following
+        | ActiveTask::Building
+        | ActiveTask::Gathering
+        | ActiveTask::Operating
+        | ActiveTask::Mining
+        | ActiveTask::Hunting
+        | ActiveTask::Woodcutting
+        | ActiveTask::Stonecutting
+        | ActiveTask::Refining
+        | ActiveTask::Crafting
+        | ActiveTask::Experimenting
+        | ActiveTask::Exploring
+        | ActiveTask::Planting
+        | ActiveTask::Tending
+        | ActiveTask::Harvesting
+        | ActiveTask::Repairing
+        | ActiveTask::Unloading => 60,
+        ActiveTask::MovingToGatherPos
+        | ActiveTask::MovingToOperatePos
+        | ActiveTask::MovingToRefinePos
+        | ActiveTask::MovingToCraftPos
+        | ActiveTask::MovingToExperimentPos
+        | ActiveTask::MovingToExplorePos
+        | ActiveTask::MovingToFoodPos
+        | ActiveTask::MovingToDrinkPos
+        | ActiveTask::MovingToShelterPos => 40,
+        ActiveTask::Idle => 10,
+        ActiveTask::None | ActiveTask::Unknown => 0,
+    }
+}
+
+fn active_task_tiebreaker(task: &ActiveTask) -> i32 {
+    match task {
+        ActiveTask::Fleeing => 35,
+        ActiveTask::FightingBack => 34,
+        ActiveTask::Mining => 33,
+        ActiveTask::Woodcutting => 32,
+        ActiveTask::Stonecutting => 31,
+        ActiveTask::Gathering => 30,
+        ActiveTask::Unloading => 29,
+        ActiveTask::Building => 28,
+        ActiveTask::Operating => 27,
+        ActiveTask::Refining => 26,
+        ActiveTask::Crafting => 25,
+        ActiveTask::Experimenting => 24,
+        ActiveTask::Exploring => 23,
+        ActiveTask::Planting => 22,
+        ActiveTask::Tending => 21,
+        ActiveTask::Harvesting => 20,
+        ActiveTask::Repairing => 19,
+        ActiveTask::Following => 18,
+        ActiveTask::GettingDrink => 17,
+        ActiveTask::GettingFood => 16,
+        ActiveTask::FindingShelter => 15,
+        ActiveTask::Drinking => 14,
+        ActiveTask::Eating => 13,
+        ActiveTask::Sleeping => 12,
+        ActiveTask::Hunting => 11,
+        ActiveTask::MovingToGatherPos => 10,
+        ActiveTask::MovingToOperatePos => 9,
+        ActiveTask::MovingToRefinePos => 8,
+        ActiveTask::MovingToCraftPos => 7,
+        ActiveTask::MovingToExperimentPos => 6,
+        ActiveTask::MovingToExplorePos => 5,
+        ActiveTask::MovingToFoodPos => 4,
+        ActiveTask::MovingToDrinkPos => 3,
+        ActiveTask::MovingToShelterPos => 2,
+        ActiveTask::Idle => 1,
+        ActiveTask::None | ActiveTask::Unknown => 0,
     }
 }
 
@@ -372,6 +537,7 @@ impl Plugin for VillagerPlugin {
                 sleep_action_system.in_set(BigBrainSet::Actions),
                 find_shelter_system.in_set(BigBrainSet::Actions),
                 set_order_destination_system.in_set(BigBrainSet::Actions),
+                maybe_transfer_gather_tool_system.in_set(BigBrainSet::Actions),
                 process_order_system.in_set(BigBrainSet::Actions),
                 set_flee_destination_system.in_set(BigBrainSet::Actions),
                 set_storage_destination_system.in_set(BigBrainSet::Actions),
@@ -1135,13 +1301,17 @@ pub fn idle_action_system(
 pub fn set_order_destination_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
+    map: Res<Map>,
     obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
-    villager_query: Query<
+    storage_query: Query<BaseQuery, (With<ClassStructure>, Without<SubclassVillager>)>,
+    mut villager_query: Query<
         (
             &PlayerId,
             &Position,
             &Order,
             Option<&Assignment>, // Villager may not have an assignment
+            &mut Inventory,
+            &mut ActiveTask,
         ),
         With<SubclassVillager>,
     >,
@@ -1155,8 +1325,14 @@ pub fn set_order_destination_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok((villager_player_id, villager_pos, order, assignment)) =
-                    villager_query.get(*actor)
+                let Ok((
+                    villager_player_id,
+                    villager_pos,
+                    order,
+                    assignment,
+                    mut villager_inventory,
+                    mut active_task,
+                )) = villager_query.get_mut(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot get villager query");
@@ -1184,7 +1360,122 @@ pub fn set_order_destination_system(
 
                         Some(*target_pos)
                     }
-                    Order::Gather { pos, .. } => Some(*pos),
+                    Order::Gather {
+                        res_type,
+                        pos,
+                        storage_pos: _,
+                        storage_id: _,
+                    } => {
+                        if let Some(required_attr) = item::required_tool_attr_for_res_type(res_type)
+                        {
+                            let updated_items =
+                                villager_inventory.auto_equip_best_tool_for_attr(&required_attr);
+
+                            if !updated_items.is_empty()
+                                || villager_inventory.has_equipped_tool_for_attr(&required_attr)
+                            {
+                                commands.entity(*actor).remove::<BlockedWork>();
+                                commands.entity(*actor).remove::<ToolFetchTarget>();
+                                ActiveTask::set_if_changed(
+                                    &mut active_task,
+                                    ActiveTask::get_activity_from_res_type(res_type.clone()),
+                                );
+                                Some(*pos)
+                            } else {
+                                let mut best_storage_tool: Option<(f32, u32, i32, i32, Position)> =
+                                    None;
+
+                                for structure in storage_query.iter() {
+                                    if villager_player_id.0 != structure.player_id.0 {
+                                        continue;
+                                    }
+
+                                    if *structure.subclass != Subclass::Storage {
+                                        continue;
+                                    }
+
+                                    if *structure.state != State::None {
+                                        continue;
+                                    }
+
+                                    let Some(tool) =
+                                        structure.inventory.best_tool_for_attr(&required_attr)
+                                    else {
+                                        continue;
+                                    };
+
+                                    let Some((_path, cost)) = Map::find_fast_path(
+                                        *villager_pos,
+                                        *structure.pos,
+                                        &map,
+                                        villager_player_id.0,
+                                        Vec::new(),
+                                        true,
+                                        false,
+                                        false,
+                                        false,
+                                        true,
+                                    ) else {
+                                        continue;
+                                    };
+
+                                    let score = tool.attr_num(&required_attr);
+                                    let is_better = match best_storage_tool {
+                                        None => true,
+                                        Some((best_score, best_cost, best_item_id, _, _)) => {
+                                            score > best_score
+                                                || (score == best_score
+                                                    && (cost < best_cost
+                                                        || (cost == best_cost
+                                                            && tool.id < best_item_id)))
+                                        }
+                                    };
+
+                                    if is_better {
+                                        best_storage_tool = Some((
+                                            score,
+                                            cost,
+                                            tool.id,
+                                            structure.id.0,
+                                            *structure.pos,
+                                        ));
+                                    }
+                                }
+
+                                if let Some((_score, _cost, item_id, storage_id, storage_pos)) =
+                                    best_storage_tool
+                                {
+                                    commands.entity(*actor).insert(ToolFetchTarget {
+                                        storage_id,
+                                        item_id,
+                                        res_type: res_type.clone(),
+                                        required_attr,
+                                    });
+                                    commands.entity(*actor).remove::<BlockedWork>();
+                                    ActiveTask::set_if_changed(
+                                        &mut active_task,
+                                        ActiveTask::MovingToGatherPos,
+                                    );
+                                    Some(storage_pos)
+                                } else {
+                                    let reason = format!(
+                                        "Needs {} tool",
+                                        item::tool_attr_label(&required_attr)
+                                    );
+                                    commands.entity(*actor).insert(BlockedWork { reason });
+                                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                                    ActiveTask::set_if_changed(
+                                        &mut active_task,
+                                        ActiveTask::Unknown,
+                                    );
+                                    *state = ActionState::Failure;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            Some(*pos)
+                        }
+                    }
                     Order::Build
                     | Order::Operate
                     | Order::Plant
@@ -1288,6 +1579,165 @@ pub fn set_order_destination_system(
     }
 }
 
+pub fn maybe_transfer_gather_tool_system(
+    mut commands: Commands,
+    entity_map: Res<EntityObjMap>,
+    mut inventory_query: Query<(&PlayerId, &Position, &mut Inventory)>,
+    mut villager_query: Query<(&Order, &mut ActiveTask), With<SubclassVillager>>,
+    fetch_query: Query<&ToolFetchTarget>,
+    mut action_query: Query<(
+        &Actor,
+        &mut ActionState,
+        &MaybeTransferGatherTool,
+        &ActionSpan,
+    )>,
+) {
+    for (Actor(actor), mut state, _maybe_transfer, span) in &mut action_query {
+        let obj_id = entity_map.get_obj_by_entity(*actor);
+
+        match *state {
+            ActionState::Requested => {
+                *state = ActionState::Executing;
+            }
+            ActionState::Executing => {
+                let Ok(fetch_target) = fetch_query.get(*actor) else {
+                    *state = ActionState::Success;
+                    continue;
+                };
+
+                let missing_tool_reason = format!(
+                    "Needs {} tool",
+                    item::tool_attr_label(&fetch_target.required_attr)
+                );
+
+                let Some(storage_entity) = entity_map.get_entity(fetch_target.storage_id) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find storage entity for tool fetch storage_id={}",
+                            fetch_target.storage_id
+                        );
+                    });
+                    commands.entity(*actor).insert(BlockedWork {
+                        reason: missing_tool_reason,
+                    });
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                let Ok(
+                    [(villager_player_id, villager_pos, mut villager_inventory), (storage_player_id, storage_pos, mut storage_inventory)],
+                ) = inventory_query.get_many_mut([*actor, storage_entity])
+                else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Cannot find inventories for tool fetch"
+                        );
+                    });
+                    commands.entity(*actor).insert(BlockedWork {
+                        reason: missing_tool_reason,
+                    });
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if villager_player_id.0 != storage_player_id.0 || villager_pos != storage_pos {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Villager is not at owned storage for tool fetch"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                let Some(tool) = storage_inventory.get_by_id(fetch_target.item_id) else {
+                    commands.entity(*actor).insert(BlockedWork {
+                        reason: missing_tool_reason,
+                    });
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
+                if !tool.is_gather_tool_for_attr(&fetch_target.required_attr) {
+                    commands.entity(*actor).insert(BlockedWork {
+                        reason: missing_tool_reason,
+                    });
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                Inventory::transfer(
+                    fetch_target.item_id,
+                    &mut storage_inventory,
+                    &mut villager_inventory,
+                );
+                villager_inventory.auto_equip_best_tool_for_res_type(&fetch_target.res_type);
+
+                if !villager_inventory.has_equipped_tool_for_attr(&fetch_target.required_attr) {
+                    commands.entity(*actor).insert(BlockedWork {
+                        reason: missing_tool_reason,
+                    });
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                let Ok((order, mut active_task)) = villager_query.get_mut(*actor) else {
+                    commands.entity(*actor).remove::<ToolFetchTarget>();
+                    commands.entity(*actor).remove::<BlockedWork>();
+                    *state = ActionState::Success;
+                    continue;
+                };
+
+                if let Order::Gather { pos, .. } = order {
+                    commands.entity(*actor).insert(Destination { pos: *pos });
+                }
+
+                commands.entity(*actor).remove::<ToolFetchTarget>();
+                commands.entity(*actor).remove::<BlockedWork>();
+                ActiveTask::set_if_changed(
+                    &mut active_task,
+                    ActiveTask::get_activity_from_res_type(fetch_target.res_type.clone()),
+                );
+
+                *state = ActionState::Success;
+            }
+            ActionState::Cancelled => {
+                *state = ActionState::Failure;
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn process_order_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -1307,7 +1757,16 @@ pub fn process_order_system(
         mut query,
         last_combat_tick_query,
     ): (
-        Query<(&Id, &Order, Option<&Assignment>, Option<&Target>), With<SubclassVillager>>,
+        Query<
+            (
+                &Id,
+                &Order,
+                Option<&Assignment>,
+                Option<&Target>,
+                &Inventory,
+            ),
+            With<SubclassVillager>,
+        >,
         Query<(&Name, &Template, &Inventory)>,
         Query<&mut ActiveTask>,
         Query<&mut State>,
@@ -1321,8 +1780,13 @@ pub fn process_order_system(
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
-                let Ok((villager_id, villager_order, villager_assignment, villager_target)) =
-                    villager_query.get(*actor)
+                let Ok((
+                    villager_id,
+                    villager_order,
+                    villager_assignment,
+                    villager_target,
+                    villager_inventory,
+                )) = villager_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_debug!(
@@ -1400,6 +1864,22 @@ pub fn process_order_system(
                         storage_pos: _,
                         storage_id: _,
                     } => {
+                        if let Some(required_attr) = item::required_tool_attr_for_res_type(res_type)
+                        {
+                            if !villager_inventory.has_equipped_tool_for_attr(&required_attr) {
+                                commands.entity(*actor).insert(BlockedWork {
+                                    reason: format!(
+                                        "Needs {} tool",
+                                        item::tool_attr_label(&required_attr)
+                                    ),
+                                });
+                                ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                                *state = ActionState::Failure;
+                                continue;
+                            }
+                        }
+
+                        commands.entity(*actor).remove::<BlockedWork>();
                         *villager_state = State::Gathering;
 
                         // Add Game Event to start work
@@ -4075,8 +4555,11 @@ pub fn unload_items_system(
                     continue;
                 }
 
-                // Transfer items to storage
-                Inventory::transfer_all_items(&mut villager_inventory, &mut storage_inventory);
+                // Equipped gear belongs to the villager, even during bulk unload.
+                Inventory::transfer_all_unequipped_items(
+                    &mut villager_inventory,
+                    &mut storage_inventory,
+                );
 
                 *state = ActionState::Success;
             }
@@ -4088,12 +4571,132 @@ pub fn unload_items_system(
     }
 }
 
+fn active_task_is_current_action(
+    active_task: &ActiveTask,
+    state: &State,
+    order: Option<&Order>,
+    inventory: &Inventory,
+    tool_fetch_target: Option<&ToolFetchTarget>,
+) -> bool {
+    match active_task {
+        ActiveTask::None | ActiveTask::Idle | ActiveTask::Unknown => false,
+        ActiveTask::MovingToGatherPos if tool_fetch_target.is_some() => false,
+        _ => {
+            if let Some(Order::Gather { res_type, .. }) = order {
+                let gather_task = ActiveTask::get_activity_from_res_type(res_type.clone());
+                if *active_task == gather_task {
+                    return gather_active_task_for_display(
+                        state,
+                        res_type,
+                        inventory,
+                        None,
+                        tool_fetch_target,
+                    )
+                    .map(|task| task == *active_task)
+                    .unwrap_or(false);
+                }
+            }
+
+            true
+        }
+    }
+}
+
+pub fn villager_activity_text(
+    active_task: &ActiveTask,
+    state: &State,
+    order: Option<&Order>,
+    inventory: &Inventory,
+    blocked_work: Option<&BlockedWork>,
+    tool_fetch_target: Option<&ToolFetchTarget>,
+) -> String {
+    if active_task_is_current_action(active_task, state, order, inventory, tool_fetch_target) {
+        return active_task.to_string();
+    }
+
+    if let Some(tool_fetch_target) = tool_fetch_target {
+        return format!(
+            "Fetching {} tool",
+            item::tool_attr_label(&tool_fetch_target.required_attr)
+        );
+    }
+
+    if let Some(blocked_work) = blocked_work {
+        return blocked_work.reason.clone();
+    }
+
+    if let Some(Order::Gather { res_type, .. }) = order {
+        let gather_task = ActiveTask::get_activity_from_res_type(res_type.clone());
+        if *active_task == gather_task {
+            return ActiveTask::Unknown.to_string();
+        }
+    }
+
+    active_task.to_string()
+}
+
 pub fn activity_update_system(
     clients: Res<Clients>,
     active_infos: Res<ActiveInfos>,
-    query: Query<(&Id, &ActiveTask), (With<SubclassVillager>, Changed<ActiveTask>)>,
+    changed_query: Query<
+        (
+            Entity,
+            &Id,
+            &ActiveTask,
+            &State,
+            Option<&Order>,
+            &Inventory,
+            Option<&BlockedWork>,
+            Option<&ToolFetchTarget>,
+        ),
+        (
+            With<SubclassVillager>,
+            Or<(
+                Changed<ActiveTask>,
+                Changed<State>,
+                Changed<Order>,
+                Changed<Inventory>,
+                Changed<BlockedWork>,
+                Changed<ToolFetchTarget>,
+            )>,
+        ),
+    >,
+    query: Query<
+        (
+            &Id,
+            &ActiveTask,
+            &State,
+            Option<&Order>,
+            &Inventory,
+            Option<&BlockedWork>,
+            Option<&ToolFetchTarget>,
+        ),
+        With<SubclassVillager>,
+    >,
+    mut removed_blocked_work: RemovedComponents<BlockedWork>,
+    mut removed_tool_fetch_target: RemovedComponents<ToolFetchTarget>,
 ) {
-    for (id, active_task) in query.iter() {
+    let mut changed_entities = HashSet::new();
+
+    for (entity, _, _, _, _, _, _, _) in changed_query.iter() {
+        changed_entities.insert(entity);
+    }
+
+    for entity in removed_blocked_work.read() {
+        changed_entities.insert(entity);
+    }
+
+    for entity in removed_tool_fetch_target.read() {
+        changed_entities.insert(entity);
+    }
+
+    for entity in changed_entities {
+        let Ok((id, active_task, state, order, inventory, blocked_work, tool_fetch_target)) =
+            query.get(entity)
+        else {
+            continue;
+        };
+
         let Some(active_info_players) = active_infos.get(&(id.0, ActiveInfoType::Obj)) else {
             continue;
         };
@@ -4101,7 +4704,14 @@ pub fn activity_update_system(
         for player_id in active_info_players {
             let response_packet = ResponsePacket::InfoActivityUpdate {
                 id: id.0,
-                activity: active_task.to_string(),
+                activity: villager_activity_text(
+                    active_task,
+                    state,
+                    order,
+                    inventory,
+                    blocked_work,
+                    tool_fetch_target,
+                ),
             };
 
             debug!("Activity sending to client {:?}", response_packet);
@@ -4346,23 +4956,32 @@ pub fn active_task_system(
         Query<(Entity, &mut ActiveTask), With<SubclassVillager>>,
         Query<&ActiveTask, With<SubclassVillager>>,
     )>,
-    order_query: Query<(&State, &Order), With<SubclassVillager>>,
+    order_query: Query<
+        (
+            &State,
+            &Order,
+            &Inventory,
+            Option<&BlockedWork>,
+            Option<&ToolFetchTarget>,
+        ),
+        With<SubclassVillager>,
+    >,
     actions: Query<ActiveTaskActionQuery>,
 ) {
-    // Best task per villager: (rank, task)
-    let mut best: HashMap<Entity, (i32, ActiveTask)> = HashMap::new();
+    // Best task per villager: (task priority, action state priority, deterministic tiebreaker, task)
+    let mut best: HashMap<Entity, (i32, i32, i32, ActiveTask)> = HashMap::new();
 
     for action in &actions {
         let actor = action.actor.0;
 
         // Inline ranking: Executing > Requested > everything else
-        let rank = match *action.state {
+        let state_rank = match *action.state {
             ActionState::Executing => 2,
             ActionState::Requested => 1,
             _ => 0,
         };
 
-        if rank == 0 {
+        if state_rank == 0 {
             continue;
         }
 
@@ -4377,16 +4996,21 @@ pub fn active_task_system(
             continue;
         };
 
+        let priority = active_task_priority(&task);
+        let tiebreaker = active_task_tiebreaker(&task);
+
         match best.get(&actor) {
-            Some((best_rank, _)) if *best_rank >= rank => {}
+            Some((best_priority, best_state_rank, best_tiebreaker, _))
+                if (*best_priority, *best_state_rank, *best_tiebreaker)
+                    >= (priority, state_rank, tiebreaker) => {}
             _ => {
-                best.insert(actor, (rank, task));
+                best.insert(actor, (priority, state_rank, tiebreaker, task));
             }
         }
     }
 
     for (villager_entity, mut active_task) in &mut villager_queries.p0() {
-        if let Some((_rank, next_task)) = best.remove(&villager_entity) {
+        if let Some((_, _, _, next_task)) = best.remove(&villager_entity) {
             let previous_task = (*active_task).clone();
             if ActiveTask::set_if_changed(&mut active_task, next_task.clone()) {
                 debug!(

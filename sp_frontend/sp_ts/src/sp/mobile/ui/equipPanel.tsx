@@ -23,6 +23,11 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
     return (this.props.equipData.items || []).find(item => item.id == this.state.selectedItemId);
   }
 
+  isVillager() {
+    const objState = Global.objectStates[this.props.equipData.id];
+    return objState && objState.subclass == 'villager';
+  }
+
   handleSelect(eventData) {
     Global.selectedItemOwnerId = eventData.ownerId;
     Global.selectedItemId = eventData.itemId;
@@ -31,6 +36,8 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
   }
 
   handleEquipClick() {
+    if (this.isVillager()) return;
+
     const selectedItem = this.selectedItem();
     if (!selectedItem) return;
 
@@ -158,6 +165,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
   }
 
   render() {
+    const isVillager = this.isVillager();
     const items = this.props.equipData.items || [];
     const selectedItem = this.selectedItem();
     const slots = ['Helm', 'Shoulder', 'Chest', 'Pants', 'Boots', 'Bracers', 'Main Hand', 'Off Hand'];
@@ -187,7 +195,7 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
 
     const footerStyle: React.CSSProperties = {
       display: 'grid',
-      gridTemplateColumns: '1fr 1fr',
+      gridTemplateColumns: isVillager ? '1fr' : '1fr 1fr',
       gap: '8px',
     };
 
@@ -208,9 +216,10 @@ export default class EquipPanel extends React.Component<EquipPanelProps, any> {
         title="Equipment"
         footer={
           <div style={footerStyle}>
-            <button type="button" style={footerButtonStyle} disabled={!selectedItem} onClick={this.handleEquipClick}>
-              {selectedItem && selectedItem.equipped ? 'Unequip' : 'Equip'}
-            </button>
+            {!isVillager &&
+              <button type="button" style={footerButtonStyle} disabled={!selectedItem} onClick={this.handleEquipClick}>
+                {selectedItem && selectedItem.equipped ? 'Unequip' : 'Equip'}
+              </button>}
             <button type="button" style={footerButtonStyle} disabled={!selectedItem} onClick={this.handleItemInfoClick}>
               Info
             </button>

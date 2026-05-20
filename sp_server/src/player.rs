@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::common::{Heat, Hunger, Idle, Thirst, Tired, Transport};
+use crate::common::{Destination, Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
 use crate::farm::Crops;
@@ -47,6 +47,7 @@ use crate::structure::{self, Plans, Structure, WALL};
 use crate::templates::{ObjTemplate, ResReq, Templates};
 use crate::terrain_feature::{TerrainFeature, TerrainFeatures};
 use crate::trade::{Prices, WantedItem};
+use crate::villager::{villager_activity_text, BlockedWork, ToolFetchTarget};
 use crate::villager_util::{self, VillagerUtil};
 use crate::world::time_of_day_vision_mod;
 use crate::{player_setup, AppState};
@@ -563,6 +564,10 @@ struct ItemTransferQuery {
     state: &'static State,
     misc: &'static Misc,
     inventory: &'static mut Inventory,
+    order: Option<&'static Order>,
+    active_task: Option<&'static mut ActiveTask>,
+    blocked_work: Option<&'static BlockedWork>,
+    tool_fetch_target: Option<&'static ToolFetchTarget>,
 }
 
 #[derive(QueryData)]
@@ -3568,7 +3573,7 @@ fn info_villager_system(
     stats_query: Query<&Stats>,
     attrs_query: Query<(&Thirst, &Hunger, &Tired, &Heat)>,
     order_query: Query<&Order>,
-    active_task_query: Query<&ActiveTask>,
+    activity_query: Query<(&ActiveTask, Option<&BlockedWork>, Option<&ToolFetchTarget>)>,
     assignment_query: Query<&Assignment>,
     personality_query: Query<&Personality>,
 ) {
@@ -3601,6 +3606,7 @@ fn info_villager_system(
 
     let morale = None;
     let mut order: Option<String> = None;
+    let current_order = order_query.get(obj.entity).ok();
 
     let total_weight = Some(obj.inventory.get_total_weight());
     let capacity = Some(Obj::get_capacity(
@@ -3652,12 +3658,19 @@ fn info_villager_system(
         return;
     };
 
-    if let Ok(current_order) = order_query.get(obj.entity) {
+    if let Some(current_order) = current_order {
         order = Some(current_order.to_string());
     }
 
-    if let Ok(active_task) = active_task_query.get(obj.entity) {
-        activity = Some(active_task.to_string());
+    if let Ok((active_task, blocked_work, tool_fetch_target)) = activity_query.get(obj.entity) {
+        activity = Some(villager_activity_text(
+            active_task,
+            obj.state,
+            current_order,
+            obj.inventory,
+            blocked_work,
+            tool_fetch_target,
+        ));
     }
 
     let response_packet = ResponsePacket::InfoVillager {
@@ -4992,6 +5005,7 @@ fn info_item_system(
 }
 
 fn item_transfer_system(
+    mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
     mut ids: ResMut<Ids>,
@@ -5159,7 +5173,12 @@ fn item_transfer_system(
 
                     // Find first matching req item (substitution-aware)
                     let matching_req_item = req_items.iter_mut().find(|r| {
-                        crate::item::req_matches_build(&r.req_type, &item.name, &item.class, &item.subclass)
+                        crate::item::req_matches_build(
+                            &r.req_type,
+                            &item.name,
+                            &item.class,
+                            &item.subclass,
+                        )
                     });
 
                     if let Some(matching_req_item) = matching_req_item {
@@ -5394,6 +5413,54 @@ fn item_transfer_system(
                     info!("Target inventory: {:?}", target.inventory);
                     Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
 
+                    let mut target_items_updated: Vec<Item> = Vec::new();
+                    if owner.subclass.is_hero()
+                        && target.subclass.is_villager()
+                        && target.player_id.0 == *player_id
+                    {
+                        let gather_context = target.order.and_then(|order| match order {
+                            Order::Gather { res_type, pos, .. } => Some((res_type.as_str(), *pos)),
+                            _ => None,
+                        });
+                        let gather_res_type = gather_context.map(|(res_type, _pos)| res_type);
+
+                        target_items_updated = target
+                            .inventory
+                            .auto_equip_item_for_context(item.id, gather_res_type);
+
+                        let transferred_item_satisfies_block = gather_res_type
+                            .and_then(item::required_tool_attr_for_res_type)
+                            .and_then(|required_attr| {
+                                target.inventory.get_by_id(item.id).map(|transferred_item| {
+                                    transferred_item.equipped
+                                        && transferred_item.is_gather_tool_for_attr(&required_attr)
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if transferred_item_satisfies_block
+                            && (target.blocked_work.is_some() || target.tool_fetch_target.is_some())
+                        {
+                            commands.entity(target.entity).remove::<BlockedWork>();
+                            commands.entity(target.entity).remove::<ToolFetchTarget>();
+
+                            if let Some((_res_type, gather_pos)) = gather_context {
+                                commands
+                                    .entity(target.entity)
+                                    .insert(Destination { pos: gather_pos });
+                            }
+
+                            if let (Some(order), Some(active_task)) =
+                                (target.order, target.active_task.as_mut())
+                            {
+                                ActiveTask::set_if_changed(
+                                    active_task,
+                                    VillagerUtil::order_to_activity(order),
+                                );
+                            }
+                        }
+                    }
+
                     info!("Owner inventory after transfer: {:?}", owner.inventory);
                     info!("Target inventory after transfer: {:?}", target.inventory);
 
@@ -5435,6 +5502,16 @@ fn item_transfer_system(
                     };
 
                     send_to_client(*player_id, item_transfer_packet, &clients);
+
+                    if !target_items_updated.is_empty() {
+                        let item_update_packet: ResponsePacket = ResponsePacket::InfoItemsUpdate {
+                            id: target.id.0,
+                            items_updated: target.inventory.get_packet(),
+                            items_removed: Vec::new(),
+                        };
+
+                        send_to_client(*player_id, item_update_packet, &clients);
+                    }
                 }
             }
             PlayerEvent::InfoItemTransfer {

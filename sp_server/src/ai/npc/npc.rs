@@ -105,10 +105,12 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::constants::{
-        CLASS_STRUCTURE, CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_NPC, TICKS_PER_SEC,
+        CLASS_CORPSE, CLASS_STRUCTURE, CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_CORPSE,
+        SUBCLASS_NPC, TICKS_PER_SEC, URGENT_SCORE,
     };
     use crate::event::{EventExecuting, EventExecutingState};
     use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
+    use crate::obj::{Misc, Name};
     use crate::templates::ObjTemplate;
 
     fn test_stats() -> Stats {
@@ -205,6 +207,77 @@ mod tests {
             owner,
             items: Vec::new(),
         }
+    }
+
+    fn spawn_scripted_corpse_hunt_scorer(
+        app: &mut App,
+        npc_pos: Position,
+        corpse_anchor: Position,
+    ) -> (Entity, Entity) {
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
+                ScriptedCorpseHunt {
+                    corpse_anchor,
+                    search_radius: 5,
+                },
+                SubclassNPC,
+            ))
+            .id();
+
+        let scorer_entity = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&ScriptedCorpseHuntScorer, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+
+        (npc_entity, scorer_entity)
+    }
+
+    fn spawn_corpse_hunt_target(
+        app: &mut App,
+        id: i32,
+        pos: Position,
+        class: &str,
+        template: &str,
+    ) {
+        let subclass = if class == CLASS_CORPSE {
+            SUBCLASS_CORPSE
+        } else {
+            SUBCLASS_NPC
+        };
+
+        app.world_mut().spawn((
+            Id(id),
+            PlayerId(1),
+            pos,
+            Name(template.to_string()),
+            Template(template.to_string()),
+            Class(class.to_string()),
+            Subclass::from_str(subclass),
+            State::Dead,
+            Misc {
+                image: String::new(),
+                hsl: Vec::new(),
+                groups: Vec::new(),
+            },
+            empty_inventory(id),
+        ));
+    }
+
+    fn setup_scripted_corpse_hunt_app() -> App {
+        let mut app = App::new();
+        app.add_systems(Update, scripted_corpse_hunt_scorer_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(flat_test_map());
+        app
     }
 
     fn wall_stats(hp: i32) -> Stats {
@@ -699,6 +772,84 @@ mod tests {
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), NORMAL_SCORE / 100.0);
     }
+
+    #[test]
+    fn scripted_corpse_hunt_selects_nearest_shipwreck_human_corpse() {
+        let mut app = setup_scripted_corpse_hunt_app();
+        let corpse_anchor = Position { x: 12, y: 10 };
+        let (npc_entity, scorer_entity) =
+            spawn_scripted_corpse_hunt_scorer(&mut app, Position { x: 10, y: 10 }, corpse_anchor);
+
+        spawn_corpse_hunt_target(
+            &mut app,
+            1,
+            Position { x: 13, y: 10 },
+            CLASS_CORPSE,
+            "Human Corpse",
+        );
+        spawn_corpse_hunt_target(
+            &mut app,
+            2,
+            Position { x: 11, y: 10 },
+            CLASS_CORPSE,
+            "Human Corpse",
+        );
+        spawn_corpse_hunt_target(
+            &mut app,
+            3,
+            Position { x: 10, y: 11 },
+            CLASS_UNIT,
+            "Human Corpse",
+        );
+        spawn_corpse_hunt_target(
+            &mut app,
+            4,
+            Position { x: 30, y: 30 },
+            CLASS_CORPSE,
+            "Human Corpse",
+        );
+
+        app.update();
+
+        let target = app.world().entity(npc_entity).get::<TaskTarget>().unwrap();
+        assert_eq!(target.target, 2);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), URGENT_SCORE / 100.0);
+    }
+
+    #[test]
+    fn scripted_corpse_hunt_clears_target_when_no_shipwreck_corpse_exists() {
+        let mut app = setup_scripted_corpse_hunt_app();
+        let (npc_entity, scorer_entity) = spawn_scripted_corpse_hunt_scorer(
+            &mut app,
+            Position { x: 10, y: 10 },
+            Position { x: 12, y: 10 },
+        );
+
+        spawn_corpse_hunt_target(
+            &mut app,
+            1,
+            Position { x: 13, y: 10 },
+            CLASS_UNIT,
+            "Human Corpse",
+        );
+        spawn_corpse_hunt_target(
+            &mut app,
+            2,
+            Position { x: 11, y: 10 },
+            CLASS_CORPSE,
+            "Wolf Corpse",
+        );
+
+        app.update();
+
+        let target = app.world().entity(npc_entity).get::<TaskTarget>().unwrap();
+        assert_eq!(target.target, NO_TARGET);
+
+        let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+        assert_eq!(score.get(), 0.0);
+    }
 }
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
@@ -749,6 +900,15 @@ pub struct FleeToHome;
 // Corpse targets for Necromancer
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct VisibleCorpseScorer;
+
+#[derive(Debug, Clone, Component, ScorerBuilder)]
+pub struct ScriptedCorpseHuntScorer;
+
+#[derive(Debug, Clone, Component)]
+pub struct ScriptedCorpseHunt {
+    pub corpse_anchor: Position,
+    pub search_radius: u32,
+}
 
 // Corpse targets for Necromancer
 #[derive(Debug, Clone, Component, ScorerBuilder)]
@@ -828,6 +988,7 @@ impl Plugin for NPCPlugin {
                 rat_blocked_wander_scorer_system.in_set(BigBrainSet::Scorers),
                 wolf_blocked_hide_scorer_system.in_set(BigBrainSet::Scorers),
                 no_target_scorer_system.in_set(BigBrainSet::Scorers),
+                scripted_corpse_hunt_scorer_system.in_set(BigBrainSet::Scorers),
                 nearby_corpses_scorer_system.in_set(BigBrainSet::Scorers),
                 flee_scorer_system.in_set(BigBrainSet::Scorers),
                 spoil_target_scorer_system.in_set(BigBrainSet::Scorers),
@@ -1696,6 +1857,112 @@ pub fn nearby_corpses_scorer_system(
             }
         }
     }
+}
+
+pub fn scripted_corpse_hunt_scorer_system(
+    game_tick: Res<GameTick>,
+    map: Res<Map>,
+    mut npc_query: Query<
+        (
+            &PlayerId,
+            &Position,
+            &mut TaskTarget,
+            &EventExecuting,
+            &ScriptedCorpseHunt,
+        ),
+        With<SubclassNPC>,
+    >,
+    target_query: Query<ObjQuery>,
+    blocking_query: Query<BaseQuery>,
+    mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ScriptedCorpseHuntScorer>>,
+) {
+    if game_tick.0 % TICKS_PER_SEC != 0 {
+        return;
+    }
+
+    for (Actor(actor), mut score, _span) in &mut query {
+        let Ok((npc_player_id, npc_pos, mut npc_task_target, event_executing, corpse_hunt)) =
+            npc_query.get_mut(*actor)
+        else {
+            score.set(0.0);
+            continue;
+        };
+
+        if event_executing.state == EventExecutingState::Executing {
+            score.set(0.0);
+            continue;
+        }
+
+        let blocking_list = Obj::blocking_list_basequery(npc_player_id.0, &blocking_query);
+        let mut selected_corpse_id = NO_TARGET;
+        let mut selected_distance = u32::MAX;
+
+        for target in target_query.iter() {
+            if target.class.0.as_str() != CLASS_CORPSE
+                || target.template.0.as_str() != "Human Corpse"
+            {
+                continue;
+            }
+
+            if Map::dist(corpse_hunt.corpse_anchor, *target.pos) > corpse_hunt.search_radius {
+                continue;
+            }
+
+            let corpse_distance = Map::dist(*npc_pos, *target.pos);
+            if corpse_distance > selected_distance {
+                continue;
+            }
+
+            if !scripted_corpse_hunt_target_reachable(
+                *npc_pos,
+                *target.pos,
+                npc_player_id.0,
+                &map,
+                blocking_list.clone(),
+            ) {
+                continue;
+            }
+
+            if corpse_distance < selected_distance || target.id.0 < selected_corpse_id {
+                selected_distance = corpse_distance;
+                selected_corpse_id = target.id.0;
+            }
+        }
+
+        if selected_corpse_id != NO_TARGET {
+            npc_task_target.target = selected_corpse_id;
+            score.set(URGENT_SCORE / 100.0);
+        } else {
+            npc_task_target.target = NO_TARGET;
+            score.set(0.0);
+        }
+    }
+}
+
+fn scripted_corpse_hunt_target_reachable(
+    npc_pos: Position,
+    corpse_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: Vec<Blocker>,
+) -> bool {
+    if npc_pos == corpse_pos {
+        return true;
+    }
+
+    Map::find_fast_path(
+        npc_pos,
+        corpse_pos,
+        map,
+        npc_player_id,
+        blocking_list,
+        true,
+        false,
+        false,
+        true,
+        true,
+    )
+    .is_some()
 }
 
 pub fn flee_scorer_system(

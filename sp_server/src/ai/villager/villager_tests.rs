@@ -3,9 +3,11 @@ use bevy::prelude::App;
 use big_brain::prelude::Score;
 use big_brain::scorers::spawn_scorer;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::constants::TICKS_PER_SEC;
-use crate::game::Fortified;
+use crate::game::{Client, Fortified};
+use crate::network::ResponsePacket;
 use crate::obj::ActiveTask;
 
 /// Macro to create a test app with a specific system and standard resources
@@ -634,7 +636,7 @@ fn minimal_templates() -> Templates {
 use crate::effect::{Effect, Effects};
 use crate::event::{GameEvents, MapEvents};
 use crate::ids::Ids;
-use crate::item::{Item, Slot};
+use crate::item::{AttrKey, AttrVal, Item, Slot};
 use crate::map::{MoistureType, TemperatureType, TileInfo, TileType, HEIGHT, WIDTH};
 use crate::skill::Skills;
 use crate::templates::EffectTemplate;
@@ -735,6 +737,12 @@ impl ActionTestVillagerBuilder {
 
     pub fn with_equipped_weapon(mut self) -> Self {
         self.inventory_items.push(create_weapon_item(self.id));
+        self
+    }
+
+    pub fn with_equipped_mining_tool(mut self) -> Self {
+        self.inventory_items
+            .push(create_mining_tool_item(103, self.id, true, 2.0));
         self
     }
 
@@ -970,6 +978,30 @@ fn create_weapon_item(owner: i32) -> Item {
     }
 }
 
+fn create_mining_tool_item(id: i32, owner: i32, equipped: bool, mining: f32) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(AttrKey::Mining, AttrVal::Num(mining));
+    attrs.insert(AttrKey::Damage, AttrVal::Num(1.0));
+
+    Item {
+        id,
+        owner,
+        name: "Training Pick Axe".to_string(),
+        quantity: 1,
+        durability: None,
+        class: TOOL.to_string(),
+        subclass: "Pick Axe".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "pickaxe.png".to_string(),
+        weight: 2.0,
+        equipped,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
 /// Macro to create a test app with action system and all required resources
 macro_rules! setup_action_test_app {
     ($system:expr) => {{
@@ -1176,6 +1208,7 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
     let pos = Position { x: 5, y: 5 };
     let villager = ActionTestVillagerBuilder::new()
         .with_position(pos)
+        .with_equipped_mining_tool()
         .spawn(app.world_mut());
     app.world_mut().entity_mut(villager).insert((
         Subclass::Villager,
@@ -1239,6 +1272,310 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
             res_type
         } if *gatherer_id == 1 && res_type == ORE
     )));
+}
+
+#[test]
+fn plant_gather_order_does_not_require_tool() {
+    let mut app = App::new();
+    app.add_systems(Update, (set_order_destination_system, process_order_system));
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+    app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_templates());
+
+    let pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Subclass::Villager,
+        Template("Villager".to_string()),
+        combat_stats(10, 10, 1, 1),
+        Skills::new(),
+        Order::Gather {
+            res_type: PLANT.to_string(),
+            pos,
+            storage_pos: None,
+            storage_id: None,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert!(app.world().entity(villager).get::<BlockedWork>().is_none());
+
+    let process_order_action = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(process_order_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Executing
+    );
+
+    let game_events = app.world().resource::<GameEvents>();
+    assert_eq!(game_events.len(), 1);
+    assert!(game_events.values().any(|event| matches!(
+        &event.event_type,
+        GameEventType::GatherEvent {
+            gatherer_id,
+            res_type
+        } if *gatherer_id == 1 && res_type == PLANT
+    )));
+}
+
+#[test]
+fn gather_order_without_tool_fetches_matching_storage_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+    app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(open_test_map());
+
+    let gather_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(gather_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Order::Gather {
+        res_type: ORE.to_string(),
+        pos: gather_pos,
+        storage_pos: None,
+        storage_id: None,
+    });
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_mining_tool_item(200, 2, false, 3.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<ToolFetchTarget>()
+        .is_some());
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+
+    let villager_inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    let fetched_tool = villager_inventory.get_by_id(200).unwrap();
+    assert_eq!(fetched_tool.owner, 1);
+    assert!(fetched_tool.equipped);
+    assert!(villager_inventory.has_equipped_tool_for_attr(&AttrKey::Mining));
+
+    let storage_inventory = app.world().entity(storage).get::<Inventory>().unwrap();
+    assert!(storage_inventory.get_by_id(200).is_none());
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<ToolFetchTarget>()
+        .is_none());
+    assert!(app.world().entity(villager).get::<BlockedWork>().is_none());
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        gather_pos
+    );
+}
+
+#[test]
+fn unload_items_keeps_equipped_tool_on_villager() {
+    let mut app = setup_action_test_app!(unload_items_system);
+    let pos = Position { x: 5, y: 5 };
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(pos)
+        .with_equipped_mining_tool()
+        .spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Storage { id: 2 });
+
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Inventory>()
+        .unwrap()
+        .items
+        .push(Item {
+            id: 300,
+            owner: 1,
+            name: "Copper Ore".to_string(),
+            quantity: 4,
+            durability: None,
+            class: ORE.to_string(),
+            subclass: "Ore".to_string(),
+            slot: None,
+            image: "copperore.png".to_string(),
+            weight: 1.0,
+            equipped: false,
+            experiment: None,
+            start_time: 0,
+            attrs: HashMap::new(),
+            produces: Vec::new(),
+        });
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            pos,
+            Inventory {
+                owner: 2,
+                items: Vec::new(),
+            },
+        ))
+        .id();
+
+    register_test_obj(&mut app, 1, 1, villager);
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let unload_action = spawn_action_as_requested(&mut app, &UnloadItems, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(unload_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+
+    let villager_inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    let pickaxe = villager_inventory.get_by_id(103).unwrap();
+    assert_eq!(pickaxe.owner, 1);
+    assert!(pickaxe.equipped);
+    assert!(villager_inventory.get_by_id(300).is_none());
+
+    let storage_inventory = app.world().entity(storage).get::<Inventory>().unwrap();
+    assert!(storage_inventory.get_by_id(103).is_none());
+    let ore = storage_inventory.get_by_id(300).unwrap();
+    assert_eq!(ore.owner, 2);
+    assert!(!ore.equipped);
+}
+
+#[test]
+fn gather_order_without_available_tool_enters_blocked_work() {
+    let mut app = App::new();
+    app.add_systems(Update, set_order_destination_system);
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+    app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(open_test_map());
+
+    let pos = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Order::Gather {
+        res_type: ORE.to_string(),
+        pos,
+        storage_pos: None,
+        storage_id: None,
+    });
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Failure
+    );
+    let blocked = app.world().entity(villager).get::<BlockedWork>().unwrap();
+    assert_eq!(blocked.reason, "Needs Mining tool");
 }
 
 #[test]
@@ -2025,7 +2362,9 @@ fn active_task_reports_ore_gather_order_as_mining() {
     let mut app = App::new();
     app.add_systems(Update, active_task_system);
 
-    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    let villager = ActionTestVillagerBuilder::new()
+        .with_equipped_mining_tool()
+        .spawn(app.world_mut());
     app.world_mut().entity_mut(villager).insert(Order::Gather {
         res_type: ORE.to_string(),
         pos: Position { x: 0, y: 0 },
@@ -2050,6 +2389,101 @@ fn active_task_reports_ore_gather_order_as_mining() {
 }
 
 #[test]
+fn active_task_does_not_report_ore_gather_as_mining_without_tool() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Unknown)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::Gather {
+            res_type: ORE.to_string(),
+            pos: Position { x: 0, y: 0 },
+            storage_pos: None,
+            storage_id: None,
+        },
+        BlockedWork {
+            reason: "Needs Mining tool".to_string(),
+        },
+    ));
+
+    let action_entity = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Unknown,
+        "Expected missing mining tool to keep gather activity blocked"
+    );
+}
+
+#[test]
+fn active_task_reports_tool_fetch_instead_of_mining_without_tool() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Unknown)
+        .spawn(app.world_mut());
+    let display_order = Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let tool_fetch_target = ToolFetchTarget {
+        storage_id: 2,
+        item_id: 3,
+        res_type: ORE.to_string(),
+        required_attr: AttrKey::Mining,
+    };
+    app.world_mut().entity_mut(villager).insert((
+        Order::Gather {
+            res_type: ORE.to_string(),
+            pos: Position { x: 0, y: 0 },
+            storage_pos: None,
+            storage_id: None,
+        },
+        tool_fetch_target.clone(),
+    ));
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    *app.world_mut()
+        .entity_mut(action_entity)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::MovingToGatherPos,
+        "Expected tool fetch to report movement/fetch status instead of Mining"
+    );
+
+    let inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    assert_eq!(
+        villager_activity_text(
+            active_task,
+            &State::None,
+            Some(&display_order),
+            inventory,
+            None,
+            Some(&tool_fetch_target),
+        ),
+        "Fetching Mining tool"
+    );
+}
+
+#[test]
 fn active_task_reports_set_flee_destination_as_fleeing() {
     let mut app = App::new();
     app.add_systems(Update, active_task_system);
@@ -2068,6 +2502,224 @@ fn active_task_reports_set_flee_destination_as_fleeing() {
         *active_task,
         ActiveTask::Fleeing,
         "Expected selecting a flee destination to report Fleeing"
+    );
+}
+
+#[test]
+fn active_task_prefers_fleeing_over_executing_mining() {
+    let mut app = App::new();
+    app.add_systems(Update, active_task_system);
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    });
+
+    let mining_action = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
+    *app.world_mut()
+        .entity_mut(mining_action)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Executing;
+
+    spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+
+    let active_task = app.world().entity(villager).get::<ActiveTask>().unwrap();
+    assert_eq!(
+        *active_task,
+        ActiveTask::Fleeing,
+        "Expected flee action priority to beat executing mining"
+    );
+}
+
+#[test]
+fn activity_text_keeps_missing_tool_gather_blocked_over_speculative_mining() {
+    let blocked_work = BlockedWork {
+        reason: "Needs Mining tool".to_string(),
+    };
+    let order = Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Mining,
+            &State::None,
+            Some(&order),
+            &inventory,
+            Some(&blocked_work),
+            None,
+        ),
+        "Needs Mining tool"
+    );
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Fleeing,
+            &State::None,
+            Some(&order),
+            &inventory,
+            Some(&blocked_work),
+            None,
+        ),
+        "Fleeing"
+    );
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Unknown,
+            &State::None,
+            Some(&order),
+            &inventory,
+            Some(&blocked_work),
+            None,
+        ),
+        "Needs Mining tool"
+    );
+}
+
+#[test]
+fn activity_text_displays_mining_when_tool_equipped_or_gathering() {
+    let order = Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let equipped_inventory = Inventory {
+        owner: 1,
+        items: vec![create_mining_tool_item(103, 1, true, 2.0)],
+    };
+    let empty_inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    let blocked_work = BlockedWork {
+        reason: "Needs Mining tool".to_string(),
+    };
+
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Mining,
+            &State::None,
+            Some(&order),
+            &equipped_inventory,
+            Some(&blocked_work),
+            None,
+        ),
+        "Mining"
+    );
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Mining,
+            &State::Gathering,
+            Some(&order),
+            &empty_inventory,
+            Some(&blocked_work),
+            None,
+        ),
+        "Mining"
+    );
+}
+
+#[test]
+fn activity_text_prefers_fleeing_and_fetching_over_tool_fetch() {
+    let tool_fetch_target = ToolFetchTarget {
+        storage_id: 2,
+        item_id: 3,
+        res_type: ORE.to_string(),
+        required_attr: AttrKey::Mining,
+    };
+    let order = Order::Gather {
+        res_type: ORE.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Fleeing,
+            &State::None,
+            Some(&order),
+            &inventory,
+            None,
+            Some(&tool_fetch_target),
+        ),
+        "Fleeing"
+    );
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::MovingToGatherPos,
+            &State::None,
+            Some(&order),
+            &inventory,
+            None,
+            Some(&tool_fetch_target),
+        ),
+        "Fetching Mining tool"
+    );
+}
+
+#[test]
+fn activity_update_system_emits_when_blocked_work_is_removed() {
+    let mut app = App::new();
+    app.add_systems(Update, activity_update_system);
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let client_id = Uuid::new_v4();
+    let clients = Clients::default();
+    clients.lock().unwrap().insert(
+        client_id,
+        Client {
+            id: client_id,
+            player_id: 1,
+            sender,
+        },
+    );
+    app.world_mut().insert_resource(clients);
+
+    let mut active_infos = ActiveInfos(HashMap::new());
+    active_infos.add((1, ActiveInfoType::Obj), 1);
+    app.world_mut().insert_resource(active_infos);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_active_task(ActiveTask::Unknown)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert(BlockedWork {
+        reason: "Needs Mining tool".to_string(),
+    });
+
+    app.update();
+    while receiver.try_recv().is_ok() {}
+
+    app.world_mut().entity_mut(villager).remove::<BlockedWork>();
+    app.update();
+
+    let raw_packet = receiver
+        .try_recv()
+        .expect("Expected activity update after BlockedWork removal");
+    let packet: ResponsePacket = serde_json::from_str(&raw_packet).unwrap();
+
+    assert_eq!(
+        packet,
+        ResponsePacket::InfoActivityUpdate {
+            id: 1,
+            activity: "Unknown".to_string(),
+        }
     );
 }
 

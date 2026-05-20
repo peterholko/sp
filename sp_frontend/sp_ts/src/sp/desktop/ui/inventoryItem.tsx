@@ -59,7 +59,8 @@ export default class InventoryItem extends React.Component<InvItemProps, any> {
 
 
     return (
-      <div style={divStyle} onClick={this.props.handleSelect != null ? this.handleClick : null}>
+      <div style={divStyle}
+        onClick={(this.props.handleSelect != null && !this.props.disabled) ? this.handleClick : null}>
         <img src={'/static/art/items/' + this.props.image + '.png'}
             style={itemStyle}/>
         <span id="itemquantity" className={styles.itemquantity}>{quantityStr}</span>
@@ -68,4 +69,3 @@ export default class InventoryItem extends React.Component<InvItemProps, any> {
     );
   }
 }
-

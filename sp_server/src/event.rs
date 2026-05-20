@@ -514,7 +514,8 @@ pub enum GameEventType {
         pos: Position,
     },
     NecroEvent {
-        pos: Position,
+        spawn_anchor: Position,
+        corpse_anchor: Position,
         home: Position,
     },
     SpawnVillager {

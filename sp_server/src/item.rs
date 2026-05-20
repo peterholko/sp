@@ -14,7 +14,7 @@ use crate::templates::{ItemTemplate, ResReq, Templates};
 
 use crate::constants::CONTAINER;
 
-#[derive(Debug, Reflect, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Reflect, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttrKey {
     Damage,
     Defense,
@@ -203,7 +203,12 @@ pub const TIMBER: &str = "Timber";
 ///
 /// Used only for structure build/upgrade/upkeep checks. Recipe ingredient
 /// matching uses strict equality (no substitution) to preserve recipe intent.
-pub fn req_matches_build(req_type: &str, item_name: &str, item_class: &str, item_subclass: &str) -> bool {
+pub fn req_matches_build(
+    req_type: &str,
+    item_name: &str,
+    item_class: &str,
+    item_subclass: &str,
+) -> bool {
     if req_type == item_name || req_type == item_class || req_type == item_subclass {
         return true;
     }
@@ -211,6 +216,31 @@ pub fn req_matches_build(req_type: &str, item_name: &str, item_class: &str, item
         return true;
     }
     false
+}
+
+pub fn required_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
+    match res_type {
+        ORE => Some(AttrKey::Mining),
+        LOG => Some(AttrKey::Logging),
+        STONE => Some(AttrKey::Stonecutting),
+        constants::FISH => Some(AttrKey::Fishing),
+        constants::FOOD => Some(AttrKey::Farming),
+        constants::GAME_ANIMAL => Some(AttrKey::Hunting),
+        _ => None,
+    }
+}
+
+pub fn tool_attr_label(attr: &AttrKey) -> &'static str {
+    match attr {
+        AttrKey::Mining => "Mining",
+        AttrKey::Logging => "Logging",
+        AttrKey::Stonecutting => "Stonecutting",
+        AttrKey::Fishing => "Fishing",
+        AttrKey::Farming => "Farming",
+        AttrKey::Foraging => "Foraging",
+        AttrKey::Hunting => "Hunting",
+        _ => "Work",
+    }
 }
 
 pub const WEAPON: &str = "Weapon";
@@ -280,7 +310,7 @@ pub enum ExperimentItemType {
     Reagent,
 }
 
-#[derive(Debug, Reflect, Clone, PartialEq)]
+#[derive(Debug, Reflect, Clone, Copy, PartialEq)]
 pub enum Slot {
     Invalid,
     Helm,
@@ -365,6 +395,7 @@ impl Inventory {
                 } else {
                     // Update item owner
                     item_to_transfer.owner = target_inventory.owner;
+                    item_to_transfer.equipped = false;
 
                     target_inventory.items.push(item_to_transfer);
                     source_inventory.items.swap_remove(transfer_index);
@@ -376,6 +407,7 @@ impl Inventory {
                 // "Item not owned by player" because they look up the obj
                 // entity by `item.owner`.
                 item_to_transfer.owner = target_inventory.owner;
+                item_to_transfer.equipped = false;
 
                 target_inventory.items.push(item_to_transfer);
                 source_inventory.items.swap_remove(transfer_index);
@@ -435,6 +467,22 @@ impl Inventory {
         }
     }
 
+    pub fn transfer_all_unequipped_items(
+        source_inventory: &mut Inventory,
+        target_inventory: &mut Inventory,
+    ) {
+        let item_ids: Vec<i32> = source_inventory
+            .items
+            .iter()
+            .filter(|item| !item.equipped)
+            .map(|item| item.id)
+            .collect();
+
+        for item_id in item_ids {
+            Inventory::transfer(item_id, source_inventory, target_inventory);
+        }
+    }
+
     pub fn transfer_all_items_by_type(
         source_inventory: &mut Inventory,
         target_inventory: &mut Inventory,
@@ -460,7 +508,11 @@ impl Inventory {
             .items
             .iter()
             .filter(|item| {
-                item.class == ORE || item.class == LOG || item.class == STONE || item.class == HIDE
+                !item.equipped
+                    && (item.class == ORE
+                        || item.class == LOG
+                        || item.class == STONE
+                        || item.class == HIDE)
             })
             .map(|item| item.id)
             .collect();
@@ -485,7 +537,11 @@ impl Inventory {
             .items
             .iter()
             .filter(|item| {
-                item.class == ORE || item.class == LOG || item.class == STONE || item.class == HIDE
+                !item.equipped
+                    && (item.class == ORE
+                        || item.class == LOG
+                        || item.class == STONE
+                        || item.class == HIDE)
             })
             .map(|item| (item.id, item.quantity, item.weight))
             .collect();
@@ -1612,6 +1668,110 @@ impl Inventory {
         return None;
     }
 
+    pub fn get_equipped_by_slot(&self, slot: Slot) -> Option<Item> {
+        self.items
+            .iter()
+            .find(|item| item.equipped && item.slot == Some(slot))
+            .cloned()
+    }
+
+    pub fn has_equipped_tool_for_attr(&self, attr: &AttrKey) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.equipped && item.is_gather_tool_for_attr(attr))
+    }
+
+    pub fn best_tool_for_attr(&self, attr: &AttrKey) -> Option<Item> {
+        self.items
+            .iter()
+            .filter(|item| item.is_gather_tool_for_attr(attr))
+            .max_by(|a, b| {
+                let score_cmp = a
+                    .attr_num(attr)
+                    .partial_cmp(&b.attr_num(attr))
+                    .unwrap_or(std::cmp::Ordering::Equal);
+
+                if score_cmp == std::cmp::Ordering::Equal {
+                    b.id.cmp(&a.id)
+                } else {
+                    score_cmp
+                }
+            })
+            .cloned()
+    }
+
+    pub fn auto_equip_best_tool_for_attr(&mut self, attr: &AttrKey) -> Vec<Item> {
+        let Some(tool) = self.best_tool_for_attr(attr) else {
+            return Vec::new();
+        };
+
+        if self.should_equip_for_attr(&tool, attr) {
+            return self.equip(tool.id, tool.slot);
+        }
+
+        Vec::new()
+    }
+
+    pub fn auto_equip_best_tool_for_res_type(&mut self, res_type: &str) -> Vec<Item> {
+        let Some(attr) = required_tool_attr_for_res_type(res_type) else {
+            return Vec::new();
+        };
+
+        self.auto_equip_best_tool_for_attr(&attr)
+    }
+
+    pub fn auto_equip_item_for_context(
+        &mut self,
+        item_id: i32,
+        gather_res_type: Option<&str>,
+    ) -> Vec<Item> {
+        let Some(item) = self.get_by_id(item_id) else {
+            return Vec::new();
+        };
+
+        if item.equipped || item.slot.is_none() || item.class == TORCH {
+            return Vec::new();
+        }
+
+        let required_gather_attr = gather_res_type.and_then(required_tool_attr_for_res_type);
+
+        if let Some(required_attr) = required_gather_attr {
+            if self.should_equip_for_attr(&item, &required_attr) {
+                return self.equip(item.id, item.slot);
+            }
+        }
+
+        if item.class == ARMOR && self.should_equip_for_attr(&item, &AttrKey::Defense) {
+            return self.equip(item.id, item.slot);
+        }
+
+        if required_gather_attr.is_none()
+            && item.class == WEAPON
+            && self.should_equip_for_attr(&item, &AttrKey::Damage)
+        {
+            return self.equip(item.id, item.slot);
+        }
+
+        Vec::new()
+    }
+
+    fn should_equip_for_attr(&self, item: &Item, attr: &AttrKey) -> bool {
+        let Some(slot) = item.slot else {
+            return false;
+        };
+
+        let item_score = item.attr_num(attr);
+        if item_score <= 0.0 && *attr != AttrKey::Defense {
+            return false;
+        }
+
+        match self.get_equipped_by_slot(slot) {
+            None => true,
+            Some(equipped) if equipped.id == item.id => false,
+            Some(equipped) => item_score > equipped.attr_num(attr),
+        }
+    }
+
     pub fn find_by_reqs(&self, source_req_items: Vec<ResReq>) -> Option<Vec<Item>> {
         let mut found_items = Vec::new();
 
@@ -2496,6 +2656,37 @@ impl Items {
 }
 
 impl Item {
+    pub fn attr_num(&self, attr: &AttrKey) -> f32 {
+        match self.attrs.get(attr) {
+            Some(AttrVal::Num(value)) => *value,
+            _ => 0.0,
+        }
+    }
+
+    pub fn is_gather_tool_for_attr(&self, attr: &AttrKey) -> bool {
+        self.class != TORCH && self.slot.is_some() && self.attr_num(attr) > 0.0
+    }
+
+    pub fn is_gather_tool_for_res_type(&self, res_type: &str) -> bool {
+        required_tool_attr_for_res_type(res_type)
+            .map(|attr| self.is_gather_tool_for_attr(&attr))
+            .unwrap_or(false)
+    }
+
+    pub fn has_any_gather_tool_attr(&self) -> bool {
+        [
+            AttrKey::Mining,
+            AttrKey::Logging,
+            AttrKey::Stonecutting,
+            AttrKey::Fishing,
+            AttrKey::Farming,
+            AttrKey::Foraging,
+            AttrKey::Hunting,
+        ]
+        .iter()
+        .any(|attr| self.is_gather_tool_for_attr(attr))
+    }
+
     pub fn packet(&self) -> network::Item {
         return network::Item {
             id: self.id,
@@ -2535,6 +2726,9 @@ impl Item {
     pub fn equipable(&self) -> bool {
         if self.class == WEAPON || self.class == ARMOR || self.class == TORCH || self.class == TOOL
         {
+            return true;
+        }
+        if self.has_any_gather_tool_attr() {
             return true;
         }
         return false;
@@ -2639,6 +2833,160 @@ impl Plugin for ItemPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_item(
+        id: i32,
+        class: &str,
+        slot: Option<Slot>,
+        equipped: bool,
+        attrs: Vec<(AttrKey, f32)>,
+    ) -> Item {
+        Item {
+            id,
+            owner: 1,
+            name: format!("Item {}", id),
+            quantity: 1,
+            durability: None,
+            class: class.to_string(),
+            subclass: class.to_string(),
+            slot,
+            image: "item.png".to_string(),
+            weight: 1.0,
+            equipped,
+            experiment: None,
+            start_time: 0,
+            attrs: attrs
+                .into_iter()
+                .map(|(key, value)| (key, AttrVal::Num(value)))
+                .collect(),
+            produces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn required_tool_attr_maps_gather_resources() {
+        assert_eq!(required_tool_attr_for_res_type(ORE), Some(AttrKey::Mining));
+        assert_eq!(required_tool_attr_for_res_type(LOG), Some(AttrKey::Logging));
+        assert_eq!(
+            required_tool_attr_for_res_type(STONE),
+            Some(AttrKey::Stonecutting)
+        );
+        assert_eq!(
+            required_tool_attr_for_res_type(constants::FISH),
+            Some(AttrKey::Fishing)
+        );
+        assert_eq!(
+            required_tool_attr_for_res_type(constants::FOOD),
+            Some(AttrKey::Farming)
+        );
+        assert_eq!(required_tool_attr_for_res_type(constants::PLANT), None);
+        assert_eq!(
+            required_tool_attr_for_res_type(constants::GAME_ANIMAL),
+            Some(AttrKey::Hunting)
+        );
+    }
+
+    #[test]
+    fn auto_equip_best_tool_requires_strictly_better_matching_stat() {
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![
+                test_item(
+                    1,
+                    TOOL,
+                    Some(Slot::MainHand),
+                    true,
+                    vec![(AttrKey::Mining, 2.0)],
+                ),
+                test_item(
+                    2,
+                    TOOL,
+                    Some(Slot::MainHand),
+                    false,
+                    vec![(AttrKey::Mining, 2.0)],
+                ),
+            ],
+        };
+
+        assert!(inventory
+            .auto_equip_item_for_context(2, Some(ORE))
+            .is_empty());
+        assert!(inventory.get_by_id(1).unwrap().equipped);
+        assert!(!inventory.get_by_id(2).unwrap().equipped);
+
+        inventory.items.push(test_item(
+            3,
+            TOOL,
+            Some(Slot::MainHand),
+            false,
+            vec![(AttrKey::Mining, 3.0)],
+        ));
+
+        let updated = inventory.auto_equip_item_for_context(3, Some(ORE));
+        assert_eq!(updated.len(), 2);
+        assert!(!inventory.get_by_id(1).unwrap().equipped);
+        assert!(inventory.get_by_id(3).unwrap().equipped);
+
+        inventory.items.push(test_item(
+            4,
+            TORCH,
+            Some(Slot::MainHand),
+            false,
+            vec![(AttrKey::Mining, 5.0)],
+        ));
+
+        assert!(inventory
+            .auto_equip_best_tool_for_attr(&AttrKey::Mining)
+            .is_empty());
+        assert!(inventory.get_by_id(3).unwrap().equipped);
+        assert!(!inventory.get_by_id(4).unwrap().equipped);
+    }
+
+    #[test]
+    fn auto_equip_armor_by_slot_and_weapon_only_without_gather_requirement() {
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![
+                test_item(
+                    1,
+                    ARMOR,
+                    Some(Slot::Chest),
+                    true,
+                    vec![(AttrKey::Defense, 1.0)],
+                ),
+                test_item(
+                    2,
+                    ARMOR,
+                    Some(Slot::Chest),
+                    false,
+                    vec![(AttrKey::Defense, 2.0)],
+                ),
+                test_item(
+                    3,
+                    WEAPON,
+                    Some(Slot::MainHand),
+                    false,
+                    vec![(AttrKey::Damage, 4.0)],
+                ),
+            ],
+        };
+
+        inventory.auto_equip_item_for_context(2, Some(ORE));
+        assert!(!inventory.get_by_id(1).unwrap().equipped);
+        assert!(inventory.get_by_id(2).unwrap().equipped);
+
+        assert!(inventory
+            .auto_equip_item_for_context(3, Some(ORE))
+            .is_empty());
+        assert!(!inventory.get_by_id(3).unwrap().equipped);
+
+        inventory.auto_equip_item_for_context(3, Some(HIDE));
+        assert!(inventory.get_by_id(3).unwrap().equipped);
+
+        inventory.unequip(3);
+        inventory.auto_equip_item_for_context(3, None);
+        assert!(inventory.get_by_id(3).unwrap().equipped);
+    }
 
     #[test]
     fn test_transfer_partial_resources_full_transfer_when_capacity_available() {
@@ -3087,9 +3435,55 @@ mod tests {
         // Source should be empty
         assert_eq!(source_inventory.items.len(), 0);
 
-        // Target should have the weapon (not merged, owner not updated for non-stackables)
+        // Target should have the weapon as its new owner.
         assert_eq!(target_inventory.items.len(), 1);
         assert_eq!(target_inventory.items[0].id, 1);
+        assert_eq!(target_inventory.items[0].owner, 2);
+    }
+
+    #[test]
+    fn test_transfer_clears_equipped_state_when_owner_changes() {
+        let mut source_inventory = Inventory {
+            owner: 1,
+            items: vec![test_item(1, WEAPON, Some(Slot::MainHand), true, vec![])],
+        };
+
+        let mut target_inventory = Inventory {
+            owner: 2,
+            items: vec![],
+        };
+
+        Inventory::transfer(1, &mut source_inventory, &mut target_inventory);
+
+        assert!(source_inventory.items.is_empty());
+        assert_eq!(target_inventory.items.len(), 1);
+        assert_eq!(target_inventory.items[0].owner, 2);
+        assert!(!target_inventory.items[0].equipped);
+    }
+
+    #[test]
+    fn test_transfer_all_unequipped_items_skips_equipped_items() {
+        let mut source_inventory = Inventory {
+            owner: 1,
+            items: vec![
+                test_item(1, WEAPON, Some(Slot::MainHand), true, vec![]),
+                test_item(2, ORE, None, false, vec![]),
+            ],
+        };
+
+        let mut target_inventory = Inventory {
+            owner: 2,
+            items: vec![],
+        };
+
+        Inventory::transfer_all_unequipped_items(&mut source_inventory, &mut target_inventory);
+
+        assert_eq!(source_inventory.items.len(), 1);
+        assert_eq!(source_inventory.items[0].id, 1);
+        assert!(source_inventory.items[0].equipped);
+        assert_eq!(target_inventory.items.len(), 1);
+        assert_eq!(target_inventory.items[0].id, 2);
+        assert_eq!(target_inventory.items[0].owner, 2);
     }
 
     // Tests for transfer_quantity function

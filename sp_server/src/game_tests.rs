@@ -1,13 +1,32 @@
 use super::*;
+use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
 use crate::recipe::Recipe;
 use crate::skill::WEAPONSMITHING;
 use crate::templates::{ResReq, SkillTemplate, SkillTemplates, Templates};
+use std::collections::HashSet;
 use std::fs::File;
 
 fn load_obj_templates() -> Vec<ObjTemplate> {
     let obj_template_file =
         File::open("templates/obj_template.yaml").expect("Could not open obj templates");
     serde_yaml::from_reader(obj_template_file).expect("Could not read obj templates")
+}
+
+fn flat_land_map() -> Map {
+    Map {
+        width: WIDTH,
+        height: HEIGHT,
+        base: vec![
+            TileInfo {
+                tile_type: TileType::Grasslands,
+                layers: Vec::new(),
+            };
+            (WIDTH * HEIGHT) as usize
+        ],
+        temperature: Vec::new(),
+        moisture: Vec::new(),
+        wildness: Vec::new(),
+    }
 }
 
 #[test]
@@ -28,6 +47,60 @@ fn first_resurrection_uses_starting_soulshard_cost() {
 #[test]
 fn later_resurrections_scale_from_completed_deaths() {
     assert_eq!(resurrection_attempt_cost(2, 0), 12);
+}
+
+#[test]
+fn necromancer_spawn_resolver_uses_open_anchor() {
+    let map = flat_land_map();
+    let anchor = Position { x: 10, y: 10 };
+    let occupied = HashSet::new();
+
+    assert_eq!(
+        resolve_necromancer_spawn_pos(anchor, &occupied, &map, 1),
+        Some(anchor)
+    );
+}
+
+#[test]
+fn necromancer_spawn_resolver_falls_back_when_anchor_occupied() {
+    let map = flat_land_map();
+    let anchor = Position { x: 10, y: 10 };
+    let occupied = HashSet::from([anchor]);
+
+    let resolved = resolve_necromancer_spawn_pos(anchor, &occupied, &map, 1).unwrap();
+
+    assert_ne!(resolved, anchor);
+    assert_eq!(Map::dist(anchor, resolved), 1);
+    assert!(!occupied.contains(&resolved));
+}
+
+#[test]
+fn necromancer_spawn_resolver_uses_mausoleum_when_old_necro_tile_is_occupied() {
+    let map = flat_land_map();
+    let mausoleum_anchor = Position { x: 16, y: 32 };
+    let old_necromancer_pos = Position { x: 17, y: 34 };
+    let occupied = HashSet::from([old_necromancer_pos]);
+
+    assert_eq!(
+        resolve_necromancer_spawn_pos(mausoleum_anchor, &occupied, &map, 5),
+        Some(mausoleum_anchor)
+    );
+}
+
+#[test]
+fn necromancer_spawn_resolver_returns_none_when_search_area_occupied() {
+    let map = flat_land_map();
+    let anchor = Position { x: 10, y: 10 };
+    let mut occupied = HashSet::from([anchor]);
+
+    for (x, y) in Map::ring((anchor.x, anchor.y), 1) {
+        occupied.insert(Position { x, y });
+    }
+
+    assert_eq!(
+        resolve_necromancer_spawn_pos(anchor, &occupied, &map, 1),
+        None
+    );
 }
 
 #[test]
