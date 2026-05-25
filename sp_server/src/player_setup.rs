@@ -10,7 +10,7 @@ use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{
     InitialEncounterEntry, InitialEncounterState, Merchant, MerchantSailState, Monolith, ObjQuery,
-    PlayerIntroEntry, PlayerIntroState, SpawnPositions,
+    PlayerIntroEntry, PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
 };
 use crate::item::{Inventory, Slot};
 use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
@@ -358,9 +358,7 @@ pub fn new(
 
     match hero_class {
         HeroClass::Warrior => {
-            let mut weapon_attrs = HashMap::new();
-            weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
-            weapon_attrs.insert(item::AttrKey::DeepWoundChance, item::AttrVal::Num(0.9));
+            let weapon_attrs = warrior_starting_weapon_attrs();
 
             let axe = inventory.new_with_attrs(
                 ids.new_item_id(),
@@ -1216,13 +1214,23 @@ pub fn new(
         rat_ids.push(rat_npc_id);
     }
 
-    // Register the initial encounter chain: rats → boar/crab → spider.
+    // Register the initial encounter chain: two pests, then boar/crab, then spider.
     // The villager waits for shipwreck inspection, but only after the help call has fired.
     let villager_spawn_pos = Position {
         x: start_location.villager_pos[0],
         y: start_location.villager_pos[1],
     };
     let villager_help_tick = game_tick.0 + 1100;
+    let first_enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
+    let mut second_enemy_index =
+        rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len() - 1);
+    if second_enemy_index >= first_enemy_index {
+        second_enemy_index += 1;
+    }
+    let opening_enemy_templates = vec![
+        EARLY_GAME_ENEMY_TEMPLATES[first_enemy_index].to_string(),
+        EARLY_GAME_ENEMY_TEMPLATES[second_enemy_index].to_string(),
+    ];
     let phase1_spawn = if rand::thread_rng().gen_range(0..2) == 0 {
         "Giant Crab".to_string()
     } else {
@@ -1232,6 +1240,7 @@ pub fn new(
         player_id,
         InitialEncounterEntry {
             rat_ids,
+            opening_enemy_templates,
             phase1_spawn,
             phase1_npc_id: None,
             spawn_pos: shipwreck_pos,
@@ -1317,7 +1326,18 @@ pub fn new(
         x: start_location.mausoleum_pos[0],
         y: start_location.mausoleum_pos[1],
     };
+    let (_necro_entity, necromancer_id, _necro_player_id, _necro_pos) =
+        Encounter::spawn_dormant_necromancer(
+            NPC_PLAYER_ID,
+            mausoleum_pos,
+            mausoleum_pos,
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
     let event_type = GameEventType::NecroEvent {
+        necromancer_id: Some(necromancer_id.0),
         spawn_anchor: mausoleum_pos,
         corpse_anchor: shipwreck_pos,
         home: mausoleum_pos,
@@ -1593,19 +1613,21 @@ pub fn new(
         entity_map.new_obj(poi_id, poi_entity);
         commands.trigger(NewObj { entity: poi_entity });
 
-        // Spawn giant rats in the mine after 10 minutes
+        // Spawn low-tier pests in the mine after 10 minutes
         let poi_pos = Position {
             x: pos[0],
             y: pos[1],
         };
         for i in 0..3 {
+            let enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
+            let npc_type = EARLY_GAME_ENEMY_TEMPLATES[enemy_index].to_string();
             let event_id = ids.new_map_event_id();
             let spawn_event = GameEvent {
                 event_id,
                 start_tick: game_tick.0,
                 run_tick: game_tick.0 + 6000 + (i * 10),
                 event_type: GameEventType::SpawnNPC {
-                    npc_type: "Giant Rat".to_string(),
+                    npc_type,
                     pos: poi_pos,
                     npc_id: None,
                 },
@@ -1629,6 +1651,14 @@ pub fn new(
     );*/
 
     Ok(())
+}
+
+fn warrior_starting_weapon_attrs() -> HashMap<item::AttrKey, item::AttrVal> {
+    let mut weapon_attrs = HashMap::new();
+    weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
+    weapon_attrs.insert(item::AttrKey::Logging, item::AttrVal::Num(2.0));
+    weapon_attrs.insert(item::AttrKey::DeepWoundChance, item::AttrVal::Num(0.9));
+    weapon_attrs
 }
 
 fn find_nearest_monolith(
@@ -1697,5 +1727,34 @@ impl StartLocations {
         let start_location = self.0.remove(start_location_index);
 
         return Ok(start_location);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::{Item, LOG, WEAPON};
+
+    #[test]
+    fn warrior_starting_axe_counts_as_log_gathering_tool() {
+        let axe = Item {
+            id: 1,
+            owner: 1,
+            name: "Copper Training Axe".to_string(),
+            quantity: 1,
+            durability: None,
+            class: WEAPON.to_string(),
+            subclass: "Axe".to_string(),
+            slot: Some(Slot::MainHand),
+            image: "trainingaxe".to_string(),
+            weight: 10.0,
+            equipped: false,
+            experiment: None,
+            start_time: 0,
+            attrs: warrior_starting_weapon_attrs(),
+            produces: Vec::new(),
+        };
+
+        assert!(axe.is_gather_tool_for_res_type(LOG));
     }
 }

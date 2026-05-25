@@ -59,6 +59,16 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
   }
 
   handleExploreClick(event: React.MouseEvent) {
+    if (this.props.selectedKey.type == OBJ) {
+      if (Util.isPlayerObj(this.props.selectedKey.id) &&
+          Util.isSubclass(this.props.selectedKey.id, VILLAGER)) {
+        Global.network.sendOrderProspect(this.props.selectedKey.id);
+      } else if (Util.isSubclass(this.props.selectedKey.id, "poi") ||
+                 Util.isSubclass(this.props.selectedKey.id, "monolith")) {
+        Global.network.sendInvestigate(this.props.selectedKey.id);
+      }
+    }
+
     Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
   }
 
@@ -113,6 +123,7 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     var hideFollowButton = true;
     var hideMerchantButton = true;
     var hideRepairButton = true;
+    var exploreActionLabel = "Prospect";
 
     var buttonOrder = {
       info: 0,
@@ -136,6 +147,7 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
           hideGatherButton = false;
           hideFollowButton = false;
           hideRepairButton = false;
+          exploreActionLabel = "Prospect";
           numButtons = 3; //Shortcut because the explore, gather, follow are stacked below
 
         } else if (Util.isState(this.props.selectedKey.id, FOUNDED)) {
@@ -157,9 +169,15 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
         else if (Util.isSubclass(this.props.selectedKey.id, "monolith")) {
           hideTranferButton = false;
           hideInfoButton = false;
+          hideExploreButton = false;
+          exploreActionLabel = "Investigate";
+          numButtons = 2;
         } else if (Util.isSubclass(this.props.selectedKey.id, "poi")) {
           hideTranferButton = false;
           hideInfoButton = false;
+          hideExploreButton = false;
+          exploreActionLabel = "Investigate";
+          numButtons = 2;
         }
         else if (Util.isSubclass(this.props.selectedKey.id, "merchant")) {
           hideMerchantButton = false;
@@ -265,6 +283,9 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
         {!hideExploreButton &&
           <img src={explorebutton}
             style={exploreStyle}
+            title={exploreActionLabel}
+            alt={exploreActionLabel}
+            aria-label={exploreActionLabel}
             onClick={this.handleExploreClick} />}
 
         {!hideGatherButton &&

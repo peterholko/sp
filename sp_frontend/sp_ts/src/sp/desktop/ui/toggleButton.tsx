@@ -6,6 +6,7 @@ interface ToggleButtonProps {
   handler: any,
   imageName: string,
   className: any,
+  title?: string,
 }
 
 export default class ToggleButton extends React.Component<ToggleButtonProps, any> {
@@ -29,7 +30,12 @@ export default class ToggleButton extends React.Component<ToggleButtonProps, any
 
     return (
       <div onClick={this.handleClick}>
-        <img src={'/static/art/ui/' + this.props.imageName + '.png'} className={this.props.className} />      
+        <img
+          src={'/static/art/ui/' + this.props.imageName + '.png'}
+          className={this.props.className}
+          title={this.props.title}
+          alt={this.props.title}
+          aria-label={this.props.title} />
         {this.state.toggleIconBorder && <img src={smalliconborder} className={this.props.className} />}
       </div>
     );

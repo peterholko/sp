@@ -82,6 +82,16 @@
   stamina: -0.5
   duration: 500
 
+- name: Sickness
+  speed: -0.25
+  attack_speed: -0.10
+  duration: 300
+
+- name: Cursed
+  damage: -0.15
+  defense: -0.10
+  duration: 300
+
 - name: Bracing
   defense: 3.0
   duration: 50

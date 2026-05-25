@@ -8,13 +8,76 @@ import stabar from "ui_comp/stabar.png";
 import manabar from "ui_comp/manabar.png";
 import { NetworkEvent } from "../../core/networkEvent";
 import { STAT_BAR_WIDTH, STAT_BAR_HEIGHT } from "../../core/config";
-import { getNeedStatusIcon } from "./needStatus";
+import { getNeedStatusIcon, isCriticalNeed, NeedKind } from "./needStatus";
+
+const NEED_STATUS_SIZE = 30;
+
+const CRITICAL_NEED_WARNING_STYLE = `
+@keyframes criticalNeedIconPulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: brightness(1) drop-shadow(0 0 1px rgba(255, 70, 48, 0.65));
+  }
+  50% {
+    opacity: 0.72;
+    transform: scale(1.16);
+    filter: brightness(1.35) drop-shadow(0 0 6px rgba(255, 70, 48, 0.95));
+  }
+}
+
+.critical-need-warning-icon {
+  animation: criticalNeedIconPulse 0.85s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .critical-need-warning-icon {
+    animation: none !important;
+    filter: brightness(1.2) drop-shadow(0 0 4px rgba(255, 70, 48, 0.85));
+  }
+}
+`;
 
 interface HeroFrameProps {
   heroStats: any,
   hungerStatus: string,
   thirstStatus: string,
   fatigueStatus: string
+}
+
+function renderNeedStatusIcon(kind: NeedKind, value: string, style: React.CSSProperties) {
+  const icon = getNeedStatusIcon(kind, value);
+
+  if (!icon) {
+    return null;
+  }
+
+  if (!isCriticalNeed(kind, value)) {
+    return <img src={icon} style={style}/>;
+  }
+
+  const containerStyle = {
+    ...style,
+    width: NEED_STATUS_SIZE + 'px',
+    height: NEED_STATUS_SIZE + 'px',
+    display: 'block',
+    pointerEvents: 'none',
+  } as React.CSSProperties;
+
+  const iconStyle = {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: NEED_STATUS_SIZE + 'px',
+    height: NEED_STATUS_SIZE + 'px',
+  } as React.CSSProperties;
+
+  return (
+    <span style={containerStyle}>
+      <img className="critical-need-warning-icon" src={icon} style={iconStyle}/>
+    </span>
+  );
 }
 
 export default class HeroFrame extends React.Component<HeroFrameProps, any> {
@@ -155,13 +218,10 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
-    const thirstStatusIcon = getNeedStatusIcon("thirst", this.props.thirstStatus);
-    const hungerStatusIcon = getNeedStatusIcon("hunger", this.props.hungerStatus);
-    const fatigueStatusIcon = getNeedStatusIcon("tiredness", this.props.fatigueStatus);
-
     return (
       
       <div>
+          <style>{CRITICAL_NEED_WARNING_STYLE}</style>
           <img src={heroring} style={heroringStyle}/>
           <img src={hpframe} style={hpframeStyle}/>
 
@@ -180,9 +240,9 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           <span style={hStyle}>H</span>
           <span style={fStyle}>F</span>
 
-          {thirstStatusIcon && <img src={thirstStatusIcon} style={thirstStatusStyle}/>}
-          {hungerStatusIcon && <img src={hungerStatusIcon} style={hungerStatusStyle}/>}
-          {fatigueStatusIcon && <img src={fatigueStatusIcon} style={fatigueStatusStyle}/>}
+          {renderNeedStatusIcon("thirst", this.props.thirstStatus, thirstStatusStyle)}
+          {renderNeedStatusIcon("hunger", this.props.hungerStatus, hungerStatusStyle)}
+          {renderNeedStatusIcon("tiredness", this.props.fatigueStatus, fatigueStatusStyle)}
 
           {!this.state.hideHero && 
             <img src={imagePath} style={heroStyle}/>

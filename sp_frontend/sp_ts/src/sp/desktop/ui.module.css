@@ -66,6 +66,12 @@
   position: fixed;
 }
 
+.heroprospectbutton {
+  transform: translate(110px, 210px);
+  z-index: 1;
+  position: fixed;
+}
+
 .combobutton {
   bottom: 10px;
   left: 50%;

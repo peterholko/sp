@@ -837,6 +837,14 @@ fn spawn_base_obj(
         .id()
 }
 
+fn spawn_wall_obj(world: &mut World, id: i32, player_id: i32, position: Position) -> Entity {
+    let wall = spawn_base_obj(world, id, player_id, position, Subclass::Wall);
+    world
+        .entity_mut(wall)
+        .insert((Class(CLASS_STRUCTURE.to_string()), ClassStructure));
+    wall
+}
+
 fn combat_stats(hp: i32, stamina: i32, damage: i32, damage_range: i32) -> Stats {
     Stats {
         hp,
@@ -1845,6 +1853,126 @@ fn set_flee_destination_succeeds_when_hero_is_reachable() {
 
     let destination = app.world().entity(villager).get::<Destination>().unwrap();
     assert_ne!(destination.pos, villager_pos);
+}
+
+#[test]
+fn set_flee_destination_prefers_nearby_wall_over_hero() {
+    let mut app = setup_action_test_app!(set_flee_destination_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let wall_pos = Position { x: 5, y: 6 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+
+    let hero = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1,
+        Position { x: 7, y: 5 },
+        Subclass::Hero,
+    );
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 4, y: 5 },
+        Subclass::None,
+    );
+    let wall = spawn_wall_obj(app.world_mut(), 4, 1, wall_pos);
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+        ids.new_obj(4, 1);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+        entity_map.new_obj(4, wall);
+    }
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Success);
+
+    let destination = app.world().entity(villager).get::<Destination>().unwrap();
+    assert_eq!(destination.pos, wall_pos);
+}
+
+#[test]
+fn set_flee_destination_chooses_local_safety_instead_of_distant_hero() {
+    let mut app = setup_action_test_app!(set_flee_destination_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let hero_pos = Position { x: 20, y: 20 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+
+    let hero = spawn_base_obj(app.world_mut(), 2, 1, hero_pos, Subclass::Hero);
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 4, y: 5 },
+        Subclass::None,
+    );
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+    }
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Success);
+
+    let destination = app.world().entity(villager).get::<Destination>().unwrap();
+    assert_ne!(destination.pos, hero_pos);
+    assert!(
+        Map::dist(villager_pos, destination.pos) <= FLEE_SEARCH_RADIUS,
+        "Expected local flee destination, got {:?}",
+        destination.pos
+    );
 }
 
 #[test]

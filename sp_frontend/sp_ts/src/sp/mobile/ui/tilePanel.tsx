@@ -67,7 +67,8 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
                 { label: 'Defense', value: this.props.tileData.def },
                 { label: 'Sanctuary', value: sanctuary },
                 { label: 'Wildness', value: this.props.tileData.wildness },
-                { label: 'Resources', value: `${discoveredResources} / ${numResources}` },
+                { label: 'Survey Status', value: this.props.tileData.survey_status || 'Unsurveyed' },
+                { label: 'Prospected Resources', value: `${discoveredResources} / ${numResources}` },
               ]} />
               <MobilePanelActions actions={[
                 { key: 'resources', label: 'Resources', icon: resourcesbutton, onClick: this.handleResourceButtonClick },

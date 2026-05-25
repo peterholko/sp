@@ -50,33 +50,47 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
   render() {
     const imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
     const imagePath = '/static/art/' + imageName + '_single.png';
+    const formatEffectValue = (effectValue) => {
+      if (typeof effectValue === "number") {
+        return effectValue > 0 ? '+' + String(effectValue) : String(effectValue);
+      }
+
+      return String(effectValue);
+    };
     const effects = [];
 
     for (let i = 0; i < this.props.heroData.effects.length; i++) {
       const effectInfo = this.props.heroData.effects[i];
       const effectName = effectInfo.effect;
-      let duration;
+      const effectAttrs = effectInfo.attrs || {};
+      let duration = '';
+      let displayedAttrs = 0;
 
-      for (const effectKey in effectInfo.attrs) {
-        const effectValue = effectInfo.attrs[effectKey];
+      for (const effectKey in effectAttrs) {
+        const effectValue = effectAttrs[effectKey];
         if (effectKey == "Duration") {
           duration = effectValue < 0 ? '' : String(effectValue);
         }
       }
 
-      for (const effectKey in effectInfo.attrs) {
-        let effectValue = effectInfo.attrs[effectKey];
+      for (const effectKey in effectAttrs) {
+        let effectValue = effectAttrs[effectKey];
         if (effectKey == "Duration") continue;
 
-        if (typeof effectValue === "number") {
-          effectValue = effectValue < 0 ? '-' + String(effectValue) : '+' + String(effectValue);
-        } else {
-          effectValue = String(effectValue);
-        }
+        effectValue = formatEffectValue(effectValue);
+        displayedAttrs += 1;
 
         effects.push(
           <tr key={effectName + effectKey}>
-            <td colSpan={2}>{effectName} [{effectValue} {effectKey} {duration}]</td>
+            <td colSpan={2}>{effectName} [{effectValue} {effectKey}{duration ? ' ' + duration : ''}]</td>
+          </tr>
+        );
+      }
+
+      if (displayedAttrs == 0) {
+        effects.push(
+          <tr key={effectName}>
+            <td colSpan={2}>{duration ? effectName + ' [Duration ' + duration + ']' : effectName}</td>
           </tr>
         );
       }

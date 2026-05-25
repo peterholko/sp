@@ -66,6 +66,9 @@ export namespace NetworkEvent {
     export const START_UPGRADE : string = 'START_UPGRADE';
     export const UPGRADE : string = 'UPGRADE';
     export const EXPLORE : string = 'EXPLORE';
+    export const SURVEY : string = 'SURVEY';
+    export const PROSPECT : string = 'PROSPECT';
+    export const INVESTIGATE : string = 'INVESTIGATE';
     export const GATHER : string = 'GATHER';
     export const ATTACK : string = 'ATTACK';
     export const ABILITY : string = 'ABILITY';

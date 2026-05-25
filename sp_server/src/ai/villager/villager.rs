@@ -43,6 +43,27 @@ pub struct ArmedRetaliationScorer;
 pub struct FightBack;
 
 const RETALIATION_MEMORY_TICKS: i32 = 5 * TICKS_PER_SEC;
+const FLEE_SEARCH_RADIUS: u32 = 6;
+const FLEE_THREAT_SCAN_RADIUS: u32 = FLEE_SEARCH_RADIUS + 2;
+const FLEE_HERO_FALLBACK_RANGE: u32 = 4;
+const FLEE_SAFE_BONUS: i32 = 100_000;
+const FLEE_WALL_BONUS: i32 = 50_000;
+const FLEE_SHELTER_BONUS: i32 = 40_000;
+
+#[derive(Debug, Clone)]
+struct FleeThreat {
+    pos: Position,
+    player_id: i32,
+    blocking_list: Vec<Blocker>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FleeDestinationChoice {
+    pos: Position,
+    score: i32,
+    safe: bool,
+    fortified: bool,
+}
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct IdleScorer;
@@ -2232,7 +2253,7 @@ pub fn process_order_system(
                         });
                     }
                     Order::Explore => {
-                        let explore_event = VisibleEvent::ExploreEvent;
+                        let explore_event = VisibleEvent::ProspectEvent;
 
                         map_events.new(
                             villager_id.0,
@@ -2561,6 +2582,209 @@ pub fn fight_back_system(
     }
 }
 
+fn flee_path_to(
+    src_pos: Position,
+    dst_pos: Position,
+    map: &Map,
+    mover_player_id: i32,
+    blocking_list: &[Blocker],
+) -> Option<(Vec<MapPos>, u32)> {
+    if src_pos == dst_pos {
+        return Some((vec![MapPos(src_pos.x, src_pos.y)], 0));
+    }
+
+    Map::find_fast_path(
+        src_pos,
+        dst_pos,
+        map,
+        mover_player_id,
+        blocking_list.to_vec(),
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
+}
+
+fn flee_destination_is_threatened(pos: Position, threats: &[FleeThreat], map: &Map) -> bool {
+    threats.iter().any(|threat| {
+        enemy_threatens_villager(
+            pos,
+            None,
+            threat.pos,
+            threat.player_id,
+            None,
+            map,
+            &threat.blocking_list,
+        )
+    })
+}
+
+fn min_flee_threat_distance(pos: Position, threats: &[FleeThreat]) -> u32 {
+    threats
+        .iter()
+        .map(|threat| Map::dist(pos, threat.pos))
+        .min()
+        .unwrap_or(FLEE_THREAT_SCAN_RADIUS)
+}
+
+fn score_flee_candidate(
+    candidate: Position,
+    villager_pos: Position,
+    villager_player_id: i32,
+    hero_pos: Option<Position>,
+    map: &Map,
+    movement_blocking_list: &[Blocker],
+    threats: &[FleeThreat],
+    friendly_wall_positions: &HashSet<Position>,
+    bonus: i32,
+    skip_hero_position: bool,
+) -> Option<FleeDestinationChoice> {
+    if candidate == villager_pos || (skip_hero_position && Some(candidate) == hero_pos) {
+        return None;
+    }
+
+    if !Map::is_valid_pos((candidate.x, candidate.y))
+        || !Map::is_passable_by_obj(candidate.x, candidate.y, true, false, false, map)
+    {
+        return None;
+    }
+
+    let Some((path, path_cost)) = flee_path_to(
+        villager_pos,
+        candidate,
+        map,
+        villager_player_id,
+        movement_blocking_list,
+    ) else {
+        return None;
+    };
+
+    if path.len() <= 1 {
+        return None;
+    }
+
+    let fortified = friendly_wall_positions.contains(&candidate);
+    let safe = fortified || !flee_destination_is_threatened(candidate, threats, map);
+    if !safe {
+        return None;
+    }
+
+    let threat_distance = min_flee_threat_distance(candidate, threats).min(20) as i32;
+    let travel_distance = Map::dist(villager_pos, candidate).min(FLEE_SEARCH_RADIUS) as i32;
+    let path_cost = path_cost.min(50) as i32;
+    let path_len = path.len().min(20) as i32;
+
+    let score = FLEE_SAFE_BONUS
+        + bonus
+        + if fortified { FLEE_WALL_BONUS } else { 0 }
+        + threat_distance * 1_000
+        + travel_distance * 75
+        - path_cost * 40
+        - path_len * 20;
+
+    Some(FleeDestinationChoice {
+        pos: candidate,
+        score,
+        safe,
+        fortified,
+    })
+}
+
+fn choose_best_safe_flee_destination(
+    villager_pos: Position,
+    villager_player_id: i32,
+    hero_pos: Option<Position>,
+    map: &Map,
+    movement_blocking_list: &[Blocker],
+    threats: &[FleeThreat],
+    friendly_wall_positions: &HashSet<Position>,
+) -> Option<FleeDestinationChoice> {
+    Map::range((villager_pos.x, villager_pos.y), FLEE_SEARCH_RADIUS)
+        .into_iter()
+        .filter_map(|(x, y)| {
+            score_flee_candidate(
+                Position { x, y },
+                villager_pos,
+                villager_player_id,
+                hero_pos,
+                map,
+                movement_blocking_list,
+                threats,
+                friendly_wall_positions,
+                0,
+                true,
+            )
+        })
+        .max_by_key(|choice| (choice.score, choice.pos.y, choice.pos.x))
+}
+
+fn choose_hero_fallback_destination(
+    villager_pos: Position,
+    hero_pos: Position,
+    villager_player_id: i32,
+    map: &Map,
+    movement_blocking_list: &[Blocker],
+) -> Option<FleeDestinationChoice> {
+    if villager_pos == hero_pos || Map::dist(villager_pos, hero_pos) > FLEE_HERO_FALLBACK_RANGE {
+        return None;
+    }
+
+    flee_path_to(
+        villager_pos,
+        hero_pos,
+        map,
+        villager_player_id,
+        movement_blocking_list,
+    )?;
+
+    Some(FleeDestinationChoice {
+        pos: hero_pos,
+        score: 0,
+        safe: false,
+        fortified: false,
+    })
+}
+
+fn choose_emergency_flee_step(
+    villager_pos: Position,
+    villager_player_id: i32,
+    map: &Map,
+    movement_blocking_list: &[Blocker],
+    threats: &[FleeThreat],
+) -> Option<FleeDestinationChoice> {
+    Map::get_neighbour_tiles(
+        villager_pos.x,
+        villager_pos.y,
+        map,
+        villager_player_id,
+        &movement_blocking_list.to_vec(),
+        true,
+        false,
+        false,
+        false,
+        false,
+        MapPos(villager_pos.x, villager_pos.y),
+    )
+    .into_iter()
+    .map(|(pos, cost)| {
+        let candidate = Position { x: pos.0, y: pos.1 };
+        let threatened = flee_destination_is_threatened(candidate, threats, map);
+        let threat_distance = min_flee_threat_distance(candidate, threats).min(20) as i32;
+        let score = if threatened { 0 } else { FLEE_SAFE_BONUS / 2 } + threat_distance * 1_000
+            - cost.min(50) as i32 * 40;
+
+        FleeDestinationChoice {
+            pos: candidate,
+            score,
+            safe: !threatened,
+            fortified: false,
+        }
+    })
+    .max_by_key(|choice| (choice.score, choice.pos.y, choice.pos.x))
+}
+
 pub fn set_flee_destination_system(
     mut commands: Commands,
     map: Res<Map>,
@@ -2634,6 +2858,7 @@ pub fn set_flee_destination_system(
                 }
 
                 let mut immediate_threat = false;
+                let mut nearby_threats = Vec::new();
 
                 for (
                     enemy_entity,
@@ -2658,7 +2883,7 @@ pub fn set_flee_destination_system(
                     let threat_blocking_list =
                         Obj::blocking_list_basequery(enemy_player_id.0, &blocking_query);
 
-                    if enemy_threatens_villager(
+                    let is_immediate_threat = enemy_threatens_villager(
                         *villager_pos,
                         villager_effects,
                         *enemy_pos,
@@ -2666,9 +2891,20 @@ pub fn set_flee_destination_system(
                         enemy_template,
                         &map,
                         &threat_blocking_list,
-                    ) {
+                    );
+
+                    if Map::dist(*villager_pos, *enemy_pos) <= FLEE_THREAT_SCAN_RADIUS
+                        || is_immediate_threat
+                    {
+                        nearby_threats.push(FleeThreat {
+                            pos: *enemy_pos,
+                            player_id: enemy_player_id.0,
+                            blocking_list: threat_blocking_list,
+                        });
+                    }
+
+                    if is_immediate_threat {
                         immediate_threat = true;
-                        break;
                     }
                 }
 
@@ -2687,39 +2923,15 @@ pub fn set_flee_destination_system(
 
                 let blocking_list =
                     Obj::blocking_list_basequery(villager_player_id.0, &blocking_query);
-
-                if let Some(active_shelter) = active_shelter {
-                    if active_shelter.0 != NO_SHELTER {
-                        if let Some(shelter_entity) = entity_map.get_entity(active_shelter.0) {
-                            if let Ok(shelter_pos) = shelter_query.get(shelter_entity) {
-                                span.span().in_scope(|| {
-                                    villager_debug!(
-                                        *actor,
-                                        Some(villager_id.0),
-                                        None,
-                                        "Fleeing to shelter id={}",
-                                        active_shelter.0
-                                    );
-                                });
-                                commands
-                                    .entity(*actor)
-                                    .insert(Destination { pos: *shelter_pos });
-                                *state = ActionState::Success;
-                                continue;
-                            }
-                        }
-
-                        span.span().in_scope(|| {
-                            villager_warn!(
-                                *actor,
-                                Some(villager_id.0),
-                                None,
-                                "Active shelter id={} was not reachable for fleeing",
-                                active_shelter.0
-                            );
-                        });
-                    }
-                }
+                let friendly_wall_positions: HashSet<Position> = blocking_query
+                    .iter()
+                    .filter(|obj| {
+                        obj.player_id.0 == villager_player_id.0
+                            && *obj.subclass == Subclass::Wall
+                            && obj.state.is_active()
+                    })
+                    .map(|obj| *obj.pos)
+                    .collect();
 
                 let Some(hero_id) = ids.get_hero(villager_player_id.0) else {
                     span.span().in_scope(|| {
@@ -2749,7 +2961,7 @@ pub fn set_flee_destination_system(
                     continue;
                 };
 
-                let Ok(hero_pos) = hero_query.get(hero_entity) else {
+                let Ok(hero_pos_ref) = hero_query.get(hero_entity) else {
                     span.span().in_scope(|| {
                         villager_error!(
                             *actor,
@@ -2762,103 +2974,128 @@ pub fn set_flee_destination_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+                let hero_pos = *hero_pos_ref;
 
-                if hero_pos != villager_pos {
-                    if let Some(path_result) = Map::find_fast_path(
-                        *villager_pos,
-                        *hero_pos,
-                        &map,
-                        villager_player_id.0,
-                        blocking_list.clone(),
-                        true,
-                        false,
-                        false,
-                        false,
-                        true,
-                    ) {
-                        let (path, _cost) = path_result;
-                        if path.len() > 1 {
-                            let next_pos = &path[1];
-                            let flee_pos = Position {
-                                x: next_pos.0,
-                                y: next_pos.1,
-                            };
+                let mut best_choice = choose_best_safe_flee_destination(
+                    *villager_pos,
+                    villager_player_id.0,
+                    Some(hero_pos),
+                    &map,
+                    &blocking_list,
+                    &nearby_threats,
+                    &friendly_wall_positions,
+                );
 
+                if let Some(active_shelter) = active_shelter {
+                    if active_shelter.0 != NO_SHELTER {
+                        let shelter_choice = entity_map
+                            .get_entity(active_shelter.0)
+                            .and_then(|shelter_entity| shelter_query.get(shelter_entity).ok())
+                            .and_then(|shelter_pos| {
+                                if Map::dist(*villager_pos, *shelter_pos) > FLEE_SEARCH_RADIUS {
+                                    return None;
+                                }
+
+                                score_flee_candidate(
+                                    *shelter_pos,
+                                    *villager_pos,
+                                    villager_player_id.0,
+                                    Some(hero_pos),
+                                    &map,
+                                    &blocking_list,
+                                    &nearby_threats,
+                                    &friendly_wall_positions,
+                                    FLEE_SHELTER_BONUS,
+                                    true,
+                                )
+                            });
+
+                        if let Some(shelter_choice) = shelter_choice {
+                            if best_choice
+                                .map(|choice| shelter_choice.score > choice.score)
+                                .unwrap_or(true)
+                            {
+                                best_choice = Some(shelter_choice);
+                            }
+                        } else {
                             span.span().in_scope(|| {
-                                villager_debug!(
+                                villager_warn!(
                                     *actor,
                                     Some(villager_id.0),
                                     None,
-                                    "Fleeing toward hero via ({}, {})",
-                                    flee_pos.x,
-                                    flee_pos.y
+                                    "Active shelter id={} was not safe or reachable for fleeing",
+                                    active_shelter.0
                                 );
                             });
-                            commands
-                                .entity(*actor)
-                                .insert(Destination { pos: flee_pos });
-                            *state = ActionState::Success;
-                            continue;
                         }
                     }
-
-                    span.span().in_scope(|| {
-                        villager_warn!(
-                            *actor,
-                            Some(villager_id.0),
-                            None,
-                            "Could not path toward hero while fleeing"
-                        );
-                    });
                 }
 
-                let fallback = Map::get_neighbour_tiles(
-                    villager_pos.x,
-                    villager_pos.y,
-                    &map,
-                    villager_player_id.0,
-                    &blocking_list,
-                    true,
-                    false,
-                    false,
-                    false,
-                    true,
-                    MapPos(villager_pos.x, villager_pos.y),
-                )
-                .into_iter()
-                .filter(|(pos, _cost)| {
-                    !blocking_list
-                        .iter()
-                        .any(|blocker| blocker.pos.x == pos.0 && blocker.pos.y == pos.1)
-                })
-                .max_by_key(|(pos, _cost)| {
-                    blocking_list
-                        .iter()
-                        .map(|blocker| {
-                            Map::distance((pos.0, pos.1), (blocker.pos.x, blocker.pos.y))
-                        })
-                        .min()
-                        .unwrap_or(u32::MAX)
-                });
-
-                if let Some((fallback_pos, _cost)) = fallback {
-                    let flee_pos = Position {
-                        x: fallback_pos.0,
-                        y: fallback_pos.1,
-                    };
+                if let Some(choice) = best_choice {
                     span.span().in_scope(|| {
                         villager_debug!(
                             *actor,
                             Some(villager_id.0),
                             None,
-                            "Fleeing to fallback tile ({}, {})",
-                            flee_pos.x,
-                            flee_pos.y
+                            "Fleeing to safe tile ({}, {}), fortified={}, score={}",
+                            choice.pos.x,
+                            choice.pos.y,
+                            choice.fortified,
+                            choice.score
                         );
                     });
                     commands
                         .entity(*actor)
-                        .insert(Destination { pos: flee_pos });
+                        .insert(Destination { pos: choice.pos });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                if let Some(choice) = choose_hero_fallback_destination(
+                    *villager_pos,
+                    hero_pos,
+                    villager_player_id.0,
+                    &map,
+                    &blocking_list,
+                ) {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Fleeing to nearby hero fallback ({}, {})",
+                            choice.pos.x,
+                            choice.pos.y
+                        );
+                    });
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: choice.pos });
+                    *state = ActionState::Success;
+                    continue;
+                }
+
+                if let Some(choice) = choose_emergency_flee_step(
+                    *villager_pos,
+                    villager_player_id.0,
+                    &map,
+                    &blocking_list,
+                    &nearby_threats,
+                ) {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            Some(villager_id.0),
+                            None,
+                            "Fleeing to emergency tile ({}, {}), safe={}",
+                            choice.pos.x,
+                            choice.pos.y,
+                            choice.safe
+                        );
+                    });
+                    commands
+                        .entity(*actor)
+                        .insert(Destination { pos: choice.pos });
                     *state = ActionState::Success;
                 } else {
                     span.span().in_scope(|| {

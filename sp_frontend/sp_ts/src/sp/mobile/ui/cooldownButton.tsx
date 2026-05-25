@@ -8,7 +8,10 @@ interface CooldownButtonProps {
   imageName,
   imageButton,
   className,
-  handler
+  handler,
+  cooldownEvent?: string,
+  timeKey?: string,
+  title?: string,
 }
 
 export default class CooldownButton extends React.Component<CooldownButtonProps, any> {
@@ -29,11 +32,11 @@ export default class CooldownButton extends React.Component<CooldownButtonProps,
   }
 
   componentDidMount() {
-    Global.gameEmitter.on(NetworkEvent.EXPLORE, this.handleExplore, this);
+    Global.gameEmitter.on(this.props.cooldownEvent || NetworkEvent.EXPLORE, this.handleExplore, this);
   }
 
   handleExplore(message) {
-    this.setState({ cooldown: message.explore_time })
+    this.setState({ cooldown: message[this.props.timeKey || 'explore_time'] })
     this.startTimer();
   }
 
@@ -86,6 +89,9 @@ export default class CooldownButton extends React.Component<CooldownButtonProps,
           <span style={spanStyle}>{this.state.cooldown}</span>}
 
         <img src={this.props.imageButton}
+          title={this.props.title}
+          alt={this.props.title}
+          aria-label={this.props.title}
           onClick={this.handleClick} />
       </div>
     );

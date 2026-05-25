@@ -24,6 +24,8 @@ pub const CAMPFIRE_LIGHT: &str = "Campfire Light";
 pub const WATCHTOWER_LIGHT: &str = "Watchtower Light";
 pub const FOOD_POISONING: &str = "Food Poisoning";
 pub const BRACING: &str = "Bracing";
+pub const SICKNESS: &str = "Sickness";
+pub const CURSED: &str = "Cursed";
 
 #[derive(Debug, Reflect, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectInfo {
@@ -33,12 +35,20 @@ pub struct EffectInfo {
 
 #[derive(Debug, Reflect, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectAttr {
+    Armor,
+    AttackSpeed,
     Health,
     Damage,
     Defense,
     Duration,
+    Healing,
+    Lifeleech,
+    MaxHealth,
+    NextAttack,
     Stamina,
+    Speed,
     Vision,
+    Viewshed,
 }
 
 #[derive(Debug, Reflect, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +81,8 @@ pub enum Effect {
     WatchtowerLight,
     FoodPoisoning,
     Bracing,
+    Sickness,
+    Cursed,
 }
 
 impl Effect {
@@ -96,6 +108,8 @@ impl Effect {
             Effect::WatchtowerLight => WATCHTOWER_LIGHT.to_string(),
             Effect::FoodPoisoning => FOOD_POISONING.to_string(),
             Effect::Bracing => BRACING.to_string(),
+            Effect::Sickness => SICKNESS.to_string(),
+            Effect::Cursed => CURSED.to_string(),
         }
     }
 
@@ -119,7 +133,10 @@ impl Effect {
             BURNING => Effect::Burning,
             CAMPFIRE_LIGHT => Effect::CampfireLight,
             WATCHTOWER_LIGHT => Effect::WatchtowerLight,
+            FOOD_POISONING => Effect::FoodPoisoning,
             BRACING => Effect::Bracing,
+            SICKNESS => Effect::Sickness,
+            CURSED => Effect::Cursed,
             _ => panic!("Invalid Effect"),
         }
     }
@@ -143,47 +160,47 @@ impl Effects {
                 .get(&effect.clone().to_str())
                 .expect("Effect missing from templates");
 
-            match effect {
-                Effect::Sanctuary => {
-                    let defense = *amplifier * effect_template.defense.unwrap();
-
-                    effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(defense));
-                    effect_attrs.insert(
-                        EffectAttr::Duration,
-                        EffectVal::Num(effect_template.duration as f32),
-                    );
-                }
-                Effect::WeakSanctuary => {
-                    let defense = *amplifier * effect_template.defense.unwrap();
-
-                    effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(defense));
-                    effect_attrs.insert(
-                        EffectAttr::Duration,
-                        EffectVal::Num(effect_template.duration as f32),
-                    );
-                }
-                Effect::Fortified => {
-                    effect_attrs.insert(
-                        EffectAttr::Defense,
-                        EffectVal::Num(effect_template.defense.unwrap()),
-                    );
-                    effect_attrs.insert(
-                        EffectAttr::Duration,
-                        EffectVal::Num(effect_template.duration as f32),
-                    );
-                }
-                Effect::CampfireLight | Effect::WatchtowerLight => {
-                    effect_attrs.insert(
-                        EffectAttr::Vision,
-                        EffectVal::Num(effect_template.vision.unwrap()),
-                    );
-                    effect_attrs.insert(
-                        EffectAttr::Duration,
-                        EffectVal::Num(effect_template.duration as f32),
-                    );
-                }
-                _ => {}
+            if let Some(health) = effect_template.health {
+                effect_attrs.insert(EffectAttr::Health, EffectVal::Num(health));
             }
+            if let Some(max_hp) = effect_template.max_hp {
+                effect_attrs.insert(EffectAttr::MaxHealth, EffectVal::Num(max_hp));
+            }
+            if let Some(healing) = effect_template.healing {
+                effect_attrs.insert(EffectAttr::Healing, EffectVal::Num(healing));
+            }
+            if let Some(damage) = effect_template.damage {
+                effect_attrs.insert(EffectAttr::Damage, EffectVal::Num(damage));
+            }
+            if let Some(speed) = effect_template.speed {
+                effect_attrs.insert(EffectAttr::Speed, EffectVal::Num(speed));
+            }
+            if let Some(attack_speed) = effect_template.attack_speed {
+                effect_attrs.insert(EffectAttr::AttackSpeed, EffectVal::Num(attack_speed));
+            }
+            if let Some(defense) = effect_template.defense {
+                let amplifier = if *amplifier == 0.0 { 1.0 } else { *amplifier };
+                effect_attrs.insert(EffectAttr::Defense, EffectVal::Num(defense * amplifier));
+            }
+            if let Some(armor) = effect_template.armor {
+                effect_attrs.insert(EffectAttr::Armor, EffectVal::Num(armor));
+            }
+            if let Some(lifeleech) = effect_template.lifeleech {
+                effect_attrs.insert(EffectAttr::Lifeleech, EffectVal::Num(lifeleech));
+            }
+            if let Some(viewshed) = effect_template.viewshed {
+                effect_attrs.insert(EffectAttr::Viewshed, EffectVal::Num(viewshed as f32));
+            }
+            if let Some(next_attack) = effect_template.next_attack {
+                effect_attrs.insert(EffectAttr::NextAttack, EffectVal::Bool(next_attack));
+            }
+            if let Some(vision) = effect_template.vision {
+                effect_attrs.insert(EffectAttr::Vision, EffectVal::Num(vision));
+            }
+            effect_attrs.insert(
+                EffectAttr::Duration,
+                EffectVal::Num(effect_template.duration as f32),
+            );
 
             let effect_info = EffectInfo {
                 effect: effect.clone(),

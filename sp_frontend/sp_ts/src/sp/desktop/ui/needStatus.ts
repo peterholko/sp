@@ -58,12 +58,22 @@ const NEED_STATUS_ICONS: Record<NeedSeverity, string> = {
   danger: redstatus,
 };
 
+const CRITICAL_NEEDS: Record<NeedKind, string> = {
+  thirst: DEHYDRATED,
+  hunger: RAVENOUS,
+  tiredness: DEPLETED,
+};
+
 export function getNeedSeverity(kind: NeedKind, value?: string): NeedSeverity | undefined {
   if (!value) {
     return undefined;
   }
 
   return NEED_SEVERITY[kind][value];
+}
+
+export function isCriticalNeed(kind: NeedKind, value?: string): boolean {
+  return !!value && CRITICAL_NEEDS[kind] == value;
 }
 
 export function getNeedStatusIcon(kind: NeedKind, value?: string): string | undefined {

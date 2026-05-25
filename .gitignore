@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+
+# Debug symbols
+*.pdb
+
+# IDE files
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Cargo.lock
+
+# Environment files
+.env
+
+# Runtime scene snapshots
+dynamic_scene.ron
+
+# Python local artifacts
+venv/
+__pycache__/
+*.pyc
+
+logs

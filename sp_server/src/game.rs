@@ -75,7 +75,7 @@ use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASO
 use crate::skill_defs::Skill;
 use crate::structure::{Plans, Structure, StructurePlugin};
 use crate::tax_collector::TaxCollectorPlugin;
-use crate::templates::{self, ObjTemplate, Templates, TemplatesPlugin};
+use crate::templates::{self, ObjTemplate, ResTemplates, Templates, TemplatesPlugin};
 use crate::terrain_feature::{TerrainFeature, TerrainFeaturePlugin, TerrainFeatures};
 use crate::trade::{Prices, TradePorts, WantedItem};
 use crate::villager::{Morale, VillagerPlugin};
@@ -146,6 +146,122 @@ pub struct ExploredMap(pub HashMap<i32, Vec<(i32, i32)>>);
 
 #[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
 #[reflect(Resource)]
+pub struct SurveyHistory(pub HashMap<i32, HashSet<Position>>);
+
+#[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
+#[reflect(Resource)]
+pub struct InvestigatedPOIs(pub HashMap<i32, HashSet<i32>>);
+
+pub const SURVEY_STATUS_UNSURVEYED: &str = "Unsurveyed";
+pub const SURVEY_STATUS_SURVEYED: &str = "Surveyed";
+
+pub fn survey_status_for_tile(
+    player_id: i32,
+    pos: Position,
+    survey_history: &SurveyHistory,
+) -> String {
+    if survey_history
+        .get(&player_id)
+        .map(|tiles| tiles.contains(&pos))
+        .unwrap_or(false)
+    {
+        SURVEY_STATUS_SURVEYED.to_string()
+    } else {
+        SURVEY_STATUS_UNSURVEYED.to_string()
+    }
+}
+
+pub fn record_tile_survey(
+    player_id: i32,
+    pos: Position,
+    survey_history: &mut SurveyHistory,
+) -> bool {
+    survey_history
+        .entry(player_id)
+        .or_insert_with(HashSet::new)
+        .insert(pos)
+}
+
+pub fn record_poi_investigation(
+    player_id: i32,
+    target_id: i32,
+    investigated_pois: &mut InvestigatedPOIs,
+) -> bool {
+    investigated_pois
+        .entry(player_id)
+        .or_insert_with(HashSet::new)
+        .insert(target_id)
+}
+
+pub fn explore_cure_for_item(
+    item_name: &str,
+    item_class: &str,
+    item_subclass: &str,
+) -> Option<Effect> {
+    match (item_name, item_class, item_subclass) {
+        ("Crude Bandage", item::MEDICAL, "Bandage") => Some(Effect::Bleed),
+        ("Herbal Poultice", item::POTION, item::HEALTH) => Some(Effect::Sickness),
+        ("Health Potion", item::POTION, item::HEALTH) => Some(Effect::Sickness),
+        (CRUDE_TORCH, item::TORCH, _) | (RESIN_TORCH, item::TORCH, _) => Some(Effect::Cursed),
+        _ => None,
+    }
+}
+
+pub fn remove_explore_negative_effect(effects: &mut Effects, effect: Effect) -> bool {
+    effects.0.remove(&effect).is_some()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExploreOutcomeKind {
+    ResourceGlimpse,
+    MinorSalvage,
+    SupplyCache,
+    WashedAshoreMaterials,
+    PoiClue,
+    EarlyMerchantSignal,
+    StirredEnemy,
+    BrambleWound,
+    FoulSpores,
+    DarkOmen,
+}
+
+pub fn explore_outcome_from_slot(slot: usize) -> ExploreOutcomeKind {
+    match slot % 12 {
+        0 | 1 => ExploreOutcomeKind::ResourceGlimpse,
+        2 | 3 => ExploreOutcomeKind::MinorSalvage,
+        4 => ExploreOutcomeKind::SupplyCache,
+        5 => ExploreOutcomeKind::WashedAshoreMaterials,
+        6 => ExploreOutcomeKind::PoiClue,
+        7 | 8 => ExploreOutcomeKind::EarlyMerchantSignal,
+        9 => ExploreOutcomeKind::StirredEnemy,
+        10 => ExploreOutcomeKind::BrambleWound,
+        _ => ExploreOutcomeKind::FoulSpores,
+    }
+}
+
+pub fn explore_outcome_is_positive(outcome: ExploreOutcomeKind) -> bool {
+    matches!(
+        outcome,
+        ExploreOutcomeKind::ResourceGlimpse
+            | ExploreOutcomeKind::MinorSalvage
+            | ExploreOutcomeKind::SupplyCache
+            | ExploreOutcomeKind::WashedAshoreMaterials
+            | ExploreOutcomeKind::PoiClue
+            | ExploreOutcomeKind::EarlyMerchantSignal
+    )
+}
+
+fn roll_explore_outcome() -> ExploreOutcomeKind {
+    let slot = rand::thread_rng().gen_range(0..12);
+    if slot == 11 && rand::thread_rng().gen_range(0..2) == 1 {
+        ExploreOutcomeKind::DarkOmen
+    } else {
+        explore_outcome_from_slot(slot)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
+#[reflect(Resource)]
 pub struct DebugObjs(pub HashSet<i32>);
 
 #[derive(Resource, Debug)]
@@ -206,12 +322,41 @@ pub struct PlayerCrisis {
     pub goblin_raid: bool,
     pub undead_incursion: bool,
     pub goblin_pillager: bool,
-    pub initial_encounter: bool, // boar/crab spawned after rats killed
+    pub initial_encounter: bool, // boar/crab spawned after opening enemies killed
     pub spider_encounter: bool,  // spider spawned after boar/crab killed
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct CrisisState(pub HashMap<i32, PlayerCrisis>);
+
+pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
+    "Cave Bat",
+    "Cave Bat", //"Thorn Beetle",
+               //"Ash Viper",
+               //"Moss Mite",
+               //"Reef Skitter",
+];
+
+fn random_early_game_enemy_template() -> &'static str {
+    let enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
+    EARLY_GAME_ENEMY_TEMPLATES[enemy_index]
+}
+
+const SANCTUARY_HUNTER_CAP: usize = 6;
+const SANCTUARY_POWER_UNLOCK_SCORE: i32 = 200;
+
+#[derive(Debug, Clone, Default)]
+pub struct SanctuaryExcursionEntry {
+    pub exposure_moves: i32,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
+
+#[derive(Debug, Component, Clone)]
+pub struct SanctuaryHunter {
+    pub player_id: i32,
+}
 
 // Tracks where each player's hero originally spawned
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -228,10 +373,11 @@ pub struct PlayerIntroEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct PlayerIntroState(pub HashMap<i32, PlayerIntroEntry>);
 
-// Tracks the initial shipwreck encounter chain: rats → boar/crab → spider
+// Tracks the initial shipwreck encounter chain.
 #[derive(Debug, Clone)]
 pub struct InitialEncounterEntry {
-    pub rat_ids: Vec<i32>,          // IDs of the two starting rats
+    pub rat_ids: Vec<i32>, // IDs of the two starting enemies
+    pub opening_enemy_templates: Vec<String>,
     pub phase1_spawn: String,       // "Giant Crab" or "Wild Boar"
     pub phase1_npc_id: Option<i32>, // set when phase1 creature spawns
     pub spawn_pos: Position,
@@ -714,6 +860,10 @@ pub struct Fortified {
     pub id: i32,
 }
 
+fn wall_grants_fortification(state: &State) -> bool {
+    Structure::is_built(*state)
+}
+
 #[derive(Debug, Component)]
 pub struct Burning {
     pub start_tick: i32,
@@ -826,6 +976,7 @@ pub struct ObjWithStatsQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub inventory: &'static mut Inventory,
+    pub effects: &'static mut Effects,
     pub last_combat_tick: &'static LastCombatTick,
 }
 
@@ -1029,6 +1180,9 @@ impl Plugin for GamePlugin {
             .add_plugins(TaxCollectorPlugin);
         app.add_systems(OnEnter(AppState::Running), init_objs);
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
+        app.init_resource::<SanctuaryExcursions>();
+        app.init_resource::<SurveyHistory>();
+        app.init_resource::<InvestigatedPOIs>();
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -1097,6 +1251,10 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 explore_event_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                investigate_event_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -1192,6 +1350,13 @@ impl Plugin for GamePlugin {
             )
             .add_systems(Update, use_item_system.run_if(in_state(AppState::Running)))
             .add_systems(Update, drink_eat_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                hero_auto_consume_system
+                    .after(use_item_system)
+                    .after(drink_eat_system)
+                    .run_if(in_state(AppState::Running)),
+            )
             .add_systems(
                 Update,
                 find_shelter_system.run_if(in_state(AppState::Running)),
@@ -1322,6 +1487,8 @@ impl Game {
 
         // Initialize explored map
         let explored_map: ExploredMap = ExploredMap(HashMap::new());
+        let survey_history: SurveyHistory = SurveyHistory(HashMap::new());
+        let investigated_pois: InvestigatedPOIs = InvestigatedPOIs(HashMap::new());
 
         // Initialize database manager arc mutex sender
         let database_managers = DatabaseManagers(Arc::new(Mutex::new(HashMap::new())));
@@ -1381,6 +1548,7 @@ impl Game {
 
         let player_stats = PlayerStats(HashMap::new());
         let crisis_state = CrisisState(HashMap::new());
+        let sanctuary_excursions = SanctuaryExcursions(HashMap::new());
         let spawn_positions = SpawnPositions(HashMap::new());
         let player_intro_state = PlayerIntroState(HashMap::new());
         let initial_encounter_state = InitialEncounterState(HashMap::new());
@@ -1405,10 +1573,13 @@ impl Game {
         commands.insert_resource(game_events);
         commands.insert_resource(perception_updates);
         commands.insert_resource(explored_map);
+        commands.insert_resource(survey_history);
+        commands.insert_resource(investigated_pois);
         commands.insert_resource(prices);
         commands.insert_resource(encounter_probability);
         commands.insert_resource(player_stats);
         commands.insert_resource(crisis_state);
+        commands.insert_resource(sanctuary_excursions);
         commands.insert_resource(spawn_positions);
         commands.insert_resource(player_intro_state);
         commands.insert_resource(initial_encounter_state);
@@ -1770,11 +1941,202 @@ fn move_event_system(
     }
 }
 
+fn sanctuary_rank_points(template_name: &str) -> i32 {
+    if template_name.starts_with("Legendary ") {
+        260
+    } else if template_name.starts_with("Great ") {
+        150
+    } else if template_name.starts_with("Skilled ") {
+        70
+    } else {
+        0
+    }
+}
+
+fn sanctuary_power_score(
+    template: &Template,
+    skills: &Skills,
+    inventory: &Inventory,
+    player_gold: i32,
+) -> i32 {
+    let rank_points = sanctuary_rank_points(&template.0);
+    if rank_points == 0 {
+        return 0;
+    }
+
+    let equipped_points = (inventory.get_items_value_by_attr(&AttrKey::Damage, true) * 6.0
+        + inventory.get_items_value_by_attr(&AttrKey::Defense, true) * 18.0
+        + inventory.get_items_value_by_attr(&AttrKey::AttackRange, true) * 6.0)
+        .floor() as i32;
+    let skill_points = skills.get_levels().values().sum::<i32>() * 5;
+    let wealth_points = player_gold / 2;
+
+    rank_points
+        + equipped_points.clamp(0, 90)
+        + skill_points.clamp(0, 90)
+        + wealth_points.clamp(0, 70)
+}
+
+fn sanctuary_exploration_unlocked(power_score: i32) -> bool {
+    power_score >= SANCTUARY_POWER_UNLOCK_SCORE
+}
+
+fn record_sanctuary_exposure(
+    sanctuary_excursions: &mut SanctuaryExcursions,
+    player_id: i32,
+    sanctuary_protected: bool,
+    exploration_unlocked: bool,
+) -> Option<i32> {
+    if sanctuary_protected || exploration_unlocked {
+        sanctuary_excursions.remove(&player_id);
+        return None;
+    }
+
+    let entry = sanctuary_excursions
+        .entry(player_id)
+        .or_insert_with(SanctuaryExcursionEntry::default);
+    entry.exposure_moves += 1;
+    Some(entry.exposure_moves)
+}
+
+fn should_spawn_sanctuary_hunters(exposure_moves: i32) -> bool {
+    exposure_moves == 1 || (exposure_moves > 1 && (exposure_moves - 1) % 2 == 0)
+}
+
+fn sanctuary_hunter_wave(exposure_moves: i32, power_score: i32) -> Vec<&'static str> {
+    if power_score >= 150 {
+        vec![
+            "Wolf Rider",
+            "Wolf Rider",
+            "Goblin Pillager",
+            "Goblin Pillager",
+        ]
+    } else if power_score >= 90 || exposure_moves >= 5 {
+        vec!["Wolf Rider", "Goblin Pillager"]
+    } else if exposure_moves >= 3 {
+        vec!["Wolf", "Wolf", "Spider"]
+    } else {
+        vec!["Wolf", "Wolf"]
+    }
+}
+
+fn active_sanctuary_hunters(
+    player_id: i32,
+    hunter_query: &Query<(&SanctuaryHunter, Option<&StateDead>)>,
+) -> usize {
+    hunter_query
+        .iter()
+        .filter(|(hunter, dead)| hunter.player_id == player_id && dead.is_none())
+        .count()
+}
+
+fn total_player_gold(player_id: i32, inventory_query: &Query<(&PlayerId, &Inventory)>) -> i32 {
+    inventory_query
+        .iter()
+        .filter(|(obj_player_id, _)| obj_player_id.0 == player_id)
+        .map(|(_, inventory)| inventory.get_total_gold())
+        .sum()
+}
+
+fn outside_weak_sanctuary(pos: Position, all_objs: &Vec<EncounterMapObj>) -> bool {
+    all_objs.iter().all(|obj| {
+        obj.subclass != Subclass::Monolith.to_string()
+            || Map::dist(pos, Position { x: obj.x, y: obj.y }) >= WEAK_SANCTUARY_RANGE
+    })
+}
+
+fn sanctuary_hunter_spawn_pos(
+    _player_id: i32,
+    hero_pos: Position,
+    all_objs: &Vec<EncounterMapObj>,
+    map: &Map,
+) -> Option<Position> {
+    let mut candidates = Vec::new();
+
+    for radius in 2..=4 {
+        for (x, y) in Map::ring((hero_pos.x, hero_pos.y), radius) {
+            let pos = Position { x, y };
+            if !Map::is_valid_pos((x, y))
+                || !Map::is_passable(x, y, map)
+                || !outside_weak_sanctuary(pos, all_objs)
+            {
+                continue;
+            }
+
+            let blocked = all_objs
+                .iter()
+                .any(|obj| obj.x == x && obj.y == y && obj.player_id != NPC_PLAYER_ID);
+
+            if !blocked {
+                candidates.push(pos);
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Encounter::get_encounter_pos(
+            NPC_PLAYER_ID,
+            hero_pos.x,
+            hero_pos.y,
+            all_objs.clone(),
+            map,
+        );
+    }
+
+    let index = rand::thread_rng().gen_range(0..candidates.len());
+    Some(candidates[index])
+}
+
+fn spawn_sanctuary_hunter_wave(
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+    map: &Map,
+    player_id: i32,
+    hero_pos: Position,
+    all_objs: &Vec<EncounterMapObj>,
+    exposure_moves: i32,
+    power_score: i32,
+    active_hunters: usize,
+) -> usize {
+    let slots = SANCTUARY_HUNTER_CAP.saturating_sub(active_hunters);
+    if slots == 0 {
+        return 0;
+    }
+
+    let wave = sanctuary_hunter_wave(exposure_moves, power_score);
+    let mut spawned = 0;
+
+    for npc_type in wave.into_iter().take(slots) {
+        let Some(spawn_pos) = sanctuary_hunter_spawn_pos(player_id, hero_pos, all_objs, map) else {
+            continue;
+        };
+
+        let (entity, _, _, _) = Encounter::spawn_npc(
+            NPC_PLAYER_ID,
+            spawn_pos,
+            npc_type.to_string(),
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+        commands
+            .entity(entity)
+            .insert(SanctuaryHunter { player_id });
+        commands.trigger(NewObj { entity });
+        spawned += 1;
+    }
+
+    spawned
+}
+
 fn move_event_completed_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
-    entity_map: ResMut<EntityObjMap>,
+    mut entity_map: ResMut<EntityObjMap>,
     mut explored_map: ResMut<ExploredMap>,
     mut ids: ResMut<Ids>,
     mut map: ResMut<Map>,
@@ -1782,6 +2144,7 @@ fn move_event_completed_system(
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
     player_intro_state: Res<PlayerIntroState>,
+    mut sanctuary_excursions: ResMut<SanctuaryExcursions>,
     (
         mover_query,
         map_obj_query,
@@ -1791,6 +2154,9 @@ fn move_event_completed_system(
         mut transport_query,
         aboard_query,
         mut encounter_moves_query,
+        hunter_query,
+        hero_power_query,
+        inventory_query,
     ): (
         Query<(Entity, &Id, &PlayerId, &Position, &Subclass, &Viewshed), With<MoveEventCompleted>>,
         Query<MapObjQuery>,
@@ -1800,6 +2166,9 @@ fn move_event_completed_system(
         Query<&mut Transport>,
         Query<&StateAboard>,
         Query<&mut EncounterMoves>,
+        Query<(&SanctuaryHunter, Option<&StateDead>)>,
+        Query<(&Template, &Skills, &Inventory), With<SubclassHero>>,
+        Query<(&PlayerId, &Inventory)>,
     ),
 ) {
     for (mover_entity, mover_id, mover_player_id, mover_pos, mover_subclass, mover_viewshed) in
@@ -2130,6 +2499,72 @@ fn move_event_completed_system(
 
                         send_to_client(mover_player_id.0, response_packet, &clients);
                     }
+                }
+            }
+
+            let sanctuary_protected =
+                effects.has(Effect::Sanctuary) || effects.has(Effect::WeakSanctuary);
+            drop(effects);
+
+            if mover_subclass.is_hero() {
+                if let Ok((hero_template, hero_skills, hero_inventory)) =
+                    hero_power_query.get(mover_entity)
+                {
+                    let player_gold = total_player_gold(mover_player_id.0, &inventory_query);
+                    let power_score = sanctuary_power_score(
+                        hero_template,
+                        hero_skills,
+                        hero_inventory,
+                        player_gold,
+                    );
+                    let exploration_unlocked = sanctuary_exploration_unlocked(power_score);
+
+                    if let Some(exposure_moves) = record_sanctuary_exposure(
+                        &mut sanctuary_excursions,
+                        mover_player_id.0,
+                        sanctuary_protected,
+                        exploration_unlocked,
+                    ) {
+                        if exposure_moves == 1 {
+                            let packet = ResponsePacket::Notice {
+                                noticemsg:
+                                    "The Monolith's sanctuary fades. The wilds have noticed you."
+                                        .to_string(),
+                                expiry: Some(8000),
+                            };
+                            send_to_client(mover_player_id.0, packet, &clients);
+                        }
+
+                        if should_spawn_sanctuary_hunters(exposure_moves) {
+                            let active_hunters =
+                                active_sanctuary_hunters(mover_player_id.0, &hunter_query);
+                            let spawned = spawn_sanctuary_hunter_wave(
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                                &map,
+                                mover_player_id.0,
+                                *mover_pos,
+                                &all_objs,
+                                exposure_moves,
+                                power_score,
+                                active_hunters,
+                            );
+
+                            if spawned > 0 {
+                                info!(
+                                    "Sanctuary excursion spawned {} hunters for player {} at exposure {}",
+                                    spawned, mover_player_id.0, exposure_moves
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    error!(
+                        "Hero {:?} missing progression data for sanctuary excursion",
+                        mover_entity
+                    );
                 }
             }
 
@@ -2485,6 +2920,7 @@ pub fn build_system(
         (
             Entity,
             &Id,
+            &PlayerId,
             &Position,
             &State,
             &Subclass,
@@ -2497,6 +2933,10 @@ pub fn build_system(
         With<StateBuilding>,
     >,
     worker_query: Query<(&Id, &Position, &State, &Template, &Skills, &BaseAttrs)>,
+    mut occupant_query: Query<
+        (Entity, &PlayerId, &Position, &State, &mut Effects),
+        Without<ClassStructure>,
+    >,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -2505,6 +2945,7 @@ pub fn build_system(
     for (
         structure_entity,
         structure_id,
+        structure_player_id,
         structure_pos,
         structure_state,
         structure_subclass,
@@ -2599,6 +3040,22 @@ pub fn build_system(
 
             // Set structure hp to base hp
             structure_stats.hp = structure_stats.base_hp;
+
+            if *structure_subclass == Subclass::Wall {
+                for (entity, player_id, pos, state, mut effects) in occupant_query.iter_mut() {
+                    if *player_id == *structure_player_id
+                        && *pos == *structure_pos
+                        && state.is_active()
+                    {
+                        effects
+                            .0
+                            .insert(Effect::Fortified, (game_tick.0 + 1, 0.0, 1));
+                        commands
+                            .entity(entity)
+                            .insert(Fortified { id: structure_id.0 });
+                    }
+                }
+            }
 
             // Handle structure subclass specific actions
             match *structure_subclass {
@@ -5274,43 +5731,606 @@ fn experiment_event_system(
     }
 }*/
 
+fn nearby_passable_pos(center: Position, radius: u32, map: &Map) -> Option<Position> {
+    let mut candidates: Vec<Position> = Map::range((center.x, center.y), radius)
+        .into_iter()
+        .filter(|(x, y)| (*x != center.x || *y != center.y) && Map::is_valid_pos((*x, *y)))
+        .filter(|(x, y)| Map::is_passable(*x, *y, map))
+        .map(|(x, y)| Position { x, y })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let index = rand::thread_rng().gen_range(0..candidates.len());
+    Some(candidates.swap_remove(index))
+}
+
+fn nearby_ocean_adjacent_passable_pos(
+    center: Position,
+    radius: u32,
+    map: &Map,
+) -> Option<Position> {
+    let mut candidates: Vec<Position> = Map::range((center.x, center.y), radius)
+        .into_iter()
+        .filter(|(x, y)| (*x != center.x || *y != center.y) && Map::is_valid_pos((*x, *y)))
+        .filter(|(x, y)| Map::is_passable(*x, *y, map))
+        .map(|(x, y)| Position { x, y })
+        .filter(|pos| Map::are_tile_types_nearby(*pos, vec![TileType::Ocean], map))
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let index = rand::thread_rng().gen_range(0..candidates.len());
+    Some(candidates.swap_remove(index))
+}
+
+fn loot_poi_spawn_pos(template_name: &str, center: Position, map: &Map) -> Option<Position> {
+    match template_name {
+        "Washed Ashore Materials" => nearby_ocean_adjacent_passable_pos(center, 2, map),
+        _ => nearby_passable_pos(center, 2, map),
+    }
+}
+
+fn reveal_nearby_resource(
+    center: Position,
+    resources: &mut Resources,
+    res_templates: &ResTemplates,
+) -> Option<Resource> {
+    for (x, y) in Map::range((center.x, center.y), 3) {
+        let revealed = Resource::explore(0, Position { x, y }, resources, res_templates);
+        if let Some(resource) = revealed.first() {
+            return Some(resource.clone());
+        }
+    }
+
+    None
+}
+
+fn send_notice(player_id: i32, message: &str, clients: &Res<Clients>) {
+    send_to_client(
+        player_id,
+        ResponsePacket::Notice {
+            noticemsg: message.to_string(),
+            expiry: Some(8000),
+        },
+        clients,
+    );
+}
+
+fn add_inventory_salvage(
+    player_id: i32,
+    obj_id: i32,
+    owner_template: &String,
+    action: &str,
+    inventory: &mut Inventory,
+    ids: &mut ResMut<Ids>,
+    templates: &Res<Templates>,
+    clients: &Res<Clients>,
+) {
+    let salvage_table = [
+        ("Firewood", 3),
+        ("Honeybell Berries", 2),
+        ("Crude Bandage", 1),
+        ("Pebble", 2),
+        ("Cragroot Maple Stick", 1),
+    ];
+    let (item_name, quantity) = salvage_table[rand::thread_rng().gen_range(0..salvage_table.len())];
+
+    inventory.new(
+        ids.new_item_id(),
+        item_name.to_string(),
+        quantity,
+        &templates.item_templates,
+    );
+
+    send_to_client(
+        player_id,
+        ResponsePacket::InfoInventory {
+            id: inventory.owner,
+            cap: Obj::get_capacity(owner_template, &templates.obj_templates),
+            tw: inventory.get_total_weight(),
+            items: inventory.get_packet(),
+        },
+        clients,
+    );
+
+    send_to_client(
+        player_id,
+        ResponsePacket::NewItems {
+            action: action.to_string(),
+            source_id: obj_id,
+            item_name: item_name.to_string(),
+            amount: quantity,
+        },
+        clients,
+    );
+}
+
+fn add_timed_explore_effect(
+    player_id: i32,
+    obj_id: i32,
+    pos: Position,
+    effects: &mut Effects,
+    effect: Effect,
+    game_tick: i32,
+    templates: &Res<Templates>,
+    map_events: &mut ResMut<MapEvents>,
+    clients: &Res<Clients>,
+) {
+    let effect_template = templates
+        .effect_templates
+        .get(&effect.clone().to_str())
+        .expect("Effect missing from templates");
+    let duration_ticks = effect_template.duration * TICKS_PER_SEC;
+
+    effects.0.insert(effect.clone(), (duration_ticks, 1.0, 1));
+    map_events.new(
+        obj_id,
+        game_tick + duration_ticks,
+        VisibleEvent::EffectExpiredEvent {
+            effect: effect.clone(),
+        },
+    );
+
+    send_to_client(
+        player_id,
+        ResponsePacket::GainedEffect {
+            id: obj_id,
+            x: pos.x,
+            y: pos.y,
+            effect: effect.to_str(),
+        },
+        clients,
+    );
+}
+
+fn clear_effect_with_item(
+    player_id: i32,
+    obj_id: i32,
+    pos: Position,
+    effects: &mut Effects,
+    effect: Effect,
+    clients: &Res<Clients>,
+) -> bool {
+    if !remove_explore_negative_effect(effects, effect.clone()) {
+        return false;
+    }
+
+    send_to_client(
+        player_id,
+        ResponsePacket::LostEffect {
+            id: obj_id,
+            x: pos.x,
+            y: pos.y,
+            effect: effect.to_str(),
+        },
+        clients,
+    );
+
+    true
+}
+
+fn spawn_loot_poi(
+    template_name: &str,
+    center: Position,
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    map: &Res<Map>,
+    templates: &Res<Templates>,
+) -> Option<Position> {
+    let pos = loot_poi_spawn_pos(template_name, center, map)?;
+    let poi_id = ids.new_obj_id();
+    let mut inventory = Inventory {
+        owner: poi_id,
+        items: Vec::new(),
+    };
+
+    match template_name {
+        "Supply Cache" => {
+            inventory.new(
+                ids.new_item_id(),
+                "Crude Bandage".to_string(),
+                1,
+                &templates.item_templates,
+            );
+            inventory.new(
+                ids.new_item_id(),
+                "Firewood".to_string(),
+                4,
+                &templates.item_templates,
+            );
+            inventory.new(
+                ids.new_item_id(),
+                "Honeybell Berries".to_string(),
+                2,
+                &templates.item_templates,
+            );
+        }
+        "Washed Ashore Materials" => {
+            inventory.new(
+                ids.new_item_id(),
+                "Cragroot Maple Timber".to_string(),
+                3,
+                &templates.item_templates,
+            );
+            inventory.new(
+                ids.new_item_id(),
+                "Pebble".to_string(),
+                2,
+                &templates.item_templates,
+            );
+            inventory.new(
+                ids.new_item_id(),
+                "Crude Torch".to_string(),
+                1,
+                &templates.item_templates,
+            );
+        }
+        _ => {}
+    }
+
+    let poi = Obj::create_nospawn(
+        poi_id,
+        MERCHANT_PLAYER_ID,
+        template_name.to_string(),
+        pos,
+        State::None,
+        inventory,
+        templates,
+    );
+    let poi_entity = commands.spawn(poi).id();
+    ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
+    entity_map.new_obj(poi_id, poi_entity);
+    commands.trigger(NewObj { entity: poi_entity });
+
+    Some(pos)
+}
+
+fn schedule_early_merchant_signal(
+    player_id: i32,
+    game_tick: i32,
+    ids: &mut ResMut<Ids>,
+    game_events: &mut ResMut<GameEvents>,
+    initial_encounter_state: &Res<InitialEncounterState>,
+) -> bool {
+    let Some(entry) = initial_encounter_state.get(&player_id) else {
+        return false;
+    };
+    if entry.merchant_id == 0 {
+        return false;
+    }
+    if game_events.iter().any(|(_, event)| {
+        matches!(
+            event.event_type,
+            GameEventType::MerchantArrival {
+                merchant_id,
+                player_id: event_player_id,
+            } if merchant_id == entry.merchant_id && event_player_id == player_id
+        )
+    }) {
+        return false;
+    }
+
+    let event_id = ids.new_map_event_id();
+    game_events.insert(
+        event_id,
+        GameEvent {
+            event_id,
+            start_tick: game_tick,
+            run_tick: game_tick + 600,
+            event_type: GameEventType::MerchantArrival {
+                merchant_id: entry.merchant_id,
+                player_id,
+            },
+        },
+    );
+    true
+}
+
+fn apply_explore_outcome(
+    outcome: ExploreOutcomeKind,
+    player_id: i32,
+    obj_id: i32,
+    pos: Position,
+    owner_template: &String,
+    action: &str,
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    map: &Res<Map>,
+    resources: &mut ResMut<Resources>,
+    inventory: &mut Inventory,
+    effects: &mut Effects,
+    templates: &Res<Templates>,
+    clients: &Res<Clients>,
+    game_tick: &Res<GameTick>,
+    map_events: &mut ResMut<MapEvents>,
+    game_events: &mut ResMut<GameEvents>,
+    initial_encounter_state: &Res<InitialEncounterState>,
+) {
+    match outcome {
+        ExploreOutcomeKind::ResourceGlimpse => {
+            if let Some(resource) = reveal_nearby_resource(pos, resources, &templates.res_templates)
+            {
+                send_notice(
+                    player_id,
+                    &format!(
+                        "A careful search reveals signs of {} nearby.",
+                        resource.name
+                    ),
+                    clients,
+                );
+            } else {
+                add_inventory_salvage(
+                    player_id,
+                    obj_id,
+                    owner_template,
+                    action,
+                    inventory,
+                    ids,
+                    templates,
+                    clients,
+                );
+            }
+        }
+        ExploreOutcomeKind::MinorSalvage => {
+            add_inventory_salvage(
+                player_id,
+                obj_id,
+                owner_template,
+                action,
+                inventory,
+                ids,
+                templates,
+                clients,
+            );
+        }
+        ExploreOutcomeKind::SupplyCache => {
+            if let Some(cache_pos) = spawn_loot_poi(
+                "Supply Cache",
+                pos,
+                commands,
+                ids,
+                entity_map,
+                map,
+                templates,
+            ) {
+                send_notice(
+                    player_id,
+                    &format!(
+                        "You spot a tucked-away supply cache at {},{}.",
+                        cache_pos.x, cache_pos.y
+                    ),
+                    clients,
+                );
+            } else {
+                add_inventory_salvage(
+                    player_id,
+                    obj_id,
+                    owner_template,
+                    action,
+                    inventory,
+                    ids,
+                    templates,
+                    clients,
+                );
+            }
+        }
+        ExploreOutcomeKind::WashedAshoreMaterials => {
+            if let Some(cache_pos) = spawn_loot_poi(
+                "Washed Ashore Materials",
+                pos,
+                commands,
+                ids,
+                entity_map,
+                map,
+                templates,
+            ) {
+                send_notice(
+                    player_id,
+                    &format!(
+                        "You notice useful debris washed ashore at {},{}.",
+                        cache_pos.x, cache_pos.y
+                    ),
+                    clients,
+                );
+            } else {
+                add_inventory_salvage(
+                    player_id,
+                    obj_id,
+                    owner_template,
+                    action,
+                    inventory,
+                    ids,
+                    templates,
+                    clients,
+                );
+            }
+        }
+        ExploreOutcomeKind::PoiClue => {
+            send_to_client(
+                player_id,
+                ResponsePacket::DiscoveryEvent {
+                    version: 1,
+                    discovery_type: "clue".to_string(),
+                    title: "Old trail sign".to_string(),
+                    unlock_source: "Exploration".to_string(),
+                    location: Some(format!("{},{}", pos.x, pos.y)),
+                    result: "Tracks and broken brush suggest there is something worth investigating nearby.".to_string(),
+                },
+                clients,
+            );
+        }
+        ExploreOutcomeKind::EarlyMerchantSignal => {
+            if schedule_early_merchant_signal(
+                player_id,
+                game_tick.0,
+                ids,
+                game_events,
+                initial_encounter_state,
+            ) {
+                send_notice(
+                    player_id,
+                    "You catch sight of a sail changing course toward the island.",
+                    clients,
+                );
+            } else {
+                add_inventory_salvage(
+                    player_id,
+                    obj_id,
+                    owner_template,
+                    action,
+                    inventory,
+                    ids,
+                    templates,
+                    clients,
+                );
+            }
+        }
+        ExploreOutcomeKind::StirredEnemy => {
+            if let Some(spawn_pos) = nearby_passable_pos(pos, 3, map) {
+                let (entity, _, _, _) = Encounter::spawn_npc(
+                    NPC_PLAYER_ID,
+                    spawn_pos,
+                    random_early_game_enemy_template().to_string(),
+                    commands,
+                    ids,
+                    entity_map,
+                    templates,
+                );
+                commands.trigger(NewObj { entity });
+                send_notice(
+                    player_id,
+                    "Your search stirs something hungry in the brush.",
+                    clients,
+                );
+            } else {
+                send_notice(player_id, "The brush goes still. Too still.", clients);
+            }
+        }
+        ExploreOutcomeKind::BrambleWound => {
+            add_timed_explore_effect(
+                player_id,
+                obj_id,
+                pos,
+                effects,
+                Effect::Bleed,
+                game_tick.0,
+                templates,
+                map_events,
+                clients,
+            );
+        }
+        ExploreOutcomeKind::FoulSpores => {
+            add_timed_explore_effect(
+                player_id,
+                obj_id,
+                pos,
+                effects,
+                Effect::Sickness,
+                game_tick.0,
+                templates,
+                map_events,
+                clients,
+            );
+        }
+        ExploreOutcomeKind::DarkOmen => {
+            add_timed_explore_effect(
+                player_id,
+                obj_id,
+                pos,
+                effects,
+                Effect::Cursed,
+                game_tick.0,
+                templates,
+                map_events,
+                clients,
+            );
+        }
+    }
+}
+
 fn explore_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
-    entity_map: Res<EntityObjMap>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    map: Res<Map>,
     mut resources: ResMut<Resources>,
     templates: Res<Templates>,
-    mut query: Query<(&PlayerId, &Position, &mut State)>,
+    mut game_events: ResMut<GameEvents>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    mut survey_history: ResMut<SurveyHistory>,
+    mut query: Query<(
+        &PlayerId,
+        &Id,
+        &Position,
+        &Template,
+        &mut State,
+        &mut Inventory,
+        &mut Effects,
+    )>,
     mut map_events: ResMut<MapEvents>,
-    mut visible_events: ResMut<VisibleEvents>,
 ) {
     let mut events_to_remove = Vec::new();
+    let due_events: Vec<_> = map_events
+        .iter()
+        .filter(|(_, map_event)| map_event.run_tick < game_tick.0)
+        .map(|(event_id, map_event)| (*event_id, map_event.clone()))
+        .collect();
 
-    for (map_event_id, map_event) in map_events.iter_mut() {
-        if map_event.run_tick < game_tick.0 {
-            // Execute event
-            match &map_event.event_type {
-                VisibleEvent::ExploreEvent => {
-                    debug!("Processing ExploreEvent");
-                    events_to_remove.push(*map_event_id);
+    for (map_event_id, map_event) in due_events {
+        match &map_event.event_type {
+            VisibleEvent::SurveyEvent
+            | VisibleEvent::ProspectEvent
+            | VisibleEvent::ExploreEvent => {
+                let is_survey = matches!(map_event.event_type, VisibleEvent::SurveyEvent);
+                let is_prospect = matches!(
+                    map_event.event_type,
+                    VisibleEvent::ProspectEvent | VisibleEvent::ExploreEvent
+                );
+                debug!("Processing discovery event: {:?}", map_event.event_type);
+                events_to_remove.push(map_event_id);
 
-                    let Some(entity) = entity_map.get_entity(map_event.obj_id) else {
-                        error!("Cannot find entity from id: {:?}", map_event.obj_id);
-                        continue;
-                    };
+                let Some(entity) = entity_map.get_entity(map_event.obj_id) else {
+                    error!("Cannot find entity from id: {:?}", map_event.obj_id);
+                    continue;
+                };
 
-                    let Ok((player_id, position, mut explorer_state)) = query.get_mut(entity)
-                    else {
-                        error!("Query failed to find entity {:?}", entity);
-                        continue;
-                    };
+                let Ok((
+                    player_id,
+                    explorer_id,
+                    position,
+                    template,
+                    mut explorer_state,
+                    mut inventory,
+                    mut effects,
+                )) = query.get_mut(entity)
+                else {
+                    error!("Query failed to find entity {:?}", entity);
+                    continue;
+                };
 
-                    let pos = Position {
-                        x: position.x,
-                        y: position.y,
-                    };
+                let player_id_value = player_id.0;
+                let explorer_id_value = explorer_id.0;
+                let pos = Position {
+                    x: position.x,
+                    y: position.y,
+                };
 
+                *explorer_state = State::None;
+                commands.trigger(StateChange {
+                    entity,
+                    new_state: State::None,
+                });
+
+                if is_prospect {
                     let revealed_resources = Resource::explore(
                         map_event.obj_id,
                         pos,
@@ -5318,26 +6338,242 @@ fn explore_event_system(
                         &templates.res_templates,
                     );
 
-                    if revealed_resources.len() > 0 {
-                        // Set explorer state to none
-                        *explorer_state = State::None;
-
-                        commands.trigger(StateChange {
-                            entity,
-                            new_state: State::None,
-                        });
-
+                    if let Some(resource) = revealed_resources.first() {
                         let notification_packet: ResponsePacket = ResponsePacket::NewItems {
-                            action: STATE_EXPLORING.to_string(),
-                            source_id: map_event.obj_id, // Villager Id
-                            item_name: revealed_resources[0].name.clone(),
-                            amount: 1,
+                            action: STATE_PROSPECTING.to_string(),
+                            source_id: map_event.obj_id,
+                            item_name: resource.name.clone(),
+                            amount: revealed_resources.len() as i32,
                         };
 
-                        send_to_client(player_id.0, notification_packet, &clients);
+                        send_to_client(player_id_value, notification_packet, &clients);
                     }
                 }
-                _ => {}
+
+                if is_survey && record_tile_survey(player_id_value, pos, &mut survey_history) {
+                    let outcome = roll_explore_outcome();
+                    apply_explore_outcome(
+                        outcome,
+                        player_id_value,
+                        explorer_id_value,
+                        pos,
+                        &template.0,
+                        STATE_SURVEYING,
+                        &mut commands,
+                        &mut ids,
+                        &mut entity_map,
+                        &map,
+                        &mut resources,
+                        &mut inventory,
+                        &mut effects,
+                        &templates,
+                        &clients,
+                        &game_tick,
+                        &mut map_events,
+                        &mut game_events,
+                        &initial_encounter_state,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for event_id in events_to_remove.iter() {
+        map_events.remove(event_id);
+    }
+}
+
+fn send_objectives_packet(player_id: i32, obj: &PlayerObjectives, clients: &Res<Clients>) {
+    let objectives_packet = ResponsePacket::Objectives {
+        build_campfire: obj.build_campfire,
+        build_3_structures: obj.build_3_structures,
+        recruit_villager: obj.recruit_villager,
+        explore_poi: obj.explore_poi,
+        survive_5_nights: obj.survive_5_nights,
+    };
+    send_to_client(player_id, objectives_packet, clients);
+}
+
+fn investigate_event_system(
+    mut commands: Commands,
+    clients: Res<Clients>,
+    game_tick: Res<GameTick>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    map: Res<Map>,
+    mut resources: ResMut<Resources>,
+    templates: Res<Templates>,
+    mut game_events: ResMut<GameEvents>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    mut investigated_pois: ResMut<InvestigatedPOIs>,
+    mut objectives: ResMut<Objectives>,
+    mut query: Query<(
+        &PlayerId,
+        &Id,
+        &Position,
+        &Template,
+        &Subclass,
+        &mut State,
+        &mut Inventory,
+        &mut Effects,
+    )>,
+    mut map_events: ResMut<MapEvents>,
+) {
+    let mut events_to_remove = Vec::new();
+    let due_events: Vec<_> = map_events
+        .iter()
+        .filter(|(_, map_event)| map_event.run_tick < game_tick.0)
+        .map(|(event_id, map_event)| (*event_id, map_event.clone()))
+        .collect();
+
+    for (map_event_id, map_event) in due_events {
+        let VisibleEvent::InvestigateEvent { target_id } = map_event.event_type else {
+            continue;
+        };
+
+        debug!("Processing InvestigateEvent");
+        events_to_remove.push(map_event_id);
+
+        let Some(explorer_entity) = entity_map.get_entity(map_event.obj_id) else {
+            error!("Cannot find investigator from id: {:?}", map_event.obj_id);
+            continue;
+        };
+        let Some(target_entity) = entity_map.get_entity(target_id) else {
+            error!("Cannot find investigate target from id: {:?}", target_id);
+            continue;
+        };
+
+        let Ok([mut explorer, target]) = query.get_many_mut([explorer_entity, target_entity])
+        else {
+            error!(
+                "Cannot find investigator/target entities {:?} {:?}",
+                explorer_entity, target_entity
+            );
+            continue;
+        };
+
+        let (
+            explorer_player_id,
+            explorer_id,
+            explorer_pos,
+            explorer_template,
+            _explorer_subclass,
+            mut explorer_state,
+            mut explorer_inventory,
+            mut explorer_effects,
+        ) = explorer;
+        let (
+            _target_player_id,
+            target_obj_id,
+            target_pos,
+            target_template,
+            target_subclass,
+            _target_state,
+            _target_inventory,
+            _target_effects,
+        ) = target;
+
+        let player_id = explorer_player_id.0;
+        let investigator_id = explorer_id.0;
+        let investigator_pos = *explorer_pos;
+        let target_id_value = target_obj_id.0;
+        let target_template_name = target_template.0.clone();
+        let target_is_poi = *target_subclass == Subclass::Poi;
+        let target_is_monolith = target_subclass.is_monolith();
+
+        *explorer_state = State::None;
+        commands.trigger(StateChange {
+            entity: explorer_entity,
+            new_state: State::None,
+        });
+
+        if target_is_monolith {
+            commands.trigger(player::InfoMonolithEvent {
+                entity: target_entity,
+                player_id,
+            });
+            continue;
+        }
+
+        if !target_is_poi {
+            send_notice(
+                player_id,
+                "There is nothing special to investigate here.",
+                &clients,
+            );
+            continue;
+        }
+
+        commands.trigger(player::InfoPOIEvent {
+            entity: target_entity,
+            player_id,
+        });
+
+        let first_investigation =
+            record_poi_investigation(player_id, target_id_value, &mut investigated_pois);
+
+        if first_investigation {
+            let player_obj = objectives
+                .entry(player_id)
+                .or_insert_with(PlayerObjectives::default);
+
+            if target_template_name == "Shipwreck" && !player_obj.scavenge_shipwreck {
+                player_obj.scavenge_shipwreck = true;
+                send_to_client(
+                    player_id,
+                    ResponsePacket::DiscoveryEvent {
+                        version: 1,
+                        discovery_type: "poi".to_string(),
+                        title: "Shipwreck scavenged".to_string(),
+                        unlock_source: "Investigation".to_string(),
+                        location: Some(format!("{},{}", target_pos.x, target_pos.y)),
+                        result: "The wreck teaches the first rule: inspect places, recover supplies, and turn danger into tools.".to_string(),
+                    },
+                    &clients,
+                );
+                add_inventory_salvage(
+                    player_id,
+                    investigator_id,
+                    &explorer_template.0,
+                    STATE_INVESTIGATING,
+                    &mut explorer_inventory,
+                    &mut ids,
+                    &templates,
+                    &clients,
+                );
+            }
+
+            if !player_obj.explore_poi {
+                player_obj.explore_poi = true;
+            }
+            send_objectives_packet(player_id, player_obj, &clients);
+
+            if !matches!(
+                target_template_name.as_str(),
+                "Shipwreck" | "Supply Cache" | "Washed Ashore Materials"
+            ) {
+                apply_explore_outcome(
+                    roll_explore_outcome(),
+                    player_id,
+                    investigator_id,
+                    investigator_pos,
+                    &explorer_template.0,
+                    STATE_INVESTIGATING,
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &map,
+                    &mut resources,
+                    &mut explorer_inventory,
+                    &mut explorer_effects,
+                    &templates,
+                    &clients,
+                    &game_tick,
+                    &mut map_events,
+                    &mut game_events,
+                    &initial_encounter_state,
+                );
             }
         }
     }
@@ -6048,45 +7284,138 @@ fn use_item_system(
 
                     match (item.class.as_str(), item.subclass.as_str()) {
                         (item::POTION, item::HEALTH) => {
-                            let healing_attrval = item
-                                .attrs
-                                .get(&item::AttrKey::Healing)
-                                .expect("Missing Healing attribute.");
+                            if let Some(healing_attrval) = item.attrs.get(&item::AttrKey::Healing) {
+                                debug!("Healing AttrVal: {:?}", healing_attrval);
 
-                            debug!("Healing AttrVal: {:?}", healing_attrval);
-
-                            let healing_value = match healing_attrval {
-                                item::AttrVal::Num(val) => *val as i32,
-                                _ => panic!("Invalid healing attribute value"),
-                            };
-
-                            if item_owner.stats.hp < item_owner.stats.base_hp {
-                                if (item_owner.stats.hp + healing_value) > item_owner.stats.base_hp
-                                {
-                                    item_owner.stats.hp = item_owner.stats.base_hp;
-                                } else {
-                                    item_owner.stats.hp += healing_value;
-                                }
-
-                                debug!("Entity: {:?} Hp: {:?}", item_owner_id, item_owner.stats.hp);
-
-                                let packet = ResponsePacket::Stats {
-                                    data: StatsData {
-                                        id: *item_owner_id,
-                                        hp: item_owner.stats.hp,
-                                        base_hp: item_owner.stats.base_hp,
-                                        stamina: 10000, // TODO missing stamina
-                                        base_stamina: 10000,
-                                        mana: item_owner.stats.mana.unwrap_or(0),
-                                        base_mana: item_owner.stats.base_mana.unwrap_or(0),
-                                        thirst: None,
-                                        hunger: None,
-                                        tiredness: None,
-                                        effects: Vec::new(),
-                                    },
+                                let healing_value = match healing_attrval {
+                                    item::AttrVal::Num(val) => *val as i32,
+                                    _ => panic!("Invalid healing attribute value"),
                                 };
 
-                                send_to_client(item_owner.player_id.0, packet, &clients);
+                                if item_owner.stats.hp < item_owner.stats.base_hp {
+                                    if (item_owner.stats.hp + healing_value)
+                                        > item_owner.stats.base_hp
+                                    {
+                                        item_owner.stats.hp = item_owner.stats.base_hp;
+                                    } else {
+                                        item_owner.stats.hp += healing_value;
+                                    }
+
+                                    debug!(
+                                        "Entity: {:?} Hp: {:?}",
+                                        item_owner_id, item_owner.stats.hp
+                                    );
+
+                                    let packet = ResponsePacket::Stats {
+                                        data: StatsData {
+                                            id: *item_owner_id,
+                                            hp: item_owner.stats.hp,
+                                            base_hp: item_owner.stats.base_hp,
+                                            stamina: 10000, // TODO missing stamina
+                                            base_stamina: 10000,
+                                            mana: item_owner.stats.mana.unwrap_or(0),
+                                            base_mana: item_owner.stats.base_mana.unwrap_or(0),
+                                            thirst: None,
+                                            hunger: None,
+                                            tiredness: None,
+                                            effects: Vec::new(),
+                                        },
+                                    };
+
+                                    send_to_client(item_owner.player_id.0, packet, &clients);
+                                }
+                            }
+
+                            if explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                == Some(Effect::Sickness)
+                                && clear_effect_with_item(
+                                    item_owner.player_id.0,
+                                    item_owner.id.0,
+                                    *item_owner.pos,
+                                    &mut item_owner.effects,
+                                    Effect::Sickness,
+                                    &clients,
+                                )
+                            {
+                                send_notice(
+                                    item_owner.player_id.0,
+                                    &format!("{} clears the sickness.", item.name),
+                                    &clients,
+                                );
+                            }
+                        }
+                        (item::MEDICAL, "Bandage") => {
+                            if explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                == Some(Effect::Bleed)
+                                && clear_effect_with_item(
+                                    item_owner.player_id.0,
+                                    item_owner.id.0,
+                                    *item_owner.pos,
+                                    &mut item_owner.effects,
+                                    Effect::Bleed,
+                                    &clients,
+                                )
+                            {
+                                item_owner.inventory.remove_quantity(item.id, 1);
+
+                                let info_inventory_packet = ResponsePacket::InfoInventory {
+                                    id: item.owner,
+                                    cap: Obj::get_capacity(
+                                        &item_owner.template.0,
+                                        &templates.obj_templates,
+                                    ),
+                                    tw: item_owner.inventory.get_total_weight(),
+                                    items: item_owner.inventory.get_packet(),
+                                };
+
+                                send_to_client(
+                                    item_owner.player_id.0,
+                                    info_inventory_packet,
+                                    &clients,
+                                );
+                                send_notice(
+                                    item_owner.player_id.0,
+                                    &format!("{} stops the bleeding.", item.name),
+                                    &clients,
+                                );
+                            } else if explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                == Some(Effect::Bleed)
+                            {
+                                send_to_client(
+                                    item_owner.player_id.0,
+                                    ResponsePacket::Error {
+                                        errmsg: "There is no bleeding to treat.".to_string(),
+                                    },
+                                    &clients,
+                                );
+                            }
+                        }
+                        (item::TORCH, _) => {
+                            if explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                == Some(Effect::Cursed)
+                            {
+                                if clear_effect_with_item(
+                                    item_owner.player_id.0,
+                                    item_owner.id.0,
+                                    *item_owner.pos,
+                                    &mut item_owner.effects,
+                                    Effect::Cursed,
+                                    &clients,
+                                ) {
+                                    send_notice(
+                                        item_owner.player_id.0,
+                                        &format!("{} burns away the curse.", item.name),
+                                        &clients,
+                                    );
+                                } else {
+                                    send_to_client(
+                                        item_owner.player_id.0,
+                                        ResponsePacket::Error {
+                                            errmsg: "There is no curse to clear.".to_string(),
+                                        },
+                                        &clients,
+                                    );
+                                }
                             }
                         }
                         (item::DEED, _) => {
@@ -6406,6 +7735,103 @@ fn use_item_system(
 
     for event_id in events_to_remove.iter() {
         map_events.remove(event_id);
+    }
+}
+
+const HERO_AUTO_CONSUME_THRESHOLD: f32 = THIRSTY_SCORE;
+const HERO_AUTO_CONSUME_TICKS: i32 = TICKS_PER_SEC * 3;
+
+fn hero_has_pending_map_event(obj_id: i32, map_events: &MapEvents) -> bool {
+    map_events.iter().any(|(_, event)| event.obj_id == obj_id)
+}
+
+fn hero_auto_consume_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    mut map_events: ResMut<MapEvents>,
+    mut hero_query: Query<
+        (
+            Entity,
+            &Id,
+            &State,
+            &Inventory,
+            &Thirst,
+            &Hunger,
+            Option<&LastCombatTick>,
+            Option<&mut EventExecuting>,
+        ),
+        With<SubclassHero>,
+    >,
+) {
+    for (entity, id, state, inventory, thirst, hunger, last_combat_tick, event_executing) in
+        hero_query.iter_mut()
+    {
+        if *state != State::None
+            || last_combat_tick
+                .map(|last_combat_tick| is_combat_locked(game_tick.0, last_combat_tick))
+                .unwrap_or(false)
+            || event_executing
+                .as_ref()
+                .map(|event_executing| event_executing.state == EventExecutingState::Executing)
+                .unwrap_or(false)
+            || hero_has_pending_map_event(id.0, &map_events)
+        {
+            continue;
+        }
+
+        let drink_item = (thirst.thirst >= HERO_AUTO_CONSUME_THRESHOLD)
+            .then(|| inventory.get_by_class(DRINK.to_string()))
+            .flatten();
+        let food_item = (hunger.hunger >= HERO_AUTO_CONSUME_THRESHOLD)
+            .then(|| inventory.get_food_to_eat())
+            .flatten();
+
+        let (next_state, event_type, event_name) = match (drink_item, food_item) {
+            (Some(drink_item), Some(_food_item)) if thirst.thirst >= hunger.hunger => (
+                State::Drinking,
+                VisibleEvent::DrinkEvent {
+                    item_id: drink_item.id,
+                    obj_id: id.0,
+                },
+                "Drink",
+            ),
+            (Some(_drink_item), Some(food_item)) => (
+                State::Eating,
+                VisibleEvent::EatEvent {
+                    item_id: food_item.id,
+                    obj_id: id.0,
+                },
+                "Eat",
+            ),
+            (Some(drink_item), None) => (
+                State::Drinking,
+                VisibleEvent::DrinkEvent {
+                    item_id: drink_item.id,
+                    obj_id: id.0,
+                },
+                "Drink",
+            ),
+            (None, Some(food_item)) => (
+                State::Eating,
+                VisibleEvent::EatEvent {
+                    item_id: food_item.id,
+                    obj_id: id.0,
+                },
+                "Eat",
+            ),
+            (None, None) => continue,
+        };
+
+        commands.trigger(StateChange {
+            entity,
+            new_state: next_state,
+        });
+        map_events.new(id.0, game_tick.0 + HERO_AUTO_CONSUME_TICKS, event_type);
+
+        if let Some(mut event_executing) = event_executing {
+            event_executing.event_type = event_name.to_string();
+            event_executing.state = EventExecutingState::Executing;
+        }
     }
 }
 
@@ -7277,8 +8703,8 @@ fn visible_event_system(
                                 let change_event = network::ChangeEvents::ObjMove {
                                     event: "obj_move".to_string(),
                                     obj: network_obj.to_owned(),
-                                    src_x: dst.x,
-                                    src_y: dst.y,
+                                    src_x: src.x,
+                                    src_y: src.y,
                                 };
 
                                 // Notify observer
@@ -7294,8 +8720,8 @@ fn visible_event_system(
                                 let change_event = network::ChangeEvents::ObjMove {
                                     event: "obj_move".to_string(),
                                     obj: network_obj.to_owned(),
-                                    src_x: dst.x,
-                                    src_y: dst.y,
+                                    src_x: src.x,
+                                    src_y: src.y,
                                 };
 
                                 all_change_events
@@ -7598,8 +9024,8 @@ fn visible_event_system(
                                 let change_event = network::ChangeEvents::ObjMove {
                                     event: "obj_move".to_string(),
                                     obj: network_obj.to_owned(),
-                                    src_x: dst.x,
-                                    src_y: dst.y,
+                                    src_x: src.x,
+                                    src_y: src.y,
                                 };
 
                                 // Notify observer
@@ -7615,8 +9041,8 @@ fn visible_event_system(
                                 let change_event = network::ChangeEvents::ObjMove {
                                     event: "obj_move".to_string(),
                                     obj: network_obj.to_owned(),
-                                    src_x: dst.x,
-                                    src_y: dst.y,
+                                    src_x: src.x,
+                                    src_y: src.y,
                                 };
 
                                 all_change_events
@@ -8138,6 +9564,7 @@ fn game_event_system(
                     );
                 }
                 GameEventType::NecroEvent {
+                    necromancer_id,
                     spawn_anchor,
                     corpse_anchor,
                     home,
@@ -8145,8 +9572,11 @@ fn game_event_system(
                     debug!("Processing NecroEvent");
                     events_to_remove.push(*event_id);
 
-                    let occupied_positions: HashSet<Position> =
-                        query.iter().map(|obj| *obj.pos).collect();
+                    let occupied_positions: HashSet<Position> = query
+                        .iter()
+                        .filter(|obj| Some(obj.id.0) != *necromancer_id)
+                        .map(|obj| *obj.pos)
+                        .collect();
 
                     let Some(spawn_pos) = resolve_necromancer_spawn_pos(
                         *spawn_anchor,
@@ -8161,19 +9591,70 @@ fn game_event_system(
                         continue;
                     };
 
-                    let (necro_entity, npc_id, _player_id, _pos) =
-                        Encounter::spawn_necromancer_hunting_corpse(
-                            NPC_PLAYER_ID,
-                            spawn_pos,
-                            *home,
-                            *corpse_anchor,
-                            &mut commands,
-                            &mut ids,
-                            &mut entity_map,
-                            &templates,
-                        );
+                    let (necro_entity, npc_id) = if let Some(necromancer_id) = necromancer_id {
+                        if let Some(necro_entity) = entity_map.get_entity(*necromancer_id) {
+                            if let Ok(mut necro) = query.get_mut(necro_entity) {
+                                *necro.pos = spawn_pos;
+                                *necro.state = State::None;
+                                Encounter::activate_necromancer_hunting_corpse(
+                                    necro_entity,
+                                    *home,
+                                    *corpse_anchor,
+                                    &mut commands,
+                                );
+                                (necro_entity, *necro.id)
+                            } else {
+                                warn!(
+                                    "NecroEvent dormant obj {:?} missing required components; spawning replacement",
+                                    necromancer_id
+                                );
+                                let (entity, id, _player_id, _pos) =
+                                    Encounter::spawn_necromancer_hunting_corpse(
+                                        NPC_PLAYER_ID,
+                                        spawn_pos,
+                                        *home,
+                                        *corpse_anchor,
+                                        &mut commands,
+                                        &mut ids,
+                                        &mut entity_map,
+                                        &templates,
+                                    );
+                                (entity, id)
+                            }
+                        } else {
+                            warn!(
+                                "NecroEvent dormant obj {:?} missing from entity map; spawning replacement",
+                                necromancer_id
+                            );
+                            let (entity, id, _player_id, _pos) =
+                                Encounter::spawn_necromancer_hunting_corpse(
+                                    NPC_PLAYER_ID,
+                                    spawn_pos,
+                                    *home,
+                                    *corpse_anchor,
+                                    &mut commands,
+                                    &mut ids,
+                                    &mut entity_map,
+                                    &templates,
+                                );
+                            (entity, id)
+                        }
+                    } else {
+                        let (entity, id, _player_id, _pos) =
+                            Encounter::spawn_necromancer_hunting_corpse(
+                                NPC_PLAYER_ID,
+                                spawn_pos,
+                                *home,
+                                *corpse_anchor,
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                            );
+                        (entity, id)
+                    };
 
-                    // Create a new object event
+                    // Create a new object event now that the hidden necromancer is visible.
                     commands.trigger(NewObj {
                         entity: necro_entity,
                     });
@@ -8337,7 +9818,10 @@ fn game_event_system(
                                 | VisibleEvent::RefineEvent { .. }
                                 | VisibleEvent::OperateEvent { .. }
                                 | VisibleEvent::CraftEvent { .. }
+                                | VisibleEvent::SurveyEvent
+                                | VisibleEvent::ProspectEvent
                                 | VisibleEvent::ExploreEvent
+                                | VisibleEvent::InvestigateEvent { .. }
                                 | VisibleEvent::UseItemEvent { .. } => {
                                     events_to_cancel.push(map_event.clone());
                                 }
@@ -8481,7 +9965,7 @@ fn player_intro_state_system(
     }
 }
 
-// Tier 1: Spawns Giant Rats when 20+ food items are stored in a storage structure
+// Tier 1: Spawns low-tier pests when 20+ food items are stored in a storage structure
 fn rat_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -8501,7 +9985,7 @@ fn rat_event_system(
     let mut food_items_stored = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
-        // Skip players who have already triggered the rat crisis
+        // Skip players who have already triggered the tier 1 pest crisis
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.rat_spoilage {
                 continue;
@@ -8546,14 +10030,13 @@ fn rat_event_system(
 
                     if let Some((path, _cost)) = path {
                         if path.len() < 20 {
-                            // Spawn 2-3 Giant Rats
-                            let num_rats = rand::thread_rng().gen_range(2..=3);
-                            for _ in 0..num_rats {
+                            let num_pests = rand::thread_rng().gen_range(2..=3);
+                            for _ in 0..num_pests {
                                 Encounter::spawn_spoil_crisis(
                                     ids.new_obj_id(),
                                     NPC_PLAYER_ID,
                                     spawn_pos,
-                                    "Giant Rat".to_string(),
+                                    random_early_game_enemy_template().to_string(),
                                     &mut commands,
                                     &mut ids,
                                     &mut entity_map,
@@ -8570,7 +10053,7 @@ fn rat_event_system(
 
             if spawned {
                 info!(
-                    "Tier 1 Crisis: Rat Spoilage triggered for player {}",
+                    "Tier 1 Crisis: Food pest spoilage triggered for player {}",
                     player_id
                 );
                 crisis_state
@@ -8582,7 +10065,7 @@ fn rat_event_system(
     }
 }
 
-// Watches for the initial rat kills and chains boar/crab → spider spawns
+// Watches for the initial enemy kills and chains boar/crab into spider spawns
 fn initial_encounter_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -8610,15 +10093,20 @@ fn initial_encounter_system(
         let crisis = crisis_state
             .entry(*player_id)
             .or_insert_with(PlayerCrisis::default);
-        let all_rats_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
+        let all_opening_enemies_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
 
         if !intro_entry.shipwreck_chain_started && game_tick.0 >= entry.first_rat_spawn_tick {
             let first_rat_id = entry.rat_ids[0];
+            let first_enemy_template = entry
+                .opening_enemy_templates
+                .get(0)
+                .map(String::as_str)
+                .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[0]);
             let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                 first_rat_id,
                 NPC_PLAYER_ID,
                 entry.spawn_pos,
-                "Giant Rat".to_string(),
+                first_enemy_template.to_string(),
                 &mut commands,
                 &mut ids,
                 &mut entity_map,
@@ -8627,19 +10115,24 @@ fn initial_encounter_system(
             commands.trigger(NewObj { entity });
             intro_entry.shipwreck_chain_started = true;
             info!(
-                "Initial Encounter: spawning first Giant Rat for player {}",
-                player_id
+                "Initial Encounter: spawning first {} for player {}",
+                first_enemy_template, player_id
             );
         }
 
         if game_tick.0 >= entry.second_rat_spawn_tick && !dead_ids.contains(&entry.rat_ids[1]) {
             let second_rat_id = entry.rat_ids[1];
             if entity_map.get_entity(second_rat_id).is_none() {
+                let second_enemy_template = entry
+                    .opening_enemy_templates
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[1]);
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     second_rat_id,
                     NPC_PLAYER_ID,
                     entry.spawn_pos,
-                    "Giant Rat".to_string(),
+                    second_enemy_template.to_string(),
                     &mut commands,
                     &mut ids,
                     &mut entity_map,
@@ -8648,8 +10141,8 @@ fn initial_encounter_system(
                 commands.trigger(NewObj { entity });
                 intro_entry.shipwreck_chain_started = true;
                 info!(
-                    "Initial Encounter: spawning second Giant Rat for player {}",
-                    player_id
+                    "Initial Encounter: spawning second {} for player {}",
+                    second_enemy_template, player_id
                 );
             }
         }
@@ -8675,9 +10168,9 @@ fn initial_encounter_system(
             entry.villager_event_scheduled = true;
         }
 
-        // Phase 0: waiting for both rats to die → spawn boar/crab
+        // Phase 0: waiting for both opening enemies to die, then spawn boar/crab
         if !crisis.initial_encounter {
-            if game_tick.0 >= entry.phase1_unlock_tick && all_rats_dead {
+            if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_dead {
                 let npc_id = ids.new_obj_id();
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     npc_id,
@@ -8693,7 +10186,7 @@ fn initial_encounter_system(
                 entry.phase1_npc_id = Some(npc_id);
                 crisis.initial_encounter = true;
                 info!(
-                    "Initial Encounter: spawning {} after rats killed for player {}",
+                    "Initial Encounter: spawning {} after opening enemies killed for player {}",
                     entry.phase1_spawn, player_id
                 );
             }
@@ -9165,7 +10658,7 @@ fn nightly_threat_system(
             match current_day {
                 2 => (vec!["Wolf"; 2], "Wolves howl nearby as darkness falls..."),
                 3 => (
-                    vec!["Wolf", "Wolf", "Giant Rat", "Giant Rat"],
+                    vec!["Wolf", "Cave Bat", "Ash Viper", "Reef Skitter"],
                     "The pack grows bolder tonight...",
                 ),
                 4 => (
@@ -9949,7 +11442,7 @@ fn objectives_system(
                 "Crafting Tent" | "Mine" | "Lumbercamp" | "Quarry" | "Trapper" | "Farm"
             )
         });
-        let starting_rats_dead = initial_encounter_state
+        let starting_enemies_dead = initial_encounter_state
             .get(&player_id.0)
             .map(|entry| entry.rat_ids.iter().all(|id| dead_ids.contains(id)))
             .unwrap_or(false);
@@ -9972,7 +11465,7 @@ fn objectives_system(
             );
         }
 
-        if !obj.win_first_fight && starting_rats_dead {
+        if !obj.win_first_fight && starting_enemies_dead {
             obj.win_first_fight = true;
             send_discovery_event(
                 player_id.0,
@@ -10059,7 +11552,7 @@ fn objectives_system(
             obj,
             structure_count as i32,
             has_shelter,
-            starting_rats_dead,
+            starting_enemies_dead,
             game_tick.day(),
         );
         send_to_client(player_id.0, objective_state_packet, &clients);
@@ -10178,7 +11671,7 @@ fn build_objective_state_packet(
     obj: &PlayerObjectives,
     structure_count: i32,
     has_shelter: bool,
-    starting_rats_dead: bool,
+    starting_enemies_dead: bool,
     day: i32,
 ) -> ResponsePacket {
     let current_id = first_incomplete_objective_id(obj, has_shelter);
@@ -10212,10 +11705,10 @@ fn build_objective_state_packet(
         objective_progress(
             "win_first_fight",
             "Win the first fight",
-            obj.win_first_fight || starting_rats_dead,
+            obj.win_first_fight || starting_enemies_dead,
             &current_id,
             "Combat",
-            Some("Giant Rat"),
+            Some("Cave Bat"),
             "Read the threat, use quick attacks for control, and block if you need time.",
             "Combat is a grammar: quick, precise, fierce, and block each mean something.",
             "XP, loot, and confidence to leave the firelight.",
@@ -10361,9 +11854,9 @@ fn build_threat_state_packet(
     let known_risks = vec![
         network::ThreatRisk {
             id: "food_spoilage".to_string(),
-            label: "Food stores attract rats".to_string(),
+            label: "Food stores attract pests".to_string(),
             severity: risk_severity(food_stored, 20),
-            trigger_hint: "20 food in storage can trigger a rat spoilage crisis.".to_string(),
+            trigger_hint: "20 food in storage can trigger a pest spoilage crisis.".to_string(),
             counter_hint: "Cook, spend, split, or defend food stores before they pile up."
                 .to_string(),
             current: Some(food_stored),
@@ -10880,7 +12373,7 @@ fn victory_check_system(
                     if monolith.sealed && !victory.conquest {
                         victory.conquest = true;
                         let packet = ResponsePacket::Notice {
-                            noticemsg: "VICTORY — CONQUEST! You have explored the island's secrets and sealed the Monolith. The darkness recedes! You may continue playing.".to_string(),
+                            noticemsg: "VICTORY — CONQUEST! You have uncovered the island's secrets and sealed the Monolith. The darkness recedes! You may continue playing.".to_string(),
                             expiry: Some(30000),
                         };
                         send_to_client(player_id.0, packet, &clients);
@@ -11345,44 +12838,52 @@ fn new_obj_observer(
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    new_obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Subclass)>,
+    new_obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Subclass, &State)>,
     query: Query<(Entity, &PlayerId, &Id, &Position, &Subclass, &State)>,
     mut effect_query: Query<&mut Effects>,
 ) {
-    let Ok((new_obj_player_id, new_obj_id, new_obj_position, new_obj_class, new_obj_subclass)) =
-        new_obj_query.get(new_obj.entity)
+    let Ok((
+        new_obj_player_id,
+        new_obj_id,
+        new_obj_position,
+        new_obj_class,
+        new_obj_subclass,
+        new_obj_state,
+    )) = new_obj_query.get(new_obj.entity)
     else {
         error!("Query failed to find entity {:?}", new_obj.entity);
         return;
     };
 
     if *new_obj_subclass == Subclass::Wall {
-        for (entity, player_id, id, position, subclass, state) in query.iter() {
-            if *player_id == *new_obj_player_id
-                && id.0 != new_obj_id.0
-                && *new_obj_position == *position
-                && state.is_active()
-            {
-                if let Ok(mut effects) = effect_query.get_mut(entity) {
-                    effects
-                        .0
-                        .insert(Effect::Fortified, (game_tick.0 + 1, 0.0, 1));
+        if wall_grants_fortification(new_obj_state) {
+            for (entity, player_id, id, position, _subclass, state) in query.iter() {
+                if *player_id == *new_obj_player_id
+                    && id.0 != new_obj_id.0
+                    && *new_obj_position == *position
+                    && state.is_active()
+                {
+                    if let Ok(mut effects) = effect_query.get_mut(entity) {
+                        effects
+                            .0
+                            .insert(Effect::Fortified, (game_tick.0 + 1, 0.0, 1));
 
-                    commands
-                        .entity(entity)
-                        .insert(Fortified { id: new_obj_id.0 });
+                        commands
+                            .entity(entity)
+                            .insert(Fortified { id: new_obj_id.0 });
+                    }
                 }
             }
         }
     } else {
         let mut wall_on_tile = None;
 
-        for (entity, player_id, id, position, subclass, state) in query.iter() {
+        for (_entity, player_id, id, position, subclass, state) in query.iter() {
             if new_obj_id.0 != id.0
                 && *new_obj_position == *position
                 && new_obj_player_id == player_id
-                && state.is_active()
                 && *subclass == Subclass::Wall
+                && wall_grants_fortification(state)
             {
                 wall_on_tile = Some(id.0);
             }
@@ -12166,7 +13667,10 @@ fn cancel_events_observer(
                 | VisibleEvent::RefineEvent { .. }
                 | VisibleEvent::OperateEvent { .. }
                 | VisibleEvent::CraftEvent { .. }
+                | VisibleEvent::SurveyEvent
+                | VisibleEvent::ProspectEvent
                 | VisibleEvent::ExploreEvent
+                | VisibleEvent::InvestigateEvent { .. }
                 | VisibleEvent::UseItemEvent { .. } => {
                     events_to_cancel.push(map_event.clone());
                 }

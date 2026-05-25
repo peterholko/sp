@@ -122,7 +122,7 @@ impl VillagerUtil {
     pub fn order_to_speech(order: &Order) -> String {
         match order {
             Order::Follow { .. } => "On my way!".to_string(),
-            Order::Explore { .. } => "Yes sir, exploring this area!".to_string(),
+            Order::Explore { .. } => "Yes sir, prospecting this area!".to_string(),
             Order::Gather { .. } => "Yes sir, gathering resources!".to_string(),
             Order::Operate { .. } => "Yes sir, operating this structure!".to_string(),
             Order::Plant { .. } => "Yes sir, off to plant the crops".to_string(),

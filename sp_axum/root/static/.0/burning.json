@@ -1,0 +1,14 @@
+{
+    "frames": {
+        "width": 32,
+        "height": 32
+    },
+    "animations": {
+        "none": [8],
+        "burning": {
+            "frames": [0, 8],
+            "repeat": -1,
+            "speed": 3000
+        }
+    }
+}

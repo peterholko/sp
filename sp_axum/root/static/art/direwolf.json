@@ -1,0 +1,25 @@
+{
+    "frames": {
+        "width": 72,
+        "height": 72
+    },
+    "animations": {
+        "attack": {
+            "frames": [
+                1
+            ],
+            "repeat": 0,
+            "speed": 1500
+        },
+        "none": [
+            0
+        ],
+        "moving": {
+            "frames": [
+                2
+            ],
+            "repeat": -1,
+            "speed": 1500
+        }
+    }
+}

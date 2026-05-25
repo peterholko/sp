@@ -184,7 +184,12 @@ pub enum VisibleEvent {
     ExperimentEvent {
         structure_id: i32,
     },
+    SurveyEvent,
+    ProspectEvent,
     ExploreEvent,
+    InvestigateEvent {
+        target_id: i32,
+    },
     PlantEvent {
         structure_id: i32,
     },
@@ -514,6 +519,7 @@ pub enum GameEventType {
         pos: Position,
     },
     NecroEvent {
+        necromancer_id: Option<i32>,
         spawn_anchor: Position,
         corpse_anchor: Position,
         home: Position,

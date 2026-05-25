@@ -50,6 +50,7 @@ export type NetworkPacket =
   | { cmd: 'order_refine'; source_id: number; structure_id: number }
   | { cmd: 'order_craft'; source_id: number; structure_id: number }
   | { cmd: 'order_explore'; source_id: number }
+  | { cmd: 'order_prospect'; source_id: number }
   | { cmd: 'order_experiment'; source_id: number; structure_id: number }
   | { cmd: 'order_plant'; source_id: number; structure_id: number }
   | { cmd: 'order_tend'; source_id: number; structure_id: number }
@@ -63,7 +64,9 @@ export type NetworkPacket =
   | { cmd: 'experiment'; structure_id: number }
   | { cmd: 'activate'; structure_id: number }
   | { cmd: 'survey'; source_id: number }
+  | { cmd: 'prospect' }
   | { cmd: 'explore' }
+  | { cmd: 'investigate'; target_id: number }
   | { cmd: 'nearby_resources' }
   | { cmd: 'info_assign'; structure_id: number }
   | { cmd: 'assign'; worker_id: number; structure_id: number }
@@ -123,7 +126,7 @@ export type ResponsePacket =
   | { packet: 'info_attrs'; id: number; attrs: Record<string, number> }
   | { packet: 'info_advance'; id: number; rank: string; next_rank: string; total_xp: number; req_xp: number }
   | { packet: 'info_upgrade'; id: number; upgrade_list: UpgradeTemplate[] }
-  | { packet: 'info_tile'; x: number; y: number; name: string; mc: number; def: number; unrevealed: number; sanctuary: string; passable: boolean; wildness: string; resources: TileResource[]; terrain_features: TileTerrainFeature[] }
+  | { packet: 'info_tile'; x: number; y: number; name: string; mc: number; def: number; unrevealed: number; sanctuary: string; passable: boolean; wildness: string; survey_status: string; resources: TileResource[]; terrain_features: TileTerrainFeature[] }
   | { packet: 'info_tile_resources'; x: number; y: number; name: string; resources: TileResource[] }
   | { packet: 'info_inventory'; id: number; cap: number; tw: number; items: Item[] }
   | { packet: 'info_inventory_snapshot'; id: number; cap: number; tw: number; items: Item[] }
@@ -152,6 +155,9 @@ export type ResponsePacket =
   | { packet: 'craft'; craft_time: number }
   | { packet: 'refine'; refine_time: number }
   | { packet: 'explore'; explore_time: number }
+  | { packet: 'survey'; survey_time: number }
+  | { packet: 'prospect'; prospect_time: number }
+  | { packet: 'investigate'; investigate_time: number }
   | { packet: 'gather'; gather_time: number }
   | { packet: 'attack'; source_id: number; attack_type: string; cooldown: number; stamina_cost: number }
   | { packet: 'ability'; source_id: number; ability_id: string; cooldown: number; stamina_cost?: number; mana_cost?: number }
@@ -813,9 +819,53 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
+  public sendSurvey(sourceId) {
+    var m = {
+      cmd: "survey",
+      source_id: sourceId
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendProspect() {
+    var m = {
+      cmd: "prospect"
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
   public sendExplore() {
     var m = {
       cmd: "explore"
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendInvestigate(targetId) {
+    var m = {
+      cmd: "investigate",
+      target_id: targetId
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendOrderExplore(sourceId) {
+    var m = {
+      cmd: "order_explore",
+      source_id: sourceId
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendOrderProspect(sourceId) {
+    var m = {
+      cmd: "order_prospect",
+      source_id: sourceId
     };
 
     this.sendMessage(JSON.stringify(m));
@@ -1674,6 +1724,13 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.REFINE, jsonData);
       } else if (jsonData.packet == 'explore') {
         Global.gameEmitter.emit(NetworkEvent.EXPLORE, jsonData);
+        Global.gameEmitter.emit(NetworkEvent.PROSPECT, jsonData);
+      } else if (jsonData.packet == 'survey') {
+        Global.gameEmitter.emit(NetworkEvent.SURVEY, jsonData);
+      } else if (jsonData.packet == 'prospect') {
+        Global.gameEmitter.emit(NetworkEvent.PROSPECT, jsonData);
+      } else if (jsonData.packet == 'investigate') {
+        Global.gameEmitter.emit(NetworkEvent.INVESTIGATE, jsonData);
       } else if (jsonData.packet == 'gather') {
         Global.gameEmitter.emit(NetworkEvent.GATHER, jsonData);
       } else if (jsonData.packet == 'attack') {
@@ -1920,6 +1977,22 @@ export class Network {
         Global.objectStates[obj.id].op = 'added';
 
         Global.gameEmitter.emit(GameEvent.OBJ_CREATED, obj.id);
+      } else {
+        Global.objectStates[obj.id].vision = obj.vision;
+        Global.objectStates[obj.id].player = obj.player;
+        Global.objectStates[obj.id].name = obj.name;
+        Global.objectStates[obj.id].class = obj.class;
+        Global.objectStates[obj.id].subclass = obj.subclass;
+        Global.objectStates[obj.id].template = obj.template;
+        Global.objectStates[obj.id].groups = obj.groups;
+        Global.objectStates[obj.id].state = obj.state;
+        Global.objectStates[obj.id].prevstate = obj.state;
+        Global.objectStates[obj.id].x = obj.x;
+        Global.objectStates[obj.id].y = obj.y;
+        Global.objectStates[obj.id].image = obj.image;
+        Global.objectStates[obj.id].op = 'updated';
+        Global.objectStates[obj.id].updateAttr = undefined;
+        Global.objectStates[obj.id].eventType = undefined;
       }
 
     }

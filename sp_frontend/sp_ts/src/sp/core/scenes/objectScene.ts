@@ -1236,7 +1236,7 @@ export class ObjectScene extends Phaser.Scene {
   private forceDeadFinalFrame(targetId: string, target: RenderObject): void {
     var targetState = Global.objectStates[targetId];
 
-    if (!targetState) {
+    if (!targetState || targetState.state != DEAD) {
       return;
     }
 
@@ -1245,8 +1245,11 @@ export class ObjectScene extends Phaser.Scene {
         var deadAnim = target.imageName + '_dead';
 
         if (this.anims.exists(deadAnim)) {
+          target.anims.chain();
           target.play(deadAnim);
         } else {
+          target.anims.chain();
+          target.anims.stop();
           target.setTexture('gravestone');
           target.setDepth(2);
         }

@@ -1,0 +1,25 @@
+{
+    "frames": [
+        [0,0,126,144,0,0,72],
+        [0,0,126,180,1,54,108],
+        [0,0,126,180,2,54,108],
+        [0,0,126,144,3,0,72],
+        [0,0,126,180,4,54,108],
+        [0,0,126,144,5,0,72],
+        [0,0,126,144,6,54,36],
+        [0,0,126,180,7,0,72],
+        [0,0,126,144,8,0,0],
+        [0,0,126,180,9,54,36]
+    ],
+    "images": ["/static/art/castle-concave-br.png",
+               "/static/art/castle-concave-bl.png",
+               "/static/art/castle-concave-r.png",
+               "/static/art/castle-concave-l.png",
+               "/static/art/castle-concave-tl.png",
+               "/static/art/castle-concave-tr.png",
+               "/static/art/castle-concave-l.png",
+               "/static/art/castle-concave-r.png",
+               "/static/art/castle-concave-br.png",
+               "/static/art/castle-concave-bl.png"]
+                
+}

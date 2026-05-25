@@ -275,6 +275,113 @@ impl Encounter {
         )
     }
 
+    pub fn spawn_dormant_necromancer(
+        player_id: i32,
+        pos: Position,
+        home_pos: Position,
+        commands: &mut Commands,
+        ids: &mut ResMut<Ids>,
+        entity_map: &mut ResMut<EntityObjMap>,
+        templates: &Res<Templates>,
+    ) -> (Entity, Id, PlayerId, Position) {
+        let necro_id = ids.new_obj_id();
+
+        let mut necro_obj = Obj::create_nospawn(
+            necro_id,
+            player_id,
+            "Necromancer".to_string(),
+            pos,
+            State::Hiding,
+            Inventory {
+                owner: necro_id,
+                items: Vec::new(),
+            },
+            templates,
+        );
+
+        let template = templates.obj_templates.get("Necromancer".to_string());
+        Encounter::generate_loot(necro_id, ids, &mut necro_obj.inventory, templates);
+
+        let necro_entity = commands
+            .spawn((
+                necro_obj.clone(),
+                Viewshed {
+                    range: template.base_vision.expect("Necromancer has no vision"),
+                },
+                SubclassNPC,
+                Minions { ids: Vec::new() },
+                Home { pos: home_pos },
+                VisibleTarget::new(NO_TARGET),
+                TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
+            ))
+            .id();
+
+        ids.new_obj(necro_obj.id.0, player_id);
+        entity_map.new_obj(necro_obj.id.0, necro_entity);
+
+        (necro_entity, necro_obj.id, PlayerId(player_id), pos)
+    }
+
+    pub fn activate_necromancer_hunting_corpse(
+        entity: Entity,
+        home_pos: Position,
+        corpse_anchor: Position,
+        commands: &mut Commands,
+    ) {
+        let cast_spell_target = Steps::build()
+            .label("Cast Spell Target")
+            .step(SetAttackTarget)
+            .step(NpcMoveNearTarget)
+            .step(CastSpellTarget);
+
+        let raise_dead = Steps::build()
+            .label("Raise Dead")
+            .step(SetCorpseTarget)
+            .step(NpcMoveToTarget)
+            .step(RaiseDead);
+
+        let scripted_raise_dead = Steps::build()
+            .label("Scripted Corpse Hunt")
+            .step(SetCorpseTarget)
+            .step(NpcMoveToTarget)
+            .step(RaiseDead);
+
+        let flee_and_hide = Steps::build()
+            .label("Flee and Hide")
+            .step(SetHome)
+            .step(NpcMoveTo)
+            .step(Hide)
+            .step(Idle {
+                start_time: 0,
+                duration: MAX,
+            });
+
+        commands.entity(entity).insert((
+            Home { pos: home_pos },
+            VisibleTarget::new(NO_TARGET),
+            TaskTarget::new(NO_TARGET),
+            EventExecuting {
+                event_type: "".to_string(),
+                state: EventExecutingState::None,
+            },
+            ScriptedCorpseHunt {
+                corpse_anchor,
+                search_radius: 5,
+            },
+            Thinker::build()
+                .label("Necromancer")
+                .picker(Highest)
+                .when(ScriptedCorpseHuntScorer, scripted_raise_dead)
+                .when(VisibleTargetScorer, cast_spell_target)
+                .when(VisibleCorpseScorer, raise_dead)
+                .when(FleeScorer, flee_and_hide),
+        ));
+    }
+
     fn spawn_necromancer_internal(
         player_id: i32,
         pos: Position,
@@ -1052,10 +1159,69 @@ impl Encounter {
 
     pub fn npc_list(tile_type: TileType) -> Vec<&'static str> {
         match tile_type {
-            TileType::DeciduousForest => return vec!["Spider", "Wose", "Skeleton"],
-            TileType::Snow => return vec!["Wolf", "Yeti"],
-            TileType::HillsSnow => return vec!["Wolf", "Yeti"],
-            TileType::FrozenForest => return vec!["Wose", "Yeti", "Spider"],
+            TileType::DeciduousForest => {
+                return vec![
+                    "Spider",
+                    "Wose",
+                    "Skeleton",
+                    "Windstride Stag",
+                    "Swiftstep Hare",
+                    "Black Bear",
+                    "Cave Bear",
+                    "Saberfang Cat",
+                ]
+            }
+            TileType::Rainforest
+            | TileType::Jungle
+            | TileType::PineForest
+            | TileType::PalmForest => {
+                return vec![
+                    "Spider",
+                    "Wose",
+                    "Windstride Stag",
+                    "Swiftstep Hare",
+                    "Mountain Lion",
+                    "Black Bear",
+                    "Cave Bear",
+                    "Saberfang Cat",
+                ]
+            }
+            TileType::Grasslands
+            | TileType::HillsGrasslands
+            | TileType::Plains
+            | TileType::HillsPlains
+            | TileType::Savanna => {
+                return vec![
+                    "Wolf",
+                    "Swiftstep Hare",
+                    "Windstride Stag",
+                    "Mountain Lion",
+                    "Saberfang Cat",
+                    "Terror Bird",
+                ]
+            }
+            TileType::Snow => return vec!["Wolf", "Yeti", "Frostmane Elk", "Saberfang Cat"],
+            TileType::HillsSnow => return vec!["Wolf", "Yeti", "Frostmane Elk", "Saberfang Cat"],
+            TileType::FrozenForest => {
+                return vec![
+                    "Wose",
+                    "Yeti",
+                    "Spider",
+                    "Frostmane Elk",
+                    "Black Bear",
+                    "Cave Bear",
+                    "Saberfang Cat",
+                ]
+            }
+            TileType::Mountain => {
+                return vec![
+                    "Wolf",
+                    "Mountain Lion",
+                    "Black Bear",
+                    "Cave Bear",
+                    "Saberfang Cat",
+                ]
+            }
             TileType::Desert => return vec!["Scorpion", "Giant Rat", "Skeleton"],
             TileType::HillsDesert => return vec!["Scorpion", "Giant Rat", "Skeleton"],
             //_ => return vec!["Giant Rat", "Wolf", "Skeleton"],

@@ -1,0 +1,4 @@
+anthropic>=0.25
+websockets>=12,<17
+requests
+python-dotenv

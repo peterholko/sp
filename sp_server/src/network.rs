@@ -206,6 +206,8 @@ enum NetworkPacket {
     OrderCraft { source_id: i32, structure_id: i32 },
     #[serde(rename = "order_explore")]
     OrderExplore { source_id: i32 },
+    #[serde(rename = "order_prospect")]
+    OrderProspect { source_id: i32 },
     #[serde(rename = "order_experiment")]
     OrderExperiment { source_id: i32, structure_id: i32 },
     #[serde(rename = "order_plant")]
@@ -235,8 +237,12 @@ enum NetworkPacket {
     Activate { structure_id: i32 },
     #[serde(rename = "survey")]
     Survey { source_id: i32 },
+    #[serde(rename = "prospect")]
+    Prospect {},
     #[serde(rename = "explore")]
     Explore {},
+    #[serde(rename = "investigate")]
+    Investigate { target_id: i32 },
     #[serde(rename = "nearby_resources")]
     NearbyResources {},
     #[serde(rename = "info_assign")]
@@ -563,6 +569,7 @@ pub enum ResponsePacket {
         sanctuary: String,
         passable: bool,
         wildness: String,
+        survey_status: String,
         resources: Vec<TileResource>,
         terrain_features: Vec<TileTerrainFeature>,
     },
@@ -750,6 +757,18 @@ pub enum ResponsePacket {
     #[serde(rename = "explore")]
     Explore {
         explore_time: i32,
+    },
+    #[serde(rename = "survey")]
+    Survey {
+        survey_time: i32,
+    },
+    #[serde(rename = "prospect")]
+    Prospect {
+        prospect_time: i32,
+    },
+    #[serde(rename = "investigate")]
+    Investigate {
+        investigate_time: i32,
     },
     #[serde(rename = "gather")]
     Gather {
@@ -2372,11 +2391,17 @@ async fn handle_connection(
                                             NetworkPacket::Survey{source_id} => {
                                                 handle_survey(player_id, source_id, client_to_game_sender.clone())
                                             }
+                                            NetworkPacket::Prospect{} => {
+                                                handle_prospect(player_id, client_to_game_sender.clone())
+                                            }
                                             NetworkPacket::NearbyResources{} => {
                                                 handle_nearby_resources(player_id, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::Explore{} => {
                                                 handle_explore(player_id, client_to_game_sender.clone())
+                                            }
+                                            NetworkPacket::Investigate{target_id} => {
+                                                handle_investigate(player_id, target_id, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::InfoAssign{structure_id} => {
                                                 handle_info_assign(player_id, structure_id, client_to_game_sender.clone())
@@ -2437,6 +2462,9 @@ async fn handle_connection(
                                             }
                                             NetworkPacket::OrderExplore{source_id} => {
                                                 handle_order_explore(player_id, source_id, client_to_game_sender.clone())
+                                            }
+                                            NetworkPacket::OrderProspect{source_id} => {
+                                                handle_order_prospect(player_id, source_id, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::OrderExperiment{source_id, structure_id} => {
                                                 handle_order_experiment(player_id, source_id, structure_id, client_to_game_sender.clone())
@@ -3374,10 +3402,35 @@ fn handle_survey(
     ResponsePacket::Ok
 }
 
+fn handle_prospect(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::Prospect {
+            player_id: player_id,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::Ok
+}
+
 fn handle_explore(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Explore {
             player_id: player_id,
+        })
+        .expect("Could not send message");
+
+    ResponsePacket::Ok
+}
+
+fn handle_investigate(
+    player_id: i32,
+    target_id: i32,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::InvestigatePOI {
+            player_id,
+            target_id,
         })
         .expect("Could not send message");
 
@@ -3722,6 +3775,21 @@ fn handle_order_explore(
         .expect("Could not send message");
 
     // Response will come from game.rs
+    ResponsePacket::Ok
+}
+
+fn handle_order_prospect(
+    player_id: i32,
+    source_id: i32,
+    client_to_game_sender: CBSender<PlayerEvent>,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::OrderProspect {
+            player_id: player_id,
+            villager_id: source_id,
+        })
+        .expect("Could not send message");
+
     ResponsePacket::Ok
 }
 

@@ -20,10 +20,10 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, Clients, DamageRecord, DebugObjs, GameTick, InitialEncounterState,
-    LogLevelOverrides, Merchant, Monolith, MonolithInvestigation, MonolithProgress,
-    NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives, PlayerRunScore,
-    PlayerStat, PlayerStats, RunScoreState, SpawnPositions, WeakSanctuary,
+    is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, SurveyHistory,
+    GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
+    MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives,
+    PlayerRunScore, PlayerStat, PlayerStats, RunScoreState, SpawnPositions, WeakSanctuary,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -202,6 +202,10 @@ pub enum PlayerEvent {
         x: i32,
         y: i32,
     },
+    InvestigatePOI {
+        player_id: i32,
+        target_id: i32,
+    },
     InfoInventory {
         player_id: i32,
         id: i32,
@@ -279,6 +283,10 @@ pub enum PlayerEvent {
         player_id: i32,
         villager_id: i32,
     },
+    OrderProspect {
+        player_id: i32,
+        villager_id: i32,
+    },
     OrderExperiment {
         player_id: i32,
         villager_id: i32,
@@ -341,6 +349,9 @@ pub enum PlayerEvent {
     Survey {
         player_id: i32,
         source_id: i32,
+    },
+    Prospect {
+        player_id: i32,
     },
     Explore {
         player_id: i32,
@@ -550,6 +561,23 @@ fn send_combat_locked_error(player_id: i32, clients: &Res<Clients>) {
     );
 }
 
+fn accepts_build_resource_transfer(class: &Class, state: &State) -> bool {
+    class.is_structure() && matches!(state, State::Founded | State::PlanningUpgrade)
+}
+
+fn incomplete_structure_blocks_inventory_transfer(class: &Class, state: &State) -> bool {
+    class.is_structure()
+        && !accepts_build_resource_transfer(class, state)
+        && !Structure::is_built(*state)
+}
+
+fn is_discovery_action_state(state: &State) -> bool {
+    matches!(
+        state,
+        State::Surveying | State::Prospecting | State::Investigating | State::Exploring
+    )
+}
+
 #[derive(QueryData)]
 #[query_data(mutable, derive(Debug))]
 struct ItemTransferQuery {
@@ -665,20 +693,28 @@ impl Plugin for PlayerPlugin {
                 build_system,
                 start_upgrade_system,
                 upgrade_system,
-                explore_system,
                 info_assign_system,
                 assign_system,
                 equip_system,
                 info_craft_system,
                 info_structure_craft_system,
                 info_structure_queue_system,
-                order_explore_system,
                 use_item_system,
                 remove_system,
                 set_experiment_item_system,
                 hire_system,
                 buy_sell_system,
                 activate_system,
+            )
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
+                survey_system,
+                prospect_system,
+                investigate_system,
+                order_prospect_system,
             )
                 .run_if(in_state(AppState::Running)),
         )
@@ -944,7 +980,10 @@ fn move_system(
                             | VisibleEvent::RefineEvent { .. }
                             | VisibleEvent::OperateEvent { .. }
                             | VisibleEvent::CraftEvent { .. }
+                            | VisibleEvent::SurveyEvent
+                            | VisibleEvent::ProspectEvent
                             | VisibleEvent::ExploreEvent
+                            | VisibleEvent::InvestigateEvent { .. }
                             | VisibleEvent::UseItemEvent { .. } => {
                                 events_to_remove.push(*map_event_id);
                             }
@@ -1035,10 +1074,21 @@ fn combo_hints_for_history(
 
 fn enemy_intent_for_template(template: &str) -> String {
     match template {
-        "Giant Rat" | "Spider" | "Scorpion" => "Fast creature looking for an opening".to_string(),
-        "Wolf" | "Wild Boar" | "Giant Crab" => {
+        "Giant Rat" | "Cave Bat" | "Ash Viper" | "Mountain Lion" | "Saberfang Cat"
+        | "Terror Bird" | "Spider" | "Scorpion" => {
+            "Fast creature looking for an opening".to_string()
+        }
+        "Bog Leech" => "Low creature trying to drag the fight close".to_string(),
+        "Moss Mite" => "Tiny pest chipping at close range".to_string(),
+        "Thorn Beetle" => "Armored pest bracing through light attacks".to_string(),
+        "Swiftstep Hare" | "Windstride Stag" | "Frostmane Elk" => {
+            "Startled wildlife trying to stay clear".to_string()
+        }
+        "Reef Skitter" | "Wolf" | "Wild Boar" | "Giant Crab" => {
             "Close-range attacker testing your position".to_string()
         }
+        "Black Bear" => "Heavy predator ready to maul anything too close".to_string(),
+        "Cave Bear" => "Ancient brute bearing down with crushing force".to_string(),
         "Zombie" | "Skeleton" | "Shipwreck Zombie" | "Shadow" => {
             "Undead pressure advancing steadily".to_string()
         }
@@ -1056,8 +1106,31 @@ fn counter_hint_for_template(template: &str, attack_history: &Vec<String>) -> St
     }
 
     match template {
-        "Giant Rat" | "Spider" | "Wolf" => {
-            "Fast enemies reward control: quick chains toward Hamstring, while block protects low stamina.".to_string()
+        "Giant Rat"
+        | "Cave Bat"
+        | "Ash Viper"
+        | "Mountain Lion"
+        | "Saberfang Cat"
+        | "Terror Bird"
+        | "Spider"
+        | "Wolf" => "Fast enemies reward control: quick chains toward Hamstring, while block protects low stamina.".to_string(),
+        "Bog Leech" | "Moss Mite" => {
+            "Weak close-range enemies can be finished quickly; block if stamina is low.".to_string()
+        }
+        "Reef Skitter" => {
+            "Mobile shell enemies reward quick control or a block before trading damage.".to_string()
+        }
+        "Thorn Beetle" => {
+            "Armored enemies reward setup: use precise attacks before committing fierce damage.".to_string()
+        }
+        "Swiftstep Hare" | "Windstride Stag" | "Frostmane Elk" => {
+            "Passive wildlife rarely presses the fight; use light attacks if you must hunt it.".to_string()
+        }
+        "Black Bear" => {
+            "Heavy predators punish sloppy trades; block to stabilize, then use precise setup before fierce damage.".to_string()
+        }
+        "Cave Bear" => {
+            "Ancient brutes punish sloppy trades; block to stabilize, then use precise setup before fierce damage.".to_string()
         }
         "Skeleton" | "Zombie" | "Shipwreck Zombie" => {
             "Steady undead can be set up with precise attacks, then punished with a combo finisher.".to_string()
@@ -4032,7 +4105,6 @@ fn info_poi_system(
     info_poi_event: On<InfoPOIEvent>,
     clients: Res<Clients>,
     query: Query<CoreQuery>,
-    mut objectives: ResMut<Objectives>,
 ) {
     let Ok(obj) = query.get(info_poi_event.entity) else {
         error!("Cannot find obj for {:?}", info_poi_event.entity);
@@ -4052,35 +4124,6 @@ fn info_poi_system(
     };
 
     send_to_client(info_poi_event.player_id, response_packet, &clients);
-
-    // Mark explore_poi objective as completed
-    let player_obj = objectives
-        .entry(info_poi_event.player_id)
-        .or_insert_with(PlayerObjectives::default);
-    if obj.template.0 == "Shipwreck" && !player_obj.scavenge_shipwreck {
-        player_obj.scavenge_shipwreck = true;
-        let discovery_packet = ResponsePacket::DiscoveryEvent {
-            version: 1,
-            discovery_type: "poi".to_string(),
-            title: "Shipwreck scavenged".to_string(),
-            unlock_source: "First Hour".to_string(),
-            location: Some(format!("{},{}", obj.pos.x, obj.pos.y)),
-            result: "The wreck teaches the first rule: inspect places, recover supplies, and turn danger into tools.".to_string(),
-        };
-        send_to_client(info_poi_event.player_id, discovery_packet, &clients);
-    }
-
-    if !player_obj.explore_poi {
-        player_obj.explore_poi = true;
-        let objectives_packet = ResponsePacket::Objectives {
-            build_campfire: player_obj.build_campfire,
-            build_3_structures: player_obj.build_3_structures,
-            recruit_villager: player_obj.recruit_villager,
-            explore_poi: player_obj.explore_poi,
-            survive_5_nights: player_obj.survive_5_nights,
-        };
-        send_to_client(info_poi_event.player_id, objectives_packet, &clients);
-    }
 }
 
 fn info_npc_system(
@@ -4579,6 +4622,7 @@ fn info_tile_system(
     clients: Res<Clients>,
     map: Res<Map>,
     resources: Res<Resources>,
+    survey_history: Res<SurveyHistory>,
     terrain_features: Res<TerrainFeatures>,
     obj_query: Query<ObjQuery>,
 ) {
@@ -4618,6 +4662,11 @@ fn info_tile_system(
                     sanctuary: sanctuary,
                     passable: Map::is_passable(*x, *y, &map),
                     wildness: map.get_wildness_string(*x, *y),
+                    survey_status: survey_status_for_tile(
+                        *player_id,
+                        Position { x: *x, y: *y },
+                        &survey_history,
+                    ),
                     resources: Resource::get_on_tile(Position { x: *x, y: *y }, &resources),
                     terrain_features: TerrainFeature::get_by_tile(
                         Position { x: *x, y: *y },
@@ -5102,15 +5151,19 @@ fn item_transfer_system(
                     continue;
                 }
 
-                // Structure is not completed
-                if target.class.is_structure() {
-                    if !Structure::is_built(*target.state) {
-                        let packet = ResponsePacket::Error {
-                            errmsg: "Structure is not completed.".to_string(),
-                        };
-                        send_to_client(*player_id, packet, &clients);
-                        continue;
-                    }
+                let target_accepts_build_resources =
+                    accepts_build_resource_transfer(target.class, target.state);
+                let owner_accepts_build_resources =
+                    accepts_build_resource_transfer(owner.class, owner.state);
+
+                // Incomplete structures can receive build/upgrade resources, but should not be
+                // used like completed inventories.
+                if incomplete_structure_blocks_inventory_transfer(target.class, target.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Structure is not completed.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
                 }
 
                 // Transfer target does not have enough capacity
@@ -5119,16 +5172,13 @@ fn item_transfer_system(
                 let target_capacity =
                     Obj::get_capacity(&target.template.0, &templates.obj_templates);
 
-                let is_founded_or_planning_upgrade =
-                    *target.state == State::Founded || *target.state == State::PlanningUpgrade;
-
                 info!(
                     "Item transfer target.class: {:?} target.template: {:?}",
                     target.class.0, target.template.0
                 );
 
                 // Structure founded and under construction use case
-                if target.class.0 == "structure" && is_founded_or_planning_upgrade {
+                if target_accepts_build_resources {
                     info!("Transfering to target structure with state founded.");
 
                     let mut req = Vec::new();
@@ -5267,23 +5317,23 @@ fn item_transfer_system(
                     };
 
                     send_to_client(*player_id, item_transfer_packet, &clients);
-                } else if owner.class.0 == "structure" && is_founded_or_planning_upgrade {
+                } else if owner_accepts_build_resources {
                     info!("Transfering from owner structure with state founded.");
 
                     let mut req = Vec::new();
 
-                    if *target.state == State::Founded {
+                    if *owner.state == State::Founded {
                         let structure_template = templates
                             .obj_templates
-                            .get_by_name_template(target.name.0.clone(), target.template.0.clone());
+                            .get_by_name_template(owner.name.0.clone(), owner.template.0.clone());
 
                         req = structure_template
                             .req
                             .expect("Structure template missing req");
-                    } else if *target.state == State::PlanningUpgrade {
+                    } else if *owner.state == State::PlanningUpgrade {
                         // Get selected upgrade
-                        let Ok(selected_upgrade) = selected_upgrade_query.get(target.entity) else {
-                            error!("Cannot find selected upgrade for {:?}", target.entity);
+                        let Ok(selected_upgrade) = selected_upgrade_query.get(owner.entity) else {
+                            error!("Cannot find selected upgrade for {:?}", owner.entity);
                             continue;
                         };
 
@@ -7017,12 +7067,12 @@ fn activate_system(
     }
 }
 
-fn explore_system(
+fn survey_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
-    ids: ResMut<Ids>,
+    ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
@@ -7031,7 +7081,89 @@ fn explore_system(
 
     for (event_id, event) in events.iter() {
         match event {
-            PlayerEvent::Explore { player_id } => {
+            PlayerEvent::Survey {
+                player_id,
+                source_id,
+            } => {
+                events_to_remove.push(*event_id);
+
+                let Some(hero_id) = ids.get_hero(*player_id) else {
+                    error!("Cannot find hero for player {:?}", *player_id);
+                    continue;
+                };
+
+                let Some(hero_entity) = entity_map.get_entity(hero_id) else {
+                    error!("Cannot find hero entity for hero {:?}", hero_id);
+                    continue;
+                };
+
+                let Ok(hero) = hero_query.get(hero_entity) else {
+                    error!("Cannot find hero for {:?}", hero_entity);
+                    continue;
+                };
+
+                if *source_id != hero_id {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Can only survey with your hero.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if Obj::is_dead(&hero.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "The dead cannot survey.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if is_discovery_action_state(hero.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Already surveying, prospecting, or investigating".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                commands.trigger(StateChange {
+                    entity: hero_entity,
+                    new_state: State::Surveying,
+                });
+
+                map_events.new(
+                    hero.id.0,
+                    game_tick.0 + 20,
+                    VisibleEvent::SurveyEvent,
+                );
+
+                let packet = ResponsePacket::Survey { survey_time: 20 };
+                send_to_client(*player_id, packet, &clients);
+            }
+            _ => {}
+        }
+    }
+
+    for event_id in events_to_remove.iter() {
+        events.remove(event_id);
+    }
+}
+
+fn prospect_system(
+    mut commands: Commands,
+    mut events: ResMut<PlayerEvents>,
+    clients: Res<Clients>,
+    game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut map_events: ResMut<MapEvents>,
+    hero_query: Query<CoreQuery, With<SubclassHero>>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        match event {
+            PlayerEvent::Prospect { player_id } | PlayerEvent::Explore { player_id } => {
                 events_to_remove.push(*event_id);
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
@@ -7051,39 +7183,136 @@ fn explore_system(
 
                 if Obj::is_dead(&hero.state) {
                     let packet = ResponsePacket::Error {
-                        errmsg: "The dead cannot explore.".to_string(),
+                        errmsg: "The dead cannot prospect.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
 
-                // If hero is not already exploring
-                // TODO expand the action and state checking across all actions
-                if *hero.state == State::Exploring {
-                    error!("Hero is already exploring {:?}", hero_id);
+                if is_discovery_action_state(hero.state) {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Already exploring".to_string(),
+                        errmsg: "Already surveying, prospecting, or investigating".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
 
-                // Exploring State Change Event
                 commands.trigger(StateChange {
                     entity: hero_entity,
-                    new_state: State::Exploring,
+                    new_state: State::Prospecting,
                 });
-
-                // Insert explore event
-                let explore_event = VisibleEvent::ExploreEvent;
 
                 map_events.new(
                     hero.id.0,
-                    game_tick.0 + 20, // in the future
-                    explore_event,
+                    game_tick.0 + 20,
+                    VisibleEvent::ProspectEvent,
                 );
 
-                let packet = ResponsePacket::Explore { explore_time: 20 };
+                let packet = ResponsePacket::Prospect { prospect_time: 20 };
+                send_to_client(*player_id, packet, &clients);
+            }
+            _ => {}
+        }
+    }
+
+    for event_id in events_to_remove.iter() {
+        events.remove(event_id);
+    }
+}
+
+fn investigate_system(
+    mut commands: Commands,
+    mut events: ResMut<PlayerEvents>,
+    clients: Res<Clients>,
+    game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    mut map_events: ResMut<MapEvents>,
+    query: Query<CoreQuery>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        match event {
+            PlayerEvent::InvestigatePOI {
+                player_id,
+                target_id,
+            } => {
+                events_to_remove.push(*event_id);
+
+                let Some(hero_id) = ids.get_hero(*player_id) else {
+                    error!("Cannot find hero for player {:?}", *player_id);
+                    continue;
+                };
+
+                let Some(hero_entity) = entity_map.get_entity(hero_id) else {
+                    error!("Cannot find hero entity for hero {:?}", hero_id);
+                    continue;
+                };
+
+                let Some(target_entity) = entity_map.get_entity(*target_id) else {
+                    error!("Cannot find investigate target entity {:?}", target_id);
+                    continue;
+                };
+
+                let Ok(hero) = query.get(hero_entity) else {
+                    error!("Cannot find hero for {:?}", hero_entity);
+                    continue;
+                };
+
+                let Ok(target) = query.get(target_entity) else {
+                    error!("Cannot find investigate target for {:?}", target_entity);
+                    continue;
+                };
+
+                if Obj::is_dead(&hero.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "The dead cannot investigate.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if is_discovery_action_state(hero.state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Already surveying, prospecting, or investigating".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !target.subclass.is_monolith() && *target.subclass != Subclass::Poi {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "You can only investigate points of interest.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if Map::dist(*hero.pos, *target.pos) > 1 {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Move closer to investigate.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                commands.trigger(StateChange {
+                    entity: hero_entity,
+                    new_state: State::Investigating,
+                });
+
+                map_events.new(
+                    hero.id.0,
+                    game_tick.0 + 20,
+                    VisibleEvent::InvestigateEvent {
+                        target_id: *target_id,
+                    },
+                );
+
+                let packet = ResponsePacket::Investigate {
+                    investigate_time: 20,
+                };
                 send_to_client(*player_id, packet, &clients);
             }
             _ => {}
@@ -8798,7 +9027,7 @@ fn structure_queue_system(
     }
 }
 
-fn order_explore_system(
+fn order_prospect_system(
     mut events: ResMut<PlayerEvents>,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
@@ -8812,6 +9041,10 @@ fn order_explore_system(
     for (event_id, event) in events.iter() {
         match event {
             PlayerEvent::OrderExplore {
+                player_id,
+                villager_id,
+            }
+            | PlayerEvent::OrderProspect {
                 player_id,
                 villager_id,
             } => {
@@ -10317,6 +10550,45 @@ mod tests {
             mage.iter().map(|ability| ability.id).collect::<Vec<_>>(),
             vec!["arcane_bolt", "ward"]
         );
+    }
+
+    #[test]
+    fn founded_structures_accept_build_resources_without_counting_as_completed_inventories() {
+        let structure_class = Class(CLASS_STRUCTURE.to_string());
+
+        assert!(accepts_build_resource_transfer(
+            &structure_class,
+            &State::Founded
+        ));
+        assert!(accepts_build_resource_transfer(
+            &structure_class,
+            &State::PlanningUpgrade
+        ));
+        assert!(!accepts_build_resource_transfer(
+            &structure_class,
+            &State::Building
+        ));
+        assert!(!accepts_build_resource_transfer(
+            &structure_class,
+            &State::None
+        ));
+
+        assert!(!incomplete_structure_blocks_inventory_transfer(
+            &structure_class,
+            &State::Founded
+        ));
+        assert!(!incomplete_structure_blocks_inventory_transfer(
+            &structure_class,
+            &State::PlanningUpgrade
+        ));
+        assert!(incomplete_structure_blocks_inventory_transfer(
+            &structure_class,
+            &State::Building
+        ));
+        assert!(!incomplete_structure_blocks_inventory_transfer(
+            &structure_class,
+            &State::None
+        ));
     }
 
     #[test]

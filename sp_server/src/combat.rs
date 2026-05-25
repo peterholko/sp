@@ -329,8 +329,12 @@ impl Combat {
             * skill_damage_mod;
 
         // 19 Calculate total defense
-        let total_defense =
-            (base_defense * defense_from_items) * defense_effects_mod * sanctuary_defense;
+        let total_defense = Self::total_defense(
+            base_defense,
+            defense_from_items,
+            defense_effects_mod,
+            sanctuary_defense,
+        );
 
         // 20 & 21 Calculate damage defense reduction
         let defense_reduction = total_defense / (total_defense + 50.0);
@@ -468,6 +472,9 @@ impl Combat {
         // 5 Get defense effects on defender
         let defense_effects_mod = Self::get_defense_effects(target, templates);
 
+        // 5b Get Sanctuary damage reduction
+        let sanctuary_defense = Self::get_sanctuary_defense(target, templates);
+
         // 6 Get damage mod from items
         let damage_from_items = attacker
             .inventory
@@ -508,7 +515,12 @@ impl Combat {
             (roll_damage + damage_from_items) * damage_effects_mod * combo_damage_mod;
 
         // 19 Calculate total defense
-        let total_defense = (base_defense * defense_from_items) * defense_effects_mod;
+        let total_defense = Self::total_defense(
+            base_defense,
+            defense_from_items,
+            defense_effects_mod,
+            sanctuary_defense,
+        );
 
         // 20 & 21 Calculate damage defense reduction
         let defense_reduction = total_defense / (total_defense + 50.0);
@@ -843,6 +855,10 @@ impl Combat {
 
     fn get_defense_effects(target: &mut CombatQueryItem, templates: &Res<Templates>) -> f32 {
         for (effect, (_duration, amplifier, _stacks)) in target.effects.0.iter() {
+            if matches!(effect, Effect::Sanctuary | Effect::WeakSanctuary) {
+                continue;
+            }
+
             let effect_template = templates
                 .effect_templates
                 .get(&effect.clone().to_str())
@@ -859,20 +875,34 @@ impl Combat {
     }
 
     fn get_sanctuary_defense(target: &mut CombatQueryItem, templates: &Res<Templates>) -> f32 {
-        let sanctuary_effect = templates
-            .effect_templates
-            .get(&Effect::Sanctuary.to_str())
-            .expect("Missing Sanctuary Template Effect");
+        Self::get_sanctuary_defense_from_effects(&target.effects, templates)
+    }
 
-        let sanctuary_defense = sanctuary_effect
-            .defense
-            .expect("Missing defense on Sanctuary Template Effect");
+    fn get_sanctuary_defense_from_effects(effects: &Effects, templates: &Templates) -> f32 {
+        for effect in [Effect::Sanctuary, Effect::WeakSanctuary] {
+            if let Some((_duration, amplifier, _stacks)) = effects.0.get(&effect) {
+                let effect_template = templates
+                    .effect_templates
+                    .get(&effect.clone().to_str())
+                    .expect("Missing sanctuary template effect");
 
-        if let Some((_duration, amplifier, _stacks)) = target.effects.0.get(&Effect::Sanctuary) {
-            return sanctuary_defense * amplifier;
-        } else {
-            return 1.0;
+                return effect_template
+                    .defense
+                    .expect("Missing defense on sanctuary template effect")
+                    * amplifier;
+            }
         }
+
+        1.0
+    }
+
+    fn total_defense(
+        base_defense: f32,
+        defense_from_items: f32,
+        defense_effects_mod: f32,
+        sanctuary_defense: f32,
+    ) -> f32 {
+        (base_defense + defense_from_items) * defense_effects_mod * sanctuary_defense
     }
 
     fn get_terrain_defense(position: Position, map: &Res<Map>) -> f32 {
@@ -963,6 +993,66 @@ mod tests {
                 .map(|effect| (effect, (0, 1.0, 1)))
                 .collect::<HashMap<_, _>>(),
         )
+    }
+
+    fn effect_template(name: &str, defense: f32) -> crate::templates::EffectTemplate {
+        crate::templates::EffectTemplate {
+            name: name.to_string(),
+            duration: -1,
+            max_hp: None,
+            healing: None,
+            damage: None,
+            damage_over_time: None,
+            speed: None,
+            attack_speed: None,
+            defense: Some(defense),
+            stackable: None,
+            armor: None,
+            lifeleech: None,
+            viewshed: None,
+            ignore_all_armor: None,
+            instant_kill_chance: None,
+            next_attack: None,
+            vision: None,
+            health: None,
+            stamina: None,
+        }
+    }
+
+    fn combat_templates() -> Templates {
+        let mut templates = Templates::from_obj_templates(Vec::new());
+        templates.effect_templates.load(vec![
+            effect_template(&Effect::Sanctuary.to_str(), 5.0),
+            effect_template(&Effect::WeakSanctuary.to_str(), 2.0),
+        ]);
+        templates
+    }
+
+    #[test]
+    fn sanctuary_defense_uses_full_and_weak_templates() {
+        let templates = combat_templates();
+        let none = effects(Vec::new());
+        let full = effects(vec![Effect::Sanctuary]);
+        let weak = effects(vec![Effect::WeakSanctuary]);
+
+        assert_eq!(
+            Combat::get_sanctuary_defense_from_effects(&none, &templates),
+            1.0
+        );
+        assert_eq!(
+            Combat::get_sanctuary_defense_from_effects(&full, &templates),
+            5.0
+        );
+        assert_eq!(
+            Combat::get_sanctuary_defense_from_effects(&weak, &templates),
+            2.0
+        );
+    }
+
+    #[test]
+    fn total_defense_adds_base_and_items_before_sanctuary() {
+        assert_eq!(Combat::total_defense(4.0, 0.0, 1.0, 5.0), 20.0);
+        assert_eq!(Combat::total_defense(4.0, 2.0, 3.0, 2.0), 36.0);
     }
 
     #[test]

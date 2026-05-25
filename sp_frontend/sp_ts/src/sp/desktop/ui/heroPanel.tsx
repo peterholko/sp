@@ -97,15 +97,25 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
       zIndex: 7
     } as React.CSSProperties
 
+    const formatEffectValue = (effectValue) => {
+      if (typeof effectValue === "number") {
+        return effectValue > 0 ? '+' + String(effectValue) : String(effectValue);
+      }
+
+      return String(effectValue);
+    };
+
     var effects = [];
 
     for (var i = 0; i < this.props.heroData.effects.length; i++) {
       var effectInfo = this.props.heroData.effects[i];
       var effectName = effectInfo.effect;
-      var duration;
+      var effectAttrs = effectInfo.attrs || {};
+      var duration = '';
+      var displayedAttrs = 0;
 
-      for (var effectKey in effectInfo.attrs) {
-        var effectValue = effectInfo.attrs[effectKey];
+      for (var effectKey in effectAttrs) {
+        var effectValue = effectAttrs[effectKey];
         
         if(effectKey == "Duration") {
           if(effectValue < 0) {
@@ -116,26 +126,25 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
         }
       }
 
-      for (var effectKey in effectInfo.attrs) {
-        var effectValue = effectInfo.attrs[effectKey];
+      for (var effectKey in effectAttrs) {
+        var effectValue = effectAttrs[effectKey];
 
         // Skip duration
         if(effectKey == "Duration") {
           continue;
         }
 
-        if (typeof effectValue === "number") {
-          if (effectValue < 0) {
-            effectValue = '-' + String(effectValue);
-          } else {
-            effectValue = '+' + String(effectValue);
-          }
-        } else {
-          effectValue = String(effectValue);
-        }        
+        effectValue = formatEffectValue(effectValue);
+        displayedAttrs += 1;
 
+        effects.push(<tr key={effectName + effectKey}>
+          <td colSpan={2}>{effectName} [{effectValue} {effectKey}{duration ? ' ' + duration : ''}]</td>
+        </tr>)
+      }
+
+      if (displayedAttrs == 0) {
         effects.push(<tr key={effectName}>
-          <td colSpan={2}>{effectName} [{effectValue} {effectKey} {duration}]</td>
+          <td colSpan={2}>{duration ? effectName + ' [Duration ' + duration + ']' : effectName}</td>
         </tr>)
       }
     }

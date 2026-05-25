@@ -136,7 +136,11 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
             <td>{this.props.tileData.wildness}</td>
           </tr>
           <tr>
-            <td>Discovered Resources: </td>
+            <td>Survey Status: </td>
+            <td>{this.props.tileData.survey_status || 'Unsurveyed'}</td>
+          </tr>
+          <tr>
+            <td>Prospected Resources: </td>
             <td>{discoveredResources} / {numResources}</td>
           </tr>
           <tr>

@@ -1,8 +1,12 @@
 use super::*;
+use crate::common::TaskTarget;
+use crate::effect::{EffectAttr, EffectVal};
+use crate::encounter::Encounter;
 use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
+use crate::npc::{ScriptedCorpseHunt, VisibleTarget};
 use crate::recipe::Recipe;
 use crate::skill::WEAPONSMITHING;
-use crate::templates::{ResReq, SkillTemplate, SkillTemplates, Templates};
+use crate::templates::{EffectTemplate, ResReq, SkillTemplate, SkillTemplates, Templates};
 use std::collections::HashSet;
 use std::fs::File;
 
@@ -10,6 +14,79 @@ fn load_obj_templates() -> Vec<ObjTemplate> {
     let obj_template_file =
         File::open("templates/obj_template.yaml").expect("Could not open obj templates");
     serde_yaml::from_reader(obj_template_file).expect("Could not read obj templates")
+}
+
+#[test]
+fn early_game_enemy_templates_are_loaded() {
+    let obj_templates = load_obj_templates();
+    let expected = [
+        ("Cave Bat", "cavebat", 12, 35),
+        ("Bog Leech", "bogleech", 18, 35),
+        ("Thorn Beetle", "thornbeetle", 24, 55),
+        ("Ash Viper", "ashviper", 14, 40),
+        ("Moss Mite", "mossmite", 10, 30),
+        ("Reef Skitter", "reefskitter", 16, 40),
+    ];
+
+    for (template_name, image, base_hp, kill_xp) in expected {
+        let template = obj_templates
+            .iter()
+            .find(|template| template.template == template_name)
+            .expect("missing early game enemy template");
+
+        assert_eq!(template.class, "unit");
+        assert_eq!(template.subclass, "npc");
+        assert_eq!(template.image, image);
+        assert_eq!(template.base_hp, Some(base_hp));
+        assert_eq!(template.kill_xp, Some(kill_xp));
+    }
+}
+
+#[test]
+fn early_game_enemy_random_spawn_pool_excludes_bog_leech() {
+    assert!(!EARLY_GAME_ENEMY_TEMPLATES.contains(&"Bog Leech"));
+}
+
+#[test]
+fn wildlife_templates_are_loaded() {
+    let obj_templates = load_obj_templates();
+    let expected = [
+        ("Swiftstep Hare", "hare", 8, 10, "passive"),
+        ("Windstride Stag", "stag", 26, 35, "passive"),
+        ("Frostmane Elk", "elk", 38, 60, "passive"),
+        ("Mountain Lion", "mountainlion", 40, 160, "strategic"),
+        ("Black Bear", "blackbear", 90, 240, "strategic"),
+        ("Saberfang Cat", "saberfangcat", 65, 300, "strategic"),
+        ("Cave Bear", "cavebear", 130, 450, "strategic"),
+        ("Terror Bird", "terrorbird", 75, 320, "frenzied"),
+    ];
+
+    for (template_name, image, base_hp, kill_xp, aggression) in expected {
+        let template = obj_templates
+            .iter()
+            .find(|template| template.template == template_name)
+            .expect("missing wildlife template");
+
+        assert_eq!(template.class, "unit");
+        assert_eq!(template.subclass, "npc");
+        assert_eq!(template.image, image);
+        assert_eq!(template.family.as_deref(), Some("Animal"));
+        assert_eq!(template.aggression.as_deref(), Some(aggression));
+        assert_eq!(template.base_hp, Some(base_hp));
+        assert_eq!(template.kill_xp, Some(kill_xp));
+    }
+}
+
+#[test]
+fn wildlife_encounters_are_available_by_terrain() {
+    assert!(Encounter::npc_list(TileType::Grasslands).contains(&"Swiftstep Hare"));
+    assert!(Encounter::npc_list(TileType::DeciduousForest).contains(&"Windstride Stag"));
+    assert!(Encounter::npc_list(TileType::FrozenForest).contains(&"Frostmane Elk"));
+    assert!(Encounter::npc_list(TileType::HillsGrasslands).contains(&"Mountain Lion"));
+    assert!(Encounter::npc_list(TileType::DeciduousForest).contains(&"Black Bear"));
+    assert!(Encounter::npc_list(TileType::Grasslands).contains(&"Terror Bird"));
+    assert!(Encounter::npc_list(TileType::Snow).contains(&"Saberfang Cat"));
+    assert!(Encounter::npc_list(TileType::FrozenForest).contains(&"Cave Bear"));
 }
 
 fn flat_land_map() -> Map {
@@ -29,6 +106,282 @@ fn flat_land_map() -> Map {
     }
 }
 
+fn set_test_tile_type(map: &mut Map, x: i32, y: i32, tile_type: TileType) {
+    let tile_index = (y * WIDTH + x) as usize;
+    map.base[tile_index].tile_type = tile_type;
+}
+
+#[test]
+fn survey_status_tracks_first_tile_survey_per_player() {
+    let pos = Position { x: 3, y: 4 };
+    let mut survey_history = SurveyHistory(HashMap::new());
+
+    assert_eq!(
+        survey_status_for_tile(1, pos, &survey_history),
+        SURVEY_STATUS_UNSURVEYED
+    );
+
+    assert!(record_tile_survey(1, pos, &mut survey_history));
+
+    assert_eq!(
+        survey_status_for_tile(1, pos, &survey_history),
+        SURVEY_STATUS_SURVEYED
+    );
+    assert_eq!(
+        survey_status_for_tile(2, pos, &survey_history),
+        SURVEY_STATUS_UNSURVEYED
+    );
+}
+
+#[test]
+fn survey_history_only_allows_one_outcome_roll() {
+    let pos = Position { x: 5, y: 6 };
+
+    let mut survey_history = SurveyHistory(HashMap::new());
+
+    assert!(record_tile_survey(7, pos, &mut survey_history));
+    assert!(!record_tile_survey(7, pos, &mut survey_history));
+}
+
+#[test]
+fn poi_investigation_history_is_per_player_and_once() {
+    let mut investigated_pois = InvestigatedPOIs(HashMap::new());
+
+    assert!(record_poi_investigation(1, 10, &mut investigated_pois));
+    assert!(!record_poi_investigation(1, 10, &mut investigated_pois));
+    assert!(record_poi_investigation(2, 10, &mut investigated_pois));
+    assert!(record_poi_investigation(1, 11, &mut investigated_pois));
+}
+
+#[test]
+fn explore_outcome_table_uses_three_to_one_good_bad_ratio() {
+    let positive = (0..12)
+        .filter(|slot| explore_outcome_is_positive(explore_outcome_from_slot(*slot)))
+        .count();
+
+    assert_eq!(positive, 9);
+    assert_eq!(12 - positive, 3);
+}
+
+#[test]
+fn washed_ashore_loot_poi_only_uses_ocean_adjacent_land() {
+    let center = Position { x: 10, y: 10 };
+    let landlocked_map = flat_land_map();
+
+    assert!(loot_poi_spawn_pos("Washed Ashore Materials", center, &landlocked_map).is_none());
+    assert!(loot_poi_spawn_pos("Supply Cache", center, &landlocked_map).is_some());
+
+    let mut coastal_map = flat_land_map();
+    let ocean_tile = Map::range((center.x, center.y), 1)
+        .into_iter()
+        .find(|(x, y)| *x != center.x || *y != center.y)
+        .expect("nearby ocean tile");
+    set_test_tile_type(
+        &mut coastal_map,
+        ocean_tile.0,
+        ocean_tile.1,
+        TileType::Ocean,
+    );
+
+    for _ in 0..20 {
+        let spawn_pos = loot_poi_spawn_pos("Washed Ashore Materials", center, &coastal_map)
+            .expect("coastal washed ashore spawn");
+
+        assert!(Map::is_passable(spawn_pos.x, spawn_pos.y, &coastal_map));
+        assert!(Map::are_tile_types_nearby(
+            spawn_pos,
+            vec![TileType::Ocean],
+            &coastal_map
+        ));
+    }
+}
+
+#[test]
+fn info_tile_packet_serializes_survey_status() {
+    let packet = ResponsePacket::InfoTile {
+        x: 1,
+        y: 2,
+        name: "Grasslands".to_string(),
+        mc: 1,
+        def: 0.0,
+        unrevealed: 0,
+        sanctuary: "None".to_string(),
+        passable: true,
+        wildness: "Safe".to_string(),
+        survey_status: SURVEY_STATUS_UNSURVEYED.to_string(),
+        resources: Vec::new(),
+        terrain_features: Vec::new(),
+    };
+
+    let json = serde_json::to_value(packet).expect("info_tile packet serializes");
+
+    assert_eq!(json["packet"], "info_tile");
+    assert_eq!(json["survey_status"], SURVEY_STATUS_UNSURVEYED);
+}
+
+#[test]
+fn existing_cure_items_map_to_explore_negative_effects() {
+    assert_eq!(
+        explore_cure_for_item("Crude Bandage", item::MEDICAL, "Bandage"),
+        Some(Effect::Bleed)
+    );
+    assert_eq!(
+        explore_cure_for_item("Herbal Poultice", item::POTION, item::HEALTH),
+        Some(Effect::Sickness)
+    );
+    assert_eq!(
+        explore_cure_for_item("Health Potion", item::POTION, item::HEALTH),
+        Some(Effect::Sickness)
+    );
+    assert_eq!(
+        explore_cure_for_item(CRUDE_TORCH, item::TORCH, CRUDE_TORCH),
+        Some(Effect::Cursed)
+    );
+    assert_eq!(
+        explore_cure_for_item(RESIN_TORCH, item::TORCH, RESIN_TORCH),
+        Some(Effect::Cursed)
+    );
+    assert_eq!(
+        explore_cure_for_item(LANTERN_TORCH, item::TORCH, LANTERN_TORCH),
+        None
+    );
+}
+
+#[test]
+fn remove_explore_negative_effect_only_clears_present_effect() {
+    let mut effects = Effects(HashMap::new());
+    effects.0.insert(Effect::Sickness, (100, 1.0, 1));
+
+    assert!(!remove_explore_negative_effect(
+        &mut effects,
+        Effect::Cursed
+    ));
+    assert!(effects.has(Effect::Sickness));
+    assert!(remove_explore_negative_effect(
+        &mut effects,
+        Effect::Sickness
+    ));
+    assert!(!effects.has(Effect::Sickness));
+    assert!(!remove_explore_negative_effect(
+        &mut effects,
+        Effect::Sickness
+    ));
+}
+
+#[test]
+fn negative_explore_effects_include_panel_display_attrs() {
+    let mut templates = Templates::from_obj_templates(vec![]);
+    templates.effect_templates.load(vec![
+        EffectTemplate {
+            name: Effect::Cursed.to_str(),
+            duration: 300,
+            max_hp: None,
+            healing: None,
+            damage: Some(-0.15),
+            damage_over_time: None,
+            speed: None,
+            attack_speed: None,
+            defense: Some(-0.10),
+            stackable: None,
+            armor: None,
+            lifeleech: None,
+            viewshed: None,
+            ignore_all_armor: None,
+            instant_kill_chance: None,
+            next_attack: None,
+            vision: None,
+            health: None,
+            stamina: None,
+        },
+        EffectTemplate {
+            name: Effect::Sickness.to_str(),
+            duration: 300,
+            max_hp: None,
+            healing: None,
+            damage: None,
+            damage_over_time: None,
+            speed: Some(-0.25),
+            attack_speed: Some(-0.10),
+            defense: None,
+            stackable: None,
+            armor: None,
+            lifeleech: None,
+            viewshed: None,
+            ignore_all_armor: None,
+            instant_kill_chance: None,
+            next_attack: None,
+            vision: None,
+            health: None,
+            stamina: None,
+        },
+    ]);
+
+    let mut effects = Effects(HashMap::new());
+    effects.0.insert(Effect::Cursed, (3000, 1.0, 1));
+    effects.0.insert(Effect::Sickness, (3000, 1.0, 1));
+
+    let effect_info = effects.get_info_list(&templates.effect_templates);
+    let cursed_info = effect_info
+        .iter()
+        .find(|info| info.effect == Effect::Cursed)
+        .expect("cursed effect info");
+    let sickness_info = effect_info
+        .iter()
+        .find(|info| info.effect == Effect::Sickness)
+        .expect("sickness effect info");
+
+    assert_eq!(
+        cursed_info.attrs.get(&EffectAttr::Damage),
+        Some(&EffectVal::Num(-0.15))
+    );
+    assert_eq!(
+        cursed_info.attrs.get(&EffectAttr::Defense),
+        Some(&EffectVal::Num(-0.10))
+    );
+    assert_eq!(
+        cursed_info.attrs.get(&EffectAttr::Duration),
+        Some(&EffectVal::Num(300.0))
+    );
+    assert_eq!(
+        sickness_info.attrs.get(&EffectAttr::Speed),
+        Some(&EffectVal::Num(-0.25))
+    );
+    assert_eq!(
+        sickness_info.attrs.get(&EffectAttr::AttackSpeed),
+        Some(&EffectVal::Num(-0.10))
+    );
+}
+
+fn consumable_item(
+    id: i32,
+    owner: i32,
+    name: &str,
+    class: &str,
+    attr_key: AttrKey,
+    attr_value: f32,
+) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(attr_key, item::AttrVal::Num(attr_value));
+
+    Item {
+        id,
+        owner,
+        name: name.to_string(),
+        quantity: 1,
+        durability: None,
+        class: class.to_string(),
+        subclass: class.to_string(),
+        slot: None,
+        image: name.to_lowercase().replace(' ', ""),
+        weight: 1.0,
+        equipped: false,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
 #[test]
 fn combat_lock_helper_uses_three_second_window() {
     let last_combat_tick = LastCombatTick(100);
@@ -37,6 +390,386 @@ fn combat_lock_helper_uses_three_second_window() {
     assert!(is_combat_locked(129, &last_combat_tick));
     assert!(!is_combat_locked(130, &last_combat_tick));
     assert!(!is_combat_locked(131, &last_combat_tick));
+}
+
+fn setup_new_obj_observer_test_app() -> App {
+    let mut app = App::new();
+    app.add_observer(new_obj_observer);
+    app.world_mut().insert_resource(GameTick(0));
+    app.world_mut().insert_resource(Clients::default());
+    app.world_mut().insert_resource(VisibleEvents(Vec::new()));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut()
+        .insert_resource(Templates::from_obj_templates(Vec::new()));
+    app
+}
+
+fn spawn_fortification_test_unit(app: &mut App, id: i32) -> Entity {
+    app.world_mut()
+        .spawn((
+            Id(id),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            Template("Human Villager".into()),
+            Class(CLASS_UNIT.into()),
+            Subclass::Villager,
+            State::None,
+            Effects(HashMap::new()),
+        ))
+        .id()
+}
+
+fn spawn_fortification_test_wall(app: &mut App, id: i32, state: State) -> Entity {
+    app.world_mut()
+        .spawn((
+            Id(id),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            Template("Stockade".into()),
+            Class(CLASS_STRUCTURE.into()),
+            Subclass::Wall,
+            state,
+            Effects(HashMap::new()),
+        ))
+        .id()
+}
+
+#[test]
+fn founded_wall_does_not_fortify_existing_occupants_on_spawn() {
+    let mut app = setup_new_obj_observer_test_app();
+    let unit_entity = spawn_fortification_test_unit(&mut app, 1);
+    let wall_entity = spawn_fortification_test_wall(&mut app, 2, State::Founded);
+
+    app.world_mut().trigger(NewObj {
+        entity: wall_entity,
+    });
+    app.world_mut().flush();
+
+    let effects = app.world().get::<Effects>(unit_entity).unwrap();
+    assert!(!effects.has(Effect::Fortified));
+    assert!(app.world().get::<Fortified>(unit_entity).is_none());
+}
+
+#[test]
+fn completed_wall_fortifies_existing_occupants_on_spawn() {
+    let mut app = setup_new_obj_observer_test_app();
+    let unit_entity = spawn_fortification_test_unit(&mut app, 1);
+    let wall_entity = spawn_fortification_test_wall(&mut app, 2, State::None);
+
+    app.world_mut().trigger(NewObj {
+        entity: wall_entity,
+    });
+    app.world_mut().flush();
+
+    let effects = app.world().get::<Effects>(unit_entity).unwrap();
+    assert!(effects.has(Effect::Fortified));
+    assert_eq!(app.world().get::<Fortified>(unit_entity).unwrap().id, 2);
+}
+
+#[test]
+fn founded_wall_does_not_fortify_new_occupant_on_spawn() {
+    let mut app = setup_new_obj_observer_test_app();
+    spawn_fortification_test_wall(&mut app, 2, State::Founded);
+    let unit_entity = spawn_fortification_test_unit(&mut app, 1);
+
+    app.world_mut().trigger(NewObj {
+        entity: unit_entity,
+    });
+    app.world_mut().flush();
+
+    let effects = app.world().get::<Effects>(unit_entity).unwrap();
+    assert!(!effects.has(Effect::Fortified));
+    assert!(app.world().get::<Fortified>(unit_entity).is_none());
+}
+
+#[test]
+fn completed_wall_fortifies_new_occupant_on_spawn() {
+    let mut app = setup_new_obj_observer_test_app();
+    spawn_fortification_test_wall(&mut app, 2, State::None);
+    let unit_entity = spawn_fortification_test_unit(&mut app, 1);
+
+    app.world_mut().trigger(NewObj {
+        entity: unit_entity,
+    });
+    app.world_mut().flush();
+
+    let effects = app.world().get::<Effects>(unit_entity).unwrap();
+    assert!(effects.has(Effect::Fortified));
+    assert_eq!(app.world().get::<Fortified>(unit_entity).unwrap().id, 2);
+}
+
+#[test]
+fn sanctuary_power_score_requires_non_novice_rank() {
+    let skills = Skills::new();
+    let inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+
+    assert_eq!(
+        sanctuary_power_score(
+            &Template("Novice Warrior".to_string()),
+            &skills,
+            &inventory,
+            1_000
+        ),
+        0
+    );
+    assert!(!sanctuary_exploration_unlocked(sanctuary_power_score(
+        &Template("Skilled Warrior".to_string()),
+        &skills,
+        &inventory,
+        100
+    )));
+    assert!(sanctuary_exploration_unlocked(sanctuary_power_score(
+        &Template("Great Warrior".to_string()),
+        &skills,
+        &inventory,
+        100
+    )));
+}
+
+#[test]
+fn sanctuary_exposure_resets_when_protected_or_unlocked() {
+    let mut excursions = SanctuaryExcursions(HashMap::new());
+
+    assert_eq!(
+        record_sanctuary_exposure(&mut excursions, 1, false, false),
+        Some(1)
+    );
+    assert_eq!(
+        record_sanctuary_exposure(&mut excursions, 1, false, false),
+        Some(2)
+    );
+    assert_eq!(
+        record_sanctuary_exposure(&mut excursions, 1, true, false),
+        None
+    );
+    assert!(!excursions.contains_key(&1));
+    assert_eq!(
+        record_sanctuary_exposure(&mut excursions, 1, false, false),
+        Some(1)
+    );
+    assert_eq!(
+        record_sanctuary_exposure(&mut excursions, 1, false, true),
+        None
+    );
+    assert!(!excursions.contains_key(&1));
+}
+
+#[test]
+fn sanctuary_hunter_cadence_and_composition_escalate() {
+    assert!(should_spawn_sanctuary_hunters(1));
+    assert!(!should_spawn_sanctuary_hunters(2));
+    assert!(should_spawn_sanctuary_hunters(3));
+    assert!(!should_spawn_sanctuary_hunters(4));
+    assert!(should_spawn_sanctuary_hunters(5));
+
+    assert_eq!(sanctuary_hunter_wave(1, 0), vec!["Wolf", "Wolf"]);
+    assert_eq!(sanctuary_hunter_wave(3, 0), vec!["Wolf", "Wolf", "Spider"]);
+    assert_eq!(
+        sanctuary_hunter_wave(5, 0),
+        vec!["Wolf Rider", "Goblin Pillager"]
+    );
+    assert_eq!(
+        sanctuary_hunter_wave(1, 150),
+        vec![
+            "Wolf Rider",
+            "Wolf Rider",
+            "Goblin Pillager",
+            "Goblin Pillager"
+        ]
+    );
+}
+
+#[test]
+fn idle_thirsty_hero_auto_drinks_from_inventory() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::None,
+            SubclassHero,
+            LastCombatTick(0),
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+            Inventory {
+                owner: 1,
+                items: vec![consumable_item(
+                    10,
+                    1,
+                    "Waterskin (Filled)",
+                    DRINK,
+                    AttrKey::Thirst,
+                    100.0,
+                )],
+            },
+            Thirst::new(HERO_AUTO_CONSUME_THRESHOLD, 0.0),
+            Hunger::new(0.0, 0.0),
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::Drinking
+    );
+    assert_eq!(
+        app.world()
+            .entity(hero)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::Executing
+    );
+
+    let map_events = app.world().resource::<MapEvents>();
+    assert_eq!(map_events.len(), 1);
+    let event = map_events.values().next().unwrap();
+    assert_eq!(event.obj_id, 1);
+    assert_eq!(event.run_tick, 100 + HERO_AUTO_CONSUME_TICKS);
+    match &event.event_type {
+        VisibleEvent::DrinkEvent { item_id, obj_id } => {
+            assert_eq!(*item_id, 10);
+            assert_eq!(*obj_id, 1);
+        }
+        other => panic!("expected drink event, got {:?}", other),
+    }
+}
+
+#[test]
+fn hero_auto_eats_when_hungry_and_idle() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(200));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::None,
+            SubclassHero,
+            LastCombatTick(0),
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+            Inventory {
+                owner: 1,
+                items: vec![consumable_item(
+                    20,
+                    1,
+                    "Salted Meat Strip",
+                    FOOD,
+                    AttrKey::Feed,
+                    100.0,
+                )],
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(HERO_AUTO_CONSUME_THRESHOLD, 0.0),
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::Eating
+    );
+
+    let map_events = app.world().resource::<MapEvents>();
+    assert_eq!(map_events.len(), 1);
+    let event = map_events.values().next().unwrap();
+    match &event.event_type {
+        VisibleEvent::EatEvent { item_id, obj_id } => {
+            assert_eq!(*item_id, 20);
+            assert_eq!(*obj_id, 1);
+        }
+        other => panic!("expected eat event, got {:?}", other),
+    }
+}
+
+#[test]
+fn hero_auto_consume_skips_busy_combat_locked_and_non_hero_entities() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(300));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let drink = consumable_item(30, 1, "Waterskin (Filled)", DRINK, AttrKey::Thirst, 100.0);
+    let food = consumable_item(31, 2, "Salted Meat Strip", FOOD, AttrKey::Feed, 100.0);
+
+    let busy_hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::Moving,
+            SubclassHero,
+            LastCombatTick(0),
+            Inventory {
+                owner: 1,
+                items: vec![drink.clone()],
+            },
+            Thirst::new(100.0, 0.0),
+            Hunger::new(0.0, 0.0),
+        ))
+        .id();
+    let combat_locked_hero = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            State::None,
+            SubclassHero,
+            LastCombatTick(300),
+            Inventory {
+                owner: 2,
+                items: vec![food],
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(100.0, 0.0),
+        ))
+        .id();
+    app.world_mut().spawn((
+        Id(3),
+        State::None,
+        Inventory {
+            owner: 3,
+            items: vec![drink],
+        },
+        Thirst::new(100.0, 0.0),
+        Hunger::new(0.0, 0.0),
+    ));
+
+    app.update();
+
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert_eq!(
+        *app.world().entity(busy_hero).get::<State>().unwrap(),
+        State::Moving
+    );
+    assert_eq!(
+        *app.world()
+            .entity(combat_locked_hero)
+            .get::<State>()
+            .unwrap(),
+        State::None
+    );
 }
 
 #[test]
@@ -101,6 +834,48 @@ fn necromancer_spawn_resolver_returns_none_when_search_area_occupied() {
         resolve_necromancer_spawn_pos(anchor, &occupied, &map, 1),
         None
     );
+}
+
+#[test]
+fn necromancer_activation_adds_scripted_corpse_hunt_brain() {
+    let mut app = App::new();
+    let old_home = Position { x: 1, y: 1 };
+    let home = Position { x: 16, y: 32 };
+    let corpse_anchor = Position { x: 5, y: 31 };
+    let entity = app
+        .world_mut()
+        .spawn((
+            Home { pos: old_home },
+            VisibleTarget::new(999),
+            TaskTarget::new(999),
+            EventExecuting {
+                event_type: "old".to_string(),
+                state: EventExecutingState::Executing,
+            },
+        ))
+        .id();
+
+    {
+        let mut commands = app.world_mut().commands();
+        Encounter::activate_necromancer_hunting_corpse(entity, home, corpse_anchor, &mut commands);
+    }
+    app.world_mut().flush();
+
+    let entity_ref = app.world().entity(entity);
+    assert_eq!(entity_ref.get::<Home>().unwrap().pos, home);
+    assert_eq!(
+        entity_ref
+            .get::<ScriptedCorpseHunt>()
+            .unwrap()
+            .corpse_anchor,
+        corpse_anchor
+    );
+    assert_eq!(
+        entity_ref.get::<EventExecuting>().unwrap().state,
+        EventExecutingState::None
+    );
+    assert_eq!(entity_ref.get::<TaskTarget>().unwrap().target, NO_TARGET);
+    assert!(entity_ref.contains::<ThinkerBuilder>());
 }
 
 #[test]
@@ -467,6 +1242,120 @@ fn watchtower_does_not_reveal_out_of_range_or_friendly_hidden_units() {
         app.world().get::<State>(friendly_hidden),
         Some(&State::Hiding)
     );
+}
+
+#[test]
+fn visible_event_move_packets_keep_source_coordinates() {
+    let mut app = App::new();
+    app.add_systems(Update, visible_event_system);
+    app.insert_resource(EntityObjMap(HashMap::new()));
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    let client_id = Uuid::new_v4();
+    app.insert_resource(Clients(Arc::new(Mutex::new(HashMap::from([(
+        client_id,
+        Client {
+            id: client_id,
+            player_id: 1,
+            sender,
+        },
+    )])))));
+
+    app.world_mut().spawn((
+        Id(1),
+        PlayerId(1),
+        Position { x: 5, y: 5 },
+        Name("Observer".to_string()),
+        Template("Human".to_string()),
+        Class(CLASS_UNIT.to_string()),
+        Subclass::Hero,
+        State::None,
+        Viewshed { range: 10 },
+        Misc::default(),
+    ));
+
+    let moved_entity = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(2),
+            Position { x: 4, y: 4 },
+            Name("Moved Unit".to_string()),
+            Template("Wolf".to_string()),
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Npc,
+            State::None,
+            Misc::default(),
+        ))
+        .id();
+
+    let updated_entity = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(2),
+            Position { x: 7, y: 7 },
+            Name("Updated Unit".to_string()),
+            Template("Wolf".to_string()),
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Npc,
+            State::None,
+            Misc::default(),
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(2, moved_entity);
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(3, updated_entity);
+
+    app.insert_resource(VisibleEvents(vec![
+        MapEvent {
+            event_id: Uuid::new_v4(),
+            obj_id: 2,
+            run_tick: 0,
+            event_type: VisibleEvent::MoveEvent {
+                src: Position { x: 3, y: 4 },
+                dst: Position { x: 4, y: 4 },
+            },
+        },
+        MapEvent {
+            event_id: Uuid::new_v4(),
+            obj_id: 3,
+            run_tick: 0,
+            event_type: VisibleEvent::UpdateObjPosEvent {
+                src: Position { x: 6, y: 7 },
+                dst: Position { x: 7, y: 7 },
+            },
+        },
+    ]));
+
+    app.update();
+
+    let msg = receiver.try_recv().expect("perception change packet");
+    let packet: serde_json::Value = serde_json::from_str(&msg).expect("valid json packet");
+    assert_eq!(packet["packet"].as_str(), Some("perception_changes"));
+
+    let move_sources: HashMap<i32, (i32, i32)> = packet["events"]
+        .as_array()
+        .expect("events array")
+        .iter()
+        .filter(|event| event["event"].as_str() == Some("obj_move"))
+        .map(|event| {
+            (
+                event["obj"]["id"].as_i64().unwrap() as i32,
+                (
+                    event["src_x"].as_i64().unwrap() as i32,
+                    event["src_y"].as_i64().unwrap() as i32,
+                ),
+            )
+        })
+        .collect();
+
+    assert_eq!(move_sources.get(&2), Some(&(3, 4)));
+    assert_eq!(move_sources.get(&3), Some(&(6, 7)));
 }
 
 #[test]
@@ -937,7 +1826,7 @@ fn crisis_bonus_xp_scales_with_tier() {
 fn crisis_state_tracks_per_player() {
     let mut crisis_state = CrisisState::default();
 
-    // Player 1 triggers rat crisis
+    // Player 1 triggers tier 1 pest crisis
     crisis_state
         .entry(1)
         .or_insert_with(PlayerCrisis::default)
@@ -1016,14 +1905,14 @@ fn creature_kill_xp_follows_tier_progression() {
 
 #[test]
 fn hero_warrior_can_survive_tier1_encounter() {
-    // Novice Warrior (100 HP) vs Giant Rat (2 dmg + 3 range = 5 max)
-    // Warrior survives at least 100/5 = 20 hits
+    // Novice Warrior (100 HP) vs Thorn Beetle (2 dmg + 2 range = 4 max)
+    // Warrior survives at least 100/4 = 25 hits
     let warrior_hp = 100;
-    let rat_max_dmg = 2 + 3;
-    let hits_to_kill_warrior = warrior_hp / rat_max_dmg;
+    let thorn_beetle_max_dmg = 2 + 2;
+    let hits_to_kill_warrior = warrior_hp / thorn_beetle_max_dmg;
     assert!(
         hits_to_kill_warrior >= 10,
-        "Warrior should survive 10+ rat hits, got {}",
+        "Warrior should survive 10+ tier 1 enemy hits, got {}",
         hits_to_kill_warrior
     );
 }
@@ -1031,14 +1920,14 @@ fn hero_warrior_can_survive_tier1_encounter() {
 #[test]
 fn hero_can_kill_tier1_creatures_quickly() {
     // Novice Warrior (2 dmg, 2 range) + Copper Axe (+11 dmg)
-    // Avg damage: 2 + 1 + 11 = 14. Giant Rat HP: 20
+    // Avg damage: 2 + 1 + 11 = 14. Thorn Beetle HP: 24
     let hero_avg_dmg = 2 + 1 + 11;
-    let rat_hp = 20;
-    let hits_to_kill_rat = (rat_hp as f64 / hero_avg_dmg as f64).ceil() as i32;
+    let thorn_beetle_hp = 24;
+    let hits_to_kill_tier1_enemy = (thorn_beetle_hp as f64 / hero_avg_dmg as f64).ceil() as i32;
     assert!(
-        hits_to_kill_rat <= 3,
-        "Hero should kill T1 rat in 3 or fewer hits, got {}",
-        hits_to_kill_rat
+        hits_to_kill_tier1_enemy <= 3,
+        "Hero should kill T1 enemies in 3 or fewer hits, got {}",
+        hits_to_kill_tier1_enemy
     );
 }
 
@@ -1274,6 +2163,7 @@ fn survival_director_starts_after_day_six_or_objective() {
 fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
     let entry = InitialEncounterEntry {
         rat_ids: vec![1, 2],
+        opening_enemy_templates: vec!["Cave Bat".to_string(), "Thorn Beetle".to_string()],
         phase1_spawn: "Wild Boar".to_string(),
         phase1_npc_id: None,
         spawn_pos: Position { x: 10, y: 10 },

@@ -13,6 +13,7 @@ import SingleInventoryPanel from './ui/singleInventoryPanel';
 import ItemPanel from './ui/itemPanel';
 
 import explorebutton from "ui/explorebutton.png";
+import resourcesbutton from "ui/resourcesbutton.png";
 
 
 import movecompass from "ui/movecompass.png";
@@ -62,7 +63,7 @@ import ExperimentPanel from './ui/experimentPanel';
 import ActionButton from './ui/actionButton';
 import NPCPanel from './ui/npcPanel';
 import HeroAdvancePanel from './ui/heroAdvancePanel';
-import NoticePanel from './ui/noticePanel';
+import NoticeStack from './ui/noticePanel';
 import SmallButtonClassName from './ui/smallButtonClassName';
 import AttacksPanel from './ui/attacksPanel';
 import ToggleButton from './ui/toggleButton';
@@ -81,6 +82,13 @@ import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
 import ZoomButton from './ui/zoomButton';
 import ObjectivesPanel from './ui/objectivesPanel';
+
+interface NoticeNotification {
+  id: number,
+  message: string,
+  expiryMs: number,
+  createdAt: number,
+}
 
 interface UIState {
   selectBoxes: [],
@@ -111,7 +119,6 @@ interface UIState {
   hideStructureUpgradePanel: boolean,
   hideErrorPanel: boolean,
   hideConfirmPanel: boolean,
-  hideNoticePanel: boolean,
   hideAssignPanel: boolean,
   hideCraftPanel: boolean,
   hideStructureCraftPanel: boolean,
@@ -172,8 +179,7 @@ interface UIState {
   infoItemAction: string,
   resourcesIconBorder: boolean,
   errmsg: string,
-  noticemsg: string,
-  noticeExpiry: integer,
+  notifications: NoticeNotification[],
   confirmMsg: string,
   confirmData: any,
   showMoveCompassClick: boolean
@@ -195,6 +201,7 @@ interface UIState {
 export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
   private heroDeathOverlayTimer: any = null;
+  private nextNotificationId: number = 1;
 
   constructor(props) {
     super(props);
@@ -231,7 +238,6 @@ export default class UI extends React.Component<any, UIState> {
       hideStructureCraftPanel: true,
       hideWorkQueuePanel: true,
       hideErrorPanel: true,
-      hideNoticePanel: true,
       hideConfirmPanel: true,
       hideMerchantPanel: true,
       hideMerchantQuantityPanel: true,
@@ -289,8 +295,7 @@ export default class UI extends React.Component<any, UIState> {
       infoItemAction: TRIGGER_INVENTORY,
       resourcesIconBorder: false,
       errmsg: '',
-      noticemsg: '',
-      noticeExpiry: 5000,
+      notifications: [],
       confirmMsg: '',
       confirmData: {},
       showMoveCompassClick: false,
@@ -315,6 +320,7 @@ export default class UI extends React.Component<any, UIState> {
     this.handleHeroAttrsClick = this.handleHeroAttrsClick.bind(this);
     this.handleHeroInventoryClick = this.handleHeroInventoryClick.bind(this);
     this.handleHeroExploreClick = this.handleHeroExploreClick.bind(this);
+    this.handleHeroProspectClick = this.handleHeroProspectClick.bind(this);
     this.handleHeroBuildClick = this.handleHeroBuildClick.bind(this);
     this.handleHeroGatherClick = this.handleHeroGatherClick.bind(this);
     this.handleHeroSleepClick = this.handleHeroSleepClick.bind(this);
@@ -327,6 +333,7 @@ export default class UI extends React.Component<any, UIState> {
     this.handleTransitionEnd = this.handleTransitionEnd.bind(this);
 
     this.hideMoveCompassClick = this.hideMoveCompassClick.bind(this);
+    this.removeNotice = this.removeNotice.bind(this);
 
     Global.gameEmitter.on(GameEvent.LOADING_FINISHED, this.handleLoadingFinished, this);
     Global.gameEmitter.on(GameEvent.TILE_CLICK, this.handleTileClick, this);
@@ -355,7 +362,6 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CRAFT_CLICK, this.handleCraftClick, this);
     Global.gameEmitter.on(GameEvent.STRUCTURE_CRAFT_CLICK, this.handleStructureCraftClick, this);
     Global.gameEmitter.on(GameEvent.CRAFT_QUEUE_CLICK, this.handleCraftQueueClick, this);
-    Global.gameEmitter.on(GameEvent.NOTICE_EXPIRE, this.handleNoticeExpire, this);
     Global.gameEmitter.on(GameEvent.DELETE_STRUCTURE_CLICK, this.handleDeleteStructureClick, this);
     Global.gameEmitter.on(GameEvent.CONFIRMATION, this.handleConfirmation, this);
     Global.gameEmitter.on(GameEvent.CONFIRM_OK_CLICK, this.handleConfirmOkClick, this);
@@ -727,7 +733,11 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroExploreClick(event: React.MouseEvent) {
-    Global.network.sendExplore();
+    Global.network.sendSurvey(Global.heroId);
+  }
+
+  handleHeroProspectClick(event: React.MouseEvent) {
+    Global.network.sendProspect();
   }
 
   handleHeroBuildClick(event: React.MouseEvent) {
@@ -890,8 +900,10 @@ export default class UI extends React.Component<any, UIState> {
         msg = sourceName + " has refined (" + message.amount + "x) " + message.item_name;
       } else if (message.action == 'gathering') {
         msg = sourceName + " has gathered (" + message.amount + "x) " + message.item_name;
-      } else if (message.action == 'exploring') {
+      } else if (message.action == 'exploring' || message.action == 'prospecting') {
         msg = sourceName + " has discovered (" + message.amount + "x) sources of " + message.item_name;
+      } else if (message.action == 'surveying' || message.action == 'investigating') {
+        msg = sourceName + " has found (" + message.amount + "x) " + message.item_name;
       }
     } else {
       if (message.action == 'crafting') {
@@ -900,31 +912,39 @@ export default class UI extends React.Component<any, UIState> {
         msg = sourceName + " has refined a " + message.item_name;
       } else if (message.action == 'gathering') {
         msg = sourceName + " has gathered a " + message.item_name;
-      } else if (message.action == 'exploring') {
+      } else if (message.action == 'exploring' || message.action == 'prospecting') {
         msg = sourceName + " has discovered a source of " + message.item_name;
+      } else if (message.action == 'surveying' || message.action == 'investigating') {
+        msg = sourceName + " has found " + message.item_name;
       }
     }
 
-    this.setState({
-      hideNoticePanel: false,
-      noticemsg: msg,
-      noticeExpiry: 5000
-    });
+    this.enqueueNotice(msg);
   }
 
-  handleNoticeExpire() {
-    this.setState({ hideNoticePanel: true });
+  enqueueNotice(message: string, expiryMs: number = Global.noticeExpiry) {
+    const notification = {
+      id: this.nextNotificationId,
+      message,
+      expiryMs,
+      createdAt: Date.now()
+    };
+
+    this.nextNotificationId += 1;
+
+    this.setState((state) => ({
+      notifications: state.notifications.concat(notification)
+    }));
+  }
+
+  removeNotice(notificationId: number) {
+    this.setState((state) => ({
+      notifications: state.notifications.filter((notification) => notification.id !== notificationId)
+    }));
   }
 
   handleNotice(message) {
-    if (message.expiry) {
-      this.setState({ noticeExpiry: message.expiry, hideNoticePanel: false, noticemsg: message.noticemsg });
-    } else {
-      this.setState({
-        hideNoticePanel: false,
-        noticemsg: message.noticemsg
-      });
-    }
+    this.enqueueNotice(message.noticemsg, message.expiry || Global.noticeExpiry);
   }
 
   handleError(message) {
@@ -972,11 +992,7 @@ export default class UI extends React.Component<any, UIState> {
   handleHeroDead() {
     Global.heroDead = true;
 
-    this.setState({
-      hideNoticePanel: false,
-      noticemsg: Global.objectStates[Global.heroId].name + " has fallen.  The Monolith weighs their soul...",
-      noticeExpiry: 12000
-    });
+    this.enqueueNotice(Global.objectStates[Global.heroId].name + " has fallen.  The Monolith weighs their soul...", 12000);
   }
 
   handleHeroDeathState(message) {
@@ -1742,13 +1758,24 @@ export default class UI extends React.Component<any, UIState> {
           imageName="inventorybutton"
           className={styles.heroinventorybutton} />
 
-        <CooldownButton imageName='explorebutton'
+        <CooldownButton imageName='surveybutton'
           imageButton={explorebutton}
           handler={this.handleHeroExploreClick}
-          className={styles.heroexplorebutton} />
+          className={styles.heroexplorebutton}
+          cooldownEvent={NetworkEvent.SURVEY}
+          timeKey="survey_time"
+          title="Survey" />
 
         <GatherButton handler={this.handleHeroGatherClick}
           className={styles.herogatherbutton} />
+
+        <CooldownButton imageName='prospectbutton'
+          imageButton={resourcesbutton}
+          handler={this.handleHeroProspectClick}
+          className={styles.heroprospectbutton}
+          cooldownEvent={NetworkEvent.PROSPECT}
+          timeKey="prospect_time"
+          title="Prospect" />
 
         <SmallButtonClassName handler={this.handleHeroBuildClick}
           imageName="buildbutton"
@@ -1756,7 +1783,8 @@ export default class UI extends React.Component<any, UIState> {
 
         <ToggleButton handler={this.handleHeroSleepClick}
           imageName="resourcesbutton"
-          className={styles.herosleepbutton} />
+          className={styles.herosleepbutton}
+          title="Nearby Resources" />
 
         <SmallButtonClassName handler={this.handleHeroEquipClick}
           imageName="equipbutton"
@@ -1963,8 +1991,7 @@ export default class UI extends React.Component<any, UIState> {
         {!this.state.hideExperimentPanel &&
           <ExperimentPanel expData={this.state.expData} />}
 
-        {!this.state.hideNoticePanel &&
-          <NoticePanel noticemsg={this.state.noticemsg} noticeExpiry={this.state.noticeExpiry} />}
+        <NoticeStack notifications={this.state.notifications} onDismiss={this.removeNotice} />
 
         {!this.state.hideErrorPanel &&
           <ErrorPanel errmsg={this.state.errmsg} />}

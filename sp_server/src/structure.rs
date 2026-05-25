@@ -230,10 +230,38 @@ impl Structure {
     }
 
     pub fn is_built(state: State) -> bool {
-        let is_built =
-            state != State::Progressing || state != State::Upgrading || state != State::Stalled;
+        !matches!(
+            state,
+            State::Dead
+                | State::Founded
+                | State::Progressing
+                | State::Building
+                | State::PlanningUpgrade
+                | State::Upgrading
+                | State::Stalled
+        )
+    }
+}
 
-        return is_built;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_built_excludes_incomplete_structure_states() {
+        assert!(!Structure::is_built(State::Founded));
+        assert!(!Structure::is_built(State::Progressing));
+        assert!(!Structure::is_built(State::Building));
+        assert!(!Structure::is_built(State::PlanningUpgrade));
+        assert!(!Structure::is_built(State::Upgrading));
+        assert!(!Structure::is_built(State::Stalled));
+        assert!(!Structure::is_built(State::Dead));
+    }
+
+    #[test]
+    fn is_built_allows_completed_structure_states() {
+        assert!(Structure::is_built(State::None));
+        assert!(Structure::is_built(State::Burning));
     }
 }
 

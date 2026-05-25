@@ -102,6 +102,7 @@ mod tests {
     use bevy::prelude::App;
     use big_brain::prelude::Score;
     use big_brain::scorers::spawn_scorer;
+    use big_brain::BigBrainPlugin;
     use std::collections::HashMap;
 
     use crate::constants::{
@@ -247,29 +248,33 @@ mod tests {
         pos: Position,
         class: &str,
         template: &str,
-    ) {
+    ) -> Entity {
         let subclass = if class == CLASS_CORPSE {
             SUBCLASS_CORPSE
         } else {
             SUBCLASS_NPC
         };
 
-        app.world_mut().spawn((
-            Id(id),
-            PlayerId(1),
-            pos,
-            Name(template.to_string()),
-            Template(template.to_string()),
-            Class(class.to_string()),
-            Subclass::from_str(subclass),
-            State::Dead,
-            Misc {
-                image: String::new(),
-                hsl: Vec::new(),
-                groups: Vec::new(),
-            },
-            empty_inventory(id),
-        ));
+        app.world_mut()
+            .spawn((
+                Id(id),
+                PlayerId(1),
+                pos,
+                Name(template.to_string()),
+                Template(template.to_string()),
+                Class(class.to_string()),
+                Subclass::from_str(subclass),
+                State::Dead,
+                Misc {
+                    image: String::new(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(id),
+            ))
+            .id()
     }
 
     fn setup_scripted_corpse_hunt_app() -> App {
@@ -278,6 +283,119 @@ mod tests {
         app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
         app.world_mut().insert_resource(flat_test_map());
         app
+    }
+
+    fn register_test_obj(app: &mut App, obj_id: i32, player_id: i32, entity: Entity) {
+        app.world_mut()
+            .resource_mut::<Ids>()
+            .new_obj(obj_id, player_id);
+        app.world_mut()
+            .resource_mut::<EntityObjMap>()
+            .new_obj(obj_id, entity);
+    }
+
+    fn setup_scripted_necromancer_brain_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(BigBrainPlugin::new(PreUpdate));
+        app.add_systems(
+            Update,
+            (
+                scripted_corpse_hunt_scorer_system.in_set(BigBrainSet::Scorers),
+                set_corpse_target_system.in_set(BigBrainSet::Actions),
+                move_to_target_system.in_set(BigBrainSet::Actions),
+                raise_dead_system.in_set(BigBrainSet::Actions),
+            ),
+        );
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut().insert_resource(MapEvents(HashMap::new()));
+        app.world_mut().insert_resource(GameEvents(HashMap::new()));
+        app.world_mut().insert_resource(minimal_templates());
+        app
+    }
+
+    fn spawn_scripted_necromancer_brain(
+        app: &mut App,
+        npc_pos: Position,
+        corpse_anchor: Position,
+    ) -> Entity {
+        let scripted_raise_dead = Steps::build()
+            .label("Scripted Corpse Hunt")
+            .step(SetCorpseTarget)
+            .step(NpcMoveToTarget)
+            .step(RaiseDead);
+
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(28),
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                Name("Necromancer".to_string()),
+                Template("Necromancer".to_string()),
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                State::None,
+                Misc {
+                    image: "necromancer".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(28),
+            ))
+            .insert((
+                Viewshed { range: 5 },
+                SubclassNPC,
+                VisibleTarget::new(NO_TARGET),
+                TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
+                ScriptedCorpseHunt {
+                    corpse_anchor,
+                    search_radius: 5,
+                },
+                Thinker::build()
+                    .label("Necromancer")
+                    .picker(Highest)
+                    .when(ScriptedCorpseHuntScorer, scripted_raise_dead),
+            ))
+            .id();
+
+        register_test_obj(app, 28, NPC_PLAYER_ID, npc_entity);
+        npc_entity
+    }
+
+    fn spawn_blocking_test_unit(app: &mut App, id: i32, pos: Position) -> Entity {
+        let entity = app
+            .world_mut()
+            .spawn((
+                Id(id),
+                PlayerId(1),
+                pos,
+                Name("Hero".to_string()),
+                Template("Human".to_string()),
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                State::None,
+                Misc {
+                    image: String::new(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(id),
+            ))
+            .id();
+        register_test_obj(app, id, 1, entity);
+        entity
     }
 
     fn wall_stats(hp: i32) -> Stats {
@@ -849,6 +967,77 @@ mod tests {
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn scripted_necromancer_thinker_schedules_move_to_shipwreck_corpse() {
+        let mut app = setup_scripted_necromancer_brain_app();
+        let npc_entity = spawn_scripted_necromancer_brain(
+            &mut app,
+            Position { x: 16, y: 32 },
+            Position { x: 15, y: 36 },
+        );
+        let corpse_entity = spawn_corpse_hunt_target(
+            &mut app,
+            12,
+            Position { x: 16, y: 35 },
+            CLASS_CORPSE,
+            "Human Corpse",
+        );
+        register_test_obj(&mut app, 12, 999, corpse_entity);
+
+        for _ in 0..20 {
+            app.update();
+        }
+
+        let target = app.world().entity(npc_entity).get::<TaskTarget>().unwrap();
+        assert_eq!(target.target, 12);
+
+        let map_events = app.world().resource::<MapEvents>();
+        assert!(
+            map_events
+                .values()
+                .any(|event| matches!(event.event_type, VisibleEvent::MoveEvent { .. })),
+            "scripted necromancer did not schedule a move event: {:?}",
+            map_events
+        );
+    }
+
+    #[test]
+    fn scripted_necromancer_thinker_routes_around_hero_on_old_spawn_tile() {
+        let mut app = setup_scripted_necromancer_brain_app();
+        let old_necromancer_pos = Position { x: 4, y: 29 };
+        let npc_entity = spawn_scripted_necromancer_brain(
+            &mut app,
+            Position { x: 5, y: 25 },
+            Position { x: 5, y: 31 },
+        );
+        let corpse_entity = spawn_corpse_hunt_target(
+            &mut app,
+            12,
+            Position { x: 4, y: 30 },
+            CLASS_CORPSE,
+            "Human Corpse",
+        );
+        register_test_obj(&mut app, 12, 999, corpse_entity);
+        spawn_blocking_test_unit(&mut app, 40, old_necromancer_pos);
+
+        for _ in 0..20 {
+            app.update();
+        }
+
+        let target = app.world().entity(npc_entity).get::<TaskTarget>().unwrap();
+        assert_eq!(target.target, 12);
+
+        let map_events = app.world().resource::<MapEvents>();
+        let move_event = map_events
+            .values()
+            .find_map(|event| match &event.event_type {
+                VisibleEvent::MoveEvent { dst, .. } => Some(*dst),
+                _ => None,
+            })
+            .expect("scripted necromancer should schedule a move");
+        assert_ne!(move_event, old_necromancer_pos);
     }
 }
 
@@ -1960,7 +2149,7 @@ fn scripted_corpse_hunt_target_reachable(
         false,
         false,
         true,
-        true,
+        false,
     )
     .is_some()
 }
@@ -2969,6 +3158,7 @@ pub fn move_to_target_system(
     templates: Res<Templates>,
     mut obj_query: Query<ObjStatQuery>,
     target_query: Query<&Target>,
+    scripted_corpse_hunt_query: Query<(), With<ScriptedCorpseHunt>>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut query: Query<(&Actor, &mut ActionState, &NpcMoveToTarget, &ActionSpan)>,
 ) {
@@ -3035,7 +3225,8 @@ pub fn move_to_target_system(
                     .obj_templates
                     .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
                 let npc_int = npc_template.int.unwrap_or("mindless".to_string());
-                let allow_attackable_blockers = !is_animal(&npc_int);
+                let allow_attackable_blockers =
+                    !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
 
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
@@ -3188,7 +3379,8 @@ pub fn move_to_target_system(
                     .obj_templates
                     .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
                 let npc_int = npc_template.int.unwrap_or("mindless".to_string());
-                let allow_attackable_blockers = !is_animal(&npc_int);
+                let allow_attackable_blockers =
+                    !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {

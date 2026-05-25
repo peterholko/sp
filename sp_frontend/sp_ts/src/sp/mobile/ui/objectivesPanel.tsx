@@ -126,7 +126,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       },
       {
         id: 'explore_poi',
-        title: 'Explore a point of interest',
+        title: 'Investigate a point of interest',
         state: this.state.explore_poi ? 'complete' : 'locked',
         category: 'Exploration',
         action_hint: 'Look for useful places near camp.',

@@ -112,12 +112,20 @@ export default class TrueDeathPanel extends React.Component<TrueDeathPanelProps,
               <td>{this.props.fate}</td>
             </tr>
             {this.props.scoreBreakdown &&
-              <tr>
-                <td>Score Split: </td>
-                <td>
-                  S {this.props.scoreBreakdown.survival || 0} / P {this.props.scoreBreakdown.progression || 0} / V {this.props.scoreBreakdown.valor || 0}
-                </td>
-              </tr>}
+              <React.Fragment>
+                <tr>
+                  <td>Survival score: </td>
+                  <td>{this.props.scoreBreakdown.survival || 0}</td>
+                </tr>
+                <tr>
+                  <td>Progression score: </td>
+                  <td>{this.props.scoreBreakdown.progression || 0}</td>
+                </tr>
+                <tr>
+                  <td>Valor/combat score: </td>
+                  <td>{this.props.scoreBreakdown.valor || 0}</td>
+                </tr>
+              </React.Fragment>}
           </tbody>
         </table>
         <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick}/>
