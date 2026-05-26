@@ -517,6 +517,80 @@ fn completed_wall_fortifies_new_occupant_on_spawn() {
 }
 
 #[test]
+fn completed_wall_fortifies_builder_still_in_building_state() {
+    let mut app = App::new();
+    app.add_systems(Update, build_system);
+    app.insert_resource(GameTick(10));
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+
+    app.world_mut().spawn((
+        Id(1),
+        PlayerId(1),
+        Position { x: 0, y: 0 },
+        State::Building,
+        Class(CLASS_STRUCTURE.to_string()),
+        ClassStructure,
+        Subclass::Wall,
+        Template("Stockade".to_string()),
+        Stats {
+            hp: 1,
+            stamina: None,
+            mana: None,
+            base_hp: 20,
+            base_stamina: None,
+            base_mana: None,
+            base_def: 0,
+            damage_range: None,
+            base_damage: None,
+            base_speed: None,
+            base_vision: None,
+        },
+        Assignments(vec![2]),
+        BuildUpgradeState {
+            build_upgrade_cost: 1.0,
+            work_done: 0.0,
+            work_per_sec: 0.0,
+        },
+        WorkQueue(Vec::new()),
+        StateBuilding,
+    ));
+
+    let builder_entity = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Building,
+            Template("Human Villager".to_string()),
+            Skills::new(),
+            BaseAttrs {
+                creativity: 0,
+                dexterity: 0,
+                endurance: 0,
+                focus: 0,
+                intellect: 0,
+                spirit: 0,
+                strength: 0,
+                toughness: 0,
+            },
+            Effects(HashMap::new()),
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(2, builder_entity);
+
+    app.update();
+
+    let effects = app.world().get::<Effects>(builder_entity).unwrap();
+    assert!(effects.has(Effect::Fortified));
+    assert_eq!(app.world().get::<Fortified>(builder_entity).unwrap().id, 1);
+}
+
+#[test]
 fn sanctuary_power_score_requires_non_novice_rank() {
     let skills = Skills::new();
     let inventory = Inventory {

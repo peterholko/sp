@@ -864,6 +864,10 @@ fn wall_grants_fortification(state: &State) -> bool {
     Structure::is_built(*state)
 }
 
+fn occupant_receives_wall_fortification(state: &State) -> bool {
+    state.is_active() || matches!(state, State::Building)
+}
+
 #[derive(Debug, Component)]
 pub struct Burning {
     pub start_tick: i32,
@@ -3051,7 +3055,7 @@ pub fn build_system(
                 for (entity, player_id, pos, state, mut effects) in occupant_query.iter_mut() {
                     if *player_id == *structure_player_id
                         && *pos == *structure_pos
-                        && state.is_active()
+                        && occupant_receives_wall_fortification(state)
                     {
                         effects
                             .0
