@@ -342,7 +342,7 @@ fn random_early_game_enemy_template() -> &'static str {
     EARLY_GAME_ENEMY_TEMPLATES[enemy_index]
 }
 
-const SANCTUARY_HUNTER_CAP: usize = 6;
+const SANCTUARY_HUNTER_CAP: usize = 18;
 const SANCTUARY_POWER_UNLOCK_SCORE: i32 = 200;
 
 #[derive(Debug, Clone, Default)]
@@ -1308,6 +1308,10 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                wildness_reduction_on_enemy_death_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
                 objectives_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
@@ -2000,23 +2004,34 @@ fn record_sanctuary_exposure(
 }
 
 fn should_spawn_sanctuary_hunters(exposure_moves: i32) -> bool {
-    exposure_moves == 1 || (exposure_moves > 1 && (exposure_moves - 1) % 2 == 0)
+    exposure_moves >= 1
 }
 
-fn sanctuary_hunter_wave(exposure_moves: i32, power_score: i32) -> Vec<&'static str> {
+fn sanctuary_hunter_template_for_slot(
+    slot_index: usize,
+    exposure_moves: i32,
+    power_score: i32,
+) -> &'static str {
     if power_score >= 150 {
-        vec![
-            "Wolf Rider",
-            "Wolf Rider",
-            "Goblin Pillager",
-            "Goblin Pillager",
-        ]
+        if slot_index % 2 == 0 {
+            "Wolf Rider"
+        } else {
+            "Goblin Pillager"
+        }
     } else if power_score >= 90 || exposure_moves >= 5 {
-        vec!["Wolf Rider", "Goblin Pillager"]
+        if slot_index % 2 == 0 {
+            "Wolf Rider"
+        } else {
+            "Goblin Pillager"
+        }
     } else if exposure_moves >= 3 {
-        vec!["Wolf", "Wolf", "Spider"]
+        if slot_index % 3 == 2 {
+            "Spider"
+        } else {
+            "Wolf"
+        }
     } else {
-        vec!["Wolf", "Wolf"]
+        "Wolf"
     }
 }
 
@@ -2038,53 +2053,47 @@ fn total_player_gold(player_id: i32, inventory_query: &Query<(&PlayerId, &Invent
         .sum()
 }
 
-fn outside_weak_sanctuary(pos: Position, all_objs: &Vec<EncounterMapObj>) -> bool {
-    all_objs.iter().all(|obj| {
-        obj.subclass != Subclass::Monolith.to_string()
-            || Map::dist(pos, Position { x: obj.x, y: obj.y }) >= WEAK_SANCTUARY_RANGE
-    })
+fn outside_weak_sanctuary_from_monolith_positions(
+    pos: Position,
+    monolith_positions: &[Position],
+) -> bool {
+    monolith_positions
+        .iter()
+        .all(|monolith_pos| Map::dist(pos, *monolith_pos) >= WEAK_SANCTUARY_RANGE)
 }
 
-fn sanctuary_hunter_spawn_pos(
-    _player_id: i32,
+fn sanctuary_hunter_adjacent_spawn_positions(
     hero_pos: Position,
     all_objs: &Vec<EncounterMapObj>,
     map: &Map,
-) -> Option<Position> {
+) -> Vec<Position> {
     let mut candidates = Vec::new();
+    let monolith_positions = all_objs
+        .iter()
+        .filter(|obj| obj.subclass == Subclass::Monolith.to_string())
+        .map(|obj| Position { x: obj.x, y: obj.y })
+        .collect::<Vec<_>>();
 
-    for radius in 2..=4 {
-        for (x, y) in Map::ring((hero_pos.x, hero_pos.y), radius) {
-            let pos = Position { x, y };
-            if !Map::is_valid_pos((x, y))
-                || !Map::is_passable(x, y, map)
-                || !outside_weak_sanctuary(pos, all_objs)
-            {
-                continue;
-            }
+    for (x, y) in Map::ring((hero_pos.x, hero_pos.y), 1) {
+        let pos = Position { x, y };
+        if !Map::is_valid_pos((x, y))
+            || !Map::is_passable(x, y, map)
+            || !outside_weak_sanctuary_from_monolith_positions(pos, &monolith_positions)
+        {
+            continue;
+        }
 
-            let blocked = all_objs
-                .iter()
-                .any(|obj| obj.x == x && obj.y == y && obj.player_id != NPC_PLAYER_ID);
+        let blocked = all_objs.iter().any(|obj| {
+            let class = obj.class.as_str();
+            obj.x == x && obj.y == y && (class == CLASS_UNIT || class == CLASS_STRUCTURE)
+        });
 
-            if !blocked {
-                candidates.push(pos);
-            }
+        if !blocked {
+            candidates.push(pos);
         }
     }
 
-    if candidates.is_empty() {
-        return Encounter::get_encounter_pos(
-            NPC_PLAYER_ID,
-            hero_pos.x,
-            hero_pos.y,
-            all_objs.clone(),
-            map,
-        );
-    }
-
-    let index = rand::thread_rng().gen_range(0..candidates.len());
-    Some(candidates[index])
+    candidates
 }
 
 fn spawn_sanctuary_hunter_wave(
@@ -2105,14 +2114,11 @@ fn spawn_sanctuary_hunter_wave(
         return 0;
     }
 
-    let wave = sanctuary_hunter_wave(exposure_moves, power_score);
+    let spawn_positions = sanctuary_hunter_adjacent_spawn_positions(hero_pos, all_objs, map);
     let mut spawned = 0;
 
-    for npc_type in wave.into_iter().take(slots) {
-        let Some(spawn_pos) = sanctuary_hunter_spawn_pos(player_id, hero_pos, all_objs, map) else {
-            continue;
-        };
-
+    for (slot_index, spawn_pos) in spawn_positions.into_iter().take(slots).enumerate() {
+        let npc_type = sanctuary_hunter_template_for_slot(slot_index, exposure_moves, power_score);
         let (entity, _, _, _) = Encounter::spawn_npc(
             NPC_PLAYER_ID,
             spawn_pos,
@@ -5804,7 +5810,7 @@ fn send_notice(player_id: i32, message: &str, clients: &Res<Clients>) {
 fn add_inventory_salvage(
     player_id: i32,
     obj_id: i32,
-    owner_template: &String,
+    _owner_template: &String,
     action: &str,
     inventory: &mut Inventory,
     ids: &mut ResMut<Ids>,
@@ -5820,20 +5826,45 @@ fn add_inventory_salvage(
     ];
     let (item_name, quantity) = salvage_table[rand::thread_rng().gen_range(0..salvage_table.len())];
 
-    inventory.new(
+    let item = inventory.new(
         ids.new_item_id(),
         item_name.to_string(),
         quantity,
         &templates.item_templates,
     );
+    let item_packet = item.packet();
 
     send_to_client(
         player_id,
-        ResponsePacket::InfoInventory {
+        ResponsePacket::InfoItemsUpdate {
             id: inventory.owner,
-            cap: Obj::get_capacity(owner_template, &templates.obj_templates),
-            tw: inventory.get_total_weight(),
-            items: inventory.get_packet(),
+            items_updated: vec![item_packet],
+            items_removed: Vec::new(),
+        },
+        clients,
+    );
+
+    send_to_client(
+        player_id,
+        ResponsePacket::InfoItem {
+            action: Some("inventory".to_string()),
+            id: item.id,
+            owner: item.owner,
+            name: item.name.clone(),
+            quantity: item.quantity,
+            durability: item.durability,
+            class: item.class.clone(),
+            subclass: item.subclass.clone(),
+            image: item.image.clone(),
+            weight: item.weight,
+            equipped: item.equipped,
+            price: None,
+            attrs: Some(item.attrs.clone()),
+            produces: if item.produces.is_empty() {
+                None
+            } else {
+                Some(item.produces.clone())
+            },
         },
         clients,
     );
@@ -11341,6 +11372,53 @@ fn run_score_kill_tracking_system(
 
         if is_elite_enemy_template(&template.0) {
             run_score.elites_killed += 1;
+        }
+    }
+}
+
+fn reduce_wildness_at_pos(map: &mut Map, pos: Position) -> bool {
+    if !Map::is_valid_pos((pos.x, pos.y)) || map.get_wildness(pos.x, pos.y) <= 0 {
+        return false;
+    }
+
+    map.update_wildness(pos.x, pos.y, -1);
+    true
+}
+
+fn wildness_reduction_on_enemy_death_system(
+    ids: Res<Ids>,
+    mut map: ResMut<Map>,
+    dead_query: Query<
+        (&Position, Option<&LastAttacker>),
+        (
+            With<SubclassNPC>,
+            Added<StateDead>,
+            Without<LegendaryFollower>,
+            Without<LegendaryBoss>,
+        ),
+    >,
+    monolith_query: Query<&Position, With<Monolith>>,
+) {
+    let monolith_positions = monolith_query.iter().copied().collect::<Vec<_>>();
+
+    for (pos, last_attacker) in dead_query.iter() {
+        let Some(last_attacker) = last_attacker else {
+            continue;
+        };
+        let Some(player_id) = ids.get_player(last_attacker.id) else {
+            continue;
+        };
+        if !player::is_player(player_id)
+            || !outside_weak_sanctuary_from_monolith_positions(*pos, &monolith_positions)
+        {
+            continue;
+        }
+
+        if reduce_wildness_at_pos(&mut map, *pos) {
+            info!(
+                "Player {} reduced wildness at {:?} by killing an enemy",
+                player_id, pos
+            );
         }
     }
 }

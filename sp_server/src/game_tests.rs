@@ -111,6 +111,23 @@ fn set_test_tile_type(map: &mut Map, x: i32, y: i32, tile_type: TileType) {
     map.base[tile_index].tile_type = tile_type;
 }
 
+fn test_encounter_map_obj(
+    player_id: i32,
+    pos: Position,
+    class: &str,
+    subclass: &str,
+) -> EncounterMapObj {
+    EncounterMapObj {
+        player_id,
+        x: pos.x,
+        y: pos.y,
+        name: subclass.to_string(),
+        class: class.to_string(),
+        subclass: subclass.to_string(),
+        template: subclass.to_string(),
+    }
+}
+
 #[test]
 fn survey_status_tracks_first_tile_survey_per_player() {
     let pos = Position { x: 3, y: 4 };
@@ -561,26 +578,101 @@ fn sanctuary_exposure_resets_when_protected_or_unlocked() {
 #[test]
 fn sanctuary_hunter_cadence_and_composition_escalate() {
     assert!(should_spawn_sanctuary_hunters(1));
-    assert!(!should_spawn_sanctuary_hunters(2));
+    assert!(should_spawn_sanctuary_hunters(2));
     assert!(should_spawn_sanctuary_hunters(3));
-    assert!(!should_spawn_sanctuary_hunters(4));
+    assert!(should_spawn_sanctuary_hunters(4));
     assert!(should_spawn_sanctuary_hunters(5));
 
-    assert_eq!(sanctuary_hunter_wave(1, 0), vec!["Wolf", "Wolf"]);
-    assert_eq!(sanctuary_hunter_wave(3, 0), vec!["Wolf", "Wolf", "Spider"]);
+    assert_eq!(sanctuary_hunter_template_for_slot(0, 1, 0), "Wolf");
+    assert_eq!(sanctuary_hunter_template_for_slot(5, 1, 0), "Wolf");
+    assert_eq!(sanctuary_hunter_template_for_slot(2, 3, 0), "Spider");
+    assert_eq!(sanctuary_hunter_template_for_slot(0, 5, 0), "Wolf Rider");
     assert_eq!(
-        sanctuary_hunter_wave(5, 0),
-        vec!["Wolf Rider", "Goblin Pillager"]
+        sanctuary_hunter_template_for_slot(1, 5, 0),
+        "Goblin Pillager"
     );
+    assert_eq!(sanctuary_hunter_template_for_slot(0, 1, 150), "Wolf Rider");
     assert_eq!(
-        sanctuary_hunter_wave(1, 150),
-        vec![
-            "Wolf Rider",
-            "Wolf Rider",
-            "Goblin Pillager",
-            "Goblin Pillager"
-        ]
+        sanctuary_hunter_template_for_slot(1, 1, 150),
+        "Goblin Pillager"
     );
+}
+
+#[test]
+fn sanctuary_hunter_positions_fill_adjacent_open_tiles() {
+    let map = flat_land_map();
+    let hero_pos = Position { x: 20, y: 20 };
+    let monolith_pos = Position { x: 1, y: 1 };
+    let all_objs = vec![test_encounter_map_obj(
+        MONOLITH_PLAYER_ID,
+        monolith_pos,
+        CLASS_STRUCTURE,
+        &Subclass::Monolith.to_string(),
+    )];
+
+    let positions = sanctuary_hunter_adjacent_spawn_positions(hero_pos, &all_objs, &map);
+    let expected = Map::ring((hero_pos.x, hero_pos.y), 1)
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .collect::<HashSet<_>>();
+
+    assert_eq!(positions.len(), 6);
+    assert_eq!(positions.into_iter().collect::<HashSet<_>>(), expected);
+}
+
+#[test]
+fn sanctuary_hunter_positions_skip_occupied_adjacent_tiles() {
+    let map = flat_land_map();
+    let hero_pos = Position { x: 20, y: 20 };
+    let adjacent_tiles = Map::ring((hero_pos.x, hero_pos.y), 1)
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .collect::<Vec<_>>();
+    let blocked_player_pos = adjacent_tiles[0];
+    let blocked_npc_pos = adjacent_tiles[1];
+    let all_objs = vec![
+        test_encounter_map_obj(
+            MONOLITH_PLAYER_ID,
+            Position { x: 1, y: 1 },
+            CLASS_STRUCTURE,
+            &Subclass::Monolith.to_string(),
+        ),
+        test_encounter_map_obj(
+            1,
+            blocked_player_pos,
+            CLASS_UNIT,
+            &Subclass::Villager.to_string(),
+        ),
+        test_encounter_map_obj(
+            NPC_PLAYER_ID,
+            blocked_npc_pos,
+            CLASS_UNIT,
+            &Subclass::Npc.to_string(),
+        ),
+    ];
+
+    let positions = sanctuary_hunter_adjacent_spawn_positions(hero_pos, &all_objs, &map);
+    let position_set = positions.into_iter().collect::<HashSet<_>>();
+
+    assert_eq!(position_set.len(), 4);
+    assert!(!position_set.contains(&blocked_player_pos));
+    assert!(!position_set.contains(&blocked_npc_pos));
+}
+
+#[test]
+fn reduce_wildness_at_pos_clamps_at_zero() {
+    let mut map = flat_land_map();
+    map.wildness = vec![0; (WIDTH * HEIGHT) as usize];
+    let pos = Position { x: 10, y: 10 };
+    let tile_index = (pos.y * WIDTH + pos.x) as usize;
+    map.wildness[tile_index] = 2;
+
+    assert!(reduce_wildness_at_pos(&mut map, pos));
+    assert_eq!(map.get_wildness(pos.x, pos.y), 1);
+    assert!(reduce_wildness_at_pos(&mut map, pos));
+    assert_eq!(map.get_wildness(pos.x, pos.y), 0);
+    assert!(!reduce_wildness_at_pos(&mut map, pos));
+    assert_eq!(map.get_wildness(pos.x, pos.y), 0);
 }
 
 #[test]

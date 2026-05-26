@@ -1186,7 +1186,7 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({
       hideItemPanel: false,
       itemData: message,
-      infoItemAction: Global.infoItemAction
+      infoItemAction: message.action || Global.infoItemAction
     });
   }
 

@@ -605,6 +605,8 @@ pub enum ResponsePacket {
     },
     #[serde(rename = "info_item")]
     InfoItem {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
         id: i32,
         owner: i32,
         name: String,

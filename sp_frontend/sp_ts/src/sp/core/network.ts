@@ -131,7 +131,7 @@ export type ResponsePacket =
   | { packet: 'info_inventory'; id: number; cap: number; tw: number; items: Item[] }
   | { packet: 'info_inventory_snapshot'; id: number; cap: number; tw: number; items: Item[] }
   | { packet: 'info_equip'; name: string; template: string; id: number; cap: number; tw: number; items: Item[] }
-  | { packet: 'info_item'; id: number; owner: number; name: string; quantity: number; durability?: number; class: string; subclass: string; image: string; weight: number; equipped: boolean; price?: number; attrs?: Record<string, AttrVal>; produces?: string[] }
+  | { packet: 'info_item'; action?: string; id: number; owner: number; name: string; quantity: number; durability?: number; class: string; subclass: string; image: string; weight: number; equipped: boolean; price?: number; attrs?: Record<string, AttrVal>; produces?: string[] }
   | { packet: 'info_item_transfer'; source_id: number; sourceitems: Inventory; target_id: number; targetitems: Inventory; reqitems: ResReq[] }
   | { packet: 'info_items_update'; id: number; items_updated: Item[]; items_removed: number[] }
   | { packet: 'info_state_update'; id: number; state: string }

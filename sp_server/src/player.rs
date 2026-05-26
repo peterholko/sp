@@ -20,10 +20,11 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, SurveyHistory,
-    GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
+    is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, GameTick,
+    InitialEncounterState, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
     MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives,
-    PlayerRunScore, PlayerStat, PlayerStats, RunScoreState, SpawnPositions, WeakSanctuary,
+    PlayerRunScore, PlayerStat, PlayerStats, RunScoreState, SpawnPositions, SurveyHistory,
+    WeakSanctuary,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -4805,6 +4806,7 @@ fn info_item_system(
                         );
 
                         let info_item_packet: ResponsePacket = ResponsePacket::InfoItem {
+                            action: Some(action.clone()),
                             id: item.id,
                             owner: item.owner,
                             name: item.name,
@@ -4833,6 +4835,7 @@ fn info_item_system(
                         );
 
                         let info_item_packet: ResponsePacket = ResponsePacket::InfoItem {
+                            action: Some(action.clone()),
                             id: item.id,
                             owner: item.owner,
                             name: item.name,
@@ -4857,6 +4860,7 @@ fn info_item_system(
                             Item::get_template(item.name.clone(), &templates.item_templates);
 
                         let info_item_packet: ResponsePacket = ResponsePacket::InfoItem {
+                            action: Some(action.clone()),
                             id: item.id,
                             owner: item.owner,
                             name: item.name,
@@ -4909,6 +4913,7 @@ fn info_item_system(
                 }
 
                 let info_item_packet: ResponsePacket = ResponsePacket::InfoItem {
+                    action: None,
                     id: -1,
                     owner: -1,
                     name: item_template.name.clone(),
@@ -7131,11 +7136,7 @@ fn survey_system(
                     new_state: State::Surveying,
                 });
 
-                map_events.new(
-                    hero.id.0,
-                    game_tick.0 + 20,
-                    VisibleEvent::SurveyEvent,
-                );
+                map_events.new(hero.id.0, game_tick.0 + 20, VisibleEvent::SurveyEvent);
 
                 let packet = ResponsePacket::Survey { survey_time: 20 };
                 send_to_client(*player_id, packet, &clients);
@@ -7202,11 +7203,7 @@ fn prospect_system(
                     new_state: State::Prospecting,
                 });
 
-                map_events.new(
-                    hero.id.0,
-                    game_tick.0 + 20,
-                    VisibleEvent::ProspectEvent,
-                );
+                map_events.new(hero.id.0, game_tick.0 + 20, VisibleEvent::ProspectEvent);
 
                 let packet = ResponsePacket::Prospect { prospect_time: 20 };
                 send_to_client(*player_id, packet, &clients);
