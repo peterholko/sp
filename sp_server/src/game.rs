@@ -864,6 +864,7 @@ fn wall_grants_fortification(state: &State) -> bool {
     Structure::is_built(*state)
 }
 
+// Builders can still be in Building on the tick their wall completes.
 fn occupant_receives_wall_fortification(state: &State) -> bool {
     state.is_active() || matches!(state, State::Building)
 }
