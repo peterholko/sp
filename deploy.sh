@@ -44,6 +44,7 @@ if echo "$CHANGED" | grep -Eq '^(sp_server/)'; then
       exit 1
     fi
     pkill -x siege_perilous 2>/dev/null || true
+    exec 9>&-
     CARGO_MANIFEST_DIR=/home/peter/sp/sp_server nohup ./target/release/siege_perilous > /tmp/sp_server.manual.log 2>&1 < /dev/null &
   fi
 fi
