@@ -8,6 +8,7 @@ import { Network } from "../../core/network";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
+import { TRIGGER_INVENTORY } from "../../core/config";
 
 
 export default class SingleInventoryPanel extends React.Component<any, any> {
@@ -33,7 +34,7 @@ export default class SingleInventoryPanel extends React.Component<any, any> {
     });
 
     Global.infoItemAction = 'inventory';
-    Global.network.sendInfoItem(this.props.inventoryData.id,eventData.itemId, "None");
+    Global.network.sendInfoItem(this.props.inventoryData.id,eventData.itemId, TRIGGER_INVENTORY);
   }
 
   handleEquipClick() {
