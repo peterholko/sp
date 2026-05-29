@@ -1778,104 +1778,10 @@ export class ObjectScene extends Phaser.Scene {
       return;
     }
 
-    var source = Util.hex_to_pixel(objectState.x, objectState.y);
-    var graphics = this.add.graphics()
-    var container = this.add.container(source.x - 24, source.y - 20);
-
-    if (message.speech.length < 40) {
-      var speechText = this.add.text(60, 20, message.speech, { fontFamily: 'Alegreya', fontSize: 14, color: '#FFFFFF' });
-      speechText.setWordWrapWidth(120);
-      speechText.setOrigin(0.5, 0.5);
-      speechText.setAlign('center');
-
-      container.add(graphics);
-      container.add(speechText);
-      container.setDepth(20);
-
-      graphics.fillStyle(0x000000, 0.50);
-      graphics.fillRoundedRect(0,
-        0,
-        120,
-        40,
-        5);
-
-      if (message.speech.length < 5) {
-        graphics.setVisible(false);
-      }
-
-      var textTween = this.tweens.add({
-        targets: container,
-        alpha: 0,
-        ease: 'Power1',
-        delay: 5000,
-        duration: 5000,
-        onComplete: this.onSpeechComplete
-      });
-
-      textTween.play();
-    } else if (message.speech.length < 60) {
-      var speechText = this.add.text(60, 30, message.speech, { fontFamily: 'Alegreya', fontSize: 14, color: '#FFFFFF' });
-      speechText.setWordWrapWidth(120);
-      speechText.setOrigin(0.5, 0.5);
-      speechText.setAlign('center');
-
-      container.add(graphics);
-      container.add(speechText);
-      container.setDepth(20);
-
-      graphics.fillStyle(0x000000, 0.50);
-      graphics.fillRoundedRect(0,
-        0,
-        120,
-        60,
-        5);
-
-      if (message.speech.length < 5) {
-        graphics.setVisible(false);
-      }
-
-      var textTween = this.tweens.add({
-        targets: container,
-        alpha: 0,
-        ease: 'Power1',
-        delay: 5000,
-        duration: 5000,
-        onComplete: this.onSpeechComplete
-      });
-
-      textTween.play();
-    } else {
-      var speechText = this.add.text(60, 40, message.speech, { fontFamily: 'Alegreya', fontSize: 14, color: '#FFFFFF' });
-      speechText.setWordWrapWidth(120);
-      speechText.setOrigin(0.5, 0.5);
-      speechText.setAlign('center');
-
-      container.add(graphics);
-      container.add(speechText);
-      container.setDepth(20);
-
-      graphics.fillStyle(0x000000, 0.50);
-      graphics.fillRoundedRect(0,
-        0,
-        120,
-        75,
-        5);
-
-      if (message.speech.length < 5) {
-        graphics.setVisible(false);
-      }
-
-      var textTween = this.tweens.add({
-        targets: container,
-        alpha: 0,
-        ease: 'Power1',
-        delay: 3000,
-        duration: 3000,
-        onComplete: this.onSpeechComplete
-      });
-
-      textTween.play();
-    }
+    // Prose speech bubbles are rendered by the React HTML overlay
+    // (SpeechBubbleLayer), which listens to the same NetworkEvent.SPEECH. Drawing
+    // them in HTML rather than in the canvas keeps the text a constant, readable
+    // size regardless of the camera zoom.
   }
 
   onSpeechComplete(tween, targets) {

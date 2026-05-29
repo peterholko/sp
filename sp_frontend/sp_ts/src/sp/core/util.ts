@@ -14,6 +14,20 @@ export class Util {
       return {x: x, y: y};
   }
 
+  // Convert a Phaser world point to a viewport (page) pixel position. Robust to
+  // camera scroll/zoom and to any CSS sizing of the canvas, so HTML overlays can
+  // be anchored over world objects without being scaled by the camera zoom.
+  static worldToPage(scene : Phaser.Scene, worldX : number, worldY : number) {
+    const cam = scene.cameras.main;
+    const sx = (worldX - cam.worldView.x) * cam.zoom;   // canvas-local px
+    const sy = (worldY - cam.worldView.y) * cam.zoom;
+    const rect = scene.game.canvas.getBoundingClientRect();
+    return {
+      x: rect.left + sx * (rect.width / cam.width),     // CSS-scale safe
+      y: rect.top + sy * (rect.height / cam.height),
+    };
+  }
+
   static distance(srcX : integer, srcY : integer, dstX : integer, dstY : integer) {
     var srcCube = Util.odd_q_to_cube(srcX, srcY);
     var dstCube = Util.odd_q_to_cube(dstX, dstY);

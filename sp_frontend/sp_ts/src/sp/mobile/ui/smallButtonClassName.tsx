@@ -5,6 +5,7 @@ interface SmallButtonProps {
   handler: any,
   imageName: string,
   className: any,
+  title?: string,
 }
 
 export default class SmallButtonClassName extends React.Component<SmallButtonProps, any> {
@@ -40,8 +41,19 @@ export default class SmallButtonClassName extends React.Component<SmallButtonPro
 
     return (
       <div onClick={this.handleClick}>
-        <img src={'/static/art/ui/' + this.props.imageName + '.png'} className={this.props.className} />
-        {this.state.showClicked && <img src={'/static/art/ui/' + this.props.imageName + '_click.png'} className={this.props.className} /> }
+        <img
+          src={'/static/art/ui/' + this.props.imageName + '.png'}
+          className={this.props.className}
+          title={this.props.title}
+          alt={this.props.title}
+          aria-label={this.props.title} />
+        {this.state.showClicked &&
+          <img
+            src={'/static/art/ui/' + this.props.imageName + '_click.png'}
+            className={this.props.className}
+            title={this.props.title}
+            alt={this.props.title}
+            aria-label={this.props.title} /> }
       </div>
     );
   }

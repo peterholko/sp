@@ -66,12 +66,6 @@
   position: fixed;
 }
 
-.heroprospectbutton {
-  transform: translate(110px, 210px);
-  z-index: 1;
-  position: fixed;
-}
-
 .combobutton {
   bottom: 10px;
   left: 50%;
@@ -171,6 +165,12 @@
 
 .tilepanelresourcebutton {
   transform: translate(112px, 10px);
+  z-index: 3;
+  position: fixed;
+}
+
+.tilepanelprospectbutton {
+  transform: translate(58px, 10px);
   z-index: 3;
   position: fixed;
 }

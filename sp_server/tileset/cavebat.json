@@ -16,6 +16,11 @@
             "repeat": 0,
             "speed": 350
         },
+        "die": {
+            "frames": [0, 8, 9, 7],
+            "repeat": 0,
+            "speed": 650
+        },
         "dead": [7]
     }
 }

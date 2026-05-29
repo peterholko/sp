@@ -13,7 +13,6 @@ import SingleInventoryPanel from './ui/singleInventoryPanel';
 import ItemPanel from './ui/itemPanel';
 
 import explorebutton from "ui/explorebutton.png";
-import resourcesbutton from "ui/resourcesbutton.png";
 
 import movecompass from "ui/movecompass.png";
 import movecompass_click from "ui/movecompass_click.png"
@@ -25,6 +24,7 @@ import dodgebutton from "ui/dodgebutton.png";
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
+import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
   TRIGGER_INVENTORY,
   QUICK,
@@ -311,8 +311,7 @@ export default class UI extends React.Component<any, UIState> {
 
     this.handleHeroAttrsClick = this.handleHeroAttrsClick.bind(this);
     this.handleHeroInventoryClick = this.handleHeroInventoryClick.bind(this);
-    this.handleHeroExploreClick = this.handleHeroExploreClick.bind(this);
-    this.handleHeroProspectClick = this.handleHeroProspectClick.bind(this);
+    this.handleHeroSurveyClick = this.handleHeroSurveyClick.bind(this);
     this.handleHeroBuildClick = this.handleHeroBuildClick.bind(this);
     this.handleHeroGatherClick = this.handleHeroGatherClick.bind(this);
     this.handleHeroSleepClick = this.handleHeroSleepClick.bind(this);
@@ -724,12 +723,8 @@ export default class UI extends React.Component<any, UIState> {
     Global.network.sendInfoInventory(Global.heroId);
   }
 
-  handleHeroExploreClick(event: React.MouseEvent) {
+  handleHeroSurveyClick(event: React.MouseEvent) {
     Global.network.sendSurvey(Global.heroId);
-  }
-
-  handleHeroProspectClick(event: React.MouseEvent) {
-    Global.network.sendProspect();
   }
 
   handleHeroBuildClick(event: React.MouseEvent) {
@@ -1751,8 +1746,7 @@ export default class UI extends React.Component<any, UIState> {
         <div className={styles.mobileActionGrid}>
           {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
           {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
-          {mobileCooldownButton('surveybutton', explorebutton, 'Survey', this.handleHeroExploreClick, NetworkEvent.SURVEY, 'survey_time')}
-          {mobileCooldownButton('prospectbutton', resourcesbutton, 'Prospect', this.handleHeroProspectClick, NetworkEvent.PROSPECT, 'prospect_time')}
+          {mobileCooldownButton('surveybutton', explorebutton, 'Survey', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
           {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick)}
           {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
           {mobileActionButton('resourcesbutton', 'Nearby Resources', this.handleHeroSleepClick)}
@@ -1963,6 +1957,8 @@ export default class UI extends React.Component<any, UIState> {
           <ConfirmPanel msg={this.state.confirmMsg} />}
 
         <HeroDeathOverlay data={this.state.heroDeathData} />
+
+        <SpeechBubbleLayer />
 
         {!this.state.hideTrueDeathPanel &&
           <TrueDeathPanel

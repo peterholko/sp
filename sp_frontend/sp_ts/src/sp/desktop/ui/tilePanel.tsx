@@ -6,6 +6,7 @@ import ResourceItem from "./resourceItem";
 import styles from "./../ui.module.css";
 import SmallButtonClassName from "./smallButtonClassName";
 import { GameEvent } from "../../core/gameEvent";
+import { NetworkEvent } from "../../core/networkEvent";
 interface TilePanelProps {
   tileData,
 }
@@ -16,12 +17,26 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
 
     this.state = {
     };
-    
+
+    this.handleResourceButtonClick = this.handleResourceButtonClick.bind(this);
+    this.handleProspectButtonClick = this.handleProspectButtonClick.bind(this);
   }
 
   handleResourceButtonClick(event: React.MouseEvent) {
     console.log('handleResourceButtonClick');
     Global.gameEmitter.emit(GameEvent.RESOURCE_BUTTON_CLICK, {});
+  }
+
+  handleProspectButtonClick(event: React.MouseEvent) {
+    const hero = Global.objectStates[Global.heroId];
+    if (hero && (hero.x != this.props.tileData.x || hero.y != this.props.tileData.y)) {
+      Global.gameEmitter.emit(NetworkEvent.NOTICE, {
+        noticemsg: "Move onto this tile to prospect it."
+      });
+      return;
+    }
+
+    Global.network.sendProspect();
   }
 
   render() {
@@ -145,9 +160,14 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
           </tr>
           <tr>
             <td>
-            <SmallButtonClassName handler={this.handleResourceButtonClick}
-          imageName="resourcesbutton"
-          className={styles.tilepanelresourcebutton} />
+              <SmallButtonClassName handler={this.handleProspectButtonClick}
+                imageName="explorebutton"
+                className={styles.tilepanelprospectbutton}
+                title="Prospect" />
+              <SmallButtonClassName handler={this.handleResourceButtonClick}
+                imageName="resourcesbutton"
+                className={styles.tilepanelresourcebutton}
+                title="Discovered Resources" />
             </td>
           </tr>
           </tbody>

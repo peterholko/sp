@@ -2,8 +2,10 @@
 import * as React from "react";
 import { Global } from "../../core/global";
 import MobilePanelScreen from "./mobilePanelScreen";
+import explorebutton from "ui_comp/explorebutton.png";
 import resourcesbutton from "ui_comp/resourcesbutton.png";
 import { GameEvent } from "../../core/gameEvent";
+import { NetworkEvent } from "../../core/networkEvent";
 import {
   MobilePanelActions,
   MobileSplitPanelLayout,
@@ -21,12 +23,26 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
 
     this.state = {
     };
-    
+
+    this.handleResourceButtonClick = this.handleResourceButtonClick.bind(this);
+    this.handleProspectButtonClick = this.handleProspectButtonClick.bind(this);
   }
 
   handleResourceButtonClick(event: React.MouseEvent) {
     console.log('handleResourceButtonClick');
     Global.gameEmitter.emit(GameEvent.RESOURCE_BUTTON_CLICK, {});
+  }
+
+  handleProspectButtonClick(event: React.MouseEvent) {
+    const hero = Global.objectStates[Global.heroId];
+    if (hero && (hero.x != this.props.tileData.x || hero.y != this.props.tileData.y)) {
+      Global.gameEmitter.emit(NetworkEvent.NOTICE, {
+        noticemsg: "Move onto this tile to prospect it."
+      });
+      return;
+    }
+
+    Global.network.sendProspect();
   }
 
   render() {
@@ -71,7 +87,8 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
                 { label: 'Prospected Resources', value: `${discoveredResources} / ${numResources}` },
               ]} />
               <MobilePanelActions actions={[
-                { key: 'resources', label: 'Resources', icon: resourcesbutton, onClick: this.handleResourceButtonClick },
+                { key: 'prospect', label: 'Prospect', icon: explorebutton, onClick: this.handleProspectButtonClick },
+                { key: 'resources', label: 'Discovered Resources', icon: resourcesbutton, onClick: this.handleResourceButtonClick },
               ]} align="start" />
             </>
           } />

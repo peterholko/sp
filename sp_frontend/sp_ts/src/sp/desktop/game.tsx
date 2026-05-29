@@ -53,7 +53,7 @@ export default class Game extends React.Component {
       }
     };
 
-    new Phaser.Game(config);
+    Global.game = new Phaser.Game(config);
   }
 
   shouldComponentUpdate() {
