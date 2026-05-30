@@ -1,0 +1,141 @@
+*** Primary Stats ***:
+HP,
+Stamina,
+Hunger,
+Thirst,
+Focus, (or Tiredness)
+Sanity ???
+
+
+*** Attributes ***:
+Strength: Physical Damage, Carry Weight
+Toughness: HP, Brace 
+Endurance: Stamina, Thirst, Hunger
+Dexterity: Dodge, Hiding 
+Intellect: Magic, Crafting
+Creativity: Crafting only?
+Focus: Parry, Critical Strike
+Spirit: Magic / Prayers
+Creativity
+
+Willpower?
+Perception?
+Agility?
+
+
+*** Skills ***
+Mining
+-> Weaponsmithing, Armorsmithing
+Woodcutting
+-> Woodmaking 
+Stonecutting
+-> Masonry
+Herb-gathering
+-> Alchemy
+
+Woodmaking: Bows, Arrows, Siege Weapons
+Masonry: Stone Blocks, Siege Ammo
+Alchemy: Potions 
+
+Skill Table:
+Obj,
+Skill Name,
+Experience,
+Level
+
+Skill Def Table
+Skill Attr Table
+
+
+Gathering:
+Mining - Strength/Toughness
+Stonecutting - Endurance/Strength
+Woodcutting - Toughness/Endurance
+Farming - Endurance/Focus
+Hunting - Dexterity/Focus
+Herb-gathering - Intelligence/Focus
+
+Crafting:
+Weaponsmithing - Intelligence / Strength
+Armorsmithing - Intelligence / Toughness
+Woodmaking - Intelligence / Dexterity
+Leathermaking - Intelligence / Dexterity
+Tailoring - Intelligence / Dexterity
+Masonry - Endurance / Focus
+Alchemy - Creativity / Intelligence
+
+Combat:
+Swords
+Axes
+Hammers
+Spears
+Shield
+Dual-Wield
+Bows
+Crossbows
+
+Plate mail
+Chain mail
+Leather armor
+
+Quick
+Dodge
+Parry
+
+*** OR ***
+
+One-handed + shield
+Two-handed 
+Dual Wield
+Archery
+
+Heavy Armor
+Medium Armor
+Light Armor 
+
+Fire Magic
+Ice Magic
+Earth Magic
+Water Magic
+
+Reagent Conservation
+
+
+#####################
+
+Skills Revision Oct 2019
+
+Ex: 
+Dabbling 0 100
+Novice 100 500
+Adequate 500 2000
+
+
+100xp to Skill 1
+250xp to Skill 2
+500xp to Skill 3
+etc...
+X xp to Skill 100
+
+
+Leveling Effects:
+
+Mining
+------
+* Speed Increase
+* Chance to discover gems
+* Decrease chance to break pickaxe
+
+Sword
+-----
+* Increased Damage
+* Reduced stamina 
+* Increased 
+
+
+
+
+
+
+
+

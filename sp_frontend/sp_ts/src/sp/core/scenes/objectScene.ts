@@ -38,10 +38,12 @@ interface ActionProgressBar {
 
 const ACTION_PROGRESS_WIDTH = 34;
 const ACTION_PROGRESS_HEIGHT = 5;
-const ACTION_PROGRESS_Y_OFFSET = -7;
+const ACTION_PROGRESS_Y_OFFSET = -20;
 const ACTION_PROGRESS_DEPTH = 24;
+const ACTION_PROGRESS_FILL_COLOR = 0xffc857;
 const ACTION_PROGRESS_DEFAULT_DURATION_MS = 3000;
 const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
+  building: 2500,
   gathering: 15000,
   exploring: 2000,
   surveying: 2000,
@@ -51,6 +53,7 @@ const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
   drinking: 3000
 };
 const ACTION_PROGRESS_STATES = new Set(Object.keys(ACTION_PROGRESS_DURATIONS_MS));
+const ACTION_PROGRESS_LOOPING_STATES = new Set(['building']);
 
 export class ObjectScene extends Phaser.Scene {
 
@@ -543,8 +546,6 @@ export class ObjectScene extends Phaser.Scene {
 
   private drawActionProgressBar(progressBar: ActionProgressBar, renderObject: RenderObject, time: number): void {
     var elapsed = Math.max(0, time - progressBar.startTime);
-    var progress = Math.min(1, elapsed / progressBar.durationMs);
-    var fillWidth = Math.max(0, (ACTION_PROGRESS_WIDTH - 2) * progress);
     var left = renderObject.x + 36 - ACTION_PROGRESS_WIDTH / 2;
     var top = renderObject.y + ACTION_PROGRESS_Y_OFFSET - ACTION_PROGRESS_HEIGHT / 2;
 
@@ -554,8 +555,22 @@ export class ObjectScene extends Phaser.Scene {
     progressBar.graphics.lineStyle(1, 0x111111, 0.9);
     progressBar.graphics.strokeRect(left, top, ACTION_PROGRESS_WIDTH, ACTION_PROGRESS_HEIGHT);
 
+    if (ACTION_PROGRESS_LOOPING_STATES.has(progressBar.state)) {
+      var innerWidth = ACTION_PROGRESS_WIDTH - 2;
+      var segmentWidth = Math.max(9, innerWidth * 0.42);
+      var loopProgress = (elapsed % progressBar.durationMs) / progressBar.durationMs;
+      var segmentX = left + 1 + (innerWidth - segmentWidth) * loopProgress;
+
+      progressBar.graphics.fillStyle(ACTION_PROGRESS_FILL_COLOR, 1);
+      progressBar.graphics.fillRect(segmentX, top + 1, segmentWidth, ACTION_PROGRESS_HEIGHT - 2);
+      return;
+    }
+
+    var progress = Math.min(1, elapsed / progressBar.durationMs);
+    var fillWidth = Math.max(0, (ACTION_PROGRESS_WIDTH - 2) * progress);
+
     if (fillWidth > 0) {
-      progressBar.graphics.fillStyle(0x7fd36b, 1);
+      progressBar.graphics.fillStyle(ACTION_PROGRESS_FILL_COLOR, 1);
       progressBar.graphics.fillRect(left + 1, top + 1, fillWidth, ACTION_PROGRESS_HEIGHT - 2);
     }
   }

@@ -1,7 +1,10 @@
 import * as React from "react";
 import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
-import { isWideScreen } from "../../core/config";
+import { isDesktop, isWideScreen } from "../../core/config";
+
+const COMPACT_DESKTOP_MAX_WIDTH = 1280;
+const DESKTOP_THREAD_BOTTOM = '145px';
 
 interface ObjectiveProgress {
   id: string;
@@ -46,6 +49,8 @@ interface ObjectivesState {
   objectiveState: any;
   threatState: any;
   discoveryEvent: any;
+  viewportWidth: number;
+  compactExpanded: boolean;
 }
 
 const severityRank = {
@@ -68,7 +73,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       objectiveState: null,
       threatState: null,
       discoveryEvent: null,
+      viewportWidth: typeof window === 'undefined' ? 0 : window.innerWidth,
+      compactExpanded: false,
     };
+
+    this.handleResize = this.handleResize.bind(this);
+    this.toggleCompactExpanded = this.toggleCompactExpanded.bind(this);
   }
 
   componentDidMount() {
@@ -76,6 +86,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.on(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('resize', this.handleResize);
+    }
   }
 
   componentWillUnmount() {
@@ -83,6 +97,22 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.off(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('resize', this.handleResize);
+    }
+  }
+
+  handleResize() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    this.setState({ viewportWidth: window.innerWidth });
+  }
+
+  toggleCompactExpanded() {
+    this.setState((state) => ({ compactExpanded: !state.compactExpanded }));
   }
 
   handleObjectives(message) {
@@ -222,33 +252,45 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     }
 
     const wide = isWideScreen();
+    const compactDesktop = isDesktop() && !wide && this.state.viewportWidth <= COMPACT_DESKTOP_MAX_WIDTH;
+    const compactExpanded = compactDesktop && this.state.compactExpanded;
+    const panelChrome: React.CSSProperties = {
+      backgroundColor: 'rgba(8, 10, 12, 0.82)',
+      border: '1px solid rgba(201, 170, 113, 0.38)',
+      borderRadius: '4px',
+      zIndex: 50,
+      boxSizing: 'border-box',
+    };
     const containerStyle: React.CSSProperties = wide ? {
+      ...panelChrome,
       position: 'fixed',
       top: 'calc(50% - 500px)',
       left: 'calc(50% + 612px)',
       width: '290px',
       maxHeight: '1000px',
       overflowY: 'auto',
-      backgroundColor: 'rgba(8, 10, 12, 0.82)',
-      border: '1px solid rgba(201, 170, 113, 0.38)',
-      borderRadius: '4px',
       padding: '9px 10px',
-      zIndex: 50,
       pointerEvents: 'auto',
-      boxSizing: 'border-box',
-    } : {
+    } : compactDesktop ? {
+      ...panelChrome,
       position: 'fixed',
-      bottom: '145px',
+      bottom: DESKTOP_THREAD_BOTTOM,
+      right: '12px',
+      width: compactExpanded ? '280px' : '260px',
+      maxWidth: 'calc(100vw - 24px)',
+      maxHeight: compactExpanded ? 'calc(100vh - 169px)' : '42px',
+      overflowY: compactExpanded ? 'auto' : 'hidden',
+      padding: compactExpanded ? '8px 10px' : '7px 9px',
+      pointerEvents: 'auto',
+    } : {
+      ...panelChrome,
+      position: 'fixed',
+      bottom: DESKTOP_THREAD_BOTTOM,
       right: '12px',
       width: '290px',
       maxWidth: 'calc(100vw - 24px)',
-      backgroundColor: 'rgba(8, 10, 12, 0.82)',
-      border: '1px solid rgba(201, 170, 113, 0.38)',
-      borderRadius: '4px',
       padding: '9px 10px',
-      zIndex: 50,
       pointerEvents: 'none',
-      boxSizing: 'border-box',
     };
 
     const titleStyle: React.CSSProperties = {
@@ -301,6 +343,50 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       paddingTop: '7px',
     };
 
+    const compactHeaderStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      width: '100%',
+      border: 0,
+      background: 'transparent',
+      color: 'inherit',
+      padding: 0,
+      margin: 0,
+      marginBottom: compactExpanded ? '7px' : 0,
+      textAlign: 'left',
+      cursor: 'pointer',
+      fontFamily: 'Verdana',
+      boxSizing: 'border-box',
+    };
+
+    const compactTitleStyle: React.CSSProperties = {
+      ...titleStyle,
+      marginBottom: 0,
+      flex: '0 0 auto',
+    };
+
+    const compactObjectiveStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      lineHeight: 1.2,
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      flex: '1 1 auto',
+    };
+
+    const compactToggleStyle: React.CSSProperties = {
+      color: '#c9aa71',
+      fontFamily: 'Verdana',
+      fontSize: '13px',
+      fontWeight: 'bold',
+      lineHeight: 1,
+      flex: '0 0 auto',
+    };
+
     const objectiveRowStyle = (state: string): React.CSSProperties => ({
       display: 'flex',
       justifyContent: 'space-between',
@@ -321,9 +407,23 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     return (
       <div style={containerStyle}>
-        <div style={titleStyle}>Survival Thread</div>
+        {compactDesktop ?
+          <button
+            type="button"
+            style={compactHeaderStyle}
+            onClick={this.toggleCompactExpanded}
+            aria-expanded={compactExpanded}
+            aria-label={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
+          >
+            <span style={compactTitleStyle}>Survival Thread</span>
+            {!compactExpanded && activeObjective &&
+              <span style={compactObjectiveStyle}>{activeObjective.title}</span>}
+            <span style={compactToggleStyle}>{compactExpanded ? '-' : '+'}</span>
+          </button>
+          :
+          <div style={titleStyle}>Survival Thread</div>}
 
-        {activeObjective &&
+        {(!compactDesktop || compactExpanded) && activeObjective &&
           <div>
             <div style={categoryStyle}>{activeObjective.category}</div>
             <div style={activeTitleStyle}>{activeObjective.title}</div>
@@ -333,16 +433,16 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             {this.renderProgress(activeObjective, labelStyle)}
           </div>}
 
-        <div style={sectionStyle}>
+        {(!compactDesktop || compactExpanded) && <div style={sectionStyle}>
           {objectives.map(obj => (
             <div key={obj.id} style={objectiveRowStyle(obj.state)}>
               <span>{obj.title}</span>
               <span>{obj.state == 'complete' ? 'Done' : obj.state == 'active' ? 'Next' : 'Later'}</span>
             </div>
           ))}
-        </div>
+        </div>}
 
-        {threatState &&
+        {(!compactDesktop || compactExpanded) && threatState &&
           <div style={sectionStyle}>
             <div style={categoryStyle}>Threat Pressure: {threatState.pressure_level}</div>
             <div style={bodyStyle}>Day {threatState.day}, {threatState.phase}. {threatState.next_night_warning}</div>
@@ -373,7 +473,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             ))}
           </div>}
 
-        {discoveryEvent &&
+        {(!compactDesktop || compactExpanded) && discoveryEvent &&
           <div style={sectionStyle}>
             <div style={categoryStyle}>Discovery: {discoveryEvent.title}</div>
             <div style={bodyStyle}>{discoveryEvent.result}</div>

@@ -1,155 +1,35 @@
-Siege Perilous
-==============
+# Siege Perilous Frontend
 
-A multiplayer game with focus on small settlement building and survival.
+Browser client for Siege Perilous, built with React, TypeScript, and Phaser.
 
-Erlang Backend server leveraging Cowboy for web socket support
-HTML5 client using the EaselJS library
+## Current Layout
 
-Start
------
+- `sp_ts/` is the TypeScript project root.
+- `sp_ts/src/sp/core/` contains shared game, network, state, and Phaser scene code.
+- `sp_ts/src/sp/desktop/` and `sp_ts/src/sp/mobile/` contain the two UI shells.
+- `priv/static/art/` and `priv/static/tileset.json` are source static assets used by the frontend build and runtime asset loading.
+- `docs/design-notes/` keeps old design notes that are useful as product history but are not active source.
 
-Royal declaration to explore/exploit/expand to newly discovered land.
+## Serving Model
 
-Ship wrecked onto coast.
+The active site is served by the Rust Axum app in `../sp_axum`, which serves files from `../sp_axum/root`. The Rust game server in `../sp_server` owns the game WebSocket protocol.
 
-All ships crew dies in wreck, except for 1 settler.
+Frontend builds produce separate desktop and mobile bundles:
 
-Cursed land causes the dead crew to rise from the dead as zombies.
+- `sp_ts/dist/sp2.desktop.js`
+- `sp_ts/dist/sp2.mobile.js`
 
-Game starts surrounded by zombies with 1 villager.
+`sp_ts/copy.sh` copies those bundles into `../sp_axum/root/` and copies the small set of static assets needed by the deploy flow.
 
-Villager will notice glowing Monolith nearby.  Player will have to fight through zombies.  If path is open, villager move right away to the Monolith.
+## Development
 
-Zombies will stop attacking anyone adjacent to the Monolith.
+Run commands from `sp_ts/`:
 
-Zombies are spawning from nearby crypt.  Crypt will have to be destroyed before area becomes safer.
+```bash
+npm ci
+./check-imports.sh
+npm run dev
+./copy.sh
+```
 
-Wild Animals are not affected by the Monolith.
-
-Resources will be available on ship wreck to start a settlement.
-
-If starter villager dies:
-    -Player will have to travel to the nearby port to recruit a new villager. 
-    -Player can build a market and villagers will travel to the market to be hired.
-
-Royal tax collector: 
-    -Arrives once a player has a constructed a few buildings
-    -Demands Property Tax paid in Gold
-   
-    If the player has a storage building:
-        -Travels to the players storage building, retrieves X gold from it
-        
-        If the player does not have enough gold:
-        -TBD
-
-    Else travels to player & demands payment:
-                
-        if player does not have enough gold:
-        -TBD    
-            
-Early Game:
------------
-1.  Player builds Stockades near the Monolith.
-
-2.  Villager suggests building tent shelter (provides improved rest and protection from the element).
-
-3.  Food will have to be secured, either farming, hunting, foraging.  
-
-4.  Fresh water source?  (Not implemented yet)
-
-5.  Villager suggests prospecting for resources, wood, ore and stone? 
-
-
-6. Gold acquired by looting zombies, skeletons, and treasures.
-
-Midgame
--------
-
-Nearby lich king becomes interested  player once they reach a certain power level as a potential undead minion.
-
-Nearby Goblins become interested in the player once they reach a certain wealth threshold.  Plan to raid the player's holdings.
-
-
-
-
-Maintenance/Sinks:
-
-Tax on buildings - collected by Tax collector
-Villager wages 
-Durability on weapons/armor
-Food requirement
-Repair maintenance of buildings
-
-Ideas: 
-
-Survey/Exploring grants permanent unique tile bonuses, (Plentiful Valley +25% Food production, Porous Rock +25% Mining production, 
-
-
-Major Issues:
-
-1. Villager UI for:
-    * Assigning to Structure
-    * XXX Attacking Target (Idea "Attack My Target" button) 
-    * Other orders follow, craft, hide etc...
-
-
-Player start location diversity:
-
-1. Seed unique resources 
-
-
-
-
-Sanctuary
-
-Hides player's units from Undead
-Provided by Monolith (Monolith: 1 distance hex neighbours, Greater Monolith: 2 distance hex neighbours)
-Requires Mana for upkeep, when mana is exhausted, it becomes disabled
-Cannot be destroyed
-Fortified
-
-Hides player's units from Animals/Monsters
-Provided by Walls
-Requires Wood for upkeep
-Can be destroyed
-Melee Attack
-
-Attacks adjacent units
-50% penalty when Fortified
-Range Attack
-
-Attacks adjacent units
-No penalty when Fortified
-Warrior Class
-
-Melee weapon focus
-Brute force
-Ranger Class
-
-Range weapon focus
-Can attack from hidden position
-Mage Class
-
-Summon creatures/elements
-Range/Magic focus
-Hero Death Mechanics
-
-Random Minor/Major Effect acquired on revival
-Drop of some/all items
-Villager Death Mechanics
-
-Perma-death
-Wish List
-
-Enemies have other senses other than vision such as Smell for Animals/Zombies, Soul Hunting Ghosts/Shadows/Horrors
-
-Weather/Seasons, i.e. Gets cold and snow forms over a period. Fuel needed to stay warm. Winter Clothing required to survive.
-
-
-
-
-
-
-
-    
+`npm run dev` creates webpack development bundles. `./check-imports.sh` enforces the desktop/mobile/core import boundaries.
