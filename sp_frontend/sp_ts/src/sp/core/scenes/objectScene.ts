@@ -29,6 +29,29 @@ interface PendingImageTask {
   renderKind?: string;
 }
 
+interface ActionProgressBar {
+  graphics: Phaser.GameObjects.Graphics;
+  state: string;
+  startTime: number;
+  durationMs: number;
+}
+
+const ACTION_PROGRESS_WIDTH = 34;
+const ACTION_PROGRESS_HEIGHT = 5;
+const ACTION_PROGRESS_Y_OFFSET = -7;
+const ACTION_PROGRESS_DEPTH = 24;
+const ACTION_PROGRESS_DEFAULT_DURATION_MS = 3000;
+const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
+  gathering: 15000,
+  exploring: 2000,
+  surveying: 2000,
+  prospecting: 2000,
+  investigating: 2000,
+  eating: 3000,
+  drinking: 3000
+};
+const ACTION_PROGRESS_STATES = new Set(Object.keys(ACTION_PROGRESS_DURATIONS_MS));
+
 export class ObjectScene extends Phaser.Scene {
 
   private renderToggle = false;
@@ -46,6 +69,7 @@ export class ObjectScene extends Phaser.Scene {
   private stateTimerList: Record<string, ReturnType<typeof setInterval>> = {};
   private burningSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
+  private actionProgressBars: Record<string, ActionProgressBar> = {};
 
   private lastVillagerActivity: Record<string, string> = {};
 
@@ -228,6 +252,10 @@ export class ObjectScene extends Phaser.Scene {
     }
   }
 
+  update(time: number): void {
+    this.updateActionProgressBars(time);
+  }
+
   setRender(): void {
     console.log('ObjectScene setRender')
     this.renderToggle = true;
@@ -344,6 +372,7 @@ export class ObjectScene extends Phaser.Scene {
   private destroyRenderedObject(objectId: string): void {
     this.stopMoveTween(objectId);
     this.clearPendingImageTask(objectId);
+    this.destroyActionProgressBar(objectId);
 
     if (objectId in this.stateTimerList) {
       clearInterval(this.stateTimerList[objectId]);
@@ -434,6 +463,100 @@ export class ObjectScene extends Phaser.Scene {
       this.updateSprite(objectState);
     } else if (imageType == CONTAINER) {
       this.updateContainer(objectState);
+    }
+
+    this.syncActionProgressBar(objectState, renderObject);
+  }
+
+  private isActionProgressTarget(objectState: ObjectState): boolean {
+    return (objectState.subclass == HERO || objectState.subclass == VILLAGER) &&
+      ACTION_PROGRESS_STATES.has(objectState.state);
+  }
+
+  private getActionProgressDurationMs(state: string): number {
+    return ACTION_PROGRESS_DURATIONS_MS[state] || ACTION_PROGRESS_DEFAULT_DURATION_MS;
+  }
+
+  private destroyActionProgressBar(objectId: string): void {
+    var progressBar = this.actionProgressBars[objectId];
+
+    if (!progressBar) {
+      return;
+    }
+
+    if (progressBar.graphics.scene != null) {
+      progressBar.graphics.destroy();
+    }
+
+    delete this.actionProgressBars[objectId];
+  }
+
+  private syncActionProgressBar(objectState: ObjectState, renderObject: RenderObject): void {
+    if (!this.isActionProgressTarget(objectState)) {
+      this.destroyActionProgressBar(objectState.id);
+      return;
+    }
+
+    var progressBar = this.actionProgressBars[objectState.id];
+    var durationMs = this.getActionProgressDurationMs(objectState.state);
+
+    if (!progressBar) {
+      progressBar = {
+        graphics: this.add.graphics(),
+        state: objectState.state,
+        startTime: this.time.now,
+        durationMs: durationMs
+      };
+      progressBar.graphics.setDepth(ACTION_PROGRESS_DEPTH);
+      this.actionProgressBars[objectState.id] = progressBar;
+    } else if (progressBar.state != objectState.state) {
+      progressBar.state = objectState.state;
+      progressBar.startTime = this.time.now;
+      progressBar.durationMs = durationMs;
+    }
+
+    this.drawActionProgressBar(progressBar, renderObject, this.time.now);
+  }
+
+  private updateActionProgressBars(time: number): void {
+    var now = typeof time == 'number' ? time : this.time.now;
+
+    for (var objectId in this.actionProgressBars) {
+      var objectState = Global.objectStates[objectId];
+      var renderObject = this.getRenderedObject(objectId);
+
+      if (!objectState || !renderObject || !this.isActionProgressTarget(objectState)) {
+        this.destroyActionProgressBar(objectId);
+        continue;
+      }
+
+      var progressBar = this.actionProgressBars[objectId];
+      if (progressBar.state != objectState.state) {
+        progressBar.state = objectState.state;
+        progressBar.startTime = now;
+        progressBar.durationMs = this.getActionProgressDurationMs(objectState.state);
+      }
+
+      this.drawActionProgressBar(progressBar, renderObject, now);
+    }
+  }
+
+  private drawActionProgressBar(progressBar: ActionProgressBar, renderObject: RenderObject, time: number): void {
+    var elapsed = Math.max(0, time - progressBar.startTime);
+    var progress = Math.min(1, elapsed / progressBar.durationMs);
+    var fillWidth = Math.max(0, (ACTION_PROGRESS_WIDTH - 2) * progress);
+    var left = renderObject.x + 36 - ACTION_PROGRESS_WIDTH / 2;
+    var top = renderObject.y + ACTION_PROGRESS_Y_OFFSET - ACTION_PROGRESS_HEIGHT / 2;
+
+    progressBar.graphics.clear();
+    progressBar.graphics.fillStyle(0x000000, 0.65);
+    progressBar.graphics.fillRect(left, top, ACTION_PROGRESS_WIDTH, ACTION_PROGRESS_HEIGHT);
+    progressBar.graphics.lineStyle(1, 0x111111, 0.9);
+    progressBar.graphics.strokeRect(left, top, ACTION_PROGRESS_WIDTH, ACTION_PROGRESS_HEIGHT);
+
+    if (fillWidth > 0) {
+      progressBar.graphics.fillStyle(0x7fd36b, 1);
+      progressBar.graphics.fillRect(left + 1, top + 1, fillWidth, ACTION_PROGRESS_HEIGHT - 2);
     }
   }
 

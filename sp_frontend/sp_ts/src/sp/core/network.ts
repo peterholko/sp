@@ -613,6 +613,61 @@ export interface InfoStructurePacket {
 export class Network {
 
   private websocket;
+  private networkErrorTimeoutId: number | null = null;
+  private readonly networkErrorGraceMs = 1500;
+
+  private clearNetworkErrorTimeout() {
+    if (this.networkErrorTimeoutId !== null) {
+      window.clearTimeout(this.networkErrorTimeoutId);
+      this.networkErrorTimeoutId = null;
+    }
+  }
+
+  private scheduleNetworkError(socket) {
+    this.clearNetworkErrorTimeout();
+
+    this.networkErrorTimeoutId = window.setTimeout(() => {
+      this.networkErrorTimeoutId = null;
+
+      if (socket !== this.websocket) {
+        return;
+      }
+
+      if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+        return;
+      }
+
+      if (document.visibilityState !== 'visible') {
+        this.scheduleNetworkError(socket);
+        return;
+      }
+
+      Global.gameEmitter.emit(NetworkEvent.NETWORK_ERROR);
+    }, this.networkErrorGraceMs);
+  }
+
+  private scheduleServerOffline(socket) {
+    this.clearNetworkErrorTimeout();
+
+    this.networkErrorTimeoutId = window.setTimeout(() => {
+      this.networkErrorTimeoutId = null;
+
+      if (socket !== this.websocket) {
+        return;
+      }
+
+      if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+        return;
+      }
+
+      if (document.visibilityState !== 'visible') {
+        this.scheduleServerOffline(socket);
+        return;
+      }
+
+      Global.gameEmitter.emit(NetworkEvent.SERVER_OFFLINE);
+    }, this.networkErrorGraceMs);
+  }
 
   public sendMessage(message: String) {
     this.websocket.send(message);
@@ -629,7 +684,7 @@ export class Network {
   }*/
 
   public isConnected() {
-    return this.websocket.readyState === WebSocket.OPEN;
+    return Boolean(this.websocket && this.websocket.readyState === WebSocket.OPEN);
   }
 
   public sendPing() {
@@ -1543,9 +1598,16 @@ export class Network {
   public connect() {
     const url: string = "wss://" + window.location.hostname + ":8443";
 
+    this.clearNetworkErrorTimeout();
     this.websocket = new WebSocket(url);
+    const websocket = this.websocket;
 
     this.websocket.onopen = (evt) => {
+      if (websocket !== this.websocket) {
+        return;
+      }
+
+      this.clearNetworkErrorTimeout();
       console.log('Opened websocket');
       setInterval(function () {
         console.log('Sending Ping');
@@ -1554,13 +1616,21 @@ export class Network {
     };
 
     this.websocket.onclose = (evt) => {
+      if (websocket !== this.websocket) {
+        return;
+      }
+
       console.log('Websocket Closing...');
-      Global.gameEmitter.emit(NetworkEvent.SERVER_OFFLINE);
+      this.scheduleServerOffline(websocket);
     }
 
     this.websocket.onerror = (evt) => {
+      if (websocket !== this.websocket) {
+        return;
+      }
+
       console.log('Websocket Error...');
-      Global.gameEmitter.emit(NetworkEvent.NETWORK_ERROR);
+      this.scheduleNetworkError(websocket);
     }
 
     this.setupMessageHandler();

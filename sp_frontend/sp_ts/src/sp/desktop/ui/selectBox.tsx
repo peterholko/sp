@@ -110,8 +110,10 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
   getCanvasStyle(frame: SpriteFrame): React.CSSProperties {
     return {
       ...(this.props.imageStyle || this.props.style),
+      left: 'auto',
       width: frame.width + 'px',
-      height: frame.height + 'px'
+      height: frame.height + 'px',
+      zIndex: 'auto'
     };
   }
 

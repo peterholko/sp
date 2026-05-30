@@ -501,6 +501,24 @@ fn intro_is_younger_than(
         .unwrap_or(false)
 }
 
+fn player_survival_day(
+    game_tick: &GameTick,
+    player_id: i32,
+    player_intro_state: &PlayerIntroState,
+) -> i32 {
+    intro_age(game_tick, player_id, player_intro_state)
+        .map(|age| (age.max(0) / GAME_TICKS_PER_DAY) + 1)
+        .unwrap_or_else(|| game_tick.day())
+}
+
+fn player_days_survived(
+    game_tick: &GameTick,
+    player_id: i32,
+    player_intro_state: &PlayerIntroState,
+) -> i32 {
+    (player_survival_day(game_tick, player_id, player_intro_state) - 1).max(0)
+}
+
 const LEGENDARY_BOSS: &str = "Fire Dragon";
 const LEGENDARY_RAIDER: &str = "Wyvern Rider";
 const LEGENDARY_TORCHBEARER: &str = "Great Troll";
@@ -10663,6 +10681,7 @@ fn nightly_threat_system(
         if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
             continue;
         }
+        let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
 
         // Only trigger once per day per player
         if let Some(&last_day) = last_threat_day.get(&player_id.0) {
@@ -10673,7 +10692,7 @@ fn nightly_threat_system(
 
         // Determine threat composition based on day count
         let player_objectives = objectives.get(&player_id.0);
-        let (creatures, warning) = if survival_director_active(current_day, player_objectives) {
+        let (creatures, warning) = if survival_director_active(player_day, player_objectives) {
             let tier = crisis_state.get(&player_id.0).map(crisis_tier).unwrap_or(0);
             let active_legendary_count = legendary_threat_state
                 .get(&player_id.0)
@@ -10685,13 +10704,13 @@ fn nightly_threat_system(
                     }
                 })
                 .unwrap_or(0);
-            let horde_size = survival_horde_size(current_day, tier, active_legendary_count);
+            let horde_size = survival_horde_size(player_day, tier, active_legendary_count);
             (
-                survival_horde_composition(horde_size, current_day),
+                survival_horde_composition(horde_size, player_day),
                 "The survival horde descends upon your settlement!",
             )
         } else {
-            match current_day {
+            match player_day {
                 2 => (vec!["Wolf"; 2], "Wolves howl nearby as darkness falls..."),
                 3 => (
                     vec!["Wolf", "Cave Bat", "Ash Viper", "Reef Skitter"],
@@ -10760,8 +10779,8 @@ fn nightly_threat_system(
 
         if spawned {
             info!(
-                "Nightly threat: Day {} spawned {} creatures for player {}",
-                current_day,
+                "Nightly threat: player day {} spawned {} creatures for player {}",
+                player_day,
                 creatures.len(),
                 player_id.0
             );
@@ -11080,6 +11099,7 @@ fn legendary_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
+    player_intro_state: Res<PlayerIntroState>,
     hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
     structure_query: Query<(&Id, &PlayerId, &Position), With<ClassStructure>>,
     storage_query: Query<(&Id, &PlayerId, &Position, &Inventory), With<Storage>>,
@@ -11091,14 +11111,14 @@ fn legendary_threat_system(
         return;
     }
 
-    let current_day = game_tick.day();
-    if current_day < LEGENDARY_RUMOR_DAY {
-        return;
-    }
-
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (_hero_id, player_id, hero_pos) in hero_query.iter() {
+        let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
+        if player_day < LEGENDARY_RUMOR_DAY {
+            continue;
+        }
+
         let Some(spawn_pos) = spawn_positions.get(&player_id.0).copied() else {
             continue;
         };
@@ -11177,7 +11197,7 @@ fn legendary_threat_system(
             reveal_legendary_hideout(player_id.0, threat, &mut objectives, &clients, "Scouting");
         }
 
-        if current_day >= LEGENDARY_ACTIVE_DAY && !threat.active && !threat.defeated {
+        if player_day >= LEGENDARY_ACTIVE_DAY && !threat.active && !threat.defeated {
             threat.active = true;
             threat.active_since_tick = Some(game_tick.0);
             threat.next_follower_tick = game_tick.0;
@@ -11498,6 +11518,7 @@ fn objectives_system(
     spawn_positions: Res<SpawnPositions>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
+    player_intro_state: Res<PlayerIntroState>,
     mut objectives: ResMut<Objectives>,
     mut run_score_state: ResMut<RunScoreState>,
 ) {
@@ -11509,6 +11530,7 @@ fn objectives_system(
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (player_id, hero_pos) in hero_query.iter() {
+        let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
         let player_structures: Vec<String> = structure_query
             .iter()
             .filter(|(pid, _)| pid.0 == player_id.0)
@@ -11608,7 +11630,7 @@ fn objectives_system(
         }
 
         // Check: Survive 5 Nights (day >= 6 means survived 5 nights)
-        if !obj.survive_5_nights && game_tick.day() >= 6 {
+        if !obj.survive_5_nights && player_day >= 6 {
             obj.survive_5_nights = true;
             send_discovery_event(
                 player_id.0,
@@ -11636,7 +11658,7 @@ fn objectives_system(
             structure_count as i32,
             has_shelter,
             starting_enemies_dead,
-            game_tick.day(),
+            player_day,
         );
         send_to_client(player_id.0, objective_state_packet, &clients);
 
@@ -11644,6 +11666,7 @@ fn objectives_system(
             player_id.0,
             hero_pos,
             &game_tick,
+            player_day,
             &storage_query,
             &spawn_positions,
             &crisis_state,
@@ -11901,6 +11924,7 @@ fn build_threat_state_packet(
     player_id: i32,
     hero_pos: &Position,
     game_tick: &GameTick,
+    player_day: i32,
     storage_query: &Query<(&PlayerId, &Position, &Inventory), With<Storage>>,
     spawn_positions: &SpawnPositions,
     crisis_state: &CrisisState,
@@ -11932,7 +11956,7 @@ fn build_threat_state_packet(
     } else {
         GAME_TICKS_PER_DAY - ticks_in_day + DUSK
     };
-    let nights_survived = (game_tick.day() - 1).max(0);
+    let nights_survived = (player_day - 1).max(0);
 
     let known_risks = vec![
         network::ThreatRisk {
@@ -12011,7 +12035,7 @@ fn build_threat_state_packet(
     }
     .to_string();
 
-    let next_night_warning = if game_tick.day() <= 1 {
+    let next_night_warning = if player_day <= 1 {
         "First day: learn the camp loop before the island pushes back.".to_string()
     } else if ticks_to_dusk <= 300 {
         "Dusk is close. Stop long errands and prepare the camp.".to_string()
@@ -12021,7 +12045,7 @@ fn build_threat_state_packet(
 
     ResponsePacket::ThreatState {
         version: 1,
-        day: game_tick.day(),
+        day: player_day,
         phase: game_tick.time_of_day(),
         pressure_level,
         next_night_warning,
@@ -13977,6 +14001,7 @@ fn true_death_system(
         templates,
         mut run_score_state,
         mut legendary_threat_state,
+        player_intro_state,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -13986,6 +14011,7 @@ fn true_death_system(
         Res<Templates>,
         ResMut<RunScoreState>,
         ResMut<LegendaryThreatState>,
+        Res<PlayerIntroState>,
     ),
     mut hero_query: Query<
         (
@@ -14080,7 +14106,7 @@ fn true_death_system(
                 .unwrap_or(false);
             let completed_objectives = completed_objectives_count(objectives.get(&player_id.0));
             let total_skill_levels: i32 = skills.get_levels().values().sum();
-            let days_survived = (game_tick.day() - 1).max(0);
+            let days_survived = player_days_survived(&game_tick, player_id.0, &player_intro_state);
             let nights_survived = days_survived;
             let score_inputs = RunScoreInputs {
                 days_survived,

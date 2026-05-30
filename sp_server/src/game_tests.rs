@@ -2326,6 +2326,43 @@ fn survival_director_starts_after_day_six_or_objective() {
 }
 
 #[test]
+fn player_survival_day_uses_player_join_tick() {
+    let join_tick = DAWN + (GAME_TICKS_PER_DAY * 5);
+    let mut intro_state = PlayerIntroState(HashMap::new());
+    intro_state.insert(
+        7,
+        PlayerIntroEntry {
+            start_tick: join_tick,
+            shipwreck_chain_started: false,
+            villager_spawned: false,
+            danger_unlocked: false,
+        },
+    );
+
+    assert_eq!(GameTick(join_tick).day(), 6);
+    assert_eq!(
+        player_survival_day(&GameTick(join_tick), 7, &intro_state),
+        1
+    );
+    assert_eq!(
+        player_survival_day(
+            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 5)),
+            7,
+            &intro_state,
+        ),
+        LEGENDARY_RUMOR_DAY,
+    );
+    assert_eq!(
+        player_days_survived(
+            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 5)),
+            7,
+            &intro_state,
+        ),
+        5,
+    );
+}
+
+#[test]
 fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
     let entry = InitialEncounterEntry {
         rat_ids: vec![1, 2],
