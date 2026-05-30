@@ -91,4 +91,17 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 CREATE INDEX IF NOT EXISTS idx_device_tokens_token ON device_tokens (token);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_player_id ON device_tokens (player_id);
 
+-- =============================================================================
+-- password_resets: Short-lived tokens for the forgot-password flow
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS password_resets (
+    token       VARCHAR(64)     NOT NULL PRIMARY KEY,
+    player_id   INTEGER         NOT NULL REFERENCES accounts(player_id),
+    created_at  TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    used_at     TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_resets_player_id ON password_resets (player_id);
+
 COMMIT;

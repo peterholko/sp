@@ -19,20 +19,21 @@ pub enum AccountError {
 
 impl Account {
     pub fn new(account_name: String, password: String) -> Account {
-        let password_bytes = password.as_bytes();
+        Account {
+            account_name: Some(account_name),
+            password: Some(Account::hash_password(&password)),
+        }
+    }
 
+    /// Argon2-hash a password (salted). Used by registration and password reset.
+    pub fn hash_password(password: &str) -> String {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
 
-        let password_hash = argon2
-            .hash_password(password_bytes, &salt)
+        argon2
+            .hash_password(password.as_bytes(), &salt)
             .unwrap()
-            .to_string();
-
-        Account {
-            account_name: Some(account_name),
-            password: Some(password_hash),
-        }
+            .to_string()
     }
 
     pub fn verify_password(password: String, account_password: String) -> Result<(), AccountError> {

@@ -10,6 +10,7 @@ interface AccountSetupProps {
 
 interface AccountSetupState {
   accountName: string;
+  email: string;
   password: string;
   confirmPassword: string;
   validationError: string;
@@ -21,12 +22,14 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
     this.state = {
       accountName: '',
+      email: '',
       password: '',
       confirmPassword: '',
       validationError: '',
     };
 
     this.handleAccountNameChange = this.handleAccountNameChange.bind(this);
+    this.handleEmailChange = this.handleEmailChange.bind(this);
     this.handlePasswordChange = this.handlePasswordChange.bind(this);
     this.handleConfirmPasswordChange = this.handleConfirmPasswordChange.bind(this);
     this.handleSubmit = this.handleSubmit.bind(this);
@@ -35,6 +38,10 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
   handleAccountNameChange(event) {
     this.setState({ accountName: event.target.value, validationError: '' });
+  }
+
+  handleEmailChange(event) {
+    this.setState({ email: event.target.value, validationError: '' });
   }
 
   handlePasswordChange(event) {
@@ -46,7 +53,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
   }
 
   handleSubmit() {
-    const { accountName, password, confirmPassword } = this.state;
+    const { accountName, email, password, confirmPassword } = this.state;
 
     if (accountName.length < 3 || accountName.length > 20) {
       this.setState({ validationError: 'Name must be 3-20 characters' });
@@ -68,7 +75,13 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       return;
     }
 
-    Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SUBMIT, { accountName, password });
+    const trimmedEmail = email.trim();
+    if (trimmedEmail.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      this.setState({ validationError: 'Enter a valid email, or leave it blank' });
+      return;
+    }
+
+    Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SUBMIT, { accountName, password, email: trimmedEmail });
   }
 
   handleSkip() {
@@ -194,6 +207,19 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
               type="text"
               value={this.state.accountName}
               onChange={this.handleAccountNameChange}
+              autoCapitalize="none"
+              autoCorrect="off"
+            />
+          </div>
+
+          <div style={fieldStyle}>
+            <label style={labelStyle}>Email (optional)</label>
+            <input
+              style={inputStyle}
+              type="email"
+              value={this.state.email}
+              onChange={this.handleEmailChange}
+              placeholder="for password recovery"
               autoCapitalize="none"
               autoCorrect="off"
             />

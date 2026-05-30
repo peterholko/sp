@@ -28,4 +28,7 @@ chrono = "0.4.39"
 tokio-tungstenite = { version = "0.21", features = ["native-tls", "rustls-tls-webpki-roots"] }
 native-tls = "0.2"
 uuid = { version = "1", features = ["v4"] }
+# native-tls (not rustls) so we don't add a second rustls CryptoProvider that
+# conflicts with axum-server's tls-rustls. native-tls is already in the tree.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 

@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::connect_async_tls_with_config;
@@ -58,6 +59,42 @@ struct AuthRequest {
 struct AuthResponse {
     player_id: i32,
     device_token: String,
+}
+
+// Registration carries an optional recovery email on top of the login fields.
+#[derive(Deserialize)]
+struct RegisterRequest {
+    account_name: String,
+    password: String,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PasswordResetRequest {
+    // Account name or email — whichever the player remembers.
+    identifier: String,
+}
+
+#[derive(Deserialize)]
+struct ResetPasswordRequest {
+    token: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct MessageResponse {
+    message: String,
+}
+
+// Body sent to the Cloudflare email-sending API.
+#[derive(Serialize)]
+struct CloudflareEmail<'a> {
+    to: &'a str,
+    from: &'a str,
+    subject: &'a str,
+    html: &'a str,
+    text: &'a str,
 }
 
 #[derive(Serialize)]
@@ -180,6 +217,8 @@ async fn main() {
         .route("/session", get(session_handler))
         .route("/auth", post(auth_handler))
         .route("/register", post(register_handler))
+        .route("/request-password-reset", post(request_password_reset_handler))
+        .route("/reset-password", post(reset_password_handler))
         .route("/fingerprint-auth", post(fingerprint_auth_handler))
         .route("/logout", post(logout_handler))
         .route("/scores", get(scores_handler))
@@ -270,25 +309,29 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
 
         let session_row = conn
             .query_one(
-                "SELECT s.created_at, s.player_id, a.account_name FROM sessions s JOIN accounts a ON s.player_id = a.player_id WHERE s.session = $1",
+                "SELECT s.created_at, s.last_login, s.player_id, a.account_name FROM sessions s JOIN accounts a ON s.player_id = a.player_id WHERE s.session = $1",
                 &[&cookie.value()],
             )
             .await;
 
         match session_row {
             Ok(session_row) => {
-                // Check if created_at is within the last 10 minutes
+                // Sliding idle window: a session stays valid as long as it is
+                // used at least once every SESSION_IDLE_DAYS. Activity is tracked
+                // via last_login (falling back to created_at for legacy rows) and
+                // refreshed on every successful check, so an active same-device
+                // player is never bounced. The window matches the cookie Max-Age.
+                const SESSION_IDLE_DAYS: i64 = 7;
 
                 let created_at: DateTime<Utc> = session_row.get::<_, DateTime<Utc>>("created_at");
-                println!("created_at: {}", created_at);
+                let last_login: Option<DateTime<Utc>> = session_row.get("last_login");
+                let last_active = last_login.unwrap_or(created_at);
 
                 let now = Utc::now(); // Already a DateTime<Utc>
-                println!("now: {}", now);
+                let diff = now.signed_duration_since(last_active);
+                println!("last_active: {}, now: {}, diff: {}", last_active, now, diff);
 
-                let diff = now.signed_duration_since(created_at);
-                println!("diff: {}", diff);
-
-                if diff.num_minutes() > 10 {
+                if diff.num_minutes() > SESSION_IDLE_DAYS * 24 * 60 {
                     println!("Session expired");
                     // Delete session from database
                     let _ = conn
@@ -305,6 +348,14 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
                     )
                         .into_response();
                 } else {
+                    // Slide the window forward so active players are never bounced.
+                    let _ = conn
+                        .execute(
+                            "UPDATE sessions SET last_login = NOW() WHERE session = $1",
+                            &[&cookie.value()],
+                        )
+                        .await;
+
                     let account_name: Option<String> = session_row.get("account_name");
                     let player_id: i32 = session_row.get("player_id");
                     println!(
@@ -740,29 +791,19 @@ async fn fingerprint_auth_handler(
 
                 let account_row = conn
                     .query_opt(
-                        "SELECT account_name, password FROM accounts WHERE player_id = $1",
+                        "SELECT account_name FROM accounts WHERE player_id = $1",
                         &[&player_id],
                     )
                     .await;
 
                 if let Ok(Some(account_row)) = account_row {
-                    let password: Option<String> = account_row.get("password");
-
-                    if password.is_some() {
-                        let acct_name: Option<String> = account_row.get("account_name");
-                        println!(
-                            "Device token auth denied: player {} has password set",
-                            player_id
-                        );
-                        return (
-                            StatusCode::UNAUTHORIZED,
-                            Json(PasswordRequiredResponse {
-                                error: "password_required".to_string(),
-                                account_name: acct_name.unwrap_or_default(),
-                            }),
-                        )
-                            .into_response();
-                    }
+                    // A valid, server-issued device token proves this is a
+                    // trusted device, so we log in silently even when the
+                    // account has a password set. Securing an account adds a
+                    // recovery option; it must not break silent return on a
+                    // device the player has already used. (The fingerprint-only
+                    // match path above still requires the password, since a
+                    // fingerprint alone is spoofable and can collide.)
 
                     // Update fingerprint for this player
                     if let Err(e) = conn
@@ -919,7 +960,7 @@ async fn fingerprint_auth_handler(
 async fn register_handler(
     State(state): State<AppState>,
     jar: CookieJar,
-    Json(payload): Json<AuthRequest>,
+    Json(payload): Json<RegisterRequest>,
 ) -> Response {
     let Some(cookie) = jar.get("session") else {
         return (
@@ -960,17 +1001,57 @@ async fn register_handler(
     let account_name = payload.account_name;
     let password = payload.password;
 
+    // Email is optional; normalize and drop blanks. It is the only way to
+    // recover a forgotten password, so we store it when provided.
+    let email = payload
+        .email
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| !e.is_empty());
+
+    if let Some(ref email) = email {
+        if email.len() > 255 || !email.contains('@') || email.starts_with('@') || email.ends_with('@') {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AuthError {
+                    msg: "Please enter a valid email address".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let account = Account::new(account_name, password);
 
-    // Update the existing account row for this player_id
-    let result = conn
-        .execute(
-            "UPDATE accounts SET account_name = $1, password = $2 WHERE player_id = $3",
-            &[&account.account_name, &account.password, &player_id],
-        )
-        .await;
+    // Update the existing account row for this player_id (atomically including
+    // the recovery email when one was provided).
+    let result = match email {
+        Some(ref email) => {
+            conn.execute(
+                "UPDATE accounts SET account_name = $1, password = $2, email = $3 WHERE player_id = $4",
+                &[&account.account_name, &account.password, email, &player_id],
+            )
+            .await
+        }
+        None => {
+            conn.execute(
+                "UPDATE accounts SET account_name = $1, password = $2 WHERE player_id = $3",
+                &[&account.account_name, &account.password, &player_id],
+            )
+            .await
+        }
+    };
 
-    let Ok(_result) = result else {
+    if let Err(e) = result {
+        if e.code() == Some(&SqlState::UNIQUE_VIOLATION) {
+            return (
+                StatusCode::CONFLICT,
+                Json(AuthError {
+                    msg: "That account name or email is already in use".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        println!("Error registering player {}: {}", player_id, e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(AuthError {
@@ -978,7 +1059,7 @@ async fn register_handler(
             }),
         )
             .into_response();
-    };
+    }
 
     // Generate device token
     let device_token = Uuid::new_v4().to_string();
@@ -1001,6 +1082,251 @@ async fn register_handler(
         }),
     )
         .into_response()
+}
+
+// How long a password-reset link stays valid.
+const PASSWORD_RESET_TTL_MINUTES: i64 = 60;
+
+// Generic reply for the request-reset endpoint. Returned in every case so the
+// endpoint never reveals whether an account or email exists (anti-enumeration).
+fn reset_requested_response() -> Response {
+    (
+        StatusCode::OK,
+        Json(MessageResponse {
+            message: "If an account with a recovery email exists, a reset link has been sent."
+                .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+#[debug_handler]
+async fn request_password_reset_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetRequest>,
+) -> Response {
+    let identifier = payload.identifier.trim().to_lowercase();
+    if identifier.is_empty() {
+        return reset_requested_response();
+    }
+
+    let conn = state
+        .pool
+        .get()
+        .await
+        .expect("Error getting connection from pool");
+
+    // Match on either account name or email, case-insensitively.
+    let row = conn
+        .query_opt(
+            "SELECT player_id, email FROM accounts WHERE LOWER(account_name) = $1 OR LOWER(email) = $1",
+            &[&identifier],
+        )
+        .await;
+
+    if let Ok(Some(row)) = row {
+        let player_id: i32 = row.get("player_id");
+        let email: Option<String> = row.get("email");
+
+        // Recovery is only possible when the account has an email on file.
+        if let Some(email) = email {
+            let token = Uuid::new_v4().simple().to_string();
+
+            if let Err(e) = conn
+                .execute(
+                    "INSERT INTO password_resets (token, player_id, created_at) VALUES ($1, $2, NOW())",
+                    &[&token, &player_id],
+                )
+                .await
+            {
+                println!("Error storing password reset token: {}", e);
+                return reset_requested_response();
+            }
+
+            let base = env::var("PUBLIC_BASE_URL")
+                .unwrap_or_else(|_| "https://surviveperilous.com".to_string());
+            let reset_url = format!("{}/?reset={}", base.trim_end_matches('/'), token);
+
+            send_password_reset_email(&email, &reset_url).await;
+        }
+    }
+
+    reset_requested_response()
+}
+
+#[debug_handler]
+async fn reset_password_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<ResetPasswordRequest>,
+) -> Response {
+    let token = payload.token.trim().to_string();
+    let password = payload.password;
+
+    if password.len() < 6 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "Password must be at least 6 characters".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let conn = state
+        .pool
+        .get()
+        .await
+        .expect("Error getting connection from pool");
+
+    let row = conn
+        .query_opt(
+            "SELECT player_id, created_at, used_at FROM password_resets WHERE token = $1",
+            &[&token],
+        )
+        .await;
+
+    let Ok(Some(row)) = row else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "This reset link is invalid or has expired".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    let used_at: Option<DateTime<Utc>> = row.get("used_at");
+    if used_at.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "This reset link has already been used".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let created_at: DateTime<Utc> = row.get("created_at");
+    if Utc::now().signed_duration_since(created_at).num_minutes() > PASSWORD_RESET_TTL_MINUTES {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "This reset link is invalid or has expired".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let player_id: i32 = row.get("player_id");
+    let password_hash = Account::hash_password(&password);
+
+    if let Err(e) = conn
+        .execute(
+            "UPDATE accounts SET password = $1 WHERE player_id = $2",
+            &[&password_hash, &player_id],
+        )
+        .await
+    {
+        println!("Error updating password for player {}: {}", player_id, e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unknown error".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    // Burn the token so it cannot be replayed.
+    let _ = conn
+        .execute(
+            "UPDATE password_resets SET used_at = NOW() WHERE token = $1",
+            &[&token],
+        )
+        .await;
+
+    println!("Password reset for player {}", player_id);
+    (
+        StatusCode::OK,
+        Json(MessageResponse {
+            message: "Your password has been updated. Please log in.".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+async fn send_password_reset_email(to: &str, reset_url: &str) {
+    let subject = "Reset your Survive Perilous password";
+    let html = format!(
+        "<h1>Password reset</h1>\
+         <p>We received a request to reset your Survive Perilous password. \
+         Click the link below to choose a new one. This link expires in {} minutes.</p>\
+         <p><a href=\"{}\">Reset your password</a></p>\
+         <p>If you didn't request this, you can safely ignore this email.</p>",
+        PASSWORD_RESET_TTL_MINUTES, reset_url
+    );
+    let text = format!(
+        "Reset your Survive Perilous password\n\n\
+         We received a request to reset your password. Open the link below to \
+         choose a new one (expires in {} minutes):\n{}\n\n\
+         If you didn't request this, you can safely ignore this email.",
+        PASSWORD_RESET_TTL_MINUTES, reset_url
+    );
+
+    send_email(to, subject, &html, &text).await;
+}
+
+// Sends transactional email via Cloudflare's email-sending API. When
+// CLOUDFLARE_EMAIL_TOKEN is unset (e.g. local dev) it logs the message instead
+// of sending, so the reset flow stays fully testable without credentials.
+async fn send_email(to: &str, subject: &str, html: &str, text: &str) {
+    let token = match env::var("CLOUDFLARE_EMAIL_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            println!(
+                "[email] CLOUDFLARE_EMAIL_TOKEN not set; would send to {}:\n{}",
+                to, text
+            );
+            return;
+        }
+    };
+
+    let account_id = env::var("CLOUDFLARE_ACCOUNT_ID")
+        .unwrap_or_else(|_| "514db0d52efacfc2b7d0c685d7b57cf6".to_string());
+    let from =
+        env::var("EMAIL_FROM_ADDRESS").unwrap_or_else(|_| "welcome@surviveperilous.com".to_string());
+
+    let url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/email/sending/send",
+        account_id
+    );
+
+    let client = reqwest::Client::new();
+    let result = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&CloudflareEmail {
+            to,
+            from: &from,
+            subject,
+            html,
+            text,
+        })
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                println!("[email] Sent to {}", to);
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                println!("[email] Cloudflare send failed ({}): {}", status, body);
+            }
+        }
+        Err(e) => println!("[email] Error sending to {}: {}", to, e),
+    }
 }
 
 #[derive(Deserialize)]

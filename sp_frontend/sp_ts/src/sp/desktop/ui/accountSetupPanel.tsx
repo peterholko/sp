@@ -10,6 +10,7 @@ interface AccountSetupProps {
 
 interface AccountSetupState {
   accountName: string;
+  email: string;
   password: string;
   confirmPassword: string;
   validationError: string;
@@ -21,12 +22,14 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
     this.state = {
       accountName: '',
+      email: '',
       password: '',
       confirmPassword: '',
       validationError: '',
     };
 
     this.handleAccountNameChange = this.handleAccountNameChange.bind(this);
+    this.handleEmailChange = this.handleEmailChange.bind(this);
     this.handlePasswordChange = this.handlePasswordChange.bind(this);
     this.handleConfirmPasswordChange = this.handleConfirmPasswordChange.bind(this);
     this.handleSubmit = this.handleSubmit.bind(this);
@@ -35,6 +38,10 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
   handleAccountNameChange(event) {
     this.setState({ accountName: event.target.value, validationError: '' });
+  }
+
+  handleEmailChange(event) {
+    this.setState({ email: event.target.value, validationError: '' });
   }
 
   handlePasswordChange(event) {
@@ -46,7 +53,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
   }
 
   handleSubmit() {
-    const { accountName, password, confirmPassword } = this.state;
+    const { accountName, email, password, confirmPassword } = this.state;
 
     if (accountName.length < 3 || accountName.length > 20) {
       this.setState({ validationError: 'Name must be 3-20 characters' });
@@ -68,7 +75,13 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       return;
     }
 
-    Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SUBMIT, { accountName, password });
+    const trimmedEmail = email.trim();
+    if (trimmedEmail.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      this.setState({ validationError: 'Enter a valid email, or leave it blank' });
+      return;
+    }
+
+    Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SUBMIT, { accountName, password, email: trimmedEmail });
   }
 
   handleSkip() {
@@ -138,17 +151,20 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       fontFamily: 'Open Sans, Arial, sans-serif',
     } as React.CSSProperties;
 
-    const nameLabel = { ...labelStyle, transform: 'translate(100px, 115px)' } as React.CSSProperties;
-    const nameInput = { ...inputStyle, transform: 'translate(320px, 108px)', position: 'fixed' } as React.CSSProperties;
+    const nameLabel = { ...labelStyle, transform: 'translate(100px, 107px)' } as React.CSSProperties;
+    const nameInput = { ...inputStyle, transform: 'translate(320px, 100px)', position: 'fixed' } as React.CSSProperties;
 
-    const passLabel = { ...labelStyle, transform: 'translate(100px, 165px)' } as React.CSSProperties;
-    const passInput = { ...inputStyle, transform: 'translate(320px, 158px)', position: 'fixed' } as React.CSSProperties;
+    const emailLabel = { ...labelStyle, transform: 'translate(100px, 149px)' } as React.CSSProperties;
+    const emailInput = { ...inputStyle, transform: 'translate(320px, 142px)', position: 'fixed' } as React.CSSProperties;
 
-    const confirmLabel = { ...labelStyle, transform: 'translate(100px, 215px)' } as React.CSSProperties;
-    const confirmInput = { ...inputStyle, transform: 'translate(320px, 208px)', position: 'fixed' } as React.CSSProperties;
+    const passLabel = { ...labelStyle, transform: 'translate(100px, 191px)' } as React.CSSProperties;
+    const passInput = { ...inputStyle, transform: 'translate(320px, 184px)', position: 'fixed' } as React.CSSProperties;
+
+    const confirmLabel = { ...labelStyle, transform: 'translate(100px, 233px)' } as React.CSSProperties;
+    const confirmInput = { ...inputStyle, transform: 'translate(320px, 226px)', position: 'fixed' } as React.CSSProperties;
 
     const errorStyle = {
-      transform: 'translate(20px, 255px)',
+      transform: 'translate(20px, 268px)',
       position: 'fixed',
       textAlign: 'center',
       color: 'red',
@@ -158,7 +174,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
     } as React.CSSProperties;
 
     const submitStyle = {
-      transform: 'translate(308px, 285px)',
+      transform: 'translate(308px, 288px)',
       position: 'fixed',
       cursor: 'pointer',
     } as React.CSSProperties;
@@ -183,6 +199,9 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
         <span style={nameLabel}>Account Name:</span>
         <input style={nameInput} type="text" value={this.state.accountName} onChange={this.handleAccountNameChange} />
+
+        <span style={emailLabel}>Email (optional):</span>
+        <input style={emailInput} type="email" value={this.state.email} onChange={this.handleEmailChange} placeholder="for password recovery" />
 
         <span style={passLabel}>Password:</span>
         <input style={passInput} type="password" value={this.state.password} onChange={this.handlePasswordChange} />

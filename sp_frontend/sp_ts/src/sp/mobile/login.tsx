@@ -59,6 +59,12 @@ export default class LoginControl extends React.Component<any, any> {
       loginAccountName: '',
       loginPassword: '',
       loginButtonPressed: false,
+      showResetPanel: false,
+      resetToken: '',
+      resetPassword: '',
+      resetConfirmPassword: '',
+      resetButtonPressed: false,
+      resetInfo: '',
     };
 
     this.handleHeroNameChange = this.handleHeroNameChange.bind(this);
@@ -75,6 +81,10 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleLoginPasswordChange = this.handleLoginPasswordChange.bind(this);
     this.handleLoginFormSubmit = this.handleLoginFormSubmit.bind(this);
     this.handleLoginCancel = this.handleLoginCancel.bind(this);
+    this.handleForgotPassword = this.handleForgotPassword.bind(this);
+    this.handleResetPasswordChange = this.handleResetPasswordChange.bind(this);
+    this.handleResetConfirmChange = this.handleResetConfirmChange.bind(this);
+    this.handleResetSubmit = this.handleResetSubmit.bind(this);
 
     this.handleLeaderboardOpen = this.handleLeaderboardOpen.bind(this);
     this.handleLeaderboardClose = this.handleLeaderboardClose.bind(this);
@@ -185,6 +195,15 @@ export default class LoginControl extends React.Component<any, any> {
     this.fetchServerHealth();
     this.healthIntervalId = window.setInterval(() => this.fetchServerHealth(), 10000);
 
+    const resetToken = new URLSearchParams(window.location.search).get('reset');
+    if (resetToken) {
+      // Arrived from a password-reset email link: show the reset form and skip
+      // the normal session/auto-connect path.
+      this.setState({ showResetPanel: true, resetToken, hideLandingPage: true });
+      this.loadLeaderboardEntries();
+      return;
+    }
+
     try {
       const url = `${window.location.origin}/session`;
 
@@ -196,8 +215,18 @@ export default class LoginControl extends React.Component<any, any> {
       });
 
       if (!response.ok) {
-        console.log('Session not found, showing enter world button');
-        this.setState({ showEnterWorld: true });
+        const deviceToken = localStorage.getItem('deviceToken');
+        if (deviceToken) {
+          // This browser has connected before (it holds a device token), so skip
+          // the "Enter World" click and reconnect silently. fingerprintAuth()
+          // handles every outcome: returning player -> connect, secured account
+          // on a new/untrusted device -> prefilled login panel.
+          console.log('Session expired but device token present, reconnecting silently');
+          this.fingerprintAuth();
+        } else {
+          console.log('Session not found, showing enter world button');
+          this.setState({ showEnterWorld: true });
+        }
       } else {
         const result = await response.json();
         console.log('Session found', result);
@@ -410,6 +439,92 @@ export default class LoginControl extends React.Component<any, any> {
     });
   }
 
+  async handleForgotPassword(event?) {
+    if (event) event.preventDefault();
+    const identifier = (this.state.loginAccountName || '').trim();
+    if (!identifier) {
+      this.setState({ loginError: 'Enter your account name or email first', resetInfo: '' });
+      return;
+    }
+    try {
+      await fetch(`${window.location.origin}/request-password-reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier }),
+      });
+    } catch (error) {
+      console.error('Error requesting password reset:', error);
+    }
+    // Always show the same neutral confirmation (never reveal which accounts exist).
+    this.setState({
+      loginError: '',
+      resetInfo: 'If an account with a recovery email exists, a reset link has been sent.',
+    });
+  }
+
+  handleResetPasswordChange(event) {
+    this.setState({ resetPassword: event.target.value, resetInfo: '' });
+  }
+
+  handleResetConfirmChange(event) {
+    this.setState({ resetConfirmPassword: event.target.value, resetInfo: '' });
+  }
+
+  clearResetParam() {
+    try {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } catch (e) {
+      // ignore history errors
+    }
+  }
+
+  async handleResetSubmit(event?) {
+    if (event) event.preventDefault();
+    const { resetToken, resetPassword, resetConfirmPassword } = this.state;
+
+    if (resetPassword.length < 6) {
+      this.setState({ resetInfo: 'Password must be at least 6 characters' });
+      return;
+    }
+    if (resetPassword !== resetConfirmPassword) {
+      this.setState({ resetInfo: 'Passwords do not match' });
+      return;
+    }
+
+    this.setState({ resetButtonPressed: true });
+    try {
+      const response = await fetch(`${window.location.origin}/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: resetToken, password: resetPassword }),
+      });
+
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        this.setState({
+          resetInfo: result.msg || result.error || 'This reset link is invalid or has expired',
+          resetButtonPressed: false,
+        });
+        return;
+      }
+
+      this.clearResetParam();
+      this.setState({
+        showResetPanel: false,
+        showLoginPanel: true,
+        hideLandingPage: true,
+        resetToken: '',
+        resetPassword: '',
+        resetConfirmPassword: '',
+        resetButtonPressed: false,
+        loginError: '',
+        resetInfo: 'Your password has been updated. Please log in.',
+      });
+    } catch (error) {
+      console.error('Error resetting password:', error);
+      this.setState({ resetInfo: 'Network error. Please try again.', resetButtonPressed: false });
+    }
+  }
 
   startAccountSetupTimer() {
     if (Global.accountSetupCompleted) {
@@ -426,13 +541,13 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   async handleAccountSetupSubmit(data) {
-    const { accountName, password } = data;
+    const { accountName, password, email } = data;
     try {
       const url = `${window.location.origin}/register`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account_name: accountName, password }),
+        body: JSON.stringify({ account_name: accountName, password, email }),
       });
 
       if (!response.ok) {
@@ -937,6 +1052,9 @@ export default class LoginControl extends React.Component<any, any> {
                 {this.state.loginError && (
                   <p style={{ color: '#ea4c4c', fontSize: '12px', textAlign: 'center' }}>{this.state.loginError}</p>
                 )}
+                {this.state.resetInfo && (
+                  <p style={{ color: '#c9aa71', fontSize: '12px', textAlign: 'center' }}>{this.state.resetInfo}</p>
+                )}
                 <p><input
                   type="submit"
                   value={this.state.loginButtonPressed ? 'Logging in...' : 'Log In'}
@@ -945,7 +1063,42 @@ export default class LoginControl extends React.Component<any, any> {
                   aria-busy={this.state.loginButtonPressed}
                 /></p>
               </form>
+              <p><a href="#" onClick={this.handleForgotPassword}>Forgot password?</a></p>
               <p><a href="#" onClick={this.handleLoginCancel}>Back</a></p>
+            </div>
+          </div>
+        )}
+
+        {this.state.showResetPanel && (
+          <div className="container">
+            <img src={logo} style={logoStyle} />
+            <div id="login">
+              <form onSubmit={this.handleResetSubmit}>
+                <p style={{ textAlign: 'center' }}>Choose a new password</p>
+                <p><span className="fontawesome-lock"></span>
+                  <input type="password"
+                    value={this.state.resetPassword}
+                    onChange={this.handleResetPasswordChange}
+                    placeholder="New Password"
+                    autoFocus />
+                </p>
+                <p><span className="fontawesome-lock"></span>
+                  <input type="password"
+                    value={this.state.resetConfirmPassword}
+                    onChange={this.handleResetConfirmChange}
+                    placeholder="Confirm Password" />
+                </p>
+                {this.state.resetInfo && (
+                  <p style={{ color: '#ea4c4c', fontSize: '12px', textAlign: 'center' }}>{this.state.resetInfo}</p>
+                )}
+                <p><input
+                  type="submit"
+                  value={this.state.resetButtonPressed ? 'Saving...' : 'Set New Password'}
+                  className={`form-button${this.state.resetButtonPressed ? ' form-button--pressed' : ''}`}
+                  disabled={this.state.resetButtonPressed}
+                  aria-busy={this.state.resetButtonPressed}
+                /></p>
+              </form>
             </div>
           </div>
         )}
