@@ -76,6 +76,7 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleMageSelect = this.handleMageSelect.bind(this);
 
     this.handleEnterWorld = this.handleEnterWorld.bind(this);
+    this.handleClearFingerprint = this.handleClearFingerprint.bind(this);
     this.handleShowLogin = this.handleShowLogin.bind(this);
     this.handleLoginAccountNameChange = this.handleLoginAccountNameChange.bind(this);
     this.handleLoginPasswordChange = this.handleLoginPasswordChange.bind(this);
@@ -339,6 +340,25 @@ export default class LoginControl extends React.Component<any, any> {
   handleEnterWorld() {
     this.setState({ showEnterWorld: false, hideLandingPage: true });
     this.fingerprintAuth();
+  }
+
+  // TEMP test-only: clears this device's fingerprint + tokens so the next
+  // Enter World creates a brand-new player. Remove before production.
+  async handleClearFingerprint() {
+    try {
+      const fingerprint = await getFingerprint();
+      await fetch(`${window.location.origin}/clear-fingerprint`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fingerprint }),
+      });
+      // End the current session too, so reload doesn't auto-reconnect us.
+      await fetch(`${window.location.origin}/logout`, { method: 'POST' });
+    } catch (error) {
+      console.error('Error clearing device fingerprint:', error);
+    }
+    localStorage.removeItem('deviceToken');
+    window.location.reload();
   }
 
   handleShowLogin() {
@@ -983,6 +1003,17 @@ export default class LoginControl extends React.Component<any, any> {
 
               <p className="leaderboard-link">
                 <button type="button" className="leaderboard-button" onClick={this.handleLeaderboardOpen}>View Leaderboard</button>
+              </p>
+
+              {/* TEMP test-only: reset this device to a brand-new player. Remove before production. */}
+              <p style={{ textAlign: 'center', marginTop: '2em' }}>
+                <button
+                  type="button"
+                  onClick={this.handleClearFingerprint}
+                  style={{ background: 'transparent', border: '1px solid #5a4a38', color: '#8a7a68', fontSize: '11px', padding: '4px 10px', cursor: 'pointer', borderRadius: '3px' }}
+                >
+                  Clear Device Fingerprint (test)
+                </button>
               </p>
             </div>
           </div>

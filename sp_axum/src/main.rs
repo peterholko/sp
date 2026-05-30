@@ -1,6 +1,7 @@
 use account::Account;
 use axum::body::Body;
 use axum::debug_handler;
+use axum::extract::ConnectInfo;
 use axum::extract::State;
 use axum::http::header::{CACHE_CONTROL, EXPIRES, PRAGMA};
 use axum::http::HeaderMap;
@@ -27,9 +28,12 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::env;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::{net::SocketAddr, path::PathBuf};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tokio_postgres::error::SqlState;
@@ -156,10 +160,11 @@ struct AuthError {
     msg: String,
 }
 
+// No account_name: we never echo which account is tied to a device/fingerprint
+// (anti-enumeration, R8). The client shows an empty login form to fill in.
 #[derive(Serialize)]
 struct PasswordRequiredResponse {
     error: String,
-    account_name: String,
 }
 
 #[derive(Serialize)]
@@ -174,6 +179,89 @@ struct AppState {
     rng: Arc<Mutex<ChaCha20Rng>>,
     ws_health_url: String,
     ws_health_allow_invalid_certs: bool,
+    // Per-IP fixed-window counter for the auth endpoints (R7).
+    rate_limiter: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
+}
+
+// Auth endpoints (/auth, /register, /fingerprint-auth) allow at most
+// AUTH_RATE_MAX attempts per AUTH_RATE_WINDOW per client IP.
+const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
+const AUTH_RATE_MAX: u32 = 20;
+
+impl AppState {
+    // Records a hit for this IP and returns true if it is still under the limit.
+    async fn rate_limit_ok(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut map = self.rate_limiter.lock().await;
+
+        // Opportunistic cleanup so the map can't grow without bound under attack.
+        if map.len() > 10_000 {
+            map.retain(|_, (start, _)| now.duration_since(*start) <= AUTH_RATE_WINDOW);
+        }
+
+        let entry = map.entry(ip).or_insert((now, 0));
+        if now.duration_since(entry.0) > AUTH_RATE_WINDOW {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= AUTH_RATE_MAX
+    }
+}
+
+// Resolves the real client IP for rate limiting. Behind Cloudflare the peer is
+// the proxy, so prefer CF-Connecting-IP (set/overwritten by Cloudflare), then a
+// generic X-Forwarded-For first hop, then the direct peer. NOTE: if the server
+// is NOT behind a trusted proxy these headers are client-spoofable, which only
+// weakens the limit rather than locking legitimate users out.
+fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
+    if let Some(ip) = headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return ip;
+    }
+    if let Some(ip) = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return ip;
+    }
+    peer.ip()
+}
+
+fn too_many_requests() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(AuthError {
+            msg: "Too many attempts. Please wait a minute and try again.".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// Issues a fresh device token for the player and prunes their expired tokens
+// (90-day TTL) so the device_tokens table can't grow without bound (R9).
+async fn issue_device_token(conn: &tokio_postgres::Client, player_id: i32) -> String {
+    let device_token = Uuid::new_v4().to_string();
+    if let Err(e) = conn
+        .execute(
+            "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
+            &[&player_id, &device_token],
+        )
+        .await
+    {
+        println!("Error storing device token: {}", e);
+    }
+    let _ = conn
+        .execute(
+            "DELETE FROM device_tokens WHERE player_id = $1 AND created_at < NOW() - INTERVAL '90 days'",
+            &[&player_id],
+        )
+        .await;
+    device_token
 }
 
 #[tokio::main]
@@ -220,6 +308,7 @@ async fn main() {
         .route("/request-password-reset", post(request_password_reset_handler))
         .route("/reset-password", post(reset_password_handler))
         .route("/fingerprint-auth", post(fingerprint_auth_handler))
+        .route("/clear-fingerprint", post(clear_fingerprint_handler))
         .route("/logout", post(logout_handler))
         .route("/scores", get(scores_handler))
         .route("/health", get(health_handler))
@@ -229,6 +318,7 @@ async fn main() {
             rng: shared_rng,
             ws_health_url,
             ws_health_allow_invalid_certs,
+            rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
         .layer(middleware::from_fn(cache_control_middleware));
 
@@ -247,7 +337,7 @@ async fn main() {
         .expect("ADDRESS must be a valid IP address");
     tracing::debug!("listening on {}", addr);
     axum_server::bind_rustls(addr, config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();
 }
@@ -364,17 +454,7 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
                         account_name
                     );
 
-                    // Generate device token
-                    let device_token = Uuid::new_v4().to_string();
-                    if let Err(e) = conn
-                        .execute(
-                            "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
-                            &[&player_id, &device_token],
-                        )
-                        .await
-                    {
-                        println!("Error storing device token: {}", e);
-                    }
+                    let device_token = issue_device_token(&conn, player_id).await;
 
                     return (
                         StatusCode::OK,
@@ -405,6 +485,58 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
         )
             .into_response();
     }
+}
+
+// TEMPORARY TEST ENDPOINT: nulls the fingerprint and deletes the device tokens
+// of the account matching the supplied fingerprint, so this device is treated as
+// a brand-new player on the next Enter World. Remove before production.
+#[debug_handler]
+async fn clear_fingerprint_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<FingerprintAuthRequest>,
+) -> Response {
+    let fingerprint = payload.fingerprint.trim().to_string();
+
+    let conn = state
+        .pool
+        .get()
+        .await
+        .expect("Error getting connection from pool");
+
+    let row = conn
+        .query_opt(
+            "SELECT player_id FROM accounts WHERE fingerprint = $1",
+            &[&fingerprint],
+        )
+        .await;
+
+    if let Ok(Some(row)) = row {
+        let player_id: i32 = row.get("player_id");
+        let _ = conn
+            .execute(
+                "DELETE FROM device_tokens WHERE player_id = $1",
+                &[&player_id],
+            )
+            .await;
+        let _ = conn
+            .execute(
+                "UPDATE accounts SET fingerprint = NULL WHERE player_id = $1",
+                &[&player_id],
+            )
+            .await;
+        println!(
+            "[test] Cleared fingerprint and device tokens for player {}",
+            player_id
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(MessageResponse {
+            message: "Device fingerprint cleared".to_string(),
+        }),
+    )
+        .into_response()
 }
 
 #[debug_handler]
@@ -533,7 +665,15 @@ fn build_health_check_request(url: &str) -> Result<Request<()>, String> {
 }
 
 #[debug_handler]
-async fn auth_handler(State(state): State<AppState>, Json(payload): Json<AuthRequest>) -> Response {
+async fn auth_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(payload): Json<AuthRequest>,
+) -> Response {
+    if !state.rate_limit_ok(client_ip(&headers, addr)).await {
+        return too_many_requests();
+    }
     let conn = state
         .pool
         .get()
@@ -648,17 +788,7 @@ async fn auth_handler(State(state): State<AppState>, Json(payload): Json<AuthReq
     }
 
     if let Some(session) = session {
-        // Generate device token
-        let device_token = Uuid::new_v4().to_string();
-        if let Err(e) = conn
-            .execute(
-                "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
-                &[&player_id, &device_token],
-            )
-            .await
-        {
-            println!("Error storing device token: {}", e);
-        }
+        let device_token = issue_device_token(&conn, player_id).await;
 
         let cookie_value = format!(
             "session={}; HttpOnly; Secure; SameSite=Strict; Max-Age=604800",
@@ -692,8 +822,13 @@ async fn auth_handler(State(state): State<AppState>, Json(payload): Json<AuthReq
 #[debug_handler]
 async fn fingerprint_auth_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<FingerprintAuthRequest>,
 ) -> Response {
+    if !state.rate_limit_ok(client_ip(&headers, addr)).await {
+        return too_many_requests();
+    }
     let fingerprint = payload.fingerprint.trim().to_string();
     let request_device_token = payload.device_token;
 
@@ -765,7 +900,6 @@ async fn fingerprint_auth_handler(
                 StatusCode::UNAUTHORIZED,
                 Json(PasswordRequiredResponse {
                     error: "password_required".to_string(),
-                    account_name: account_name.unwrap_or_default(),
                 }),
             )
                 .into_response();
@@ -781,7 +915,7 @@ async fn fingerprint_auth_handler(
         if let Some(ref token) = request_device_token {
             let token_row = conn
                 .query_opt(
-                    "SELECT player_id FROM device_tokens WHERE token = $1",
+                    "SELECT player_id FROM device_tokens WHERE token = $1 AND created_at > NOW() - INTERVAL '90 days'",
                     &[token],
                 )
                 .await;
@@ -872,17 +1006,7 @@ async fn fingerprint_auth_handler(
 
     let (player_id, account_name, has_account) = resolved_player.unwrap();
 
-    // Generate device token
-    let device_token = Uuid::new_v4().to_string();
-    if let Err(e) = conn
-        .execute(
-            "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
-            &[&player_id, &device_token],
-        )
-        .await
-    {
-        println!("Error storing device token: {}", e);
-    }
+    let device_token = issue_device_token(&conn, player_id).await;
 
     // Create a session (same logic as /auth)
     // First check for existing session
@@ -959,9 +1083,14 @@ async fn fingerprint_auth_handler(
 #[debug_handler]
 async fn register_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(payload): Json<RegisterRequest>,
 ) -> Response {
+    if !state.rate_limit_ok(client_ip(&headers, addr)).await {
+        return too_many_requests();
+    }
     let Some(cookie) = jar.get("session") else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -1061,17 +1190,7 @@ async fn register_handler(
             .into_response();
     }
 
-    // Generate device token
-    let device_token = Uuid::new_v4().to_string();
-    if let Err(e) = conn
-        .execute(
-            "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
-            &[&player_id, &device_token],
-        )
-        .await
-    {
-        println!("Error storing device token: {}", e);
-    }
+    let device_token = issue_device_token(&conn, player_id).await;
 
     println!("Successfully registered: {}", player_id);
     (
