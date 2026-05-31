@@ -24,7 +24,7 @@ import appStyles from "./app.module.css";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
-  private readonly accountSetupDelay = 60000; // 1 minute
+  private readonly accountSetupDelay = 10000; // TEMP: 10s for testing (revert to 60000)
   private healthIntervalId?: number;
   private accountSetupTimerId?: number;
 

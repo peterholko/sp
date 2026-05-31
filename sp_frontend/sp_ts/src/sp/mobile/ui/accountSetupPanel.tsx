@@ -1,5 +1,4 @@
 import * as React from "react";
-import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 import { MOBILE_DIALOG_Z } from "./mobileLayers";
@@ -32,6 +31,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
     this.handleEmailChange = this.handleEmailChange.bind(this);
     this.handlePasswordChange = this.handlePasswordChange.bind(this);
     this.handleConfirmPasswordChange = this.handleConfirmPasswordChange.bind(this);
+    this.handleFormSubmit = this.handleFormSubmit.bind(this);
     this.handleSubmit = this.handleSubmit.bind(this);
     this.handleSkip = this.handleSkip.bind(this);
   }
@@ -50,6 +50,11 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
   handleConfirmPasswordChange(event) {
     this.setState({ confirmPassword: event.target.value, validationError: '' });
+  }
+
+  handleFormSubmit(event) {
+    if (event) event.preventDefault();
+    this.handleSubmit();
   }
 
   handleSubmit() {
@@ -84,17 +89,19 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
     Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SUBMIT, { accountName, password, email: trimmedEmail });
   }
 
-  handleSkip() {
+  handleSkip(event?) {
+    if (event) event.preventDefault();
     Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SKIP, {});
   }
 
   render() {
     const errorMessage = this.props.errorMessage || this.state.validationError;
 
+    // Dimmed full-screen backdrop, matching the mobile leaderboard overlay.
     const overlayStyle: React.CSSProperties = {
       position: 'fixed',
       top: 0, left: 0, right: 0, bottom: 0,
-      background: 'rgba(0, 0, 0, 0.7)',
+      background: 'rgba(12, 14, 17, 0.75)',
       zIndex: MOBILE_DIALOG_Z,
       display: 'flex',
       alignItems: 'center',
@@ -104,154 +111,113 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       overflowY: 'auto',
     };
 
-    const cardStyle: React.CSSProperties = {
-      width: '100%',
-      maxWidth: '400px',
-      background: '#1c1814',
-      border: '1px solid #5a4a38',
+    // Dark card using the same palette as the login screen / leaderboard card.
+    const panelStyle: React.CSSProperties = {
+      background: '#2c3338',
+      border: '1px solid #3b4148',
       borderRadius: '8px',
+      boxShadow: '0 18px 36px rgba(0, 0, 0, 0.45)',
       padding: '24px 20px',
       boxSizing: 'border-box',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '14px',
     };
 
     const titleStyle: React.CSSProperties = {
-      textAlign: 'center',
       color: '#ea4c4c',
-      fontFamily: 'Cinzel',
-      fontSize: '20px',
+      fontFamily: "'Open Sans', sans-serif",
+      fontSize: '1.1rem',
+      fontWeight: 700,
       letterSpacing: '0.12em',
       textTransform: 'uppercase',
-      margin: 0,
+      textAlign: 'center',
+      margin: '0 0 0.4em',
     };
 
     const descStyle: React.CSSProperties = {
-      textAlign: 'center',
-      color: '#FFFFF0',
-      fontFamily: 'Cinzel',
-      fontSize: '13px',
-      lineHeight: 1.4,
-      margin: 0,
-    };
-
-    const fieldStyle: React.CSSProperties = {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '6px',
-    };
-
-    const labelStyle: React.CSSProperties = {
       color: '#b4bcc4',
-      fontFamily: 'Cinzel',
-      fontSize: '14px',
-    };
-
-    const inputStyle: React.CSSProperties = {
-      backgroundColor: '#363b41',
-      borderRadius: '4px',
-      color: '#ffffff',
-      height: '48px',
-      padding: '0 12px',
-      width: '100%',
-      border: 'none',
-      fontSize: '16px',
-      fontFamily: 'Open Sans, Arial, sans-serif',
-      boxSizing: 'border-box',
+      fontFamily: "'Open Sans', sans-serif",
+      fontSize: '0.85rem',
+      textAlign: 'center',
+      margin: '0 0 1.25em',
     };
 
     const errorStyle: React.CSSProperties = {
-      textAlign: 'center',
       color: '#ea4c4c',
-      fontSize: '13px',
-      fontWeight: 'bold',
-      margin: 0,
-    };
-
-    const submitContainer: React.CSSProperties = {
-      display: 'flex',
-      justifyContent: 'center',
-      paddingTop: '4px',
-    };
-
-    const submitStyle: React.CSSProperties = {
-      cursor: 'pointer',
-    };
-
-    const skipStyle: React.CSSProperties = {
+      fontFamily: "'Open Sans', sans-serif",
+      fontSize: '0.8rem',
+      fontWeight: 600,
       textAlign: 'center',
+      margin: '0 0 0.5em',
+    };
+
+    // Matches the #login text/password inputs (type="email" isn't covered by the
+    // shared login.css selector, so apply the same look to every field here).
+    const inputStyle: React.CSSProperties = {
+      backgroundColor: '#3b4148',
+      borderRadius: '0 3px 3px 0',
       color: '#b4bcc4',
-      fontFamily: 'Cinzel',
+      height: '50px',
+      padding: '0 16px',
+      width: '230px',
+      border: 'none',
+      fontFamily: "'Open Sans', Arial, sans-serif",
       fontSize: '14px',
-      cursor: 'pointer',
-      textDecoration: 'underline',
-      padding: '12px',
-      margin: 0,
-      minHeight: '44px',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
     };
 
     return (
       <div style={overlayStyle}>
-        <div style={cardStyle}>
-          <h2 style={titleStyle}>Secure Your Account</h2>
+        <div style={panelStyle}>
+          <p style={titleStyle}>Secure Your Account</p>
           <p style={descStyle}>Choose an account name and password to secure your progress.</p>
 
-          <div style={fieldStyle}>
-            <label style={labelStyle}>Account Name</label>
-            <input
-              style={inputStyle}
-              type="text"
-              value={this.state.accountName}
-              onChange={this.handleAccountNameChange}
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
+          <div id="login">
+            <form onSubmit={this.handleFormSubmit}>
+              <p><span className="fontawesome-user"></span>
+                <input
+                  style={inputStyle}
+                  type="text"
+                  value={this.state.accountName}
+                  onChange={this.handleAccountNameChange}
+                  placeholder="Account Name"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+              </p>
+              <p><span className="fontawesome-envelope"></span>
+                <input
+                  style={inputStyle}
+                  type="email"
+                  value={this.state.email}
+                  onChange={this.handleEmailChange}
+                  placeholder="Email (optional)"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                />
+              </p>
+              <p><span className="fontawesome-lock"></span>
+                <input
+                  style={inputStyle}
+                  type="password"
+                  value={this.state.password}
+                  onChange={this.handlePasswordChange}
+                  placeholder="Password"
+                />
+              </p>
+              <p><span className="fontawesome-lock"></span>
+                <input
+                  style={inputStyle}
+                  type="password"
+                  value={this.state.confirmPassword}
+                  onChange={this.handleConfirmPasswordChange}
+                  placeholder="Confirm Password"
+                />
+              </p>
+
+              {errorMessage && <p style={errorStyle}>{errorMessage}</p>}
+
+              <p><input type="submit" className="form-button" value="Secure Account" /></p>
+            </form>
+            <p><a href="#" onClick={this.handleSkip}>Skip for now</a></p>
           </div>
-
-          <div style={fieldStyle}>
-            <label style={labelStyle}>Email (optional)</label>
-            <input
-              style={inputStyle}
-              type="email"
-              value={this.state.email}
-              onChange={this.handleEmailChange}
-              placeholder="for password recovery"
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
-          </div>
-
-          <div style={fieldStyle}>
-            <label style={labelStyle}>Password</label>
-            <input
-              style={inputStyle}
-              type="password"
-              value={this.state.password}
-              onChange={this.handlePasswordChange}
-            />
-          </div>
-
-          <div style={fieldStyle}>
-            <label style={labelStyle}>Confirm Password</label>
-            <input
-              style={inputStyle}
-              type="password"
-              value={this.state.confirmPassword}
-              onChange={this.handleConfirmPasswordChange}
-            />
-          </div>
-
-          {errorMessage && <p style={errorStyle}>{errorMessage}</p>}
-
-          <div style={submitContainer}>
-            <img src={okbutton} style={submitStyle} onClick={this.handleSubmit} alt="Submit" />
-          </div>
-
-          <span style={skipStyle} onClick={this.handleSkip}>Skip for now</span>
         </div>
       </div>
     );

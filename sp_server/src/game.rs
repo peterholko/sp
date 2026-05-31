@@ -501,6 +501,16 @@ fn intro_is_younger_than(
         .unwrap_or(false)
 }
 
+fn player_survival_ticks(
+    game_tick: &GameTick,
+    player_id: i32,
+    player_intro_state: &PlayerIntroState,
+) -> i32 {
+    intro_age(game_tick, player_id, player_intro_state)
+        .unwrap_or_else(|| game_tick.0 - DAWN)
+        .max(0)
+}
+
 fn player_survival_day(
     game_tick: &GameTick,
     player_id: i32,
@@ -533,6 +543,8 @@ const LEGENDARY_FAST_AFTER_TICKS: i32 = GAME_TICKS_PER_DAY * 3;
 const LEGENDARY_HIDEOUT_REVEAL_CAPTAINS: i32 = 2;
 const LEGENDARY_HIDEOUT_REVEAL_WAVES: i32 = 4;
 const LEGENDARY_HIDEOUT_REVEAL_RANGE: u32 = 5;
+const UNDEAD_INCURSION_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 3;
+const GOBLIN_PILLAGER_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 5;
 
 pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
     let mut tier = 0;
@@ -10464,8 +10476,7 @@ fn goblin_raid_system(
     }
 }
 
-// Tier 4: Undead Incursion - triggers after 3 in-game days (~12 min real-time)
-// 3 days = 3 * 2400 = 7200 ticks. Game starts at DAWN (500), so trigger at tick 7700.
+// Tier 4: Undead Incursion - triggers after each player survives 3 in-game days.
 fn undead_incursion_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -10474,14 +10485,20 @@ fn undead_incursion_system(
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     map: Res<Map>,
+    player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
 ) {
-    // Only check once at the trigger tick (7200 ticks from start = ~12 min)
-    if game_tick.0 != 7700 {
+    if game_tick.0 % 10 != 0 {
         return;
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
+        if player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
+            < UNDEAD_INCURSION_SURVIVAL_TICKS
+        {
+            continue;
+        }
+
         // Skip if already triggered
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.undead_incursion {
@@ -10559,8 +10576,7 @@ fn undead_incursion_system(
     }
 }
 
-// Tier 5: Goblin Pillagers - triggers after 5 in-game days (~20 min real-time)
-// 5 days = 5 * 2400 = 12000 ticks. Game starts at DAWN (500), so trigger at tick 12500.
+// Tier 5: Goblin Pillagers - triggers after each player survives 5 in-game days.
 fn goblin_pillager_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -10569,10 +10585,10 @@ fn goblin_pillager_system(
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     map: Res<Map>,
+    player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
 ) {
-    // Only check once at the trigger tick (12000 ticks from start = ~20 min)
-    if game_tick.0 != 12500 {
+    if game_tick.0 % 10 != 0 {
         return;
     }
 
@@ -10580,6 +10596,12 @@ fn goblin_pillager_system(
     let mut player_targets: HashMap<i32, (i32, Position)> = HashMap::new();
 
     for (id, player_id, pos) in storage_query.iter() {
+        if player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
+            < GOBLIN_PILLAGER_SURVIVAL_TICKS
+        {
+            continue;
+        }
+
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.goblin_pillager {
                 continue;
@@ -11448,11 +11470,54 @@ fn wildness_reduction_on_enemy_death_system(
     }
 }
 
+fn atmospheric_event_message(player_day: i32, ticks_in_day: i32) -> Option<&'static str> {
+    match (player_day, ticks_in_day) {
+        // Day 1 morning hints
+        (1, 700..=800) => Some(
+            "The shipwreck groans as waves crash against the hull. There may be supplies worth salvaging.",
+        ),
+        // Day 1 afternoon
+        (1, 1400..=1500) => {
+            Some("Smoke rises from somewhere in the distance. You are not alone on this island.")
+        }
+        // Day 2 morning
+        (2, 600..=700) => {
+            Some("Strange markings on the rocks point toward the interior of the island.")
+        }
+        // Day 2 afternoon
+        (2, 1300..=1400) => {
+            Some("The Monolith pulses faintly. Its power draws the attention of the dead.")
+        }
+        // Day 3 morning
+        (3, 600..=700) => {
+            Some("A cold wind blows from the mountains. The creatures grow bolder each night.")
+        }
+        // Day 3 evening
+        (3, 1700..=1800) => {
+            Some("The ground near the graveyard trembles. Something stirs beneath.")
+        }
+        // Day 4
+        (4, 600..=700) => {
+            Some("Footprints in the mud suggest scouts have been watching your settlement.")
+        }
+        // Day 5
+        (5, 600..=700) => {
+            Some("The island's dangers grow. Your settlement must be strong to survive.")
+        }
+        // Day 7+, every morning
+        (d, 600..=699) if d >= 7 && d % 2 == 1 => {
+            Some("The darkness beyond your walls grows deeper. Fortify your defenses.")
+        }
+        _ => None,
+    }
+}
+
 // Periodic map events: atmospheric discoveries and world events
 fn map_event_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
+    player_intro_state: Res<PlayerIntroState>,
     mut last_event_tick: Local<HashMap<i32, i32>>,
 ) {
     // Check every 100 ticks (10 seconds)
@@ -11460,7 +11525,6 @@ fn map_event_system(
         return;
     }
 
-    let current_day = game_tick.day();
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
 
     for (player_id, _pos) in hero_query.iter() {
@@ -11471,28 +11535,8 @@ fn map_event_system(
             continue;
         }
 
-        // Time-of-day atmospheric events
-        let event_message = match (current_day, ticks_in_day) {
-            // Day 1 morning hints
-            (1, 700..=800) => Some("The shipwreck groans as waves crash against the hull. There may be supplies worth salvaging."),
-            // Day 1 afternoon
-            (1, 1400..=1500) => Some("Smoke rises from somewhere in the distance. You are not alone on this island."),
-            // Day 2 morning
-            (2, 600..=700) => Some("Strange markings on the rocks point toward the interior of the island."),
-            // Day 2 afternoon
-            (2, 1300..=1400) => Some("The Monolith pulses faintly. Its power draws the attention of the dead."),
-            // Day 3 morning
-            (3, 600..=700) => Some("A cold wind blows from the mountains. The creatures grow bolder each night."),
-            // Day 3 evening
-            (3, 1700..=1800) => Some("The ground near the graveyard trembles. Something stirs beneath."),
-            // Day 4
-            (4, 600..=700) => Some("Footprints in the mud suggest scouts have been watching your settlement."),
-            // Day 5
-            (5, 600..=700) => Some("The island's dangers grow. Your settlement must be strong to survive."),
-            // Day 7+, every morning
-            (d, 600..=699) if d >= 7 && d % 2 == 1 => Some("The darkness beyond your walls grows deeper. Fortify your defenses."),
-            _ => None,
-        };
+        let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
+        let event_message = atmospheric_event_message(player_day, ticks_in_day);
 
         if let Some(message) = event_message {
             let packet = ResponsePacket::Notice {
@@ -12416,6 +12460,10 @@ pub struct PlayerVictory {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct VictoryState(pub HashMap<i32, PlayerVictory>);
 
+fn rescue_victory_ready(player_day: i32, victory: &PlayerVictory) -> bool {
+    player_day >= 11 && victory.rescue_progress == 0
+}
+
 // Victory condition check system
 fn victory_check_system(
     game_tick: Res<GameTick>,
@@ -12425,6 +12473,7 @@ fn victory_check_system(
     villager_query: Query<&PlayerId, With<SubclassVillager>>,
     objectives: Res<Objectives>,
     monolith_investigation: Res<MonolithInvestigation>,
+    player_intro_state: Res<PlayerIntroState>,
     mut victory_state: ResMut<VictoryState>,
 ) {
     // Check every 200 ticks (20 seconds)
@@ -12443,7 +12492,8 @@ fn victory_check_system(
         }
 
         // Rescue: Survive 10 days
-        if game_tick.day() >= 11 && victory.rescue_progress == 0 {
+        let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
+        if rescue_victory_ready(player_day, victory) {
             victory.rescue_progress = 1;
             let packet = ResponsePacket::Notice {
                 noticemsg: "VICTORY! You have survived 10 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),

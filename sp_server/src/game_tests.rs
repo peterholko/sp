@@ -2184,10 +2184,9 @@ fn warrior_progression_scales_correctly() {
 
 #[test]
 fn crisis_timeline_is_ordered() {
-    // Tier 4 triggers at tick 7700 (3 in-game days from DAWN)
-    // Tier 5 triggers at tick 12500 (5 in-game days from DAWN)
-    let tier4_trigger = 7700;
-    let tier5_trigger = 12500;
+    // Tier 4 triggers after 3 player-survival days; Tier 5 after 5.
+    let tier4_trigger = DAWN + UNDEAD_INCURSION_SURVIVAL_TICKS;
+    let tier5_trigger = DAWN + GOBLIN_PILLAGER_SURVIVAL_TICKS;
     let ticks_per_day = GAME_TICKS_PER_DAY;
 
     // Verify the time-based crises happen in order
@@ -2360,6 +2359,91 @@ fn player_survival_day_uses_player_join_tick() {
         ),
         5,
     );
+}
+
+#[test]
+fn timed_crisis_gates_use_player_survival_ticks() {
+    let join_tick = DAWN + (GAME_TICKS_PER_DAY * 5);
+    let mut intro_state = PlayerIntroState(HashMap::new());
+    intro_state.insert(
+        7,
+        PlayerIntroEntry {
+            start_tick: join_tick,
+            shipwreck_chain_started: false,
+            villager_spawned: false,
+            danger_unlocked: false,
+        },
+    );
+
+    assert_eq!(GameTick(join_tick).day(), 6);
+    assert_eq!(
+        player_survival_ticks(&GameTick(join_tick), 7, &intro_state),
+        0
+    );
+    assert!(
+        player_survival_ticks(
+            &GameTick(join_tick + UNDEAD_INCURSION_SURVIVAL_TICKS - 10),
+            7,
+            &intro_state,
+        ) < UNDEAD_INCURSION_SURVIVAL_TICKS
+    );
+    assert!(
+        player_survival_ticks(
+            &GameTick(join_tick + UNDEAD_INCURSION_SURVIVAL_TICKS),
+            7,
+            &intro_state,
+        ) >= UNDEAD_INCURSION_SURVIVAL_TICKS
+    );
+    assert!(
+        player_survival_ticks(
+            &GameTick(join_tick + GOBLIN_PILLAGER_SURVIVAL_TICKS),
+            7,
+            &intro_state,
+        ) >= GOBLIN_PILLAGER_SURVIVAL_TICKS
+    );
+}
+
+#[test]
+fn atmospheric_messages_use_player_day() {
+    assert!(atmospheric_event_message(1, 700).is_some());
+    assert_eq!(atmospheric_event_message(6, 700), None);
+    assert!(atmospheric_event_message(7, 650).is_some());
+}
+
+#[test]
+fn rescue_victory_uses_player_survival_day() {
+    let join_tick = DAWN + (GAME_TICKS_PER_DAY * 10);
+    let mut intro_state = PlayerIntroState(HashMap::new());
+    intro_state.insert(
+        7,
+        PlayerIntroEntry {
+            start_tick: join_tick,
+            shipwreck_chain_started: false,
+            villager_spawned: false,
+            danger_unlocked: false,
+        },
+    );
+
+    let victory = PlayerVictory::default();
+    assert_eq!(GameTick(join_tick).day(), 11);
+    assert!(!rescue_victory_ready(
+        player_survival_day(&GameTick(join_tick), 7, &intro_state),
+        &victory,
+    ));
+    assert!(rescue_victory_ready(
+        player_survival_day(
+            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 10)),
+            7,
+            &intro_state,
+        ),
+        &victory,
+    ));
+
+    let already_rescued = PlayerVictory {
+        rescue_progress: 1,
+        ..Default::default()
+    };
+    assert!(!rescue_victory_ready(11, &already_rescued));
 }
 
 #[test]
