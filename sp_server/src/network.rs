@@ -38,6 +38,7 @@ use crate::{
 use crate::{
     game::{ObjQueryItem, ObjQueryMutReadOnlyItem},
     item,
+    obj::BuildUpgradeState,
     obj::HeroClassList,
     resource::Property,
     templates::ResReq,
@@ -127,7 +128,11 @@ enum NetworkPacket {
         combo_type: String,
     },
     #[serde(rename = "block")]
-    Block { source_id: i32 },
+    Block {
+        source_id: i32,
+        #[serde(default)]
+        defense: String,
+    },
     #[serde(rename = "info_obj")]
     InfoObj { id: i32 },
     #[serde(rename = "info_skills")]
@@ -947,6 +952,14 @@ pub enum ResponsePacket {
         noticemsg: String,
         expiry: Option<i32>,
     },
+    #[serde(rename = "combat_telegraph")]
+    CombatTelegraph {
+        attacker_id: i32,
+        attacker_name: String,
+        attack_type: String,
+        defense_hint: String,
+        strike_in: i32,
+    },
     #[serde(rename = "info_true_death")]
     InfoTrueDeath {
         hero_name: String,
@@ -1088,6 +1101,7 @@ pub enum BroadcastEvents {
     Sound { x: i32, y: i32, sound: String },
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Eq, Hash, PartialEq)]
 pub struct MapObj {
     pub id: i32,
@@ -1103,6 +1117,9 @@ pub struct MapObj {
     pub vision: Option<u32>,
     pub hsl: Vec<i32>,
     pub groups: Vec<String>,
+    pub work_done: Option<i32>,
+    pub total_work: Option<i32>,
+    pub work_per_sec: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1411,7 +1428,23 @@ pub fn send_to_database(database_event: DatabaseEvent, database_managers: &Res<D
     }
 }
 
+pub fn build_progress_fields(
+    build_state: Option<&BuildUpgradeState>,
+) -> (Option<i32>, Option<i32>, Option<i32>) {
+    if let Some(build_state) = build_state {
+        return (
+            Some(build_state.work_done.round() as i32),
+            Some(build_state.build_upgrade_cost.round() as i32),
+            Some(build_state.work_per_sec.round() as i32),
+        );
+    }
+
+    (None, None, None)
+}
+
 pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>) -> MapObj {
+    let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+
     let network_obj = MapObj {
         id: obj.id.0,
         player: obj.player_id.0,
@@ -1426,6 +1459,9 @@ pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>) -> MapObj {
         image: obj.misc.image.clone(),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
+        work_done,
+        total_work,
+        work_per_sec,
     };
 
     network_obj
@@ -1459,12 +1495,17 @@ pub fn network_obj(
         image: image,
         hsl: hsl,
         groups: groups,
+        work_done: None,
+        total_work: None,
+        work_per_sec: None,
     };
 
     network_obj
 }
 
 pub fn to_map_obj(obj: ObjQueryItem<'_, '_>) -> MapObj {
+    let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+
     let network_obj = MapObj {
         id: obj.id.0,
         player: obj.player_id.0,
@@ -1479,6 +1520,9 @@ pub fn to_map_obj(obj: ObjQueryItem<'_, '_>) -> MapObj {
         image: obj.misc.image.clone(),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
+        work_done,
+        total_work,
+        work_per_sec,
     };
 
     network_obj
@@ -1499,6 +1543,9 @@ pub fn to_map_without_vision(obj: ObjQueryMutReadOnlyItem<'_, '_>) -> MapObj {
         image: obj.misc.image.clone(),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
+        work_done: None,
+        total_work: None,
+        work_per_sec: None,
     };
 
     network_obj
@@ -2285,8 +2332,8 @@ async fn handle_connection(
                                             NetworkPacket::Combo{source_id, target_id, combo_type} => {
                                                 handle_combo(player_id, source_id, target_id, combo_type, client_to_game_sender.clone())
                                             }
-                                            NetworkPacket::Block{source_id} => {
-                                                handle_block(player_id, source_id, client_to_game_sender.clone())
+                                            NetworkPacket::Block{source_id, defense} => {
+                                                handle_block(player_id, source_id, defense, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::InfoObj{id} => {
                                                 handle_info_obj(player_id, id, client_to_game_sender.clone())
@@ -2806,12 +2853,14 @@ fn handle_combo(
 fn handle_block(
     player_id: i32,
     source_id: i32,
+    defense: String,
     client_to_game_sender: CBSender<PlayerEvent>,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Block {
             player_id,
             source_id,
+            defense,
         })
         .expect("Could not send message");
 

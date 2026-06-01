@@ -396,11 +396,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         <div style={bodyStylePanel}>
             {activeObjective &&
               <div>
-                <div style={categoryStyle}>{activeObjective.category}</div>
                 <div style={activeTitleStyle}>{activeObjective.title}</div>
                 <div style={bodyStyle}>{activeObjective.action_hint}</div>
-                <div style={labelStyle}>Lesson: {activeObjective.lesson}</div>
-                <div style={labelStyle}>Payoff: {activeObjective.reward}</div>
                 {this.renderProgress(activeObjective, labelStyle)}
               </div>}
 

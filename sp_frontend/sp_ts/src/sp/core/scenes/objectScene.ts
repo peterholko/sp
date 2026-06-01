@@ -14,7 +14,7 @@ import { NetworkEvent } from '../networkEvent';
 import { ObjectState } from '../objectState';
 import { MultiImage } from '../multiImage';
 import { Network } from '../network';
-import { HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE, VILLAGER, HARVESTING, CRAFTING, GATHERING, desktopCameraZoom } from '../config';
+import { HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE, VILLAGER, HARVESTING, CRAFTING, GATHERING, BUILDING, desktopCameraZoom } from '../config';
 import { GameImage } from '../objects/gameImage';
 import { GameContainer } from '../objects/gameContainer';
 
@@ -36,6 +36,13 @@ interface ActionProgressBar {
   durationMs: number;
 }
 
+interface StructureWorkProgress {
+  workDone: number;
+  totalWork: number;
+  workPerSec: number;
+  receivedAt: number;
+}
+
 const ACTION_PROGRESS_WIDTH = 34;
 const ACTION_PROGRESS_HEIGHT = 5;
 const ACTION_PROGRESS_Y_OFFSET = -20;
@@ -53,7 +60,6 @@ const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
   drinking: 3000
 };
 const ACTION_PROGRESS_STATES = new Set(Object.keys(ACTION_PROGRESS_DURATIONS_MS));
-const ACTION_PROGRESS_LOOPING_STATES = new Set(['building']);
 
 export class ObjectScene extends Phaser.Scene {
 
@@ -73,6 +79,7 @@ export class ObjectScene extends Phaser.Scene {
   private burningSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
   private actionProgressBars: Record<string, ActionProgressBar> = {};
+  private structureWorkProgress: Record<string, StructureWorkProgress> = {};
 
   private lastVillagerActivity: Record<string, string> = {};
 
@@ -169,6 +176,7 @@ export class ObjectScene extends Phaser.Scene {
     Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.processReducedEffect, this);
     Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.processIncreasedEffect, this);
     Global.gameEmitter.on(NetworkEvent.INFO_ACTIVITY_UPDATE, this.processActivityUpdate, this);
+    Global.gameEmitter.on(NetworkEvent.WORK_UPDATE, this.processWorkUpdate, this);
 
     this.load.on('filecomplete', this.fileLoadComplete, this);
     this.load.on('complete', this.loadComplete, this);
@@ -480,6 +488,78 @@ export class ObjectScene extends Phaser.Scene {
     return ACTION_PROGRESS_DURATIONS_MS[state] || ACTION_PROGRESS_DEFAULT_DURATION_MS;
   }
 
+  private processWorkUpdate(message): void {
+    if (message.structure_id == null || message.total_work == null) {
+      return;
+    }
+
+    this.structureWorkProgress[message.structure_id.toString()] = {
+      workDone: message.work_done || 0,
+      totalWork: message.total_work,
+      workPerSec: message.work_per_sec || 0,
+      receivedAt: this.time.now
+    };
+
+    this.updateActionProgressBars(this.time.now);
+  }
+
+  private getStructureWorkProgress(structureId: string, structureState: ObjectState, time: number): StructureWorkProgress | null {
+    if (structureState.work_done != null && structureState.total_work != null) {
+      var workPerSec = structureState.work_per_sec || 0;
+      var progress = this.structureWorkProgress[structureId];
+
+      if (!progress ||
+          progress.workDone != structureState.work_done ||
+          progress.totalWork != structureState.total_work ||
+          progress.workPerSec != workPerSec) {
+        progress = {
+          workDone: structureState.work_done,
+          totalWork: structureState.total_work,
+          workPerSec: workPerSec,
+          receivedAt: time
+        };
+
+        this.structureWorkProgress[structureId] = progress;
+      }
+
+      return progress;
+    }
+
+    return this.structureWorkProgress[structureId] || null;
+  }
+
+  private getBuildingProgressForActor(objectState: ObjectState, time: number): number | null {
+    for (var structureId in Global.objectStates) {
+      var structureState = Global.objectStates[structureId];
+
+      if (!structureState || structureState.class != STRUCTURE || structureState.state != BUILDING) {
+        delete this.structureWorkProgress[structureId];
+        continue;
+      }
+
+      if (structureState.x != objectState.x || structureState.y != objectState.y) {
+        continue;
+      }
+
+      var progress = this.getStructureWorkProgress(structureId, structureState, time);
+
+      if (!progress) {
+        continue;
+      }
+
+      if (progress.totalWork <= 0) {
+        return null;
+      }
+
+      var elapsedSeconds = Math.max(0, (time - progress.receivedAt) / 1000);
+      var estimatedWorkDone = progress.workDone + (elapsedSeconds * progress.workPerSec);
+
+      return Math.max(0, Math.min(1, estimatedWorkDone / progress.totalWork));
+    }
+
+    return null;
+  }
+
   private destroyActionProgressBar(objectId: string): void {
     var progressBar = this.actionProgressBars[objectId];
 
@@ -518,7 +598,7 @@ export class ObjectScene extends Phaser.Scene {
       progressBar.durationMs = durationMs;
     }
 
-    this.drawActionProgressBar(progressBar, renderObject, this.time.now);
+    this.drawActionProgressBar(progressBar, objectState, renderObject, this.time.now);
   }
 
   private updateActionProgressBars(time: number): void {
@@ -540,11 +620,11 @@ export class ObjectScene extends Phaser.Scene {
         progressBar.durationMs = this.getActionProgressDurationMs(objectState.state);
       }
 
-      this.drawActionProgressBar(progressBar, renderObject, now);
+      this.drawActionProgressBar(progressBar, objectState, renderObject, now);
     }
   }
 
-  private drawActionProgressBar(progressBar: ActionProgressBar, renderObject: RenderObject, time: number): void {
+  private drawActionProgressBar(progressBar: ActionProgressBar, objectState: ObjectState, renderObject: RenderObject, time: number): void {
     var elapsed = Math.max(0, time - progressBar.startTime);
     var left = renderObject.x + 36 - ACTION_PROGRESS_WIDTH / 2;
     var top = renderObject.y + ACTION_PROGRESS_Y_OFFSET - ACTION_PROGRESS_HEIGHT / 2;
@@ -555,18 +635,13 @@ export class ObjectScene extends Phaser.Scene {
     progressBar.graphics.lineStyle(1, 0x111111, 0.9);
     progressBar.graphics.strokeRect(left, top, ACTION_PROGRESS_WIDTH, ACTION_PROGRESS_HEIGHT);
 
-    if (ACTION_PROGRESS_LOOPING_STATES.has(progressBar.state)) {
-      var innerWidth = ACTION_PROGRESS_WIDTH - 2;
-      var segmentWidth = Math.max(9, innerWidth * 0.42);
-      var loopProgress = (elapsed % progressBar.durationMs) / progressBar.durationMs;
-      var segmentX = left + 1 + (innerWidth - segmentWidth) * loopProgress;
-
-      progressBar.graphics.fillStyle(ACTION_PROGRESS_FILL_COLOR, 1);
-      progressBar.graphics.fillRect(segmentX, top + 1, segmentWidth, ACTION_PROGRESS_HEIGHT - 2);
-      return;
+    var progress = objectState.state == BUILDING
+      ? this.getBuildingProgressForActor(objectState, time)
+      : null;
+    if (progress == null) {
+      progress = Math.min(1, elapsed / progressBar.durationMs);
     }
 
-    var progress = Math.min(1, elapsed / progressBar.durationMs);
     var fillWidth = Math.max(0, (ACTION_PROGRESS_WIDTH - 2) * progress);
 
     if (fillWidth > 0) {

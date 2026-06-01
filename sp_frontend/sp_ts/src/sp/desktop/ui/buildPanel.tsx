@@ -56,11 +56,17 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
 
       var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
 
+      // QW4: cquantity is what the hero is currently carrying. Show have/need
+      // and flag (red) anything the player can't cover yet.
+      var short = req.cquantity != null && req.cquantity < req.quantity;
+
       reqs.push(
         <ResourceItem key={i}
                       resourceName={req.type}
                       resourceImage={resourceImage}
                       quantity={req.quantity}
+                      currentQuantity={req.cquantity}
+                      insufficient={short}
                       index={i}
                       showQuantity={true}/>
       )

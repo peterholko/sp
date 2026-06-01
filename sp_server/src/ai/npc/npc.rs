@@ -1,5 +1,6 @@
 use core::f32;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use big_brain::prelude::*;
 use rand::Rng;
@@ -19,6 +20,7 @@ use crate::ids::Ids;
 use crate::item;
 use crate::item::*;
 use crate::map::{Map, MapPos, TileType};
+use crate::network::{send_to_client, ResponsePacket};
 use crate::obj::{
     BaseQuery, BaseQueryMutState, Blocker, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
     StateChange, Stats, Subclass, SubclassNPC, Template, Viewshed,
@@ -4005,6 +4007,23 @@ pub fn move_near_target_system(
     }
 }
 
+// BB-A: which defensive stance beats a given attack type (telegraph hint).
+fn defense_hint_for(attack_type: &AttackType) -> String {
+    match attack_type {
+        AttackType::Quick => "dodge".to_string(),
+        AttackType::Precise => "parry".to_string(),
+        AttackType::Fierce => "brace".to_string(),
+    }
+}
+
+// BB-A: bundled so the attack system stays within Bevy's 16-param limit.
+// `next_attacks` remembers each NPC's telegraphed upcoming attack type.
+#[derive(SystemParam)]
+pub struct TelegraphState<'w, 's> {
+    clients: Res<'w, Clients>,
+    next_attacks: Local<'s, std::collections::HashMap<i32, AttackType>>,
+}
+
 pub fn attack_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -4021,6 +4040,7 @@ pub fn attack_target_system(
     mut target_query: Query<CombatQuery, Without<SubclassNPC>>,
     fortified_query: Query<&Fortified>,
     mut query: Query<(&Actor, &mut ActionState, &AttackTarget)>,
+    mut telegraph: TelegraphState,
 ) {
     for (Actor(actor), mut state, _chase_attack) in &mut query {
         match *state {
@@ -4131,8 +4151,16 @@ pub fn attack_target_system(
                     npc_name,
                     "Target is adjacent, time to attack"
                 );
-                let (damage, combo, _skill_gain) = Combat::process_attack(
-                    AttackType::Quick,
+                // BB-A: use the attack type telegraphed last cycle (Quick on the
+                // first swing) so the player had a chance to read and counter it.
+                let current_attack = telegraph
+                    .next_attacks
+                    .get(&npc.id.0)
+                    .cloned()
+                    .unwrap_or(AttackType::Quick);
+
+                let (damage, combo, _skill_gain, countered) = Combat::process_attack(
+                    current_attack.clone(),
                     &mut npc,
                     &mut target,
                     &mut commands,
@@ -4163,17 +4191,51 @@ pub fn attack_target_system(
                     });
                 }
 
-                // Add visible damage event to broadcast to everyone nearby
+                // Add visible damage event to broadcast to everyone nearby.
+                // A dodged attack reads as a miss.
                 Combat::add_damage_event(
                     game_tick.0,
-                    "quick".to_string(),
+                    current_attack.clone().to_str(),
                     damage,
                     combo,
-                    false,
+                    countered.as_deref() == Some("Dodged"),
                     &npc,
                     &target,
                     &mut map_events,
                 );
+
+                // BB-A: choose and telegraph the NEXT attack so the player can
+                // read it during the cooldown and set the matching defense.
+                let next_attack = match rand::thread_rng().gen_range(0..3) {
+                    0 => AttackType::Quick,
+                    1 => AttackType::Precise,
+                    _ => AttackType::Fierce,
+                };
+                telegraph.next_attacks.insert(npc.id.0, next_attack.clone());
+
+                if ids.is_hero(target.id.0) {
+                    if let Some(label) = &countered {
+                        let notice = ResponsePacket::Notice {
+                            noticemsg: format!(
+                                "{}! You countered {}'s {} strike.",
+                                label,
+                                npc.template.0,
+                                current_attack.clone().to_str()
+                            ),
+                            expiry: Some(3000),
+                        };
+                        send_to_client(target.player_id.0, notice, &telegraph.clients);
+                    }
+
+                    let telegraph_packet = ResponsePacket::CombatTelegraph {
+                        attacker_id: npc.id.0,
+                        attacker_name: npc.template.0.clone(),
+                        attack_type: next_attack.clone().to_str(),
+                        defense_hint: defense_hint_for(&next_attack),
+                        strike_in: (npc_speed / TICKS_PER_SEC).max(1),
+                    };
+                    send_to_client(target.player_id.0, telegraph_packet, &telegraph.clients);
+                }
 
                 // Add Cooldown Event
                 let cooldown_event = VisibleEvent::CooldownEvent {

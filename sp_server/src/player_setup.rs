@@ -1267,17 +1267,9 @@ pub fn new(
     };
     game_events.insert(intro_notice.event_id, intro_notice);
 
-    let campfire_notice = GameEvent {
-        event_id: ids.new_map_event_id(),
-        start_tick: game_tick.0,
-        run_tick: game_tick.0 + 700,
-        event_type: GameEventType::PlayerNotice {
-            player_id,
-            message: "First lesson: fire solves light and warmth. If you can see danger early, you can choose the fight.".to_string(),
-            expiry: Some(10000),
-        },
-    };
-    game_events.insert(campfire_notice.event_id, campfire_notice);
+    // BB-B: the campfire lesson is now delivered as an action-driven nudge when
+    // the player actually builds a campfire (see objectives_system), instead of
+    // firing on a fixed clock here.
 
     let distress_notice = GameEvent {
         event_id: ids.new_map_event_id(),
@@ -1292,13 +1284,15 @@ pub fn new(
     };
     game_events.insert(distress_notice.event_id, distress_notice);
 
-    // Distress sound from the shipwreck after the first pressure beat
-    let distress_event = VisibleEvent::SoundEvent {
-        pos: shipwreck_pos,
-        sound: "A desperate voice calls from the shipwreck: \"Is anyone out there?!\"".to_string(),
+    // Distress call from the shipwreck after the first pressure beat. Anchored to
+    // the shipwreck object (rather than a bare position) so it renders as an HTML
+    // speech bubble in the UI layer (SpeechBubbleLayer) instead of canvas text.
+    // Intensity 5 preserves the original audible radius.
+    let distress_event = VisibleEvent::SpeechEvent {
+        speech: "A desperate voice calls from the shipwreck: \"Is anyone out there?!\"".to_string(),
         intensity: 5,
     };
-    map_events.new(hero_id, villager_help_tick, distress_event);
+    map_events.new(shipwreck_id, villager_help_tick, distress_event);
 
     // Wolf howl sound event after the player has learned the first camp loop
     let hero_pos = Position {
@@ -1336,8 +1330,30 @@ pub fn new(
             entity_map,
             templates,
         );
+
+    // Spawn the Mausoleum hidden alongside the dormant necromancer. Both stay
+    // invisible (State::Hiding) and unannounced (no NewObj) until the NecroEvent
+    // fires, at which point they are revealed together.
+    let mausoleum_id = ids.new_obj_id();
+    let mausoleum = Obj::create_nospawn(
+        mausoleum_id,
+        NPC_PLAYER_ID,
+        "Mausoleum".to_string(),
+        mausoleum_pos,
+        State::Hiding,
+        Inventory {
+            owner: mausoleum_id,
+            items: Vec::new(),
+        },
+        templates,
+    );
+    let mausoleum_entity = commands.spawn(mausoleum).id();
+    ids.new_obj(mausoleum_id, NPC_PLAYER_ID);
+    entity_map.new_obj(mausoleum_id, mausoleum_entity);
+
     let event_type = GameEventType::NecroEvent {
         necromancer_id: Some(necromancer_id.0),
+        mausoleum_id: Some(mausoleum_id),
         spawn_anchor: mausoleum_pos,
         corpse_anchor: shipwreck_pos,
         home: mausoleum_pos,

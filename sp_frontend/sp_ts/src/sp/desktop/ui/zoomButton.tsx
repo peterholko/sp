@@ -33,8 +33,8 @@ export default class ZoomButton extends React.Component<{}, State> {
   render() {
     const buttonStyle: React.CSSProperties = {
       position: 'fixed',
-      top: '24px',
-      left: '270px',
+      bottom: '160px',
+      left: '53px',
       width: '44px',
       height: '32px',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',

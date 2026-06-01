@@ -767,7 +767,7 @@ pub struct CancelEvents {
     pub entity: Entity,
 }
 
-#[derive(Component)]
+#[derive(Debug, Component)]
 pub struct BuildUpgradeState {
     pub build_upgrade_cost: f32,
     pub work_done: f32,

@@ -74,7 +74,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       threatState: null,
       discoveryEvent: null,
       viewportWidth: typeof window === 'undefined' ? 0 : window.innerWidth,
-      compactExpanded: false,
+      // QW1: start the Survival Thread expanded so the tutorial guidance is
+      // visible by default on compact desktops; the player can still collapse it.
+      compactExpanded: true,
     };
 
     this.handleResize = this.handleResize.bind(this);
@@ -238,16 +240,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       : null;
     const objectives: ObjectiveProgress[] = packetObjectives || this.legacyObjectives();
     const activeObjective = this.activeObjective(objectives);
-    const threatState = this.state.threatState;
-    const discoveryEvent = this.state.discoveryEvent;
-    const sortedRisks = this.sortedRisks();
-    const visibleRisks = sortedRisks.filter(risk => risk.severity != 'quiet').slice(0, 2);
-    const risksToShow = visibleRisks.length > 0 ? visibleRisks : sortedRisks.slice(0, 2);
-    const legendaryThreats: LegendaryThreat[] = threatState && threatState.legendary_threats
-      ? threatState.legendary_threats
-      : [];
 
-    if (!activeObjective && !threatState && !discoveryEvent) {
+    // Threat Pressure and Discovery sections were intentionally removed from the
+    // Survival Thread (too wordy for players). The data still arrives over the
+    // wire and the handlers/state remain, so they can be re-added later.
+    if (!activeObjective) {
       return null;
     }
 
@@ -290,7 +287,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       width: '290px',
       maxWidth: 'calc(100vw - 24px)',
       padding: '9px 10px',
-      pointerEvents: 'none',
+      // QW1: keep the panel interactive (scroll/click) on standard desktops
+      // instead of letting pointer events fall through and disable it.
+      pointerEvents: 'auto',
     };
 
     const titleStyle: React.CSSProperties = {
@@ -425,11 +424,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
         {(!compactDesktop || compactExpanded) && activeObjective &&
           <div>
-            <div style={categoryStyle}>{activeObjective.category}</div>
             <div style={activeTitleStyle}>{activeObjective.title}</div>
             <div style={bodyStyle}>{activeObjective.action_hint}</div>
-            <div style={labelStyle}>Lesson: {activeObjective.lesson}</div>
-            <div style={labelStyle}>Payoff: {activeObjective.reward}</div>
             {this.renderProgress(activeObjective, labelStyle)}
           </div>}
 
@@ -442,43 +438,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           ))}
         </div>}
 
-        {(!compactDesktop || compactExpanded) && threatState &&
-          <div style={sectionStyle}>
-            <div style={categoryStyle}>Threat Pressure: {threatState.pressure_level}</div>
-            <div style={bodyStyle}>Day {threatState.day}, {threatState.phase}. {threatState.next_night_warning}</div>
-            {risksToShow.map(risk => (
-              <div key={risk.id} style={labelStyle}>
-                <span style={{ color: riskColor(risk.severity), fontWeight: 'bold' }}>{risk.severity.toUpperCase()}</span>
-                {' '}{risk.label}
-                {typeof risk.current == 'number' && typeof risk.threshold == 'number' &&
-                  <span> ({risk.current}/{risk.threshold})</span>}
-                <div>{risk.counter_hint}</div>
-              </div>
-            ))}
-            {legendaryThreats.map(threat => (
-              <div key={threat.name} style={labelStyle}>
-                <span style={{ color: threat.status == 'defeated' ? '#8fbf88' : '#ffb36b', fontWeight: 'bold' }}>
-                  {threat.status.toUpperCase()}
-                </span>
-                {' '}{threat.name}
-                {threat.days_active > 0 && <span> day {threat.days_active}</span>}
-                <div>
-                  {threat.hideout_known
-                    ? `Hideout: ${threat.hideout_location || 'known'}`
-                    : `Followers defeated: ${threat.followers_defeated}, captains: ${threat.captains_defeated}/2`}
-                </div>
-                {typeof threat.next_attack_eta == 'number' &&
-                  <div>Next attack in {threat.next_attack_eta}s</div>}
-              </div>
-            ))}
-          </div>}
-
-        {(!compactDesktop || compactExpanded) && discoveryEvent &&
-          <div style={sectionStyle}>
-            <div style={categoryStyle}>Discovery: {discoveryEvent.title}</div>
-            <div style={bodyStyle}>{discoveryEvent.result}</div>
-            <div style={labelStyle}>Source: {discoveryEvent.unlock_source}</div>
-          </div>}
       </div>
     );
   }

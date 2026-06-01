@@ -114,20 +114,6 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
 
     return (
       <div>
-        {(enemyIntent || counterHint) &&
-          <div style={intentStyle}>
-            {enemyIntent &&
-              <div style={hintRowStyle}>
-                <span style={hintNameStyle}>Enemy:</span>
-                <span style={hintLabelStyle}>{enemyIntent}</span>
-              </div>}
-            {counterHint &&
-              <div style={hintRowStyle}>
-                <span style={hintNameStyle}>Counter:</span>
-                <span style={hintLabelStyle}>{counterHint}</span>
-              </div>}
-          </div>
-        }
         {(combos.length > 0 || availableFinisher) &&
           <div style={hintsStyle}>
             {availableFinisher &&

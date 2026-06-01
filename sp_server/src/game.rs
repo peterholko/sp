@@ -353,6 +353,15 @@ pub struct SanctuaryExcursionEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
 
+// Players that just logged in and need their hero's sanctuary state re-sent.
+// The server only emits sanctuary effect packets on movement transitions, so on
+// (re)login the client has no idea whether the hero is currently protected.
+// Each entry is (player_id, due_tick): the resend is held until due_tick so it is
+// sent after the login perception (which is what assigns the hero id client-side),
+// keeping the WebSocket delivery order correct.
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SanctuaryLoginChecks(pub Vec<(i32, i32)>);
+
 #[derive(Debug, Component, Clone)]
 pub struct SanctuaryHunter {
     pub player_id: i32,
@@ -841,6 +850,7 @@ pub struct GameEventExtras<'w, 's> {
     pub merchant_query: Query<'w, 's, &'static mut Merchant>,
     pub initial_encounter_state: Res<'w, InitialEncounterState>,
     pub plans: ResMut<'w, Plans>,
+    pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -946,6 +956,7 @@ pub struct MapObjQuery {
     pub subclass: &'static Subclass,
     pub state: &'static State,
     pub misc: &'static Misc,
+    pub build_upgrade_state: Option<&'static BuildUpgradeState>,
 }
 
 #[derive(QueryData)]
@@ -962,6 +973,7 @@ pub struct ObjQuery {
     pub state: &'static State,
     //pub viewshed: &'static Viewshed,
     pub misc: &'static Misc,
+    pub build_upgrade_state: Option<&'static BuildUpgradeState>,
 }
 
 #[derive(QueryData)]
@@ -994,6 +1006,7 @@ pub struct ObjQueryVision {
     pub state: &'static State,
     pub viewshed: &'static Viewshed,
     pub misc: &'static Misc,
+    pub build_upgrade_state: Option<&'static BuildUpgradeState>,
 }
 
 #[derive(QueryData)]
@@ -1216,6 +1229,7 @@ impl Plugin for GamePlugin {
         app.add_systems(OnEnter(AppState::Running), init_objs);
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
         app.init_resource::<SanctuaryExcursions>();
+        app.init_resource::<SanctuaryLoginChecks>();
         app.init_resource::<SurveyHistory>();
         app.init_resource::<InvestigatedPOIs>();
 
@@ -1415,6 +1429,12 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 game_event_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                sanctuary_login_system
+                    .after(game_event_system)
+                    .run_if(in_state(AppState::Running)),
             )
             /* .add_systems(
                 Update,
@@ -2671,6 +2691,9 @@ fn move_event_completed_system(
                 if mover_viewshed.range >= distance
                     && Obj::state_to_enum(map_obj.state.to_string()).is_visible()
                 {
+                    let (work_done, total_work, work_per_sec) =
+                        network::build_progress_fields(map_obj.build_upgrade_state);
+
                     // Convert to network::MapObj
                     let network_map_obj = network::MapObj {
                         id: map_obj.id.0,
@@ -2686,6 +2709,9 @@ fn move_event_completed_system(
                         image: map_obj.misc.image.clone(),
                         hsl: map_obj.misc.hsl.clone(),
                         groups: map_obj.misc.groups.clone(),
+                        work_done,
+                        total_work,
+                        work_per_sec,
                     };
 
                     new_objs.push(network_map_obj);
@@ -4011,6 +4037,11 @@ fn gather_event_system(
                     let item_templates = &templates.item_templates;
 
                     let mut items_to_update: Vec<network::Item> = Vec::new();
+                    // QW2: accumulate gathered skill XP so the hero gets the
+                    // floating "+N Skill XP" outcome feedback on completion.
+                    let mut gathered_xp: i32 = 0;
+                    let mut gathered_skill: Option<String> = None;
+                    let mut gathered_levelup: Option<i32> = None;
 
                     info!("Resources on tile: {:?}", resources_on_tile);
                     for resource in resources_on_tile.iter() {
@@ -4063,11 +4094,16 @@ fn gather_event_system(
 
                                 if (current_total_weight + total_needed_weight) < capacity {
                                     // Update skill
-                                    gatherer.skills.update(
+                                    let levelup = gatherer.skills.update(
                                         skill_name_enum.clone(),
                                         100,
                                         &templates.skill_templates,
                                     );
+                                    gathered_xp += 100;
+                                    gathered_skill = Some(skill_name.clone());
+                                    if levelup.is_some() {
+                                        gathered_levelup = levelup;
+                                    }
 
                                     let mut item_attrs = HashMap::new();
 
@@ -4145,6 +4181,23 @@ fn gather_event_system(
                     }
 
                     if gatherer.subclass.is_hero() {
+                        // QW2: surface the skill XP gained as floating "+N Skill XP"
+                        // text (mirrors the refine path); the item result is shown
+                        // by the NewItems notice below.
+                        if gathered_xp > 0 {
+                            if let Some(skill) = gathered_skill.clone() {
+                                let xp_update_packet = ResponsePacket::Xp {
+                                    id: *gatherer_id,
+                                    xp_list: vec![network::Xp {
+                                        skill,
+                                        xp: gathered_xp,
+                                        levelup: gathered_levelup,
+                                    }],
+                                };
+                                send_to_client(gatherer.player_id.0, xp_update_packet, &clients);
+                            }
+                        }
+
                         if let Some(first) = items_to_update.first() {
                             let packet = ResponsePacket::NewItems {
                                 action: STATE_GATHERING.to_string(),
@@ -6586,15 +6639,12 @@ fn investigate_event_system(
 
             if target_template_name == "Shipwreck" && !player_obj.scavenge_shipwreck {
                 player_obj.scavenge_shipwreck = true;
+                // BB-A/BB-B: action-driven nudge toward the next objective.
                 send_to_client(
                     player_id,
-                    ResponsePacket::DiscoveryEvent {
-                        version: 1,
-                        discovery_type: "poi".to_string(),
-                        title: "Shipwreck scavenged".to_string(),
-                        unlock_source: "Investigation".to_string(),
-                        location: Some(format!("{},{}", target_pos.x, target_pos.y)),
-                        result: "The wreck teaches the first rule: inspect places, recover supplies, and turn danger into tools.".to_string(),
+                    ResponsePacket::Notice {
+                        noticemsg: "Supplies salvaged from the wreck. Build a campfire before dusk — light keeps the dark and its dangers at bay.".to_string(),
+                        expiry: Some(10000),
                     },
                     &clients,
                 );
@@ -9272,6 +9322,8 @@ fn perception_system(
 
                         if observer.viewshed.range >= distance && obj.state.is_visible() {
                             debug!("Adding visible obj to percetion");
+                            let (work_done, total_work, work_per_sec) =
+                                network::build_progress_fields(obj.build_upgrade_state);
 
                             let visible_obj = network::MapObj {
                                 id: obj.id.0,
@@ -9287,6 +9339,9 @@ fn perception_system(
                                 image: obj.misc.image.to_owned(),
                                 hsl: obj.misc.hsl.to_owned(),
                                 groups: obj.misc.groups.to_owned(),
+                                work_done,
+                                total_work,
+                                work_per_sec,
                             };
 
                             visible_objs_map
@@ -9296,6 +9351,9 @@ fn perception_system(
                         }
                     }
                 }
+
+                let (work_done, total_work, work_per_sec) =
+                    network::build_progress_fields(observer.build_upgrade_state);
 
                 // Add observer to perception data
                 let observer_obj = network::MapObj {
@@ -9312,6 +9370,9 @@ fn perception_system(
                     image: observer.misc.image.to_owned(),
                     hsl: observer.misc.hsl.to_owned(),
                     groups: observer.misc.groups.to_owned(),
+                    work_done,
+                    total_work,
+                    work_per_sec,
                 };
 
                 observer_objs_map
@@ -9411,6 +9472,117 @@ fn perception_system(
     perception_updates.clear();
 }
 
+// On (re)login, evaluate the hero's proximity to monoliths and re-send its current
+// sanctuary state. The sanctuary effect is normally applied/removed only as the hero
+// crosses monolith ranges during movement, so a freshly connected client (and a hero
+// that hasn't moved since spawn or a scene reload) would otherwise show no protection.
+// Mirrors the apply/clear logic in move_event_completed_system to keep the Effects map
+// and the Sanctuary/WeakSanctuary marker components in sync.
+fn sanctuary_login_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    mut login_checks: ResMut<SanctuaryLoginChecks>,
+    mut hero_query: Query<(Entity, &Id, &PlayerId, &Position, &mut Effects), With<SubclassHero>>,
+    monolith_query: Query<(&Id, &Position), With<Monolith>>,
+) {
+    if login_checks.is_empty() {
+        return;
+    }
+
+    // Process only entries whose hold has elapsed; keep the rest for a later tick.
+    let now = game_tick.0;
+    let mut due_player_ids: Vec<i32> = Vec::new();
+    let mut pending: Vec<(i32, i32)> = Vec::new();
+
+    for (player_id, due_tick) in login_checks.drain(..) {
+        if due_tick <= now {
+            due_player_ids.push(player_id);
+        } else {
+            pending.push((player_id, due_tick));
+        }
+    }
+
+    login_checks.0 = pending;
+
+    for player_id in due_player_ids {
+        for (entity, hero_id, hero_player_id, hero_pos, mut effects) in hero_query.iter_mut() {
+            if hero_player_id.0 != player_id {
+                continue;
+            }
+
+            // Nearest monolith determines strength: strong wins over weak.
+            let mut in_range_sanctuary: Option<(i32, Position)> = None;
+            let mut in_range_weak_sanctuary: Option<(i32, Position)> = None;
+
+            for (monolith_id, monolith_pos) in monolith_query.iter() {
+                let distance = Map::dist(*hero_pos, *monolith_pos);
+
+                if distance < SANCTUARY_RANGE {
+                    in_range_sanctuary = Some((monolith_id.0, monolith_pos.clone()));
+                    break;
+                } else if distance < WEAK_SANCTUARY_RANGE && in_range_weak_sanctuary.is_none() {
+                    in_range_weak_sanctuary = Some((monolith_id.0, monolith_pos.clone()));
+                }
+            }
+
+            if let Some((monolith_id, monolith_pos)) = in_range_sanctuary {
+                if !effects.has(Effect::Sanctuary) {
+                    effects
+                        .0
+                        .insert(Effect::Sanctuary, (game_tick.0 + 1, 1.0, 1));
+                }
+                effects.0.remove(&Effect::WeakSanctuary);
+
+                commands.entity(entity).insert(Sanctuary {
+                    id: monolith_id,
+                    pos: monolith_pos,
+                });
+                commands.entity(entity).remove::<WeakSanctuary>();
+
+                let response_packet = ResponsePacket::GainedEffect {
+                    id: hero_id.0,
+                    x: hero_pos.x,
+                    y: hero_pos.y,
+                    effect: Effect::Sanctuary.to_str(),
+                };
+
+                send_to_client(player_id, response_packet, &clients);
+            } else if let Some((monolith_id, monolith_pos)) = in_range_weak_sanctuary {
+                if !effects.has(Effect::WeakSanctuary) {
+                    effects
+                        .0
+                        .insert(Effect::WeakSanctuary, (game_tick.0 + 1, 1.0, 1));
+                }
+                effects.0.remove(&Effect::Sanctuary);
+
+                commands.entity(entity).insert(WeakSanctuary {
+                    id: monolith_id,
+                    pos: monolith_pos,
+                });
+                commands.entity(entity).remove::<Sanctuary>();
+
+                let response_packet = ResponsePacket::GainedEffect {
+                    id: hero_id.0,
+                    x: hero_pos.x,
+                    y: hero_pos.y,
+                    effect: Effect::WeakSanctuary.to_str(),
+                };
+
+                send_to_client(player_id, response_packet, &clients);
+            } else {
+                // Outside every monolith range: clear any stale sanctuary state.
+                effects.0.remove(&Effect::Sanctuary);
+                effects.0.remove(&Effect::WeakSanctuary);
+                commands.entity(entity).remove::<Sanctuary>();
+                commands.entity(entity).remove::<WeakSanctuary>();
+            }
+
+            break; // one hero per player
+        }
+    }
+}
+
 fn game_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -9442,6 +9614,13 @@ fn game_event_system(
                 GameEventType::Login { player_id } => {
                     debug!("Processing Login: {:?}", player_id);
                     events_to_remove.push(*event_id);
+
+                    // Re-send the hero's current sanctuary state to the client, which
+                    // otherwise only learns it from movement transitions. Held a few
+                    // ticks so it lands after the login perception that sets the hero id.
+                    extras
+                        .sanctuary_login_checks
+                        .push((*player_id, game_tick.0 + 10));
 
                     if let Some(player_explored_map) = explored_map.get(&player_id) {
                         let explored_map_packet = ResponsePacket::ExploredMap {
@@ -9631,6 +9810,7 @@ fn game_event_system(
                 }
                 GameEventType::NecroEvent {
                     necromancer_id,
+                    mausoleum_id,
                     spawn_anchor,
                     corpse_anchor,
                     home,
@@ -9724,6 +9904,28 @@ fn game_event_system(
                     commands.trigger(NewObj {
                         entity: necro_entity,
                     });
+
+                    // Reveal the hidden Mausoleum together with the necromancer.
+                    if let Some(mausoleum_id) = mausoleum_id {
+                        if let Some(mausoleum_entity) = entity_map.get_entity(*mausoleum_id) {
+                            if let Ok(mut mausoleum) = query.get_mut(mausoleum_entity) {
+                                *mausoleum.state = State::None;
+                                commands.trigger(NewObj {
+                                    entity: mausoleum_entity,
+                                });
+                            } else {
+                                warn!(
+                                    "NecroEvent mausoleum obj {:?} missing required components",
+                                    mausoleum_id
+                                );
+                            }
+                        } else {
+                            warn!(
+                                "NecroEvent mausoleum obj {:?} missing from entity map",
+                                mausoleum_id
+                            );
+                        }
+                    }
 
                     // Necromancer announces arrival
                     let speech_event = VisibleEvent::SpeechEvent {
@@ -11603,26 +11805,25 @@ fn objectives_system(
         // Check: Build a Campfire
         if !obj.build_campfire && has_campfire {
             obj.build_campfire = true;
-            send_discovery_event(
+            // BB-B: action-driven nudge — confirm + point to the next danger/step.
+            send_to_client(
                 player_id.0,
-                "settlement",
-                "Campfire lesson learned",
-                "First sheltercraft",
-                None,
-                "Fire extends sight and warmth. Night threats become easier to read around light.",
+                ResponsePacket::Notice {
+                    noticemsg: "Your fire is lit — it wards the night and reveals what creeps in the dark. Keep your weapon close.".to_string(),
+                    expiry: Some(10000),
+                },
                 &clients,
             );
         }
 
         if !obj.win_first_fight && starting_enemies_dead {
             obj.win_first_fight = true;
-            send_discovery_event(
+            send_to_client(
                 player_id.0,
-                "combat",
-                "First fight survived",
-                "Shipwreck attack",
-                None,
-                "Fast creatures punish hesitation. Quick attacks build control; block buys time.",
+                ResponsePacket::Notice {
+                    noticemsg: "You held your ground. Gather wood and food, then raise walls before night falls.".to_string(),
+                    expiry: Some(10000),
+                },
                 &clients,
             );
         }
@@ -11630,13 +11831,12 @@ fn objectives_system(
         // Check: Build 3 Structures
         if !obj.build_3_structures && structure_count >= 3 {
             obj.build_3_structures = true;
-            send_discovery_event(
+            send_to_client(
                 player_id.0,
-                "settlement",
-                "A working camp",
-                "Construction",
-                None,
-                "A camp becomes safer when each building solves a different problem: light, rest, storage, defense.",
+                ResponsePacket::Notice {
+                    noticemsg: "A real camp takes shape. Each building should answer a need — rest, storage, defense.".to_string(),
+                    expiry: Some(10000),
+                },
                 &clients,
             );
         }
@@ -12165,29 +12365,32 @@ fn weather_cycle_system(
     }
 
     // Notify players about weather conditions
-    if !weather_areas.is_empty() {
-        let weather_names: Vec<String> = weather_areas
-            .iter()
-            .map(|w| w.weather.to_string())
-            .collect();
-        let unique_names: Vec<String> = weather_names
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        let weather_msg = format!(
-            "Weather report: {} observed on the island.",
-            unique_names.join(", ")
-        );
-
-        for player_id in hero_query.iter() {
-            let packet = ResponsePacket::Notice {
-                noticemsg: weather_msg.clone(),
-                expiry: Some(8000),
-            };
-            send_to_client(player_id.0, packet, &clients);
-        }
-    }
+    // NOTE: Weather report notices are temporarily disabled to reduce early-game
+    // notification noise. Revisit later (the weather areas themselves still spawn
+    // and apply gameplay effects; only the toast is suppressed).
+    // if !weather_areas.is_empty() {
+    //     let weather_names: Vec<String> = weather_areas
+    //         .iter()
+    //         .map(|w| w.weather.to_string())
+    //         .collect();
+    //     let unique_names: Vec<String> = weather_names
+    //         .into_iter()
+    //         .collect::<std::collections::HashSet<_>>()
+    //         .into_iter()
+    //         .collect();
+    //     let weather_msg = format!(
+    //         "Weather report: {} observed on the island.",
+    //         unique_names.join(", ")
+    //     );
+    //
+    //     for player_id in hero_query.iter() {
+    //         let packet = ResponsePacket::Notice {
+    //             noticemsg: weather_msg.clone(),
+    //             expiry: Some(8000),
+    //         };
+    //         send_to_client(player_id.0, packet, &clients);
+    //     }
+    // }
 }
 
 // Weather effects: applies gameplay effects based on weather at entity positions

@@ -12,6 +12,15 @@ import { getNeedStatusIcon, isCriticalNeed, NeedKind } from "./needStatus";
 
 const NEED_STATUS_SIZE = 30;
 
+// Effect names as sent by the server (see sp_server effect.rs SANCTUARY / WEAK_SANCTUARY).
+const SANCTUARY_EFFECT = "Sanctuary";
+const WEAK_SANCTUARY_EFFECT = "Weak Sanctuary";
+
+// Sanctuary strength shown beside the HP/Stamina panel: green when strong, yellow when weak.
+type SanctuaryState = "strong" | "weak" | null;
+const SANCTUARY_STRONG_COLOR = "#3fb84f";
+const SANCTUARY_WEAK_COLOR = "#e2b007";
+
 const CRITICAL_NEED_WARNING_STYLE = `
 @keyframes criticalNeedIconPulse {
   0%, 100% {
@@ -86,20 +95,63 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
 
     this.state = {
       hideHero : true,
+      sanctuary : null as SanctuaryState,
     };
   }
 
   componentDidMount() {
     Global.gameEmitter.on(NetworkEvent.PERCEPTION, this.handlePerception, this);
+    Global.gameEmitter.on(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
+    Global.gameEmitter.on(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
+    Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
+    Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
   }
 
   componentWillUnmount() {
     // avoid leaks / duplicate handlers
     Global.gameEmitter.off(NetworkEvent.PERCEPTION, this.handlePerception, this);
+    Global.gameEmitter.off(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
+    Global.gameEmitter.off(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
+    Global.gameEmitter.off(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
+    Global.gameEmitter.off(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
   }
 
   handlePerception() {
     this.setState({hideHero: false});
+  }
+
+  // Track the hero's Sanctuary strength from effect-change packets. The server only
+  // sends these for the hero (villagers are skipped) as it crosses monolith ranges:
+  // gained -> entered, increased -> weak became strong, reduced -> strong became weak,
+  // lost -> left entirely.
+  handleGainedEffect(message) {
+    if (message.id != Global.heroId) return;
+    if (message.effect == SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: "strong" });
+    } else if (message.effect == WEAK_SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: "weak" });
+    }
+  }
+
+  handleLostEffect(message) {
+    if (message.id != Global.heroId) return;
+    if (message.effect == SANCTUARY_EFFECT || message.effect == WEAK_SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: null });
+    }
+  }
+
+  handleIncreasedEffect(message) {
+    if (message.id != Global.heroId) return;
+    if (message.effect == SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: "strong" });
+    }
+  }
+
+  handleReducedEffect(message) {
+    if (message.id != Global.heroId) return;
+    if (message.effect == SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: "weak" });
+    }
   }
 
   render() {
@@ -218,6 +270,19 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
+    // Sanctuary indicator sits just right of the HP/Stamina panel (hpframe ends ~x229).
+    const sanctuaryStyle = {
+      transform: 'translate(238px, 21px)',
+      zIndex: 4,
+      position: 'fixed',
+      pointerEvents: 'none',
+      filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.85))'
+    } as React.CSSProperties
+
+    const sanctuary: SanctuaryState = this.state.sanctuary;
+    const sanctuaryColor = sanctuary === "strong" ? SANCTUARY_STRONG_COLOR : SANCTUARY_WEAK_COLOR;
+    const sanctuaryLabel = sanctuary === "strong" ? "Sanctuary (Strong)" : "Sanctuary (Weak)";
+
     return (
       
       <div>
@@ -244,8 +309,21 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           {renderNeedStatusIcon("hunger", this.props.hungerStatus, hungerStatusStyle)}
           {renderNeedStatusIcon("tiredness", this.props.fatigueStatus, fatigueStatusStyle)}
 
-          {!this.state.hideHero && 
+          {!this.state.hideHero &&
             <img src={imagePath} style={heroStyle}/>
+          }
+
+          {sanctuary &&
+            <svg width="26" height="30" viewBox="0 0 24 28" style={sanctuaryStyle} role="img" aria-label={sanctuaryLabel}>
+              <title>{sanctuaryLabel}</title>
+              <path
+                d="M12 1 L22 4.5 V13 C22 20 17.5 25 12 27 C6.5 25 2 20 2 13 V4.5 Z"
+                fill={sanctuaryColor}
+                stroke="#0c0e10"
+                strokeWidth="1.6"
+                strokeLinejoin="round"
+              />
+            </svg>
           }
       </div>
     );

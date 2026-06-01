@@ -150,7 +150,7 @@ export type ResponsePacket =
   | { packet: 'PlayerMoved'; player_id: number; x: number; y: number }
   | { packet: 'create_foundation'; result: string }
   | { packet: 'start_upgrade'; structure_id: number }
-  | { packet: 'work_update'; work_done: number; work_per_sec: number }
+  | { packet: 'work_update'; structure_id: number; work_done: number; total_work: number; work_per_sec: number }
   | { packet: 'upgrade'; upgrade_time: number }
   | { packet: 'craft'; craft_time: number }
   | { packet: 'refine'; refine_time: number }
@@ -184,6 +184,7 @@ export type ResponsePacket =
   | { packet: 'Pong' }
   | { packet: 'Error'; errmsg: string }
   | { packet: 'Notice'; noticemsg: string; expiry?: number | null }
+  | { packet: 'combat_telegraph'; attacker_id: number; attacker_name: string; attack_type: string; defense_hint: string; strike_in: number }
   | { packet: 'info_true_death'; hero_name: string; hero_rank: string; total_xp: number; score_total: number; score_breakdown: ScoreBreakdown; days_survived: number; waves_survived: number; highest_pressure_level: number; legendary_kills: number; hideouts_cleared: number; fate: string; crisis_tier: number }
   | { packet: 'debug_obj'; obj_id: number; enabled: boolean }
   | { packet: 'log_level_set'; target: string; level: string; success: boolean }
@@ -308,6 +309,9 @@ export interface MapObj {
   vision?: number;
   hsl: number[];
   groups: string[];
+  work_done?: number;
+  total_work?: number;
+  work_per_sec?: number;
 }
 
 export interface MapWeather {
@@ -1102,10 +1106,11 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
-  public sendBlock(sourceId) {
+  public sendBlock(sourceId, defense = "brace") {
     var m = {
       cmd: "block",
-      source_id: sourceId
+      source_id: sourceId,
+      defense: defense
     };
 
     this.sendMessage(JSON.stringify(m));
@@ -1646,6 +1651,8 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.ERROR, jsonData);
       } else if (jsonData.hasOwnProperty('noticemsg')) {
         Global.gameEmitter.emit(NetworkEvent.NOTICE, jsonData);
+      } else if (jsonData.packet == "combat_telegraph") {
+        Global.gameEmitter.emit(NetworkEvent.COMBAT_TELEGRAPH, jsonData);
       } else if (jsonData.packet == "select_class") {
         Global.playerId = jsonData.player;
         if (Global.pendingClassSelection) {
@@ -1904,6 +1911,9 @@ export class Network {
         y: obj.y,
         vision: obj.vision,
         image: obj.image,
+        work_done: obj.work_done,
+        total_work: obj.total_work,
+        work_per_sec: obj.work_per_sec,
         op: 'added'
       };
 
@@ -1957,6 +1967,9 @@ export class Network {
         Global.objectStates[observer.id].x = observer.x;
         Global.objectStates[observer.id].y = observer.y;
         Global.objectStates[observer.id].image = observer.image;
+        Global.objectStates[observer.id].work_done = observer.work_done;
+        Global.objectStates[observer.id].total_work = observer.total_work;
+        Global.objectStates[observer.id].work_per_sec = observer.work_per_sec;
         Global.objectStates[observer.id].op = 'updated';
         Global.objectStates[observer.id].updateAttr = undefined;
         Global.objectStates[observer.id].eventType = undefined;
@@ -1976,6 +1989,9 @@ export class Network {
           y: observer.y,
           vision: observer.vision,
           image: observer.image,
+          work_done: observer.work_done,
+          total_work: observer.total_work,
+          work_per_sec: observer.work_per_sec,
           op: 'added',
           eventType: undefined
         };
@@ -2009,6 +2025,9 @@ export class Network {
         Global.objectStates[visibleObj.id].x = visibleObj.x;
         Global.objectStates[visibleObj.id].y = visibleObj.y;
         Global.objectStates[visibleObj.id].image = visibleObj.image;
+        Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
+        Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
+        Global.objectStates[visibleObj.id].work_per_sec = visibleObj.work_per_sec;
         Global.objectStates[visibleObj.id].op = 'updated';
         Global.objectStates[visibleObj.id].updateAttr = undefined;
         Global.objectStates[visibleObj.id].eventType = undefined;
@@ -2028,6 +2047,9 @@ export class Network {
           y: visibleObj.y,
           vision: visibleObj.vision,
           image: visibleObj.image,
+          work_done: visibleObj.work_done,
+          total_work: visibleObj.total_work,
+          work_per_sec: visibleObj.work_per_sec,
           op: 'added',
           eventType: undefined
         };
@@ -2060,6 +2082,9 @@ export class Network {
         Global.objectStates[obj.id].x = obj.x;
         Global.objectStates[obj.id].y = obj.y;
         Global.objectStates[obj.id].image = obj.image;
+        Global.objectStates[obj.id].work_done = obj.work_done;
+        Global.objectStates[obj.id].total_work = obj.total_work;
+        Global.objectStates[obj.id].work_per_sec = obj.work_per_sec;
         Global.objectStates[obj.id].op = 'updated';
         Global.objectStates[obj.id].updateAttr = undefined;
         Global.objectStates[obj.id].eventType = undefined;

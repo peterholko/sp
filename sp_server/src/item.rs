@@ -1880,6 +1880,21 @@ impl Inventory {
         return true;
     }
 
+    // QW4: total quantity the inventory holds that counts toward a build
+    // requirement of the given type (mirrors has_reqs_for_build matching),
+    // used to show the player have/need before they commit to a build.
+    pub fn count_for_build_req(&self, req_type: &str) -> i32 {
+        let mut count = 0;
+
+        for item in self.items.iter() {
+            if req_matches_build(req_type, &item.name, &item.class, &item.subclass) {
+                count += item.quantity;
+            }
+        }
+
+        return count;
+    }
+
     fn find_by_class(&self, class: String) -> Option<usize> {
         let index = self.items.iter().position(|item| item.class == class);
         return index;

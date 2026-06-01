@@ -22,6 +22,8 @@ pub enum Skill {
     Construction,
     Axe,
     Spear,
+    Bow,
+    Dagger,
     Carpentry,
 }
 
@@ -30,10 +32,12 @@ impl Skill {
         match name {
             "Armorsmithing" => Some(Skill::Armorsmithing),
             "Axe" => Some(Skill::Axe),
+            "Bow" => Some(Skill::Bow),
             "Butchery" => Some(Skill::Butchery),
             "Carpentry" => Some(Skill::Carpentry),
             "Construction" => Some(Skill::Construction),
             "Cooking" => Some(Skill::Cooking),
+            "Dagger" => Some(Skill::Dagger),
             "Farming" => Some(Skill::Farming),
             "Fishing" => Some(Skill::Fishing),
             "Foraging" => Some(Skill::Foraging),
@@ -57,10 +61,12 @@ impl Skill {
         match self {
             Skill::Armorsmithing => "Armorsmithing",
             Skill::Axe => "Axe",
+            Skill::Bow => "Bow",
             Skill::Butchery => "Butchery",
             Skill::Carpentry => "Carpentry",
             Skill::Construction => "Construction",
             Skill::Cooking => "Cooking",
+            Skill::Dagger => "Dagger",
             Skill::Farming => "Farming",
             Skill::Fishing => "Fishing",
             Skill::Foraging => "Foraging",

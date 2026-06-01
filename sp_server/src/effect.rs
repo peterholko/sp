@@ -24,6 +24,8 @@ pub const CAMPFIRE_LIGHT: &str = "Campfire Light";
 pub const WATCHTOWER_LIGHT: &str = "Watchtower Light";
 pub const FOOD_POISONING: &str = "Food Poisoning";
 pub const BRACING: &str = "Bracing";
+pub const DODGING: &str = "Dodging";
+pub const PARRYING: &str = "Parrying";
 pub const SICKNESS: &str = "Sickness";
 pub const CURSED: &str = "Cursed";
 
@@ -81,6 +83,8 @@ pub enum Effect {
     WatchtowerLight,
     FoodPoisoning,
     Bracing,
+    Dodging,
+    Parrying,
     Sickness,
     Cursed,
 }
@@ -108,6 +112,8 @@ impl Effect {
             Effect::WatchtowerLight => WATCHTOWER_LIGHT.to_string(),
             Effect::FoodPoisoning => FOOD_POISONING.to_string(),
             Effect::Bracing => BRACING.to_string(),
+            Effect::Dodging => DODGING.to_string(),
+            Effect::Parrying => PARRYING.to_string(),
             Effect::Sickness => SICKNESS.to_string(),
             Effect::Cursed => CURSED.to_string(),
         }
@@ -135,6 +141,8 @@ impl Effect {
             WATCHTOWER_LIGHT => Effect::WatchtowerLight,
             FOOD_POISONING => Effect::FoodPoisoning,
             BRACING => Effect::Bracing,
+            DODGING => Effect::Dodging,
+            PARRYING => Effect::Parrying,
             SICKNESS => Effect::Sickness,
             CURSED => Effect::Cursed,
             _ => panic!("Invalid Effect"),

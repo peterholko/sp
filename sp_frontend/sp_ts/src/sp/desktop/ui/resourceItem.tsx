@@ -18,7 +18,8 @@ interface ResItemProps {
   xPos?,
   yPos?,
   spaceDistance?,
-  addHeight?
+  addHeight?,
+  insufficient?
 }
 
 export default class ResourceItem extends React.Component<ResItemProps, any> {
@@ -100,7 +101,8 @@ export default class ResourceItem extends React.Component<ResItemProps, any> {
         <img src={'/static/art/items/' + this.props.resourceImage + '.png'}
             style={itemStyle} />
         {this.props.showQuantity &&
-          <span id="itemquantity" className={styles.itemquantity}>{quantityStr}</span>}
+          <span id="itemquantity" className={styles.itemquantity}
+                style={this.props.insufficient ? { color: '#ff6b6b' } : undefined}>{quantityStr}</span>}
       </div>
     );
   }

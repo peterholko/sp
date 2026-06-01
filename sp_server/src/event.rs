@@ -520,6 +520,7 @@ pub enum GameEventType {
     },
     NecroEvent {
         necromancer_id: Option<i32>,
+        mausoleum_id: Option<i32>,
         spawn_anchor: Position,
         corpse_anchor: Position,
         home: Position,

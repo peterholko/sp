@@ -96,6 +96,15 @@
   defense: 3.0
   duration: 50
 
+# BB-A defensive stances. Their mitigation comes from the matched-counter
+# multiplier in combat (dodge -100% / parry -75% / brace -50%), so no passive
+# defense here. Brace keeps a small passive defense above as the generalist.
+- name: Dodging
+  duration: 50
+
+- name: Parrying
+  duration: 50
+
 ######################
 ## Positive Effects ##
 ######################

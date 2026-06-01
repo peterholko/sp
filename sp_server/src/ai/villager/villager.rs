@@ -2496,7 +2496,7 @@ pub fn fight_back_system(
                     );
                 });
 
-                let (damage, combo, _skill_updated) = Combat::process_attack(
+                let (damage, combo, _skill_updated, _countered) = Combat::process_attack(
                     AttackType::Quick,
                     &mut villager,
                     &mut attacker,

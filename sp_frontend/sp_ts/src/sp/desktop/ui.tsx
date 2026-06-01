@@ -195,6 +195,7 @@ interface UIState {
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
   combatState: any,
+  combatTelegraphs: any,
   inCombatZoom: boolean,
 }
 
@@ -202,6 +203,10 @@ export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
   private heroDeathOverlayTimer: any = null;
   private nextNotificationId: number = 1;
+  private firstActionNudgeShown: boolean = false;
+  // BB-A: per-attacker expiry timers, keyed by attacker_id. An entry is dropped
+  // only when its attacker stops telegraphing (died/fled/disengaged).
+  private telegraphTimers: { [id: number]: any } = {};
 
   constructor(props) {
     super(props);
@@ -311,6 +316,7 @@ export default class UI extends React.Component<any, UIState> {
       fatigueStatus: '',
       infoRefineItemTriggered: false,
       combatState: null,
+      combatTelegraphs: {},
       inCombatZoom: false,
     }
 
@@ -428,6 +434,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.ATTACK, this.handleAttack, this);
     Global.gameEmitter.on(NetworkEvent.ABILITY, this.handleAbility, this);
     Global.gameEmitter.on(NetworkEvent.COMBAT_STATE, this.handleCombatState, this);
+    Global.gameEmitter.on(NetworkEvent.COMBAT_TELEGRAPH, this.handleCombatTelegraph, this);
     Global.gameEmitter.on(NetworkEvent.ADVANCE, this.handleAdvance, this);
     Global.gameEmitter.on(NetworkEvent.START_UPGRADE, this.handleStartUpgrade, this);
     Global.gameEmitter.on(NetworkEvent.UPGRADE, this.handleUpgrade, this);
@@ -794,7 +801,15 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleBrace() {
-    Global.network.sendBlock(Global.heroId);
+    Global.network.sendBlock(Global.heroId, 'brace');
+  }
+
+  handleParry() {
+    Global.network.sendBlock(Global.heroId, 'parry');
+  }
+
+  handleDodge() {
+    Global.network.sendBlock(Global.heroId, 'dodge');
   }
 
   handleAbilityClick(abilityId: string) {
@@ -837,6 +852,115 @@ export default class UI extends React.Component<any, UIState> {
       combatState: message,
       hideAttacksPanel: attackHistory.length == 0 && !hasComboHint,
     });
+  }
+
+  // BB-A: an enemy telegraphed its next attack type. Track one entry per
+  // attacker (refreshed each swing) so a pack aggregates instead of flickering.
+  handleCombatTelegraph(message) {
+    const id = message.attacker_id;
+
+    // Reset this attacker's expiry. The timer only fires if the attacker stops
+    // telegraphing (died/fled), at which point its entry drops out.
+    if (this.telegraphTimers[id]) {
+      clearTimeout(this.telegraphTimers[id]);
+    }
+    const ttl = ((message.strike_in || 2) + 1) * 1000;
+    this.telegraphTimers[id] = setTimeout(() => {
+      delete this.telegraphTimers[id];
+      this.setState((state) => {
+        const next = { ...state.combatTelegraphs };
+        delete next[id];
+        return { combatTelegraphs: next };
+      });
+    }, ttl);
+
+    this.setState((state) => ({
+      combatTelegraphs: {
+        ...state.combatTelegraphs,
+        [id]: {
+          attacker_id: id,
+          attacker_name: message.attacker_name,
+          attack_type: message.attack_type,
+          defense_hint: message.defense_hint,
+          strike_in: message.strike_in,
+        },
+      },
+    }));
+  }
+
+  // BB-A: render the incoming-attack warning. One attacker -> detailed readout;
+  // a pack -> tally by attack type and recommend the stance covering the most
+  // (one Brace soaks every fierce attacker, etc.).
+  renderTelegraph() {
+    const map = this.state.combatTelegraphs || {};
+    const telegraphs: any[] = Object.keys(map).map((k) => map[k]);
+    if (telegraphs.length === 0) {
+      return null;
+    }
+
+    const bannerStyle: React.CSSProperties = {
+      position: 'fixed',
+      top: '90px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 60,
+      background: 'rgba(20, 6, 6, 0.9)',
+      border: '1px solid #ff6b6b',
+      borderRadius: '4px',
+      padding: '6px 14px',
+      color: '#ffd9d9',
+      fontFamily: 'Verdana',
+      fontSize: '13px',
+      whiteSpace: 'nowrap',
+      pointerEvents: 'none',
+      textAlign: 'center',
+    };
+    const attackStyle: React.CSSProperties = { color: '#ffb36b', fontWeight: 'bold', textTransform: 'uppercase' };
+    const defenseStyle: React.CSSProperties = { color: '#8fbf88', fontWeight: 'bold', textTransform: 'uppercase' };
+
+    // Single attacker: the original detailed readout.
+    if (telegraphs.length === 1) {
+      const t = telegraphs[0];
+      return (
+        <div style={bannerStyle}>
+          {'⚠ '}{t.attacker_name} winds up a <span style={attackStyle}>{t.attack_type}</span> strike {'—'} <span style={defenseStyle}>{t.defense_hint}</span>!
+        </div>
+      );
+    }
+
+    // Pack: tally live telegraphs by attack type.
+    const counts: { [type: string]: number } = { quick: 0, precise: 0, fierce: 0 };
+    telegraphs.forEach((t) => {
+      if (counts[t.attack_type] !== undefined) {
+        counts[t.attack_type] += 1;
+      }
+    });
+
+    // Tie-break toward the strongest counter: dodge (quick) > parry (precise) > brace (fierce).
+    const priority = ['quick', 'precise', 'fierce'];
+    const defenseForType: { [type: string]: string } = { quick: 'dodge', precise: 'parry', fierce: 'brace' };
+    let recType = priority[0];
+    let recCount = -1;
+    priority.forEach((type) => {
+      if (counts[type] > recCount) {
+        recCount = counts[type];
+        recType = type;
+      }
+    });
+
+    const tally = priority
+      .filter((type) => counts[type] > 0)
+      .sort((a, b) => counts[b] - counts[a])
+      .map((type) => counts[type] + '× ' + type.toUpperCase())
+      .join(', ');
+
+    return (
+      <div style={bannerStyle}>
+        {'⚠ Incoming: '}<span style={attackStyle}>{tally}</span>
+        {recCount > 0 &&
+          <span> {'—'} <span style={defenseStyle}>{defenseForType[recType]}</span> covers the most</span>}
+      </div>
+    );
   }
 
   handleStats(message) {
@@ -1705,6 +1829,18 @@ export default class UI extends React.Component<any, UIState> {
 
   handleWorld(message) {
     this.setState({ worldData: message });
+
+    // QW3: on first entry into the world, give the player an immediate,
+    // unmistakable first action so they aren't dropped on the map unsure what
+    // to do. Shown once per session; the Survival Thread panel carries the
+    // ongoing step-by-step guidance from here.
+    if (!this.firstActionNudgeShown) {
+      this.firstActionNudgeShown = true;
+      this.enqueueNotice(
+        "Search the shipwreck and your burrow for supplies, then build a campfire before dusk. Check the Survival Thread for your next steps.",
+        15000
+      );
+    }
   }
 
   getAbilityHints() {
@@ -1817,6 +1953,8 @@ export default class UI extends React.Component<any, UIState> {
           </div>
         }
 
+        {this.renderTelegraph()}
+
         {!this.state.hideAttacksPanel &&
           <AttacksPanel attacks={Global.attacks} combatState={this.state.combatState} />}
 
@@ -1827,11 +1965,13 @@ export default class UI extends React.Component<any, UIState> {
 
         <img src={parrybutton}
           id="parrybutton"
-          className={styles.parrybutton} />
+          className={styles.parrybutton}
+          onClick={this.handleParry} />
 
         <img src={dodgebutton}
           id="dodgebutton"
-          className={styles.dodgebutton} />
+          className={styles.dodgebutton}
+          onClick={this.handleDodge} />
 
         <img src={movecompass}
           id="movecompass"

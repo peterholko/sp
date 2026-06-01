@@ -224,6 +224,27 @@ impl Combat {
         )
     }
 
+    // BB-A: a defensive stance hard-counters one attack type. When the
+    // defender's active stance matches the incoming attack, return the design
+    // reduction (dodge -100%, parry -75%, brace -50%) plus a counter label.
+    fn get_defend_stance_mod(
+        attack_type: &AttackType,
+        target: &CombatQueryItem,
+    ) -> (f32, Option<String>) {
+        match attack_type {
+            AttackType::Quick if target.effects.has(Effect::Dodging) => {
+                (0.0, Some("Dodged".to_string()))
+            }
+            AttackType::Precise if target.effects.has(Effect::Parrying) => {
+                (0.25, Some("Parried".to_string()))
+            }
+            AttackType::Fierce if target.effects.has(Effect::Bracing) => {
+                (0.5, Some("Braced".to_string()))
+            }
+            _ => (1.0, None),
+        }
+    }
+
     pub fn process_attack(
         attack_type: AttackType,
         attacker: &mut CombatQueryItem,
@@ -234,7 +255,7 @@ impl Combat {
         _ids: &mut ResMut<Ids>,
         game_tick: &Res<GameTick>,
         _map_events: &mut ResMut<MapEvents>,
-    ) -> (i32, Option<String>, Option<SkillUpdated>) {
+    ) -> (i32, Option<String>, Option<SkillUpdated>, Option<String>) {
         Self::process_attack_with_options(
             attack_type,
             attacker,
@@ -260,7 +281,7 @@ impl Combat {
         game_tick: &Res<GameTick>,
         _map_events: &mut ResMut<MapEvents>,
         options: AttackOptions,
-    ) -> (i32, Option<String>, Option<SkillUpdated>) {
+    ) -> (i32, Option<String>, Option<SkillUpdated>, Option<String>) {
         let mut rng = rand::thread_rng();
 
         // 1 Get Base Damage, DamageRange, BaseDef and DefHp
@@ -300,14 +321,19 @@ impl Combat {
             .inventory
             .get_items_value_by_attr(&item::AttrKey::Defense, true);
 
-        // TODO 10 Check if Defender has Defensive Stance
+        // 10 Check if defender has a matched defensive stance (BB-A).
+        let (defend_stance_mod, countered) = Self::get_defend_stance_mod(&attack_type, target);
 
         // 11 & 12 Add attack type to attack list
         Self::add_attack_to_combo_tracker(commands, templates, attack_type, attacker, target);
 
-        // TODO 13 Check if combo is countered
-
-        // TODO 14 Remove Defense Stanc Effect if combo countered
+        // 13 & 14 A successful counter interrupts the attacker's combo sequence.
+        if countered.is_some() {
+            if let Some(combo_tracker) = &mut attacker.combo_tracker {
+                combo_tracker.attacks.clear();
+                combo_tracker.target_id = -1;
+            }
+        }
 
         // 15 Calculate combo damage and apply combo effects
         /*let (combo_quick_damage_mod, combo_precise_damage_mod, combo_fierce_damage_mod) =
@@ -319,8 +345,15 @@ impl Combat {
 
         // TODO 16 Check if target is fortified
 
-        // 17 Roll from base damage
-        let roll_damage = rng.gen_range(0.0..damage_range) + base_damage;
+        // 17 Roll from base damage. damage_range can be 0 (e.g. villagers, whose
+        // damage comes entirely from their equipped weapon via damage_from_items),
+        // and gen_range panics on an empty range, so only roll when there's a span.
+        let damage_roll = if damage_range > 0.0 {
+            rng.gen_range(0.0..damage_range)
+        } else {
+            0.0
+        };
+        let roll_damage = damage_roll + base_damage;
 
         // 18 Calculate total damage
         let total_damage = (roll_damage + damage_from_items + options.damage_bonus as f32)
@@ -340,8 +373,7 @@ impl Combat {
         let defense_reduction = total_defense / (total_defense + 50.0);
         let damage_reduction = total_damage * (1.0 - defense_reduction);
 
-        // TODO 22 Get defense stance mod
-        let defend_stance_mod = 1.0;
+        // 22 Defense stance mod computed above (matched-counter reduction).
 
         // 23 Get terrain defense mod
         let terrain_defense_mod = Self::get_terrain_defense(*target.pos, map);
@@ -437,7 +469,9 @@ impl Combat {
             combo_name = Some(combo.name);
         }*/
 
-        return (total_damage as i32, None, skill_updated);
+        // Report the damage actually dealt (post armor + matched stance) so the
+        // client shows the real number and a successful counter reads as 0/low.
+        return (final_damage as i32, None, skill_updated, countered);
     }
 
     pub fn process_combo(
@@ -507,8 +541,15 @@ impl Combat {
 
         // TODO 16 Check if target is fortified
 
-        // 17 Roll from base damage
-        let roll_damage = rng.gen_range(0.0..damage_range) + base_damage;
+        // 17 Roll from base damage. damage_range can be 0 (e.g. villagers, whose
+        // damage comes entirely from their equipped weapon via damage_from_items),
+        // and gen_range panics on an empty range, so only roll when there's a span.
+        let damage_roll = if damage_range > 0.0 {
+            rng.gen_range(0.0..damage_range)
+        } else {
+            0.0
+        };
+        let roll_damage = damage_roll + base_damage;
 
         // 18 Calculate total damage
         let total_damage =

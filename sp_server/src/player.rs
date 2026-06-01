@@ -131,6 +131,7 @@ pub enum PlayerEvent {
     Block {
         player_id: i32,
         source_id: i32,
+        defense: String,
     },
     Gather {
         player_id: i32,
@@ -1860,7 +1861,7 @@ fn attack_system(
                 attack_history.push(attack_type.clone());
 
                 // Calculate and process damage
-                let (damage, combo, skill_updated) = Combat::process_attack_with_options(
+                let (damage, combo, skill_updated, _countered) = Combat::process_attack_with_options(
                     Combat::attack_type_to_enum(attack_type.to_string()),
                     &mut attacker,
                     &mut target,
@@ -1915,13 +1916,21 @@ fn attack_system(
                 // Update skill
                 if let Some(skill_updated) = skill_updated {
                     if let Some(mut attacker_skills) = attacker.skills {
-                        let skill_name = Skill::from_str(&skill_updated.xp_type)
-                            .expect(&format!("Invalid skill name: {}", skill_updated.xp_type));
-                        attacker_skills.update(
-                            skill_name,
-                            skill_updated.xp,
-                            &templates.skill_templates,
-                        );
+                        match Skill::from_str(&skill_updated.xp_type) {
+                            Some(skill_name) => {
+                                attacker_skills.update(
+                                    skill_name,
+                                    skill_updated.xp,
+                                    &templates.skill_templates,
+                                );
+                            }
+                            None => {
+                                warn!(
+                                    "No combat skill mapped for weapon subclass '{}', skipping XP gain",
+                                    skill_updated.xp_type
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2433,13 +2442,21 @@ fn attack_system(
                 // Update skill
                 if let Some(skill_updated) = skill_updated {
                     if let Some(mut attacker_skills) = attacker.skills {
-                        let skill_name = Skill::from_str(&skill_updated.xp_type)
-                            .expect(&format!("Invalid skill name: {}", skill_updated.xp_type));
-                        attacker_skills.update(
-                            skill_name,
-                            skill_updated.xp,
-                            &templates.skill_templates,
-                        );
+                        match Skill::from_str(&skill_updated.xp_type) {
+                            Some(skill_name) => {
+                                attacker_skills.update(
+                                    skill_name,
+                                    skill_updated.xp,
+                                    &templates.skill_templates,
+                                );
+                            }
+                            None => {
+                                warn!(
+                                    "No combat skill mapped for weapon subclass '{}', skipping XP gain",
+                                    skill_updated.xp_type
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -2470,6 +2487,7 @@ fn attack_system(
             PlayerEvent::Block {
                 player_id,
                 source_id,
+                defense,
             } => {
                 events_to_remove.push(*event_id);
 
@@ -2500,27 +2518,42 @@ fn attack_system(
                     continue;
                 }
 
-                let (brace_duration, brace_amp) =
-                    if matches!(attacker.hero_class, Some(&HeroClass::Warrior)) {
-                        if let (Some(stamina), Some(base_stamina)) =
-                            (attacker.stats.stamina, attacker.stats.base_stamina)
-                        {
-                            attacker.stats.stamina = Some((stamina + 3).min(base_stamina));
-                        }
-                        (WARRIOR_BRACE_DURATION_TICKS, WARRIOR_BRACE_AMPLIFIER)
-                    } else {
-                        (STANDARD_BRACE_DURATION_TICKS, STANDARD_BRACE_AMPLIFIER)
-                    };
+                // BB-A: pick the stance matching the chosen defense.
+                // dodge -> Quick, parry -> Precise, brace -> Fierce.
+                let stance = match defense.as_str() {
+                    "dodge" => Effect::Dodging,
+                    "parry" => Effect::Parrying,
+                    _ => Effect::Bracing,
+                };
 
-                // Apply Bracing effect. Warriors get a longer, stronger Iron Stance.
+                // Only one stance at a time.
+                attacker.effects.0.remove(&Effect::Bracing);
+                attacker.effects.0.remove(&Effect::Dodging);
+                attacker.effects.0.remove(&Effect::Parrying);
+
+                // Brace is the generalist: warriors get a longer, stronger Iron
+                // Stance and recover a little stamina.
+                let (stance_duration, stance_amp) = if stance == Effect::Bracing
+                    && matches!(attacker.hero_class, Some(&HeroClass::Warrior))
+                {
+                    if let (Some(stamina), Some(base_stamina)) =
+                        (attacker.stats.stamina, attacker.stats.base_stamina)
+                    {
+                        attacker.stats.stamina = Some((stamina + 3).min(base_stamina));
+                    }
+                    (WARRIOR_BRACE_DURATION_TICKS, WARRIOR_BRACE_AMPLIFIER)
+                } else {
+                    (STANDARD_BRACE_DURATION_TICKS, STANDARD_BRACE_AMPLIFIER)
+                };
+
                 add_timed_effect(
                     attacker.id.0,
                     &mut attacker.effects,
                     &mut map_events,
                     game_tick.0,
-                    Effect::Bracing,
-                    brace_duration,
-                    brace_amp,
+                    stance,
+                    stance_duration,
+                    stance_amp,
                 );
 
                 last_player_attack.insert(*player_id, game_tick.0);
@@ -6261,6 +6294,7 @@ fn structure_list_system(
     clients: Res<Clients>,
     plans: Res<Plans>,
     templates: Res<Templates>,
+    hero_query: Query<(&PlayerId, &Subclass, &Inventory)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6268,11 +6302,25 @@ fn structure_list_system(
         match event {
             PlayerEvent::StructureList { player_id } => {
                 events_to_remove.push(*event_id);
-                let structure_list = Structure::available_to_build(
+                let mut structure_list = Structure::available_to_build(
                     *player_id,
                     plans.clone(),
                     &templates.obj_templates,
                 );
+
+                // QW4: annotate each build requirement with how many matching
+                // resources the hero is currently carrying, so the build panel
+                // can show have/need and flag shortfalls before committing.
+                if let Some((_, _, hero_inv)) = hero_query
+                    .iter()
+                    .find(|(pid, subclass, _)| pid.0 == *player_id && subclass.is_hero())
+                {
+                    for structure in structure_list.iter_mut() {
+                        for req in structure.req.iter_mut() {
+                            req.cquantity = Some(hero_inv.count_for_build_req(&req.req_type));
+                        }
+                    }
+                }
 
                 let structure_list = StructureList {
                     result: structure_list,
