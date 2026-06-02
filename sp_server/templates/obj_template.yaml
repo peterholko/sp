@@ -15,7 +15,7 @@
   base_dmg: 4
   dmg_range: 4
   base_def: 3
-  base_speed: 6
+  base_speed: 5
   base_vision: 5
   int: animal
   aggression: strategic
@@ -536,7 +536,7 @@
   base_dmg: 6
   dmg_range: 5
   base_def: 5
-  base_speed: 7
+  base_speed: 6
   base_vision: 4
   int: cunning
   aggression: strategic

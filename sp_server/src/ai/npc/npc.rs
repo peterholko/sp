@@ -4103,8 +4103,11 @@ pub fn attack_target_system(
                     continue;
                 }
 
-                // Get NPC speed
-                let npc_speed = npc.stats.base_speed.unwrap_or(1) * TICKS_PER_SEC;
+                // Get NPC speed, with a small random jitter so NPCs that
+                // spawned on the same tick don't attack in perfect lockstep.
+                // Jitter is recomputed each swing, so synced NPCs drift apart.
+                let jitter = rand::thread_rng().gen_range(0..=NPC_ATTACK_JITTER_TICKS);
+                let npc_speed = npc.stats.base_speed.unwrap_or(1) * TICKS_PER_SEC + jitter;
 
                 // Check if target is fortified
                 if target.effects.has(Effect::Fortified) {
@@ -4349,18 +4352,11 @@ pub fn cast_target_system(
                     continue;
                 }
 
-                // Get NPC speed
-                let mut npc_speed = 1;
-
-                if let Some(npc_base_speed) = npc.stats.base_speed {
-                    npc_speed = npc_base_speed;
-                }
-
-                let effect_speed_mod = npc.effects.get_speed_effects(&templates);
-
-                let move_duration = (BASE_MOVE_TICKS
-                    * (BASE_SPEED / npc_speed as f32)
-                    * (1.0 / effect_speed_mod)) as i32;
+                // Get NPC move duration, with a small random jitter so NPCs
+                // that spawned on the same tick don't move (and so reach their
+                // target to attack) in perfect lockstep.
+                let move_duration =
+                    npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.85, 1.15);
 
                 if target_id != NO_TARGET {
                     // Get target entity
