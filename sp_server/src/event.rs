@@ -532,6 +532,9 @@ pub enum GameEventType {
     RemoveEntity {
         entity: Entity,
     },
+    DespawnObj {
+        obj_id: i32,
+    },
     CancelRefineEvent {
         obj_id: i32,
     },

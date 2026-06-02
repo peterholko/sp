@@ -20,7 +20,7 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, GameTick,
+    is_loot_poi, is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, GameTick,
     InitialEncounterState, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
     MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives,
     PlayerRunScore, PlayerStat, PlayerStats, RunScoreState, SpawnPositions, SurveyHistory,
@@ -39,7 +39,7 @@ use crate::obj::{
     StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
     Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
-use crate::player_setup::StartLocations;
+use crate::player_setup::{AssignedStartLocations, StartLocations};
 use crate::recipe::Recipes;
 use crate::resource::{Resource, Resources};
 use crate::skill::{SkillData, Skills, MAX_RANK};
@@ -747,7 +747,8 @@ impl Plugin for PlayerPlugin {
         .add_observer(info_npc_system)
         .insert_resource(player_events)
         .insert_resource(active_infos)
-        .insert_resource(start_locations);
+        .insert_resource(start_locations)
+        .init_resource::<AssignedStartLocations>();
     }
 }
 
@@ -774,7 +775,8 @@ fn new_player_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
-    mut start_locations: ResMut<StartLocations>,
+    // Bundled into one tuple param to stay within Bevy's 16 system-parameter limit.
+    mut start_location_res: (ResMut<StartLocations>, ResMut<AssignedStartLocations>),
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     mut recipes: ResMut<Recipes>,
@@ -806,7 +808,8 @@ fn new_player_system(
                         hero_name.to_string(),
                         class_name.to_string(),
                         &mut commands,
-                        &mut start_locations,
+                        &mut start_location_res.0,
+                        &mut start_location_res.1,
                         &mut ids,
                         &mut entity_map,
                         &mut map_events,
@@ -5101,6 +5104,8 @@ fn item_transfer_system(
     mut active_infos: ResMut<ActiveInfos>,
     mut query: Query<ItemTransferQuery>,
     selected_upgrade_query: Query<&SelectedUpgrade>,
+    game_tick: Res<GameTick>,
+    mut game_events: ResMut<GameEvents>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -5500,6 +5505,21 @@ fn item_transfer_system(
                     info!("Owner inventory: {:?}", owner.inventory);
                     info!("Target inventory: {:?}", target.inventory);
                     Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
+
+                    // A loot cache that has just been emptied should despawn shortly
+                    // after, leaving a brief beat so the player sees it go empty.
+                    if is_loot_poi(&owner.template.0) && owner.inventory.items.is_empty() {
+                        let despawn_event_id = ids.new_map_event_id();
+                        game_events.insert(
+                            despawn_event_id,
+                            GameEvent {
+                                event_id: despawn_event_id,
+                                start_tick: game_tick.0,
+                                run_tick: game_tick.0 + LOOT_POI_EMPTY_DESPAWN_TICKS,
+                                event_type: GameEventType::DespawnObj { obj_id: owner.id.0 },
+                            },
+                        );
+                    }
 
                     let mut target_items_updated: Vec<Item> = Vec::new();
                     if owner.subclass.is_hero()
@@ -6472,6 +6492,7 @@ fn create_foundation_system(
                     build_upgrade_cost: structure_template.build_cost.unwrap_or(100) as f32,
                     work_done: 0.0,
                     work_per_sec: 0.0,
+                    start_time: 0,
                 };
 
                 let assignments = Assignments(Vec::new());
@@ -6756,6 +6777,7 @@ fn start_upgrade_system(
                         as f32,
                     work_done: 0.0,
                     work_per_sec: 0.0,
+                    start_time: 0,
                 };
 
                 // Insert selected upgrade into structure

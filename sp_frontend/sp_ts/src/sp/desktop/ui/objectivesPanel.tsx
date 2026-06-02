@@ -413,6 +413,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             onClick={this.toggleCompactExpanded}
             aria-expanded={compactExpanded}
             aria-label={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
+            title={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
           >
             <span style={compactTitleStyle}>Survival Thread</span>
             {!compactExpanded && activeObjective &&
@@ -430,12 +431,17 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           </div>}
 
         {(!compactDesktop || compactExpanded) && <div style={sectionStyle}>
-          {objectives.map(obj => (
-            <div key={obj.id} style={objectiveRowStyle(obj.state)}>
-              <span>{obj.title}</span>
-              <span>{obj.state == 'complete' ? 'Done' : obj.state == 'active' ? 'Next' : 'Later'}</span>
-            </div>
-          ))}
+          {objectives.map(obj => {
+            const rowTooltip = [obj.action_hint, obj.lesson, obj.reward ? `Reward: ${obj.reward}` : '']
+              .filter(Boolean)
+              .join('\n');
+            return (
+              <div key={obj.id} style={objectiveRowStyle(obj.state)} title={rowTooltip}>
+                <span>{obj.title}</span>
+                <span>{obj.state == 'complete' ? 'Done' : obj.state == 'active' ? 'Next' : 'Later'}</span>
+              </div>
+            );
+          })}
         </div>}
 
       </div>

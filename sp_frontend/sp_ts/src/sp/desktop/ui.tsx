@@ -1837,7 +1837,7 @@ export default class UI extends React.Component<any, UIState> {
     if (!this.firstActionNudgeShown) {
       this.firstActionNudgeShown = true;
       this.enqueueNotice(
-        "Search the shipwreck and your burrow for supplies, then build a campfire before dusk. Check the Survival Thread for your next steps.",
+        "Search the shipwreck and burrow for supplies, then build a campfire before dusk.",
         15000
       );
     }
@@ -1883,11 +1883,13 @@ export default class UI extends React.Component<any, UIState> {
 
         <SmallButtonClassName handler={this.handleHeroAttrsClick}
           imageName="attrsbutton"
-          className={styles.heroattrsbutton} />
+          className={styles.heroattrsbutton}
+          title="Character — view your hero's stats and skills" />
 
         <SmallButtonClassName handler={this.handleHeroInventoryClick}
           imageName="inventorybutton"
-          className={styles.heroinventorybutton} />
+          className={styles.heroinventorybutton}
+          title="Inventory — view and manage carried items" />
 
         <CooldownButton imageName='surveybutton'
           imageButton={explorebutton}
@@ -1898,11 +1900,13 @@ export default class UI extends React.Component<any, UIState> {
           title="Survey" />
 
         <GatherButton handler={this.handleHeroGatherClick}
-          className={styles.herogatherbutton} />
+          className={styles.herogatherbutton}
+          title="Gather — collect resources from this tile" />
 
         <SmallButtonClassName handler={this.handleHeroBuildClick}
           imageName="buildbutton"
-          className={styles.herobuildbutton} />
+          className={styles.herobuildbutton}
+          title="Build — construct a structure here" />
 
         <ToggleButton handler={this.handleHeroSleepClick}
           imageName="resourcesbutton"
@@ -1911,15 +1915,18 @@ export default class UI extends React.Component<any, UIState> {
 
         <SmallButtonClassName handler={this.handleHeroEquipClick}
           imageName="equipbutton"
-          className={styles.heroequipbutton} />
+          className={styles.heroequipbutton}
+          title="Equipment — manage equipped weapons and gear" />
 
         <SmallButtonClassName handler={this.handleHeroCraftClick}
           imageName="craftbutton"
-          className={styles.herocraftbutton} />
+          className={styles.herocraftbutton}
+          title="Craft — craft items from recipes" />
 
         <SmallButtonClassName handler={this.handleComboClick}
           imageName="combobutton"
-          className={styles.combobutton} />
+          className={styles.combobutton}
+          title="Combo Finisher — unleash a combo when one is available" />
 
         <ActionButton type={QUICK}
           handler={this.handleQuickAttack} />
@@ -1961,22 +1968,34 @@ export default class UI extends React.Component<any, UIState> {
         <img src={bracebutton}
           id="bracebutton"
           className={styles.bracebutton}
+          title="Brace — blocks an incoming Fierce attack"
+          alt="Brace — blocks an incoming Fierce attack"
+          aria-label="Brace — blocks an incoming Fierce attack"
           onClick={this.handleBrace} />
 
         <img src={parrybutton}
           id="parrybutton"
           className={styles.parrybutton}
+          title="Parry — counters an incoming Precise attack"
+          alt="Parry — counters an incoming Precise attack"
+          aria-label="Parry — counters an incoming Precise attack"
           onClick={this.handleParry} />
 
         <img src={dodgebutton}
           id="dodgebutton"
           className={styles.dodgebutton}
+          title="Dodge — evades an incoming Quick attack"
+          alt="Dodge — evades an incoming Quick attack"
+          aria-label="Dodge — evades an incoming Quick attack"
           onClick={this.handleDodge} />
 
         <img src={movecompass}
           id="movecompass"
           ref={this.compassRef}
           className={styles.movecompass}
+          title="Move — click a direction to move your hero"
+          alt="Move — click a direction to move your hero"
+          aria-label="Move — click a direction to move your hero"
           onClick={this.handleMoveClick} />
 
         {this.state.showMoveCompassClick &&

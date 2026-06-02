@@ -772,6 +772,9 @@ pub struct BuildUpgradeState {
     pub build_upgrade_cost: f32,
     pub work_done: f32,
     pub work_per_sec: f32,
+    // Game tick when construction/upgrade actually started (0 when not building).
+    // Lets the client anchor and animate the progress bar from the build start.
+    pub start_time: i32,
 }
 
 #[derive(Debug, Component, Clone)]

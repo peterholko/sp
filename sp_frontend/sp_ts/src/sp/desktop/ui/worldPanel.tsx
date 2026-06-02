@@ -51,9 +51,11 @@ export default class WorldPanel extends React.Component<WorldProps, any> {
       width: '160px'
     } as React.CSSProperties
 
+    const worldTitle = "World clock — current day and time of day";
+
     return (
-      <div style={divStyle}>
-        <img src={worldframe} style={worldFrameStyle}/>
+      <div style={divStyle} title={worldTitle}>
+        <img src={worldframe} style={worldFrameStyle} alt={worldTitle} aria-label={worldTitle}/>
         <span style={timeOfDayStyle}>{this.props.worldData.time_of_day}</span>
         <span style={dayStyle}>Day {this.props.worldData.day}</span>
       </div>

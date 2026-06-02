@@ -551,6 +551,7 @@ fn completed_wall_fortifies_builder_still_in_building_state() {
             build_upgrade_cost: 1.0,
             work_done: 0.0,
             work_per_sec: 0.0,
+            start_time: 0,
         },
         WorkQueue(Vec::new()),
         StateBuilding,
@@ -1154,6 +1155,7 @@ fn upgrading_campfire_to_small_tent_adds_shelter_component() {
                 build_upgrade_cost: 1.0,
                 work_done: 0.0,
                 work_per_sec: 0.0,
+                start_time: 0,
             },
             SelectedUpgrade("Small Tent".to_string()),
             StateUpgrading,
@@ -2462,6 +2464,11 @@ fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
         spider_unlock_tick: 3600,
         villager_event_scheduled: false,
         merchant_id: 0,
+        necromancer_id: 0,
+        mausoleum_id: 0,
+        necro_spawn_anchor: Position { x: 0, y: 0 },
+        necro_corpse_anchor: Position { x: 0, y: 0 },
+        necro_home: Position { x: 0, y: 0 },
     };
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,

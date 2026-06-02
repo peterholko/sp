@@ -86,6 +86,12 @@ pub const GATHER_TIME_SEC: i32 = 15;
 
 pub const NO_SHELTER: i32 = -1;
 
+// Loot POI (Supply Cache, Washed Ashore Materials) lifetimes. Abandoned caches
+// auto-despawn after 5 minutes; once emptied they vanish shortly after, leaving
+// a brief beat so the player sees the cache go empty first.
+pub const LOOT_POI_DESPAWN_TICKS: i32 = TICKS_PER_SEC * 60 * 5; // 5 minutes
+pub const LOOT_POI_EMPTY_DESPAWN_TICKS: i32 = TICKS_PER_SEC * 10; // 10 seconds
+
 pub const IMAGE: &str = "image";
 pub const TEMPLATE: &str = "template";
 pub const PLAYER_ID: &str = "player_id";

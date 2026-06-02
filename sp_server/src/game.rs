@@ -69,6 +69,7 @@ use crate::obj::{
     WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerPlugin};
+use crate::player_setup::{AssignedStartLocations, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
@@ -398,6 +399,14 @@ pub struct InitialEncounterEntry {
     pub spider_unlock_tick: i32,
     pub villager_event_scheduled: bool,
     pub merchant_id: i32,
+    // Necromancer encounter data. The necromancer and its mausoleum are spawned
+    // hidden in player_setup; the reveal/activation NecroEvent is scheduled later,
+    // 5 minutes after the villager is rescued (see the SpawnVillager handler).
+    pub necromancer_id: i32,
+    pub mausoleum_id: i32,
+    pub necro_spawn_anchor: Position,
+    pub necro_corpse_anchor: Position,
+    pub necro_home: Position,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -842,6 +851,7 @@ const MERCHANT_LEAVING_SOON_OFFSET: i32 = 2400; // 4 min after arrival
 const MERCHANT_DEPARTURE_OFFSET: i32 = 3000; // 5 min after arrival
 const MERCHANT_RETURN_GAP: i32 = 6000; // 10 min away at the empire
 const MERCHANT_FIRST_ARRIVAL_DELAY: i32 = 1800; // 3 min after villager rescue
+const NECRO_EVENT_DELAY_AFTER_RESCUE: i32 = 3000; // 5 min after villager rescue
 const NECROMANCER_SPAWN_SEARCH_RADIUS: i32 = 5;
 
 // Bundle of game_event_system parameters that don't fit in the 16-param limit.
@@ -3090,11 +3100,22 @@ pub fn build_system(
             "Build state total work: {:?}",
             build_state.build_upgrade_cost
         );
+        let prev_build_rate = build_state.work_per_sec;
         build_state.work_done += total_build_rate;
         build_state.work_per_sec = total_build_rate;
 
+        // If the build rate changed (e.g. a worker joined or left), push a
+        // fresh progress update so the client re-anchors its progress bar.
+        if (total_build_rate - prev_build_rate).abs() > f32::EPSILON {
+            commands.trigger(BuildProgressUpdate {
+                entity: structure_entity,
+            });
+        }
+
         if build_state.work_done >= build_state.build_upgrade_cost {
             build_state.work_done = build_state.build_upgrade_cost;
+            build_state.work_per_sec = 0.0;
+            build_state.start_time = 0;
 
             // Change structure state to none
             commands.trigger(StateChange {
@@ -3303,11 +3324,22 @@ pub fn upgrade_system(
             "Build state total work: {:?}",
             build_state.build_upgrade_cost
         );
+        let prev_build_rate = build_state.work_per_sec;
         build_state.work_done += total_build_rate;
         build_state.work_per_sec = total_build_rate;
 
+        // If the upgrade rate changed (e.g. a worker joined or left), push a
+        // fresh progress update so the client re-anchors its progress bar.
+        if (total_build_rate - prev_build_rate).abs() > f32::EPSILON {
+            commands.trigger(BuildProgressUpdate {
+                entity: structure_entity,
+            });
+        }
+
         if build_state.work_done >= build_state.build_upgrade_cost {
             build_state.work_done = build_state.build_upgrade_cost;
+            build_state.work_per_sec = 0.0;
+            build_state.start_time = 0;
 
             let upgrade_template = templates.obj_templates.get(selected_upgrade.0.clone());
 
@@ -6033,6 +6065,12 @@ fn clear_effect_with_item(
     true
 }
 
+/// Loot caches that are placed by exploration and should auto-despawn: quickly
+/// once emptied, and after a timeout even if the player never returns for them.
+pub fn is_loot_poi(template_name: &str) -> bool {
+    matches!(template_name, "Supply Cache" | "Washed Ashore Materials")
+}
+
 fn spawn_loot_poi(
     template_name: &str,
     center: Position,
@@ -6041,6 +6079,8 @@ fn spawn_loot_poi(
     entity_map: &mut ResMut<EntityObjMap>,
     map: &Res<Map>,
     templates: &Res<Templates>,
+    game_tick: &Res<GameTick>,
+    game_events: &mut ResMut<GameEvents>,
 ) -> Option<Position> {
     let pos = loot_poi_spawn_pos(template_name, center, map)?;
     let poi_id = ids.new_obj_id();
@@ -6106,6 +6146,20 @@ fn spawn_loot_poi(
     ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
     entity_map.new_obj(poi_id, poi_entity);
     commands.trigger(NewObj { entity: poi_entity });
+
+    // Schedule an auto-despawn so abandoned caches don't litter the map forever.
+    // If the player empties it first, item_transfer_system schedules an earlier
+    // despawn and this timeout becomes a harmless no-op.
+    let despawn_event_id = ids.new_map_event_id();
+    game_events.insert(
+        despawn_event_id,
+        GameEvent {
+            event_id: despawn_event_id,
+            start_tick: game_tick.0,
+            run_tick: game_tick.0 + LOOT_POI_DESPAWN_TICKS,
+            event_type: GameEventType::DespawnObj { obj_id: poi_id },
+        },
+    );
 
     Some(pos)
 }
@@ -6218,6 +6272,8 @@ fn apply_explore_outcome(
                 entity_map,
                 map,
                 templates,
+                game_tick,
+                game_events,
             ) {
                 send_notice(
                     player_id,
@@ -6249,6 +6305,8 @@ fn apply_explore_outcome(
                 entity_map,
                 map,
                 templates,
+                game_tick,
+                game_events,
             ) {
                 send_notice(
                     player_id,
@@ -10009,6 +10067,22 @@ fn game_event_system(
                                 },
                             });
                         }
+
+                        // Reveal and activate the hidden necromancer + mausoleum
+                        // 5 minutes after the villager is rescued. This handler runs
+                        // exactly once per player (guarded by villager_spawned above).
+                        events_to_insert.push(GameEvent {
+                            event_id: ids.new_map_event_id(),
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + NECRO_EVENT_DELAY_AFTER_RESCUE,
+                            event_type: GameEventType::NecroEvent {
+                                necromancer_id: Some(entry.necromancer_id),
+                                mausoleum_id: Some(entry.mausoleum_id),
+                                spawn_anchor: entry.necro_spawn_anchor,
+                                corpse_anchor: entry.necro_corpse_anchor,
+                                home: entry.necro_home,
+                            },
+                        });
                     }
                 }
 
@@ -10203,6 +10277,18 @@ fn game_event_system(
                     for event_id in event_ids.iter() {
                         map_events.remove(event_id);
                     }
+                }
+                GameEventType::DespawnObj { obj_id } => {
+                    debug!("Processing DespawnObj: {:?}", obj_id);
+                    events_to_remove.push(*event_id);
+
+                    // The obj may already be gone (e.g. an earlier empty-triggered
+                    // despawn fired first), in which case there is nothing to do.
+                    let Some(entity) = entity_map.get_entity(*obj_id) else {
+                        continue;
+                    };
+
+                    commands.trigger(RemoveObj { entity });
                 }
                 _ => {}
             }
@@ -13642,10 +13728,12 @@ fn food_poisoning_effect_observer(
 
 fn build_progress_update_observer(
     event: On<BuildProgressUpdate>,
+    game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     templates: Res<Templates>,
-    structure_query: Query<(&PlayerId, &Id, &Position, &Assignments, &BuildUpgradeState)>,
+    mut perception_updates: ResMut<PerceptionUpdates>,
+    mut structure_query: Query<(&PlayerId, &Id, &Position, &Assignments, &mut BuildUpgradeState)>,
     worker_query: Query<(&Position, &State, &Template, &Skills)>,
 ) {
     let Ok((
@@ -13653,8 +13741,8 @@ fn build_progress_update_observer(
         structure_id,
         structure_position,
         structure_assignments,
-        build_state,
-    )) = structure_query.get(event.entity)
+        mut build_state,
+    )) = structure_query.get_mut(event.entity)
     else {
         error!("Query failed to find entity {:?}", event.entity);
         return;
@@ -13709,6 +13797,17 @@ fn build_progress_update_observer(
         total_build_rate += build_rate;
     }
 
+    // Anchor the build start time so the client can animate the progress bar
+    // from when construction actually began.
+    if build_state.start_time == 0 {
+        build_state.start_time = game_tick.0;
+    }
+
+    // Store the live build rate on the structure so it is included in the
+    // perception data sent to the client (the WorkUpdate packet alone is not
+    // enough: the client prefers the structure's perception work fields).
+    build_state.work_per_sec = total_build_rate;
+
     // Send progress packet to client
     let packet = ResponsePacket::WorkUpdate {
         structure_id: structure_id.0,
@@ -13718,6 +13817,13 @@ fn build_progress_update_observer(
     };
 
     send_to_client(structure_player_id.0, packet, &clients);
+
+    // Re-send the structure's perception so the client receives the new
+    // work_per_sec / work_done and can animate the progress bar.
+    perception_updates.insert((
+        structure_player_id.0,
+        PerceptionUpdateType::UpdatePerception,
+    ));
 }
 
 fn start_upgrade_observer(
@@ -14255,6 +14361,8 @@ fn true_death_system(
         mut run_score_state,
         mut legendary_threat_state,
         player_intro_state,
+        mut start_locations,
+        mut assigned_start_locations,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -14265,6 +14373,8 @@ fn true_death_system(
         ResMut<RunScoreState>,
         ResMut<LegendaryThreatState>,
         Res<PlayerIntroState>,
+        ResMut<StartLocations>,
+        ResMut<AssignedStartLocations>,
     ),
     mut hero_query: Query<
         (
@@ -14442,6 +14552,17 @@ fn true_death_system(
             spawn_positions.remove(&player_id.0);
             run_score_state.remove(&player_id.0);
             legendary_threat_state.remove(&player_id.0);
+
+            // Release this player's start location back to the pool so a new hero can
+            // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
+            if let Some(start_location) = assigned_start_locations.remove(&player_id.0) {
+                let location_name = start_location.name.clone();
+                start_locations.push(start_location);
+                info!(
+                    "Released start location '{}' back to the pool after true death of player {}",
+                    location_name, player_id.0
+                );
+            }
 
             // Transfer villagers to merchant player
             for (villager_entity, villager_player_id, villager_id, _) in villager_query.iter() {

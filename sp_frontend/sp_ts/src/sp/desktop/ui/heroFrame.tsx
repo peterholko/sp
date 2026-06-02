@@ -55,15 +55,17 @@ interface HeroFrameProps {
   fatigueStatus: string
 }
 
-function renderNeedStatusIcon(kind: NeedKind, value: string, style: React.CSSProperties) {
+function renderNeedStatusIcon(kind: NeedKind, value: string, style: React.CSSProperties, label: string) {
   const icon = getNeedStatusIcon(kind, value);
 
   if (!icon) {
     return null;
   }
 
+  const tooltip = value ? `${label}: ${value}` : label;
+
   if (!isCriticalNeed(kind, value)) {
-    return <img src={icon} style={style}/>;
+    return <img src={icon} style={style} title={tooltip} alt={tooltip} aria-label={tooltip}/>;
   }
 
   const containerStyle = {
@@ -83,8 +85,8 @@ function renderNeedStatusIcon(kind: NeedKind, value: string, style: React.CSSPro
   } as React.CSSProperties;
 
   return (
-    <span style={containerStyle}>
-      <img className="critical-need-warning-icon" src={icon} style={iconStyle}/>
+    <span style={containerStyle} title={tooltip} aria-label={tooltip}>
+      <img className="critical-need-warning-icon" src={icon} style={iconStyle} alt={tooltip}/>
     </span>
   );
 }
@@ -169,9 +171,21 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     const manaRatio = showMana ? mana / baseMana : 0;
     const manaBarWidth = manaRatio * STAT_BAR_WIDTH;
 
+    const hpTitle = (this.props.heroStats.hp != null && Global.heroMaxHp > 0)
+      ? `Health: ${Math.round(this.props.heroStats.hp)} / ${Global.heroMaxHp}`
+      : 'Health';
+    const staTitle = (this.props.heroStats.stamina != null && Global.heroMaxStamina > 0)
+      ? `Stamina: ${Math.round(this.props.heroStats.stamina)} / ${Global.heroMaxStamina}`
+      : 'Stamina';
+    const manaTitle = (mana != null && baseMana > 0)
+      ? `Mana: ${Math.round(mana)} / ${baseMana}`
+      : 'Mana';
+
+    let heroName = '';
     if(Global.heroId in Global.objectStates) {
       let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
       imagePath = '/static/art/' + imageName  + '_single.png';
+      heroName = Global.objectStates[Global.heroId].name || '';
     }
 
     const heroringStyle = {
@@ -271,17 +285,21 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     } as React.CSSProperties
 
     // Sanctuary indicator sits just right of the HP/Stamina panel (hpframe ends ~x229).
+    // pointerEvents must stay 'auto' so the hover tooltip below can appear.
     const sanctuaryStyle = {
       transform: 'translate(238px, 21px)',
       zIndex: 4,
       position: 'fixed',
-      pointerEvents: 'none',
+      pointerEvents: 'auto',
+      cursor: 'help',
       filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.85))'
     } as React.CSSProperties
 
     const sanctuary: SanctuaryState = this.state.sanctuary;
     const sanctuaryColor = sanctuary === "strong" ? SANCTUARY_STRONG_COLOR : SANCTUARY_WEAK_COLOR;
-    const sanctuaryLabel = sanctuary === "strong" ? "Sanctuary (Strong)" : "Sanctuary (Weak)";
+    const sanctuaryLabel = sanctuary === "strong"
+      ? "Sanctuary (Strong) — the Monolith's protection greatly reduces the damage you take. Stay near the Monolith to keep it."
+      : "Sanctuary (Weak) — the Monolith's protection slightly reduces the damage you take. Move closer to the Monolith to strengthen it.";
 
     return (
       
@@ -290,27 +308,27 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           <img src={heroring} style={heroringStyle}/>
           <img src={hpframe} style={hpframeStyle}/>
 
-          <img src={statbg} style={hpbgStyle}/>
-          <img src={hpbar} style={hpBarStyle}/>
-          <img src={statbg} style={stabgStyle}/>
-          <img src={stabar} style={staBarStyle}/>
+          <img src={statbg} style={hpbgStyle} title={hpTitle}/>
+          <img src={hpbar} style={hpBarStyle} title={hpTitle} alt={hpTitle} aria-label={hpTitle}/>
+          <img src={statbg} style={stabgStyle} title={staTitle}/>
+          <img src={stabar} style={staBarStyle} title={staTitle} alt={staTitle} aria-label={staTitle}/>
           {showMana &&
             <>
-              <img src={statbg} style={manabgStyle}/>
-              <img src={manabar} style={manaBarStyle}/>
+              <img src={statbg} style={manabgStyle} title={manaTitle}/>
+              <img src={manabar} style={manaBarStyle} title={manaTitle} alt={manaTitle} aria-label={manaTitle}/>
             </>
           }
 
-          <span style={tStyle}>T</span>
-          <span style={hStyle}>H</span>
-          <span style={fStyle}>F</span>
+          <span style={tStyle} title="Thirst">T</span>
+          <span style={hStyle} title="Hunger">H</span>
+          <span style={fStyle} title="Fatigue">F</span>
 
-          {renderNeedStatusIcon("thirst", this.props.thirstStatus, thirstStatusStyle)}
-          {renderNeedStatusIcon("hunger", this.props.hungerStatus, hungerStatusStyle)}
-          {renderNeedStatusIcon("tiredness", this.props.fatigueStatus, fatigueStatusStyle)}
+          {renderNeedStatusIcon("thirst", this.props.thirstStatus, thirstStatusStyle, "Thirst")}
+          {renderNeedStatusIcon("hunger", this.props.hungerStatus, hungerStatusStyle, "Hunger")}
+          {renderNeedStatusIcon("tiredness", this.props.fatigueStatus, fatigueStatusStyle, "Fatigue")}
 
           {!this.state.hideHero &&
-            <img src={imagePath} style={heroStyle}/>
+            <img src={imagePath} style={heroStyle} title={heroName} alt={heroName} aria-label={heroName}/>
           }
 
           {sanctuary &&

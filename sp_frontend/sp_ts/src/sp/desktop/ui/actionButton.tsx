@@ -11,7 +11,8 @@ import { QUICK, PRECISE, FIERCE } from "../../core/config";
 
 interface ActionButtonProps {
   type,
-  handler
+  handler,
+  title?: string,
 }
 
 export default class ActionButton extends React.Component<ActionButtonProps, any> {
@@ -66,17 +67,23 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
   render() {
     var buttonType;
     var cssStyle;
+    var defaultTitle;
 
     if(this.props.type == QUICK) {
       buttonType = quickattackbutton;
       cssStyle = styles.quickattackbutton;
+      defaultTitle = "Quick Attack — fast, light hit (dodged by Dodge)";
     } else if(this.props.type == PRECISE) {
       buttonType = preciseattackbutton;
       cssStyle = styles.preciseattackbutton;
+      defaultTitle = "Precise Attack — balanced hit (countered by Parry)";
     } else if(this.props.type == FIERCE) {
       buttonType = fierceattackbutton;
       cssStyle = styles.fierceattackbutton;
+      defaultTitle = "Fierce Attack — slow, heavy hit (blocked by Brace)";
     }
+
+    const title = this.props.title || defaultTitle;
 
     const spanStyle = {
       transform: 'translate(12px, 13px)',
@@ -104,7 +111,10 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
         {this.state.cooldown != -1 && 
           <span style={spanStyle}>{this.state.cooldown}</span> }
 
-        <img src={buttonType} 
+        <img src={buttonType}
+             title={title}
+             alt={title}
+             aria-label={title}
              onClick={this.handleClick}/>
       </div>
     );

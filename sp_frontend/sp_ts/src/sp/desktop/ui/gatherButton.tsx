@@ -8,7 +8,8 @@ import gatherbuttonimageclick from "ui_comp/gatherbutton.png";
 
 interface GatherButtonProps {
   className,
-  handler
+  handler,
+  title?: string,
 }
 
 export default class GatherButton extends React.Component<GatherButtonProps, any> {
@@ -93,9 +94,15 @@ export default class GatherButton extends React.Component<GatherButtonProps, any
           <span style={spanStyle}>{this.state.cooldown}</span>}
 
         {!this.state.showClicked && <img src={gatherbuttonimage}
+          title={this.props.title}
+          alt={this.props.title}
+          aria-label={this.props.title}
           onClick={this.handleClick} />}
 
-        {this.state.showClicked && <img src={'/static/art/ui/gatherbutton_click.png'} />}
+        {this.state.showClicked && <img src={'/static/art/ui/gatherbutton_click.png'}
+          title={this.props.title}
+          alt={this.props.title}
+          aria-label={this.props.title} />}
 
       </div>
     );

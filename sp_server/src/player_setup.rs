@@ -54,6 +54,7 @@ pub fn new(
     class_name: String,
     commands: &mut Commands,
     start_locations: &mut ResMut<StartLocations>,
+    assigned_start_locations: &mut ResMut<AssignedStartLocations>,
     ids: &mut ResMut<Ids>,
     entity_map: &mut ResMut<EntityObjMap>,
     map_events: &mut ResMut<MapEvents>,
@@ -72,6 +73,9 @@ pub fn new(
         Ok(start_location) => start_location,
         Err(e) => return Err(e),
     };
+
+    // Remember the assignment so True Death can release this location back to the pool.
+    assigned_start_locations.insert(player_id, start_location.clone());
 
     // Record spawn position for crisis tracking
     spawn_positions.insert(
@@ -1236,6 +1240,43 @@ pub fn new(
     } else {
         "Wild Boar".to_string()
     };
+
+    // Spawn the necromancer and its mausoleum up front, but hidden: State::Hiding
+    // keeps them out of every perception path and we deliberately skip the NewObj
+    // trigger so the client is never told they exist. They are revealed and
+    // activated later by the NecroEvent, which is scheduled 5 minutes after the
+    // villager is rescued (see the SpawnVillager handler in game.rs).
+    let mausoleum_pos = Position {
+        x: start_location.mausoleum_pos[0],
+        y: start_location.mausoleum_pos[1],
+    };
+    let (_necro_entity, necromancer_id, _necro_player_id, _necro_pos) =
+        Encounter::spawn_dormant_necromancer(
+            NPC_PLAYER_ID,
+            mausoleum_pos,
+            mausoleum_pos,
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+    let mausoleum_id = ids.new_obj_id();
+    let mausoleum = Obj::create_nospawn(
+        mausoleum_id,
+        NPC_PLAYER_ID,
+        "Mausoleum".to_string(),
+        mausoleum_pos,
+        State::Hiding,
+        Inventory {
+            owner: mausoleum_id,
+            items: Vec::new(),
+        },
+        templates,
+    );
+    let mausoleum_entity = commands.spawn(mausoleum).id();
+    ids.new_obj(mausoleum_id, NPC_PLAYER_ID);
+    entity_map.new_obj(mausoleum_id, mausoleum_entity);
+
     initial_encounter_state.insert(
         player_id,
         InitialEncounterEntry {
@@ -1252,6 +1293,11 @@ pub fn new(
             spider_unlock_tick: game_tick.0 + 3600,
             villager_event_scheduled: false,
             merchant_id,
+            necromancer_id: necromancer_id.0,
+            mausoleum_id,
+            necro_spawn_anchor: mausoleum_pos,
+            necro_corpse_anchor: shipwreck_pos,
+            necro_home: mausoleum_pos,
         },
     );
 
@@ -1305,69 +1351,6 @@ pub fn new(
         intensity: 10,
     };
     map_events.new(hero_id, game_tick.0 + 3000, wolf_howl_event);
-
-    // Schedule the necromancer event for the next evening
-    let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
-    let event_tick = if ticks_in_day < EVENING {
-        // Player joined before evening - trigger this same evening
-        game_tick.0 + (EVENING - ticks_in_day)
-    } else {
-        // Player joined at/after evening - trigger next day's evening
-        game_tick.0 + (GAME_TICKS_PER_DAY - ticks_in_day + EVENING)
-    };
-
-    let mausoleum_pos = Position {
-        x: start_location.mausoleum_pos[0],
-        y: start_location.mausoleum_pos[1],
-    };
-    let (_necro_entity, necromancer_id, _necro_player_id, _necro_pos) =
-        Encounter::spawn_dormant_necromancer(
-            NPC_PLAYER_ID,
-            mausoleum_pos,
-            mausoleum_pos,
-            commands,
-            ids,
-            entity_map,
-            templates,
-        );
-
-    // Spawn the Mausoleum hidden alongside the dormant necromancer. Both stay
-    // invisible (State::Hiding) and unannounced (no NewObj) until the NecroEvent
-    // fires, at which point they are revealed together.
-    let mausoleum_id = ids.new_obj_id();
-    let mausoleum = Obj::create_nospawn(
-        mausoleum_id,
-        NPC_PLAYER_ID,
-        "Mausoleum".to_string(),
-        mausoleum_pos,
-        State::Hiding,
-        Inventory {
-            owner: mausoleum_id,
-            items: Vec::new(),
-        },
-        templates,
-    );
-    let mausoleum_entity = commands.spawn(mausoleum).id();
-    ids.new_obj(mausoleum_id, NPC_PLAYER_ID);
-    entity_map.new_obj(mausoleum_id, mausoleum_entity);
-
-    let event_type = GameEventType::NecroEvent {
-        necromancer_id: Some(necromancer_id.0),
-        mausoleum_id: Some(mausoleum_id),
-        spawn_anchor: mausoleum_pos,
-        corpse_anchor: shipwreck_pos,
-        home: mausoleum_pos,
-    };
-    let event_id = ids.new_map_event_id();
-
-    let event = GameEvent {
-        event_id: event_id,
-        start_tick: game_tick.0,
-        run_tick: event_tick,
-        event_type: event_type,
-    };
-
-    game_events.insert(event.event_id, event);
 
     // Spawn POIs around the player's starting area
     // Burned House - contains loot, guarded by undead
@@ -1727,6 +1710,13 @@ pub struct StartLocation {
 
 #[derive(Debug, Resource, Deref, DerefMut)]
 pub struct StartLocations(pub Vec<StartLocation>);
+
+// Tracks which start location each player was handed, keyed by player id, so the
+// location can be returned to `StartLocations` when that player's hero meets True
+// Death. In-memory only: this is rebuilt empty on restart (as is StartLocations
+// itself, which reloads from player_start.yaml).
+#[derive(Debug, Default, Resource, Deref, DerefMut)]
+pub struct AssignedStartLocations(pub HashMap<i32, StartLocation>);
 
 impl StartLocations {
     pub fn get_start_location(&mut self) -> Result<StartLocation, String> {
