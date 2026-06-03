@@ -95,9 +95,10 @@ export default class TileResourcesPanel extends React.Component<TRPProps, any> {
 
     return (
       <div>
-        <HalfPanel left={true}
+        <HalfPanel left={false}
           panelType={'tile_resources'}
-          hideExitButton={false}>
+          hideExitButton={false}
+          zIndexBonus={100}>
 
           <span style={featureNameStyle}>Discovered Resources</span>
 

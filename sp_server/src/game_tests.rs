@@ -939,6 +939,144 @@ fn hero_auto_consume_skips_busy_combat_locked_and_non_hero_entities() {
     );
 }
 
+fn bedroll_item(id: i32, owner: i32) -> Item {
+    consumable_item(id, owner, "Bedroll", BEDROLL, AttrKey::Feed, 0.0)
+}
+
+#[test]
+fn idle_tired_hero_auto_sleeps_with_bedroll() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(400));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::None,
+            SubclassHero,
+            LastCombatTick(0),
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+            Inventory {
+                owner: 1,
+                items: vec![bedroll_item(40, 1)],
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(HERO_AUTO_SLEEP_THRESHOLD, 0.0),
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::Sleeping
+    );
+    assert_eq!(
+        app.world()
+            .entity(hero)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::Executing
+    );
+
+    let map_events = app.world().resource::<MapEvents>();
+    assert_eq!(map_events.len(), 1);
+    let event = map_events.values().next().unwrap();
+    assert_eq!(event.obj_id, 1);
+    assert_eq!(event.run_tick, 400 + HERO_AUTO_CONSUME_TICKS);
+    match &event.event_type {
+        VisibleEvent::SleepEvent { obj_id } => assert_eq!(*obj_id, 1),
+        other => panic!("expected sleep event, got {:?}", other),
+    }
+}
+
+#[test]
+fn idle_tired_hero_without_bedroll_does_not_sleep() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(400));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::None,
+            SubclassHero,
+            LastCombatTick(0),
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(HERO_AUTO_SLEEP_THRESHOLD, 0.0),
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+}
+
+#[test]
+fn idle_rested_hero_with_bedroll_does_not_sleep() {
+    let mut app = App::new();
+    app.add_systems(Update, hero_auto_consume_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(400));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::None,
+            SubclassHero,
+            LastCombatTick(0),
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+            Inventory {
+                owner: 1,
+                items: vec![bedroll_item(40, 1)],
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(HERO_AUTO_SLEEP_THRESHOLD - 1.0, 0.0),
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+}
+
 #[test]
 fn first_resurrection_uses_starting_soulshard_cost() {
     assert_eq!(resurrection_attempt_cost(1, 0), 10);

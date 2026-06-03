@@ -68,7 +68,7 @@ use crate::obj::{
     Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower,
     WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
-use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerPlugin};
+use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
 use crate::player_setup::{AssignedStartLocations, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
@@ -563,6 +563,16 @@ const LEGENDARY_HIDEOUT_REVEAL_WAVES: i32 = 4;
 const LEGENDARY_HIDEOUT_REVEAL_RANGE: u32 = 5;
 const UNDEAD_INCURSION_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 3;
 const GOBLIN_PILLAGER_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 5;
+
+// Fallback deadlines: if a crisis tier has not fired from its organic condition
+// within this much survival time, force it so the threat curve keeps advancing
+// for passive players. Tiers 4 and 5 already trigger on survival time well
+// before these deadlines; their fallback is a guarantee that still holds should
+// those primary thresholds ever be raised past it.
+const WOLF_PACK_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 20; // 20 min
+const GOBLIN_RAID_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 30; // 30 min
+const UNDEAD_INCURSION_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 40; // 40 min
+const GOBLIN_PILLAGER_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 60; // 60 min
 
 pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
     let mut tier = 0;
@@ -6444,6 +6454,7 @@ fn explore_event_system(
     mut game_events: ResMut<GameEvents>,
     initial_encounter_state: Res<InitialEncounterState>,
     mut survey_history: ResMut<SurveyHistory>,
+    mut player_events: ResMut<PlayerEvents>,
     mut query: Query<(
         &PlayerId,
         &Id,
@@ -6525,6 +6536,18 @@ fn explore_event_system(
 
                         send_to_client(player_id_value, notification_packet, &clients);
                     }
+
+                    // Push a refreshed info tile so the player immediately sees the
+                    // newly revealed resources on the prospected tile.
+                    player_events.insert(
+                        ids.player_event,
+                        PlayerEvent::InfoTile {
+                            player_id: player_id_value,
+                            x: pos.x,
+                            y: pos.y,
+                        },
+                    );
+                    ids.player_event += 1;
                 }
 
                 if is_survey && record_tile_survey(player_id_value, pos, &mut survey_history) {
@@ -7914,6 +7937,8 @@ fn use_item_system(
 
 const HERO_AUTO_CONSUME_THRESHOLD: f32 = THIRSTY_SCORE;
 const HERO_AUTO_CONSUME_TICKS: i32 = TICKS_PER_SEC * 3;
+/// Tiredness at which an idle hero will bed down to sleep if a bedroll is on hand.
+const HERO_AUTO_SLEEP_THRESHOLD: f32 = 75.0;
 
 fn hero_has_pending_map_event(obj_id: i32, map_events: &MapEvents) -> bool {
     map_events.iter().any(|(_, event)| event.obj_id == obj_id)
@@ -7931,13 +7956,14 @@ fn hero_auto_consume_system(
             &Inventory,
             &Thirst,
             &Hunger,
+            Option<&Tired>,
             Option<&LastCombatTick>,
             Option<&mut EventExecuting>,
         ),
         With<SubclassHero>,
     >,
 ) {
-    for (entity, id, state, inventory, thirst, hunger, last_combat_tick, event_executing) in
+    for (entity, id, state, inventory, thirst, hunger, tired, last_combat_tick, event_executing) in
         hero_query.iter_mut()
     {
         if *state != State::None
@@ -7993,7 +8019,23 @@ fn hero_auto_consume_system(
                 },
                 "Eat",
             ),
-            (None, None) => continue,
+            (None, None) => {
+                // No food or drink need — an idle, tired hero beds down to sleep
+                // and fully recover, provided a bedroll is in their inventory.
+                let tired_enough = tired
+                    .map(|tired| tired.tired >= HERO_AUTO_SLEEP_THRESHOLD)
+                    .unwrap_or(false);
+
+                if tired_enough && inventory.has_by_class(BEDROLL.to_string()) {
+                    (
+                        State::Sleeping,
+                        VisibleEvent::SleepEvent { obj_id: id.0 },
+                        "Sleep",
+                    )
+                } else {
+                    continue;
+                }
+            }
         };
 
         commands.trigger(StateChange {
@@ -10602,18 +10644,24 @@ fn wolf_pack_system(
             }
         }
 
-        // Check distance from spawn
-        let Some(spawn_pos) = spawn_positions.get(&player_id.0) else {
-            continue;
-        };
+        // Trigger when 8+ tiles from spawn (distance_sq >= 64), or force the pack
+        // on the fallback deadline if the player has stayed close to home.
+        let fallback_due = player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
+            >= WOLF_PACK_FALLBACK_TICKS;
 
-        let dx = (pos.x - spawn_pos.x) as f64;
-        let dy = (pos.y - spawn_pos.y) as f64;
-        let distance_sq = dx * dx + dy * dy;
+        if !fallback_due {
+            // Check distance from spawn
+            let Some(spawn_pos) = spawn_positions.get(&player_id.0) else {
+                continue;
+            };
 
-        // Trigger when 8+ tiles from spawn (distance_sq >= 64)
-        if distance_sq < 64.0 {
-            continue;
+            let dx = (pos.x - spawn_pos.x) as f64;
+            let dy = (pos.y - spawn_pos.y) as f64;
+            let distance_sq = dx * dx + dy * dy;
+
+            if distance_sq < 64.0 {
+                continue;
+            }
         }
 
         // Find spawn position near the hero
@@ -10676,10 +10724,12 @@ fn goblin_raid_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     storage_query: Query<(&Id, &PlayerId, &Position, &Inventory, &Storage)>,
+    hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     map: Res<Map>,
+    player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
 ) {
     // Check every 30 ticks (3 seconds)
@@ -10762,6 +10812,80 @@ fn goblin_raid_system(
             }
         }
     }
+
+    // Fallback: force the raid if the player never stockpiled enough gold by the
+    // deadline. Steal from a storage if the player has one, otherwise the hero.
+    for (hero_id, player_id, hero_pos) in hero_query.iter() {
+        if let Some(crisis) = crisis_state.get(&player_id.0) {
+            if crisis.goblin_raid {
+                continue;
+            }
+        }
+
+        if player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
+            < GOBLIN_RAID_FALLBACK_TICKS
+        {
+            continue;
+        }
+
+        let (target_id, target_pos) = storage_query
+            .iter()
+            .find(|(_, storage_player_id, _, _, _)| storage_player_id.0 == player_id.0)
+            .map(|(id, _, pos, _, _)| (id.0, *pos))
+            .unwrap_or((hero_id.0, *hero_pos));
+
+        let mut spawned = false;
+        for _attempt in 0..10 {
+            let spawn_pos =
+                get_random_pos_at_range(player_id.0, target_pos.x, target_pos.y, 6, Vec::new(), &map);
+
+            if let Some(spawn_pos) = spawn_pos {
+                let path = Map::find_path(
+                    target_pos,
+                    spawn_pos,
+                    &map,
+                    player_id.0,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                    true,
+                );
+
+                if let Some((path, _cost)) = path {
+                    if path.len() < 20 {
+                        for _ in 0..2 {
+                            Encounter::spawn_steal_crisis(
+                                ids.new_obj_id(),
+                                NPC_PLAYER_ID,
+                                spawn_pos,
+                                "Wolf Rider".to_string(),
+                                &mut commands,
+                                &mut ids,
+                                &mut entity_map,
+                                &templates,
+                                target_id,
+                            );
+                        }
+                        spawned = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if spawned {
+            info!(
+                "Tier 3 Crisis: Goblin Wolf Rider Raid fallback triggered for player {}",
+                player_id.0
+            );
+            crisis_state
+                .entry(player_id.0)
+                .or_insert_with(PlayerCrisis::default)
+                .goblin_raid = true;
+        }
+    }
 }
 
 // Tier 4: Undead Incursion - triggers after each player survives 3 in-game days.
@@ -10781,8 +10905,11 @@ fn undead_incursion_system(
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
-        if player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
-            < UNDEAD_INCURSION_SURVIVAL_TICKS
+        // Primary trigger at 3 survived days; the fallback guarantees it by the
+        // deadline even if the primary threshold is ever raised past it.
+        let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
+        if survival_ticks < UNDEAD_INCURSION_SURVIVAL_TICKS
+            && survival_ticks < UNDEAD_INCURSION_FALLBACK_TICKS
         {
             continue;
         }
@@ -10884,8 +11011,11 @@ fn goblin_pillager_system(
     let mut player_targets: HashMap<i32, (i32, Position)> = HashMap::new();
 
     for (id, player_id, pos) in storage_query.iter() {
-        if player_survival_ticks(&game_tick, player_id.0, &player_intro_state)
-            < GOBLIN_PILLAGER_SURVIVAL_TICKS
+        // Primary trigger at 5 survived days; the fallback guarantees it by the
+        // deadline even if the primary threshold is ever raised past it.
+        let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
+        if survival_ticks < GOBLIN_PILLAGER_SURVIVAL_TICKS
+            && survival_ticks < GOBLIN_PILLAGER_FALLBACK_TICKS
         {
             continue;
         }

@@ -18,14 +18,76 @@ interface TilePanelProps {
 }
 
 export default class TilePanel extends React.Component<TilePanelProps, any> {
+  private timer: any = null;
+
   constructor(props) {
     super(props);
 
     this.state = {
+      prospecting: false,
+      prospectProgress: 0,
+      prospectMax: 0,
     };
 
     this.handleResourceButtonClick = this.handleResourceButtonClick.bind(this);
     this.handleProspectButtonClick = this.handleProspectButtonClick.bind(this);
+    this.handleProspect = this.handleProspect.bind(this);
+    this.startProspectTimer = this.startProspectTimer.bind(this);
+    this.stopProspectTimer = this.stopProspectTimer.bind(this);
+  }
+
+  componentDidMount() {
+    Global.gameEmitter.on(NetworkEvent.PROSPECT, this.handleProspect, this);
+  }
+
+  componentWillUnmount() {
+    Global.gameEmitter.removeListener(NetworkEvent.PROSPECT, this.handleProspect);
+    this.stopProspectTimer();
+  }
+
+  componentDidUpdate(prevProps) {
+    // Switched to a different tile: clear any in-progress prospecting bar.
+    if (prevProps.tileData.x !== this.props.tileData.x ||
+        prevProps.tileData.y !== this.props.tileData.y) {
+      this.stopProspectTimer();
+      if (this.state.prospecting) {
+        this.setState({ prospecting: false, prospectProgress: 0, prospectMax: 0 });
+      }
+    }
+  }
+
+  handleProspect(message) {
+    const hero = Global.objectStates[Global.heroId];
+    // Only show the progress bar on the tile actually being prospected.
+    if (!hero || hero.x !== this.props.tileData.x || hero.y !== this.props.tileData.y) {
+      return;
+    }
+
+    // prospect_time / explore_time is in game ticks (10 ticks per second).
+    const ticks = message.prospect_time ?? message.explore_time ?? 20;
+    this.startProspectTimer(ticks);
+  }
+
+  startProspectTimer(ticks) {
+    this.stopProspectTimer();
+    this.setState({ prospecting: true, prospectProgress: 0, prospectMax: ticks });
+
+    // Advance once per tick (~100ms) so the bar fills over the prospect duration.
+    this.timer = setInterval(() => {
+      if (this.state.prospectProgress >= this.state.prospectMax) {
+        this.stopProspectTimer();
+        this.setState({ prospecting: false, prospectProgress: 0, prospectMax: 0 });
+      } else {
+        this.setState({ prospectProgress: this.state.prospectProgress + 1 });
+      }
+    }, 100);
+  }
+
+  stopProspectTimer() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
   }
 
   handleResourceButtonClick(event: React.MouseEvent) {
@@ -85,6 +147,13 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
                 { label: 'Wildness', value: this.props.tileData.wildness },
                 { label: 'Survey Status', value: this.props.tileData.survey_status || 'Unsurveyed' },
                 { label: 'Prospected Resources', value: `${discoveredResources} / ${numResources}` },
+                {
+                  label: 'Prospecting',
+                  value: <progress style={{ width: '120px' }}
+                                   max={this.state.prospectMax}
+                                   value={this.state.prospectProgress}></progress>,
+                  hidden: !this.state.prospecting,
+                },
               ]} />
               <MobilePanelActions actions={[
                 { key: 'prospect', label: 'Prospect', icon: explorebutton, onClick: this.handleProspectButtonClick },
