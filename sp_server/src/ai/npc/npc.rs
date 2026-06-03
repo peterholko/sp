@@ -48,6 +48,8 @@ pub struct NPCTarget {
 pub enum AnimalFallbackKind {
     Wander,
     HideInForest,
+    // Wander a few steps first, then retreat to forest cover and hide.
+    WanderThenHide,
 }
 
 #[derive(Debug, Component, Clone)]
@@ -523,6 +525,108 @@ mod tests {
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), 0.5);
+    }
+
+    fn spawn_wander_then_hide_scorers(app: &mut App, num_moves: i32) -> (Entity, Entity) {
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                AnimalFallback {
+                    kind: AnimalFallbackKind::WanderThenHide,
+                    target_id: 1,
+                    last_seen_pos: Position { x: 1, y: 0 },
+                },
+                VisibleTarget::new(NO_TARGET),
+                State::None,
+                WanderingBehavior { num_moves },
+                SubclassNPC,
+            ))
+            .id();
+
+        let (wander_scorer, hide_scorer) = {
+            let mut commands = app.world_mut().commands();
+            (
+                spawn_scorer(&RatBlockedWanderScorer, &mut commands, npc_entity),
+                spawn_scorer(&WolfBlockedHideScorer, &mut commands, npc_entity),
+            )
+        };
+        app.world_mut().flush();
+
+        (wander_scorer, hide_scorer)
+    }
+
+    #[test]
+    fn cave_bat_template_wanders_then_hides() {
+        assert_eq!(
+            animal_fallback_kind_for_template("Cave Bat"),
+            Some(AnimalFallbackKind::WanderThenHide)
+        );
+    }
+
+    #[test]
+    fn wander_then_hide_wanders_before_threshold() {
+        let mut app = App::new();
+        app.add_systems(
+            Update,
+            (
+                rat_blocked_wander_scorer_system,
+                wolf_blocked_hide_scorer_system,
+            ),
+        );
+        let (wander_scorer, hide_scorer) =
+            spawn_wander_then_hide_scorers(&mut app, WANDER_THEN_HIDE_MOVES - 1);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(wander_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.5
+        );
+        assert_eq!(
+            app.world()
+                .entity(hide_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn wander_then_hide_hides_at_threshold() {
+        let mut app = App::new();
+        app.add_systems(
+            Update,
+            (
+                rat_blocked_wander_scorer_system,
+                wolf_blocked_hide_scorer_system,
+            ),
+        );
+        let (wander_scorer, hide_scorer) =
+            spawn_wander_then_hide_scorers(&mut app, WANDER_THEN_HIDE_MOVES);
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(wander_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.0
+        );
+        assert_eq!(
+            app.world()
+                .entity(hide_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.5
+        );
     }
 
     #[test]
@@ -2206,16 +2310,24 @@ pub fn no_target_scorer_system(
 }
 
 pub fn rat_blocked_wander_scorer_system(
-    npc_query: Query<(&AnimalFallback, &VisibleTarget, &State), With<SubclassNPC>>,
+    npc_query: Query<
+        (
+            &AnimalFallback,
+            &VisibleTarget,
+            &State,
+            Option<&WanderingBehavior>,
+        ),
+        With<SubclassNPC>,
+    >,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<RatBlockedWanderScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
-        let Ok((fallback, visible_target, npc_state)) = npc_query.get(*actor) else {
+        let Ok((fallback, visible_target, npc_state, wandering)) = npc_query.get(*actor) else {
             score.set(0.0);
             continue;
         };
 
-        if fallback.kind == AnimalFallbackKind::Wander
+        if wants_to_wander(fallback.kind, wandering)
             && visible_target.target == NO_TARGET
             && *npc_state != State::Hiding
         {
@@ -2226,17 +2338,49 @@ pub fn rat_blocked_wander_scorer_system(
     }
 }
 
+// `WanderThenHide` animals wander for their first few steps and then switch to
+// seeking forest cover. `num_moves` is incremented by `random_wander_action_system`.
+fn wants_to_wander(kind: AnimalFallbackKind, wandering: Option<&WanderingBehavior>) -> bool {
+    match kind {
+        AnimalFallbackKind::Wander => true,
+        AnimalFallbackKind::WanderThenHide => {
+            let num_moves = wandering.map_or(0, |w| w.num_moves);
+            num_moves < WANDER_THEN_HIDE_MOVES
+        }
+        AnimalFallbackKind::HideInForest => false,
+    }
+}
+
+fn wants_to_hide(kind: AnimalFallbackKind, wandering: Option<&WanderingBehavior>) -> bool {
+    match kind {
+        AnimalFallbackKind::HideInForest => true,
+        AnimalFallbackKind::WanderThenHide => {
+            let num_moves = wandering.map_or(0, |w| w.num_moves);
+            num_moves >= WANDER_THEN_HIDE_MOVES
+        }
+        AnimalFallbackKind::Wander => false,
+    }
+}
+
 pub fn wolf_blocked_hide_scorer_system(
-    npc_query: Query<(&AnimalFallback, &VisibleTarget, &State), With<SubclassNPC>>,
+    npc_query: Query<
+        (
+            &AnimalFallback,
+            &VisibleTarget,
+            &State,
+            Option<&WanderingBehavior>,
+        ),
+        With<SubclassNPC>,
+    >,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<WolfBlockedHideScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
-        let Ok((fallback, visible_target, state)) = npc_query.get(*actor) else {
+        let Ok((fallback, visible_target, state, wandering)) = npc_query.get(*actor) else {
             score.set(0.0);
             continue;
         };
 
-        if fallback.kind == AnimalFallbackKind::HideInForest
+        if wants_to_hide(fallback.kind, wandering)
             && visible_target.target == NO_TARGET
             && *state != State::Hiding
         {
@@ -2674,9 +2818,9 @@ pub fn move_to_forest_action_system(
                     continue;
                 };
 
-                if is_forest_position(&map, *npc.pos) {
+                if is_cover_position(&map, *npc.pos) {
                     span.span().in_scope(|| {
-                        npc_debug!(*actor, obj_id, None, "Wolf reached forest cover");
+                        npc_debug!(*actor, obj_id, None, "Reached forest or mountain cover");
                     });
                     *state = ActionState::Success;
                     continue;
@@ -2687,7 +2831,7 @@ pub fn move_to_forest_action_system(
                     continue;
                 }
 
-                let Some(next_pos) = find_nearest_forest_path(
+                let Some(next_pos) = find_nearest_cover_path(
                     *npc.pos,
                     fallback.last_seen_pos,
                     npc_player_id,
@@ -2775,15 +2919,15 @@ pub fn move_to_forest_action_system(
                     continue;
                 };
 
-                if is_forest_position(&map, *npc.pos) {
+                if is_cover_position(&map, *npc.pos) {
                     span.span().in_scope(|| {
-                        npc_debug!(*actor, obj_id, None, "Wolf reached forest cover");
+                        npc_debug!(*actor, obj_id, None, "Reached forest or mountain cover");
                     });
                     *state = ActionState::Success;
                     continue;
                 }
 
-                let Some(next_pos) = find_nearest_forest_path(
+                let Some(next_pos) = find_nearest_cover_path(
                     *npc.pos,
                     fallback.last_seen_pos,
                     npc_player_id,
@@ -5597,6 +5741,11 @@ pub fn cast_spell_target_system(
 
 const WOLF_FOREST_SEARCH_RADIUS: u32 = 10;
 
+// How many wandering steps a `WanderThenHide` animal takes before it gives up
+// and retreats to forest cover. Kept well below the wandering despawn threshold
+// (see `despawn_wandering_npc_system`) so these animals hide rather than vanish.
+const WANDER_THEN_HIDE_MOVES: i32 = 4;
+
 fn remember_animal_fallback(
     fallback: &mut Option<(u32, AnimalFallback)>,
     template: &str,
@@ -5628,6 +5777,8 @@ fn animal_fallback_kind_for_template(template: &str) -> Option<AnimalFallbackKin
         Some(AnimalFallbackKind::Wander)
     } else if template.contains("Wolf") {
         Some(AnimalFallbackKind::HideInForest)
+    } else if template == "Cave Bat" {
+        Some(AnimalFallbackKind::WanderThenHide)
     } else {
         None
     }
@@ -5678,7 +5829,7 @@ fn select_random_adjacent_step(
         .map(|(map_pos, _cost)| map_pos.clone())
 }
 
-fn find_nearest_forest_path(
+fn find_nearest_cover_path(
     npc_pos: Position,
     threat_pos: Position,
     npc_player_id: i32,
@@ -5688,21 +5839,23 @@ fn find_nearest_forest_path(
     let mut best_path: Option<(Vec<MapPos>, u32, u32)> = None;
 
     for (x, y) in Map::range((npc_pos.x, npc_pos.y), WOLF_FOREST_SEARCH_RADIUS) {
-        let forest_pos = Position { x, y };
-        if forest_pos == npc_pos || !is_forest_position(map, forest_pos) {
+        let cover_pos = Position { x, y };
+        if cover_pos == npc_pos || !is_cover_position(map, cover_pos) {
             continue;
         }
 
         let Some((path, cost)) = Map::find_fast_path(
             npc_pos,
-            forest_pos,
+            cover_pos,
             map,
             npc_player_id,
             blocking_list.clone(),
             true,
             false,
             false,
-            false,
+            // Allow the goal tile itself to be impassable terrain (e.g. a
+            // mountain) so animals can take cover on mountain tiles too.
+            true,
             false,
         ) else {
             continue;
@@ -5712,7 +5865,7 @@ fn find_nearest_forest_path(
             continue;
         }
 
-        let threat_distance = Map::dist(forest_pos, threat_pos);
+        let threat_distance = Map::dist(cover_pos, threat_pos);
         let should_replace = best_path
             .as_ref()
             .map_or(true, |(_, best_cost, best_threat)| {
@@ -5727,8 +5880,10 @@ fn find_nearest_forest_path(
     best_path.map(|(path, cost, _threat_distance)| (path, cost))
 }
 
-fn is_forest_position(map: &Map, pos: Position) -> bool {
-    tile_type_at(map, pos).map_or(false, TileType::is_forest)
+// Forest or mountain tiles count as cover for animals retreating from a
+// fortified target.
+fn is_cover_position(map: &Map, pos: Position) -> bool {
+    tile_type_at(map, pos).map_or(false, |tile| tile.is_forest() || tile == TileType::Mountain)
 }
 
 fn tile_type_at(map: &Map, pos: Position) -> Option<TileType> {

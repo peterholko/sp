@@ -10836,8 +10836,14 @@ fn goblin_raid_system(
 
         let mut spawned = false;
         for _attempt in 0..10 {
-            let spawn_pos =
-                get_random_pos_at_range(player_id.0, target_pos.x, target_pos.y, 6, Vec::new(), &map);
+            let spawn_pos = get_random_pos_at_range(
+                player_id.0,
+                target_pos.x,
+                target_pos.y,
+                6,
+                Vec::new(),
+                &map,
+            );
 
             if let Some(spawn_pos) = spawn_pos {
                 let path = Map::find_path(
@@ -13863,7 +13869,13 @@ fn build_progress_update_observer(
     clients: Res<Clients>,
     templates: Res<Templates>,
     mut perception_updates: ResMut<PerceptionUpdates>,
-    mut structure_query: Query<(&PlayerId, &Id, &Position, &Assignments, &mut BuildUpgradeState)>,
+    mut structure_query: Query<(
+        &PlayerId,
+        &Id,
+        &Position,
+        &Assignments,
+        &mut BuildUpgradeState,
+    )>,
     worker_query: Query<(&Position, &State, &Template, &Skills)>,
 ) {
     let Ok((

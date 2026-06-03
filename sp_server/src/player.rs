@@ -1864,21 +1864,22 @@ fn attack_system(
                 attack_history.push(attack_type.clone());
 
                 // Calculate and process damage
-                let (damage, combo, skill_updated, _countered) = Combat::process_attack_with_options(
-                    Combat::attack_type_to_enum(attack_type.to_string()),
-                    &mut attacker,
-                    &mut target,
-                    &mut commands,
-                    &templates,
-                    &map,
-                    &mut ids,
-                    &game_tick,
-                    &mut map_events,
-                    AttackOptions {
-                        stamina_cost: attack_profile.stamina_cost,
-                        damage_bonus: attack_profile.damage_bonus,
-                    },
-                );
+                let (damage, combo, skill_updated, _countered) =
+                    Combat::process_attack_with_options(
+                        Combat::attack_type_to_enum(attack_type.to_string()),
+                        &mut attacker,
+                        &mut target,
+                        &mut commands,
+                        &templates,
+                        &map,
+                        &mut ids,
+                        &game_tick,
+                        &mut map_events,
+                        AttackOptions {
+                            stamina_cost: attack_profile.stamina_cost,
+                            damage_bonus: attack_profile.damage_bonus,
+                        },
+                    );
 
                 // Add visible damage event to broadcast to everyone nearby
                 Combat::add_damage_event(
