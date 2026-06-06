@@ -19,15 +19,19 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::common::{Hunger, Thirst, Tired};
 use crate::constants::{DATABASE_MANAGER_ID, GAME_TICKS_PER_DAY};
 use crate::database::DatabaseEvent;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, NetworkReceiver, Objectives,
     PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState, VictoryState,
 };
-use crate::item::Inventory;
+use crate::item::{AttrKey, Inventory};
 use crate::map::Map;
-use crate::obj::{ClassStructure, Id, PlayerId, Position, State, Stats, SubclassHero, SubclassNPC, TrueDeath};
+use crate::obj::{
+    ClassStructure, Id, Order, PlayerId, Position, State, StateDead, Stats, Subclass, SubclassHero,
+    SubclassNPC, SubclassVillager, TrueDeath,
+};
 use crate::resource::Resources;
 use crate::skill::Skills;
 use crate::{build_headless_app, AppState, PlayerEvent, ResponsePacket};
@@ -46,12 +50,36 @@ const DB_CHANNEL_CAP: usize = 1_024;
 // per decision step via `observe()` so the bot stays pure data-in / action-out.
 pub struct WorldView {
     pub hero: Option<HeroView>,
+    pub inventory: Vec<ItemView>,
     pub enemies: Vec<UnitView>,
+    pub villagers: Vec<VillagerView>,
+    pub structures: Vec<StructureView>,
+    pub resource_tiles: Vec<ResTileView>,
     pub occupied: HashSet<(i32, i32)>,
-    pub resource_tiles: Vec<Position>,
-    pub structures_built: i32,
     pub game_tick: i32,
     pub day: i32,
+}
+
+impl WorldView {
+    pub fn structures_built(&self) -> i32 {
+        self.structures.iter().filter(|s| s.built).count() as i32
+    }
+
+    // The hero's "home" anchor for retreat: prefer the campfire, else any owned
+    // built structure (the starter Burrow), else None.
+    pub fn home(&self) -> Option<Position> {
+        self.structures
+            .iter()
+            .find(|s| s.subclass == "campfire" && s.built)
+            .or_else(|| self.structures.iter().find(|s| s.built))
+            .map(|s| s.pos)
+    }
+
+    pub fn has_built(&self, subclass: &str) -> bool {
+        self.structures
+            .iter()
+            .any(|s| s.subclass == subclass && s.built)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -59,15 +87,28 @@ pub struct HeroView {
     pub id: i32,
     pub pos: Position,
     pub hp: i32,
+    pub base_hp: i32,
     pub state: State,
     pub dead: bool,
     pub true_death: bool,
+    // Survival needs (0..=100); the game auto-eats/drinks/sleeps only while idle.
+    pub thirst: f32,
+    pub hunger: f32,
+    pub tired: f32,
 }
 
 impl HeroView {
     // Ready to receive a new command: idle (not moving/gathering/etc.) and alive.
     pub fn is_idle(&self) -> bool {
         !self.dead && !self.true_death && self.state == State::None
+    }
+
+    pub fn hp_frac(&self) -> f32 {
+        if self.base_hp <= 0 {
+            1.0
+        } else {
+            self.hp as f32 / self.base_hp as f32
+        }
     }
 }
 
@@ -78,6 +119,64 @@ pub struct UnitView {
     pub pos: Position,
 }
 
+#[derive(Clone)]
+pub struct ItemView {
+    pub id: i32,
+    pub name: String,
+    pub class: String,
+    pub subclass: String,
+    pub quantity: i32,
+    pub equipped: bool,
+    pub is_healing: bool,
+}
+
+impl ItemView {
+    // Mirrors item::req_matches_build: a build requirement of `req_type` is met
+    // by an item whose name, class, or subclass equals it (plus Log<-Timber).
+    pub fn matches_req(&self, req_type: &str) -> bool {
+        req_type == self.name
+            || req_type == self.class
+            || req_type == self.subclass
+            || (req_type == "Log" && self.class == "Timber")
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct VillagerView {
+    pub id: i32,
+    pub pos: Position,
+    pub idle: bool,
+}
+
+#[derive(Clone)]
+pub struct StructureView {
+    pub id: i32,
+    pub pos: Position,
+    pub subclass: String,
+    pub founded: bool, // placed, not yet built (needs resources + build)
+    pub building: bool,
+    pub built: bool, // construction complete
+    pub inventory: Vec<ItemView>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ResTileView {
+    pub pos: Position,
+    pub revealed: bool,
+}
+
+fn to_item_view(item: &crate::item::Item) -> ItemView {
+    ItemView {
+        id: item.id,
+        name: item.name.clone(),
+        class: item.class.clone(),
+        subclass: item.subclass.clone(),
+        quantity: item.quantity,
+        equipped: item.equipped,
+        is_healing: item.attrs.contains_key(&AttrKey::Healing),
+    }
+}
+
 // Per-run metrics emitted by the runner (CSV + JSON). Field names mirror the
 // game's own state structs (`PlayerRunScore`, `PlayerObjectives`,
 // `PlayerVictory`) so the data lines up with in-game scoring.
@@ -85,6 +184,7 @@ pub struct UnitView {
 pub struct RunMetrics {
     pub run_index: u32,
     pub outcome: String,
+    pub killer: String, // StateDead.killer at end (e.g. "Starvation", a creature name, or "")
     pub ticks: i32,
     pub days_survived: i32,
     // PlayerRunScore
@@ -313,26 +413,38 @@ impl HeadlessGame {
 
         let world = self.app.world_mut();
 
-        // Hero.
-        let hero = {
+        // Hero + its inventory (same entity).
+        let (hero, inventory) = {
             let mut q = world.query_filtered::<(
                 &Id,
                 &PlayerId,
                 &Position,
                 &Stats,
                 &State,
+                &Inventory,
+                &Thirst,
+                &Hunger,
+                Option<&Tired>,
                 Option<&TrueDeath>,
             ), With<SubclassHero>>();
-            q.iter(world)
-                .find(|(_, p, _, _, _, _)| p.0 == pid)
-                .map(|(id, _p, pos, stats, state, td)| HeroView {
-                    id: id.0,
-                    pos: *pos,
-                    hp: stats.hp,
-                    state: *state,
-                    dead: *state == State::Dead,
-                    true_death: td.is_some(),
-                })
+            match q.iter(world).find(|(_, p, ..)| p.0 == pid) {
+                Some((id, _p, pos, stats, state, inv, thirst, hunger, tired, td)) => (
+                    Some(HeroView {
+                        id: id.0,
+                        pos: *pos,
+                        hp: stats.hp,
+                        base_hp: stats.base_hp,
+                        state: *state,
+                        dead: *state == State::Dead,
+                        true_death: td.is_some(),
+                        thirst: thirst.thirst,
+                        hunger: hunger.hunger,
+                        tired: tired.map(|t| t.tired).unwrap_or(0.0),
+                    }),
+                    inv.items.iter().map(to_item_view).collect::<Vec<_>>(),
+                ),
+                None => (None, Vec::new()),
+            }
         };
 
         // Living enemy NPCs.
@@ -349,31 +461,65 @@ impl HeadlessGame {
                 .collect::<Vec<_>>()
         };
 
+        // The player's villagers, with whether they are idle (Order::None).
+        let villagers = {
+            let mut q = world.query_filtered::<(&Id, &PlayerId, &Position, &State, &Order), With<SubclassVillager>>();
+            q.iter(world)
+                .filter(|(_, p, _, state, _)| p.0 == pid && **state != State::Dead)
+                .map(|(id, _p, pos, _state, order)| VillagerView {
+                    id: id.0,
+                    pos: *pos,
+                    idle: *order == Order::None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The player's structures (+ inventories so the bot can pull build
+        // resources from the Burrow and check foundation contents).
+        let structures = {
+            let mut q = world.query_filtered::<(&Id, &PlayerId, &Position, &Subclass, &State, &Inventory), With<ClassStructure>>();
+            q.iter(world)
+                .filter(|(_, p, _, _, _, _)| p.0 == pid)
+                .map(|(id, _p, pos, subclass, state, inv)| StructureView {
+                    id: id.0,
+                    pos: *pos,
+                    subclass: subclass.to_string(),
+                    founded: *state == State::Founded,
+                    building: *state == State::Building || *state == State::Progressing,
+                    built: !matches!(
+                        *state,
+                        State::Founded | State::Building | State::Progressing | State::Stalled
+                    ),
+                    inventory: inv.items.iter().map(to_item_view).collect(),
+                })
+                .collect::<Vec<_>>()
+        };
+
         // Every positioned object's tile (move-target occupancy avoidance).
         let occupied = {
             let mut q = world.query::<&Position>();
             q.iter(world).map(|p| (p.x, p.y)).collect::<HashSet<_>>()
         };
 
-        // Structures owned by the hero's player.
-        let structures_built = {
-            let mut q = world.query_filtered::<&PlayerId, With<ClassStructure>>();
-            q.iter(world).filter(|p| p.0 == pid).count() as i32
-        };
-
-        // Resource node tiles (the `Resources` map is keyed by Position).
+        // Resource node tiles (the `Resources` map is keyed by Position). A tile
+        // is "revealed" if any resource on it has reveal == true (gatherable).
         let resource_tiles = world
             .resource::<Resources>()
-            .keys()
-            .copied()
+            .iter()
+            .map(|(pos, res_on_tile)| ResTileView {
+                pos: *pos,
+                revealed: res_on_tile.values().any(|r| r.reveal),
+            })
             .collect::<Vec<_>>();
 
         WorldView {
             hero,
+            inventory,
             enemies,
-            occupied,
+            villagers,
+            structures,
             resource_tiles,
-            structures_built,
+            occupied,
             game_tick,
             day,
         }
@@ -415,23 +561,25 @@ impl HeadlessGame {
         let world = self.app.world_mut();
 
         // Hero end-state (owned primitives so the borrow ends before the next query).
-        let (final_hp, final_skill_total, final_inventory_count, hero_true_death, hero_present) = {
+        let (final_hp, final_skill_total, final_inventory_count, hero_true_death, hero_present, killer) = {
             let mut q = world.query_filtered::<(
                 &PlayerId,
                 &Stats,
                 &Skills,
                 &Inventory,
                 Option<&TrueDeath>,
+                Option<&StateDead>,
             ), With<SubclassHero>>();
             match q.iter(world).find(|(p, ..)| p.0 == pid) {
-                Some((_p, stats, skills, inv, td)) => (
+                Some((_p, stats, skills, inv, td, dead)) => (
                     stats.hp,
                     skills.get_total_xp(),
                     inv.items.len() as i32,
                     td.is_some(),
                     true,
+                    dead.map(|d| d.killer.clone()).unwrap_or_default(),
                 ),
-                None => (0, 0, 0, true, false),
+                None => (0, 0, 0, true, false, String::new()),
             }
         };
 
@@ -484,6 +632,7 @@ impl HeadlessGame {
         RunMetrics {
             run_index: 0,
             outcome,
+            killer,
             ticks,
             days_survived,
             waves_survived: run.waves_survived,

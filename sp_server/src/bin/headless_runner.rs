@@ -63,6 +63,7 @@ fn panic_metrics(run_index: u32) -> RunMetrics {
     RunMetrics {
         run_index,
         outcome: "Panic".to_string(),
+        killer: String::new(),
         ticks: 0,
         days_survived: 0,
         waves_survived: 0,
@@ -115,9 +116,10 @@ fn main() {
         let m = run_one_safe(i, max_ticks);
         let elapsed = t0.elapsed();
         println!(
-            "  run {:>4}: {:<18} ticks={:>6} days={:>2} enemies={:>3} deaths={} hp={:>4} skillxp={:>5} inv={:>2} structs={} [{:.2}s]",
+            "  run {:>4}: {:<16} killer={:<12} ticks={:>6} days={:>2} enemies={:>3} deaths={} hp={:>4} skillxp={:>5} inv={:>2} structs={} [{:.2}s]",
             m.run_index,
             m.outcome,
+            if m.killer.is_empty() { "-" } else { &m.killer },
             m.ticks,
             m.days_survived,
             m.enemies_killed,
@@ -145,7 +147,7 @@ fn write_csv(results: &[RunMetrics], path: &str) {
         }
     };
 
-    let header = "run_index,outcome,ticks,days_survived,waves_survived,enemies_killed,\
+    let header = "run_index,outcome,killer,ticks,days_survived,waves_survived,enemies_killed,\
 elites_killed,captains_killed,legendary_kills,hideouts_cleared,repairs,highest_pressure_level,\
 num_deaths,obj_scavenge_shipwreck,obj_build_campfire,obj_win_first_fight,obj_build_3_structures,\
 obj_recruit_villager,obj_explore_poi,obj_choose_expansion,obj_survive_5_nights,\
@@ -156,9 +158,10 @@ victory_conquest,final_hp,final_skill_total,final_inventory_count,structures_bui
     for m in results {
         let _ = writeln!(
             file,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             m.run_index,
             m.outcome,
+            m.killer,
             m.ticks,
             m.days_survived,
             m.waves_survived,
