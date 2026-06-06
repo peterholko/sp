@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::{Hunger, Thirst, Tired};
-use crate::constants::{DATABASE_MANAGER_ID, GAME_TICKS_PER_DAY};
+use crate::constants::{DATABASE_MANAGER_ID, GAME_TICKS_PER_DAY, SPRING_WATER};
 use crate::database::DatabaseEvent;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, NetworkReceiver, Objectives,
@@ -162,7 +162,9 @@ pub struct StructureView {
 #[derive(Clone, Copy)]
 pub struct ResTileView {
     pub pos: Position,
-    pub revealed: bool,
+    pub revealed: bool,        // any resource on the tile is revealed (gatherable)
+    pub has_spring: bool,      // a Spring Water resource exists here (maybe hidden)
+    pub spring_revealed: bool, // ...and it's revealed -> waterskins refill here
 }
 
 fn to_item_view(item: &crate::item::Item) -> ItemView {
@@ -501,14 +503,23 @@ impl HeadlessGame {
             q.iter(world).map(|p| (p.x, p.y)).collect::<HashSet<_>>()
         };
 
-        // Resource node tiles (the `Resources` map is keyed by Position). A tile
-        // is "revealed" if any resource on it has reveal == true (gatherable).
+        // Resource node tiles (the `Resources` map is keyed by Position). Track
+        // both general reveal state and spring-water specifically (the bot
+        // prospects a tile to reveal a spring, then refills waterskins there).
         let resource_tiles = world
             .resource::<Resources>()
             .iter()
-            .map(|(pos, res_on_tile)| ResTileView {
-                pos: *pos,
-                revealed: res_on_tile.values().any(|r| r.reveal),
+            .map(|(pos, res_on_tile)| {
+                let springs = res_on_tile.values().filter(|r| r.res_type == SPRING_WATER);
+                let (has_spring, spring_revealed) = springs.fold((false, false), |acc, r| {
+                    (true, acc.1 || r.reveal)
+                });
+                ResTileView {
+                    pos: *pos,
+                    revealed: res_on_tile.values().any(|r| r.reveal),
+                    has_spring,
+                    spring_revealed,
+                }
             })
             .collect::<Vec<_>>();
 

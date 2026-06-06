@@ -84,9 +84,6 @@ pub struct Bot {
     explore_cursor: usize,
     job: Option<BuildJob>,
     walls_attempted: usize,
-    // Land tiles next to a River where a waterskin can be refilled (cached from
-    // the static map on first use).
-    refill_tiles: Option<Vec<Position>>,
 }
 
 impl Bot {
@@ -98,7 +95,6 @@ impl Bot {
             explore_cursor: 0,
             job: None,
             walls_attempted: 0,
-            refill_tiles: None,
         }
     }
 
@@ -238,15 +234,39 @@ impl Bot {
 
         // 6. Routine needs while safe: refill water, sleep, idle to auto-eat/drink.
         if safe {
-            // Water is the tightest supply: refill empty waterskins at a river so
-            // the hero doesn't die of dehydration once the starting skins are dry.
+            // Water: prospect a spring + refill so dehydration never sets in.
             if let Some(action) = self.water_action(&hero, view, map) {
                 return Some(action);
             }
+            // Sleep BEFORE foraging: sleep is a short (30-tick) action, while a
+            // forage is ~150 ticks — letting a forage pre-empt sleep is how the
+            // hero ends up dying of exhaustion mid-gather.
             if hero.tired >= CONSUME_AT {
                 return Some(PlayerEvent::Sleep {
                     player_id: self.player_id,
                     structure_id: 0, // ignored by the handler
+                });
+            }
+            // Food: when out of rations and getting hungry, restock — first from
+            // the Burrow's stores, then by foraging (plant-picking yields edible
+            // berries & mushrooms) — so the hero doesn't starve once its starting
+            // food runs out.
+            if hero.hunger >= CONSUME_AT && !has_class(&view.inventory, "Food") {
+                if let Some((spos, sid, item_id)) = storage_food(view) {
+                    if Map::is_adjacent_including_source(hero.pos, spos) {
+                        return Some(PlayerEvent::ItemTransfer {
+                            player_id: self.player_id,
+                            source_id: sid,
+                            target_id: hero.id,
+                            item_id,
+                        });
+                    }
+                    if let Some(mv) = self.step_adjacent_to(hero.pos, spos, view, map) {
+                        return Some(mv);
+                    }
+                }
+                return Some(PlayerEvent::Gather {
+                    player_id: self.player_id,
                 });
             }
             let want_drink = hero.thirst >= CONSUME_AT && has_class(&view.inventory, "Drink");
@@ -486,9 +506,11 @@ impl Bot {
 
     // ---- Water -------------------------------------------------------------
 
-    // Refill empty waterskins at a river. Returns Use (refill) when standing next
-    // to fresh water, a step toward the nearest river otherwise, or None when the
-    // hero has enough water / no empties / no river reachable.
+    // Keep waterskins filled. Spring Water sits hidden under nearly every
+    // grassland/plains hex, so rather than trekking to a river the hero prospects
+    // in place to reveal a spring, then refills empties there (a revealed spring
+    // refills infinitely). Returns Use (refill), Prospect (reveal a spring), a
+    // step toward a known spring, or None when water is healthy / nothing to do.
     fn water_action(
         &mut self,
         hero: &HeroView,
@@ -496,7 +518,7 @@ impl Bot {
         map: &Map,
     ) -> Option<PlayerEvent> {
         let filled = count_name(&view.inventory, WATERSKIN_FILLED);
-        if filled >= 2 {
+        if filled >= 3 {
             return None; // healthy water buffer
         }
         let empty_id = view
@@ -505,7 +527,12 @@ impl Bot {
             .find(|i| i.name == WATERSKIN_EMPTY)
             .map(|i| i.id)?; // nothing to refill
 
-        if Map::are_tile_types_nearby(hero.pos, vec![TileType::River], map) {
+        let here = view.resource_tiles.iter().find(|r| r.pos == hero.pos);
+        let refillable_here = here.map_or(false, |t| t.spring_revealed)
+            || Map::are_tile_types_nearby(hero.pos, vec![TileType::River], map);
+
+        // Refill right here.
+        if refillable_here {
             return Some(PlayerEvent::Use {
                 player_id: self.player_id,
                 obj_id: hero.id,
@@ -513,33 +540,32 @@ impl Bot {
             });
         }
 
-        let tile = self.nearest_refill_tile(hero.pos, map)?;
-        self.step_toward(hero.pos, tile, view, map)
-    }
-
-    fn nearest_refill_tile(&mut self, from: Position, map: &Map) -> Option<Position> {
-        if self.refill_tiles.is_none() {
-            // One-time scan of the static map for land tiles beside a river.
-            let mut tiles = Vec::new();
-            for y in 0..crate::map::HEIGHT {
-                for x in 0..crate::map::WIDTH {
-                    if !Map::is_passable(x, y, map) {
-                        continue;
-                    }
-                    let p = Position { x, y };
-                    if Map::are_tile_types_nearby(p, vec![TileType::River], map) {
-                        tiles.push(p);
-                    }
-                }
-            }
-            self.refill_tiles = Some(tiles);
+        // A spring is under this tile but still hidden -> prospect to reveal it.
+        if here.map_or(false, |t| t.has_spring) {
+            return Some(PlayerEvent::Prospect {
+                player_id: self.player_id,
+            });
         }
-        self.refill_tiles
-            .as_ref()
-            .unwrap()
+
+        // No spring here: walk to the nearest known spring tile (or, if none are
+        // known yet, prospect in place — most hexes hide a spring).
+        if let Some(t) = view
+            .resource_tiles
             .iter()
-            .min_by_key(|p| hex_dist(from, **p))
-            .copied()
+            .filter(|t| t.has_spring)
+            .min_by_key(|t| hex_dist(hero.pos, t.pos))
+        {
+            if t.pos == hero.pos {
+                return Some(PlayerEvent::Prospect {
+                    player_id: self.player_id,
+                });
+            }
+            return self.step_toward(hero.pos, t.pos, view, map);
+        }
+
+        Some(PlayerEvent::Prospect {
+            player_id: self.player_id,
+        })
     }
 
     // ---- Economy / movement helpers ----------------------------------------
@@ -767,6 +793,16 @@ fn storage_item_for_missing(
             if let Some(item) = s.inventory.iter().find(|i| i.matches_req(req_type)) {
                 return Some((s.pos, s.id, item.id));
             }
+        }
+    }
+    None
+}
+
+// A Food item sitting in an owned storage (e.g. the Burrow's berries) to pull.
+fn storage_food(view: &WorldView) -> Option<(Position, i32, i32)> {
+    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        if let Some(item) = s.inventory.iter().find(|i| i.class == "Food" && i.quantity > 0) {
+            return Some((s.pos, s.id, item.id));
         }
     }
     None
