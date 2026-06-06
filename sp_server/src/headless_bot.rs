@@ -26,9 +26,13 @@ use crate::map::{Map, TileType};
 use crate::obj::Position;
 use crate::PlayerEvent;
 
-const AGGRO_RADIUS: u32 = 3; // only engage near enemies (don't chase into trouble)
+// Engage enemies within this range. A lingering enemy keeps re-applying the
+// combat lock, which blocks ALL eating/drinking/sleeping — so the hero must
+// clear nearby harassers rather than passively ignore them, or it starves while
+// standing idle holding food.
+const AGGRO_RADIUS: u32 = 3;
 const DANGER_RADIUS: u32 = 3; // an enemy this close counts as a threat for retreat
-const SLEEP_SAFE_RADIUS: u32 = 3; // no enemy within this -> safe to rest/eat
+const SLEEP_SAFE_RADIUS: u32 = 3; // no enemy within this -> clear to rest/eat
 const LOW_HP: f32 = 0.5; // retreat / heal below this HP fraction
 const CRITICAL_HP: f32 = 0.3; // emergency heal below this
 // Yield to the game's auto-consume just under its 75.0 trigger so the hero is
@@ -36,6 +40,8 @@ const CRITICAL_HP: f32 = 0.3; // emergency heal below this
 const CONSUME_AT: f32 = 70.0;
 // Above this tiredness, surviving (resting) overrides fighting.
 const CRITICAL_TIRED: f32 = 85.0;
+// Above this hunger, eat raw meat now instead of taking time to cook it.
+const CRITICAL_HUNGER: f32 = 85.0;
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
@@ -158,6 +164,14 @@ impl Bot {
         let dist_to_enemy = nearest.map(|e| hex_dist(hero.pos, e.pos));
         let safe = dist_to_enemy.map_or(true, |d| d > SLEEP_SAFE_RADIUS);
 
+        if std::env::var("BOT_DEBUG").is_ok() && hero.hunger >= 80.0 && view.game_tick % 200 == 0 {
+            eprintln!(
+                "[bot] t={} hp={:.0} hunger={:.0} thirst={:.0} tired={:.0} food={} dist_enemy={:?} safe={} state={:?}",
+                view.game_tick, hero.hp as f32, hero.hunger, hero.thirst, hero.tired,
+                has_class(&view.inventory, "Food"), dist_to_enemy, safe, hero.state,
+            );
+        }
+
         // 1. Emergency heal.
         if hero.hp_frac() < CRITICAL_HP {
             if let Some(item_id) = healing_item(view) {
@@ -183,6 +197,22 @@ impl Bot {
                     player_id: self.player_id,
                     structure_id: 0,
                 });
+            }
+        }
+
+        // 2b. Critical hunger: securing food outranks base-building/exploring.
+        //     Retreat from a close enemy first, otherwise run the food pipeline
+        //     (butcher/cook/hunt/forage) even if not perfectly safe — otherwise the
+        //     hero starves mid-task once its starting rations run out (~day 4).
+        if hero.hunger >= CRITICAL_HUNGER && !has_edible(&view.inventory) {
+            if threat {
+                let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+                if let Some(mv) = self.retreat_step(hero.pos, view, map, home) {
+                    return Some(mv);
+                }
+            }
+            if let Some(action) = self.food_action(&hero, view, map) {
+                return Some(action);
             }
         }
 
@@ -218,6 +248,11 @@ impl Bot {
         if let Some(enemy) = nearest {
             let d = hex_dist(hero.pos, enemy.pos);
             if d <= AGGRO_RADIUS && hero.hp_frac() >= LOW_HP {
+                // Make sure the strong combat weapon (axe) is equipped — hunting
+                // swaps in the weak Hunting spear, so swap back before a fight.
+                if let Some(eq) = self.equip_combat_weapon(view) {
+                    return Some(eq);
+                }
                 if d <= 1 {
                     return Some(PlayerEvent::Attack {
                         player_id: self.player_id,
@@ -247,32 +282,16 @@ impl Bot {
                     structure_id: 0, // ignored by the handler
                 });
             }
-            // Food: when out of rations and getting hungry, restock — first from
-            // the Burrow's stores, then by foraging (plant-picking yields edible
-            // berries & mushrooms) — so the hero doesn't starve once its starting
-            // food runs out.
-            if hero.hunger >= CONSUME_AT && !has_class(&view.inventory, "Food") {
-                if let Some((spos, sid, item_id)) = storage_food(view) {
-                    if Map::is_adjacent_including_source(hero.pos, spos) {
-                        return Some(PlayerEvent::ItemTransfer {
-                            player_id: self.player_id,
-                            source_id: sid,
-                            target_id: hero.id,
-                            item_id,
-                        });
-                    }
-                    if let Some(mv) = self.step_adjacent_to(hero.pos, spos, view, map) {
-                        return Some(mv);
-                    }
-                }
-                return Some(PlayerEvent::Gather {
-                    player_id: self.player_id,
-                });
+            // Food pipeline: butcher carcasses -> cook raw meat -> hunt/forage for
+            // more. See food_action.
+            if let Some(action) = self.food_action(&hero, view, map) {
+                return Some(action);
             }
-            let want_drink = hero.thirst >= CONSUME_AT && has_class(&view.inventory, "Drink");
-            let want_food = hero.hunger >= CONSUME_AT && has_class(&view.inventory, "Food");
-            if want_drink || want_food {
-                return None; // idle so hero_auto_consume_system can fire
+            // Eat / drink EXPLICITLY via Use rather than waiting for the game's
+            // auto-consume — auto-consume is blocked by several transient states,
+            // so an idle hero can sit on food at hunger 100 and starve.
+            if let Some(action) = self.consume_action(&hero, view) {
+                return Some(action);
             }
         }
 
@@ -568,6 +587,243 @@ impl Bot {
         })
     }
 
+    // Explicitly eat an edible food / drink a waterskin when hungry/thirsty.
+    fn consume_action(&self, hero: &HeroView, view: &WorldView) -> Option<PlayerEvent> {
+        if hero.hunger >= CONSUME_AT {
+            if let Some(id) = view.inventory.iter().find(|i| i.is_edible()).map(|i| i.id) {
+                return Some(PlayerEvent::Use {
+                    player_id: self.player_id,
+                    obj_id: hero.id,
+                    item_id: id,
+                });
+            }
+        }
+        if hero.thirst >= CONSUME_AT {
+            if let Some(id) = view.inventory.iter().find(|i| i.is_drink()).map(|i| i.id) {
+                return Some(PlayerEvent::Use {
+                    player_id: self.player_id,
+                    obj_id: hero.id,
+                    item_id: id,
+                });
+            }
+        }
+        None
+    }
+
+    // ---- Food: butcher -> cook -> hunt -------------------------------------
+
+    // Keep the hero fed. Butcher carcasses into raw meat, cook raw meat into
+    // Cooked Meat at the campfire (more Feed), and when out of food hunt game
+    // (raw meat) or pull from the Burrow / forage. Raw & cooked meat are both
+    // `Food`, auto-eaten by the game when the hero is idle and hungry.
+    fn food_action(
+        &mut self,
+        hero: &HeroView,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        // 1. Butcher a carcass (a "Felled X", class "Game Animal") into raw meat.
+        if let Some(carcass) = view.inventory.iter().find(|i| i.class == "Game Animal") {
+            return Some(PlayerEvent::Refine {
+                player_id: self.player_id,
+                item_id: carcass.id,
+            });
+        }
+
+        // 2. Cook raw meat into Cooked Meat (the craft) unless desperately hungry,
+        //    in which case the raw meat is just auto-eaten.
+        let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
+        if has_raw_meat && hero.hunger < CRITICAL_HUNGER {
+            if let Some(action) = self.cook_action(hero, view, map) {
+                return Some(action);
+            }
+        }
+
+        // 3. Out of edible food and getting hungry: restock.
+        if hero.hunger >= CONSUME_AT && !has_edible(&view.inventory) {
+            // Pull food from the Burrow's stores first.
+            if let Some((spos, sid, item_id)) = storage_food(view) {
+                if Map::is_adjacent_including_source(hero.pos, spos) {
+                    return Some(PlayerEvent::ItemTransfer {
+                        player_id: self.player_id,
+                        source_id: sid,
+                        target_id: hero.id,
+                        item_id,
+                    });
+                }
+                return self.step_adjacent_to(hero.pos, spos, view, map);
+            }
+            // Hunt game for meat — but only when we can cook it locally (campfire
+            // + firewood + game near home). Otherwise the carcass becomes raw meat
+            // we can't safely eat (0.99 food poisoning) and never get back to cook.
+            if self.can_hunt_locally(hero, view) {
+                if let Some(action) = self.hunt_action(hero, view, map) {
+                    return Some(action);
+                }
+            }
+            // Otherwise forage (berries / mushrooms) — cheap and on-tile.
+            return Some(PlayerEvent::Gather {
+                player_id: self.player_id,
+            });
+        }
+
+        None
+    }
+
+    // Only hunt when the carcass can actually be turned into Cooked Meat near
+    // home: a built campfire, firewood on hand, and a game tile close to home.
+    fn can_hunt_locally(&self, hero: &HeroView, view: &WorldView) -> bool {
+        const HUNT_RADIUS: u32 = 6;
+        if !view.has_built("campfire") {
+            return false;
+        }
+        if !view.inventory.iter().any(|i| i.name == "Firewood" && i.quantity > 0) {
+            return false;
+        }
+        let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+        view.resource_tiles
+            .iter()
+            .any(|t| t.has_game && hex_dist(home, t.pos) <= HUNT_RADIUS)
+    }
+
+    // Hunt a Game Animal: equip the Hunting weapon (the starting Sharpened Stick),
+    // then gather a revealed game tile (prospect to reveal one — game spawns under
+    // grassland/plains hexes near the base). Yields a carcass to butcher in (1).
+    fn hunt_action(
+        &mut self,
+        hero: &HeroView,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        let equipped_hunting = view.inventory.iter().any(|i| i.equipped && i.is_hunting);
+        if !equipped_hunting {
+            let id = view.inventory.iter().find(|i| i.is_hunting).map(|i| i.id)?;
+            return Some(PlayerEvent::Equip {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id: id,
+                status: true,
+            });
+        }
+
+        let here = view.resource_tiles.iter().find(|t| t.pos == hero.pos);
+        if here.map_or(false, |t| t.game_revealed) {
+            return Some(PlayerEvent::Gather {
+                player_id: self.player_id,
+            });
+        }
+        if here.map_or(false, |t| t.has_game) {
+            return Some(PlayerEvent::Prospect {
+                player_id: self.player_id,
+            });
+        }
+        if let Some(t) = view
+            .resource_tiles
+            .iter()
+            .filter(|t| t.has_game)
+            .min_by_key(|t| hex_dist(hero.pos, t.pos))
+        {
+            if t.pos == hero.pos {
+                return Some(PlayerEvent::Prospect {
+                    player_id: self.player_id,
+                });
+            }
+            return self.step_toward(hero.pos, t.pos, view, map);
+        }
+        Some(PlayerEvent::Prospect {
+            player_id: self.player_id,
+        })
+    }
+
+    // Cook raw meat into Cooked Meat at the campfire: deposit Raw Meat + Firewood
+    // into the campfire, StructureCraft, then retrieve the cooked meat. Stateless —
+    // each call inspects the campfire's inventory to pick the next step. Returns
+    // None if there's no campfire / no firewood (then the raw meat is eaten raw).
+    fn cook_action(
+        &self,
+        hero: &HeroView,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        let campfire = view
+            .structures
+            .iter()
+            .find(|s| s.subclass == "campfire" && s.built)?;
+
+        // Retrieve a finished Cooked Meat from the campfire.
+        if let Some(cooked) = campfire.inventory.iter().find(|i| i.subclass == "Cooked Meat") {
+            if Map::is_adjacent_including_source(hero.pos, campfire.pos) {
+                return Some(PlayerEvent::ItemTransfer {
+                    player_id: self.player_id,
+                    source_id: campfire.id,
+                    target_id: hero.id,
+                    item_id: cooked.id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, campfire.pos, view, map);
+        }
+
+        let cf_has_meat = campfire.inventory.iter().any(|i| i.subclass == "Raw Meat");
+        let cf_has_wood = campfire.inventory.iter().any(|i| i.name == "Firewood");
+
+        // Ingredients are staged -> craft.
+        if cf_has_meat && cf_has_wood {
+            return Some(PlayerEvent::StructureCraft {
+                player_id: self.player_id,
+                structure_id: campfire.id,
+                recipe_name: "Cooked Meat".to_string(),
+            });
+        }
+
+        // Otherwise stage the ingredients (must be next to the campfire to transfer).
+        if !Map::is_adjacent_including_source(hero.pos, campfire.pos) {
+            return self.step_adjacent_to(hero.pos, campfire.pos, view, map);
+        }
+        if !cf_has_meat {
+            let raw = view.inventory.iter().find(|i| i.subclass == "Raw Meat")?;
+            return Some(PlayerEvent::ItemTransfer {
+                player_id: self.player_id,
+                source_id: hero.id,
+                target_id: campfire.id,
+                item_id: raw.id,
+            });
+        }
+        if !cf_has_wood {
+            let wood = view.inventory.iter().find(|i| i.name == "Firewood")?;
+            return Some(PlayerEvent::ItemTransfer {
+                player_id: self.player_id,
+                source_id: hero.id,
+                target_id: campfire.id,
+                item_id: wood.id,
+            });
+        }
+        None
+    }
+
+    // Equip the strongest non-hunting weapon (the axe) if it isn't already — used
+    // before combat, since hunting swaps in the weak Hunting spear.
+    fn equip_combat_weapon(&self, view: &WorldView) -> Option<PlayerEvent> {
+        let hero = view.hero?;
+        if view
+            .inventory
+            .iter()
+            .any(|i| i.equipped && i.is_weapon && !i.is_hunting)
+        {
+            return None; // a combat weapon is already equipped
+        }
+        let id = view
+            .inventory
+            .iter()
+            .find(|i| i.is_weapon && !i.is_hunting && !i.equipped)
+            .map(|i| i.id)?;
+        Some(PlayerEvent::Equip {
+            player_id: self.player_id,
+            obj_id: hero.id,
+            item_id: id,
+            status: true,
+        })
+    }
+
     // ---- Economy / movement helpers ----------------------------------------
 
     fn forage(&self, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
@@ -760,6 +1016,10 @@ fn has_class(items: &[ItemView], class: &str) -> bool {
 
 fn count_name(items: &[ItemView], name: &str) -> i32 {
     items.iter().filter(|i| i.name == name).map(|i| i.quantity).sum()
+}
+
+fn has_edible(items: &[ItemView]) -> bool {
+    items.iter().any(|i| i.is_edible())
 }
 
 fn as_req_slice(reqs: &[(String, i32)]) -> Vec<(&str, i32)> {

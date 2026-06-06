@@ -20,13 +20,13 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::{Hunger, Thirst, Tired};
-use crate::constants::{DATABASE_MANAGER_ID, GAME_TICKS_PER_DAY, SPRING_WATER};
+use crate::constants::{DATABASE_MANAGER_ID, GAME_ANIMAL, GAME_TICKS_PER_DAY, SPRING_WATER};
 use crate::database::DatabaseEvent;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, NetworkReceiver, Objectives,
     PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState, VictoryState,
 };
-use crate::item::{AttrKey, Inventory};
+use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
 use crate::obj::{
     ClassStructure, Id, Order, PlayerId, Position, State, StateDead, Stats, Subclass, SubclassHero,
@@ -128,6 +128,20 @@ pub struct ItemView {
     pub quantity: i32,
     pub equipped: bool,
     pub is_healing: bool,
+    pub is_weapon: bool,
+    pub is_hunting: bool, // weapon/tool with a Hunting attr (can take down game)
+    pub feed: f32,        // Feed value (0 if not edible)
+    pub food_poisoning: bool, // eating it risks food poisoning (raw meat)
+}
+
+impl ItemView {
+    pub fn is_drink(&self) -> bool {
+        self.class == "Drink"
+    }
+    // Safe to eat for hunger: has Feed and won't poison the hero.
+    pub fn is_edible(&self) -> bool {
+        self.class == "Food" && self.feed > 0.0 && !self.food_poisoning
+    }
 }
 
 impl ItemView {
@@ -165,6 +179,8 @@ pub struct ResTileView {
     pub revealed: bool,        // any resource on the tile is revealed (gatherable)
     pub has_spring: bool,      // a Spring Water resource exists here (maybe hidden)
     pub spring_revealed: bool, // ...and it's revealed -> waterskins refill here
+    pub has_game: bool,        // a Game Animal resource exists here (maybe hidden)
+    pub game_revealed: bool,   // ...and it's revealed -> huntable with a Hunting tool
 }
 
 fn to_item_view(item: &crate::item::Item) -> ItemView {
@@ -176,6 +192,13 @@ fn to_item_view(item: &crate::item::Item) -> ItemView {
         quantity: item.quantity,
         equipped: item.equipped,
         is_healing: item.attrs.contains_key(&AttrKey::Healing),
+        is_weapon: item.class == "Weapon",
+        is_hunting: item.attrs.contains_key(&AttrKey::Hunting),
+        feed: match item.attrs.get(&AttrKey::Feed) {
+            Some(AttrVal::Num(v)) => *v,
+            _ => 0.0,
+        },
+        food_poisoning: item.attrs.contains_key(&AttrKey::FoodPoisoning),
     }
 }
 
@@ -510,15 +533,21 @@ impl HeadlessGame {
             .resource::<Resources>()
             .iter()
             .map(|(pos, res_on_tile)| {
-                let springs = res_on_tile.values().filter(|r| r.res_type == SPRING_WATER);
-                let (has_spring, spring_revealed) = springs.fold((false, false), |acc, r| {
-                    (true, acc.1 || r.reveal)
-                });
+                let (has_spring, spring_revealed) = res_on_tile
+                    .values()
+                    .filter(|r| r.res_type == SPRING_WATER)
+                    .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
+                let (has_game, game_revealed) = res_on_tile
+                    .values()
+                    .filter(|r| r.res_type == GAME_ANIMAL)
+                    .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
                 ResTileView {
                     pos: *pos,
                     revealed: res_on_tile.values().any(|r| r.reveal),
                     has_spring,
                     spring_revealed,
+                    has_game,
+                    game_revealed,
                 }
             })
             .collect::<Vec<_>>();
