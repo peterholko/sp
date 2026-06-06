@@ -8,6 +8,12 @@ edition = "2021"
 name = "siege_perilous"
 path = "src/main.rs"
 
+# In-process headless balance/metrics runner (see src/headless.rs). Runs many
+# full games with a deterministic bot and emits per-run + aggregate metrics.
+[[bin]]
+name = "headless_runner"
+path = "src/bin/headless_runner.rs"
+
 [lib]
 name = "siege_perilous"
 path = "src/lib.rs"

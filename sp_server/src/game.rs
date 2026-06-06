@@ -86,11 +86,20 @@ use crate::{villager_util, AppState};
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
 
-#[derive(Resource, Deref, DerefMut, Clone, Debug)]
+#[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct DatabaseManagers(Arc<Mutex<HashMap<i32, DatabaseClient>>>);
 
 #[derive(Resource, Deref, DerefMut)]
 pub struct NetworkReceiver(CBReceiver<PlayerEvent>);
+
+impl NetworkReceiver {
+    // Constructor so the headless harness (a sibling module) can wrap a crossbeam
+    // receiver it owns the sending half of. The production path builds this inline
+    // in `Game::network_init`.
+    pub fn new(receiver: CBReceiver<PlayerEvent>) -> Self {
+        Self(receiver)
+    }
+}
 
 #[derive(Resource, Deref, DerefMut, Reflect, Debug)]
 #[reflect(Resource)]
@@ -1204,18 +1213,30 @@ pub struct VillagerQuery {
 }
 pub struct GamePlugin {
     pub new_game: bool,
+    // When true the production network/tokio path is skipped and the world is
+    // built with `new_game_setup_headless`. The in-process headless test harness
+    // (see `headless.rs`) inserts the network resources itself. Always false for
+    // the real server.
+    pub headless: bool,
 }
 
 impl Default for GamePlugin {
     fn default() -> Self {
-        Self { new_game: true }
+        Self {
+            new_game: true,
+            headless: false,
+        }
     }
 }
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         if self.new_game {
-            app.add_systems(PreStartup, Game::new_game_setup);
+            if self.headless {
+                app.add_systems(PreStartup, Game::new_game_setup_headless);
+            } else {
+                app.add_systems(PreStartup, Game::new_game_setup);
+            }
         } else {
             app.add_systems(PreStartup, Game::reload_game);
             //app.add_systems(PreUpdate, Game::check_resources_ready.run_if(in_state(AppState::PreRunning));
@@ -1542,17 +1563,72 @@ pub struct Game {
 }
 
 impl Game {
+    // Production new-game setup: build the world, wire up the network/tokio path,
+    // then enter Running. Behaviour-preserving wrapper around `world_init` +
+    // `network_init` (split so the headless harness can reuse `world_init` and
+    // supply its own in-process network resources instead).
     pub fn new_game_setup(
         mut commands: Commands,
-        mut recipes: ResMut<Recipes>,
-        mut resources: ResMut<Resources>,
-        mut terrain_features: ResMut<TerrainFeatures>,
+        recipes: ResMut<Recipes>,
+        resources: ResMut<Resources>,
+        terrain_features: ResMut<TerrainFeatures>,
         templates: Res<Templates>,
         map: Res<Map>,
         mut next_state: ResMut<NextState<AppState>>,
     ) {
         println!("Bevy Setup System");
 
+        Self::world_init(
+            &mut commands,
+            recipes,
+            resources,
+            terrain_features,
+            templates,
+            map,
+        );
+        Self::network_init(&mut commands);
+
+        next_state.set(AppState::Running);
+    }
+
+    // Headless new-game setup for the in-process test harness: build the world
+    // and enter Running, WITHOUT spawning the tokio/WebSocket/Postgres network
+    // path. The harness inserts `NetworkReceiver`/`Clients`/`DatabaseManagers`
+    // itself (see `headless.rs`) before pumping the app.
+    pub fn new_game_setup_headless(
+        mut commands: Commands,
+        recipes: ResMut<Recipes>,
+        resources: ResMut<Resources>,
+        terrain_features: ResMut<TerrainFeatures>,
+        templates: Res<Templates>,
+        map: Res<Map>,
+        mut next_state: ResMut<NextState<AppState>>,
+    ) {
+        Self::world_init(
+            &mut commands,
+            recipes,
+            resources,
+            terrain_features,
+            templates,
+            map,
+        );
+
+        next_state.set(AppState::Running);
+    }
+
+    // World-only initialization: spawn resources/terrain, load recipes/prices and
+    // insert every per-game state resource. Deliberately EXCLUDES the three
+    // network resources (`NetworkReceiver`/`Clients`/`DatabaseManagers`) and the
+    // tokio_setup spawn — those are handled by `network_init` (production) or by
+    // the headless harness. Does not change AppState.
+    pub fn world_init(
+        commands: &mut Commands,
+        mut recipes: ResMut<Recipes>,
+        mut resources: ResMut<Resources>,
+        mut terrain_features: ResMut<TerrainFeatures>,
+        templates: Res<Templates>,
+        map: Res<Map>,
+    ) {
         // Initialize game tick
         let game_tick: GameTick = GameTick(EVENING); // Set to Evening for testing campfire vision
 
@@ -1568,33 +1644,6 @@ impl Game {
         let explored_map: ExploredMap = ExploredMap(HashMap::new());
         let survey_history: SurveyHistory = SurveyHistory(HashMap::new());
         let investigated_pois: InvestigatedPOIs = InvestigatedPOIs(HashMap::new());
-
-        // Initialize database manager arc mutex sender
-        let database_managers = DatabaseManagers(Arc::new(Mutex::new(HashMap::new())));
-
-        //Create the database to game channel, note the sender will be cloned by each connected client
-        let (database_to_game_sender, _database_to_game_receiver) = unbounded::<DatabaseEvent>();
-
-        //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
-        let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
-
-        //Create the client to game channel, note the sender will be cloned by each connected client
-        let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
-
-        let thread_pool = IoTaskPool::get();
-
-        //Spawn the tokio runtime setup using a Compat with the clients and client to game channel
-        thread_pool
-            .spawn(Compat::new(network::tokio_setup(
-                database_to_game_sender,
-                database_managers.clone(),
-                client_to_game_sender,
-                clients.clone(),
-                true,
-            )))
-            .detach();
-
-        let network_receiver = NetworkReceiver(client_to_game_receiver);
 
         // Initialize indexes
         let ids: Ids = Ids {
@@ -1640,12 +1689,8 @@ impl Game {
         let debug_objs = DebugObjs(HashSet::new());
         let log_overrides = LogLevelOverrides::default();
 
-        //Insert the clients and client to game channel into the Bevy resources
         commands.insert_resource(ids);
         commands.insert_resource(entity_obj_map);
-        commands.insert_resource(database_managers);
-        commands.insert_resource(clients);
-        commands.insert_resource(network_receiver);
         commands.insert_resource(game_tick);
         commands.insert_resource(map_events);
         commands.insert_resource(processed_map_events);
@@ -1669,8 +1714,43 @@ impl Game {
         commands.insert_resource(victory_state);
         commands.insert_resource(debug_objs);
         commands.insert_resource(log_overrides);
+    }
 
-        next_state.set(AppState::Running);
+    // Network initialization for the production path: create the crossbeam client
+    // channel + database channel, spawn the tokio/WebSocket/Postgres runtime via
+    // the IO task pool, and insert the three network resources. NOT used by the
+    // headless harness.
+    pub fn network_init(commands: &mut Commands) {
+        // Initialize database manager arc mutex sender
+        let database_managers = DatabaseManagers(Arc::new(Mutex::new(HashMap::new())));
+
+        //Create the database to game channel, note the sender will be cloned by each connected client
+        let (database_to_game_sender, _database_to_game_receiver) = unbounded::<DatabaseEvent>();
+
+        //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
+        let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
+
+        //Create the client to game channel, note the sender will be cloned by each connected client
+        let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
+
+        let thread_pool = IoTaskPool::get();
+
+        //Spawn the tokio runtime setup using a Compat with the clients and client to game channel
+        thread_pool
+            .spawn(Compat::new(network::tokio_setup(
+                database_to_game_sender,
+                database_managers.clone(),
+                client_to_game_sender,
+                clients.clone(),
+                true,
+            )))
+            .detach();
+
+        let network_receiver = NetworkReceiver(client_to_game_receiver);
+
+        commands.insert_resource(database_managers);
+        commands.insert_resource(clients);
+        commands.insert_resource(network_receiver);
     }
 
     pub fn reload_game(
@@ -9518,10 +9598,15 @@ fn perception_system(
                 visible_objs_list = visible_objs.iter().cloned().collect();
             }
 
-            println!(
-                "Perceptions to send player: {:?} observers: {:?}",
-                player_id, observer_objs
-            );
+            // Gated behind NETWORK_DEBUG (same convention as message_broker_system)
+            // so this per-tick perception spam stays off by default — it otherwise
+            // floods stdout, e.g. when running many headless games.
+            if std::env::var("NETWORK_DEBUG").is_ok() {
+                println!(
+                    "Perceptions to send player: {:?} observers: {:?}",
+                    player_id, observer_objs
+                );
+            }
 
             let mut visible_tiles: &mut Vec<(i32, i32)> = tiles_to_send.get_mut(player_id).unwrap();
 

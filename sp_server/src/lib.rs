@@ -34,6 +34,8 @@ pub mod constants;
 pub mod database;
 pub mod event;
 pub mod game;
+pub mod headless;
+pub mod headless_bot;
 pub mod obj;
 pub mod world;
 
@@ -77,6 +79,11 @@ mod skill;
 #[path = "skill/skill_defs.rs"]
 mod skill_defs;
 
+// Re-exports so the headless harness (and the headless_runner bin, a separate
+// crate) can name these types without the modules being public.
+pub use network::ResponsePacket;
+pub use player::PlayerEvent;
+
 const TIMESTEP_10_PER_SECOND: f64 = 1.0 / 10.0;
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
@@ -95,8 +102,9 @@ pub fn setup(command: &String) {
         new_game = false;
     }
 
-    App::new()
-        .add_plugins(StatesPlugin)
+    let mut app = App::new();
+
+    app.add_plugins(StatesPlugin)
         .add_plugins(AssetPlugin::default())
         .add_plugins(ScenePlugin::default())
         .add_plugins(TaskPoolPlugin::default())
@@ -129,9 +137,21 @@ pub fn setup(command: &String) {
             },
             ..default()
         })
-        .add_plugins(GamePlugin { new_game: new_game })
-        .init_state::<AppState>()
-        .register_type::<combat::Combo>()
+        .add_plugins(GamePlugin {
+            new_game,
+            headless: false,
+        })
+        .init_state::<AppState>();
+
+    register_all_types(&mut app);
+
+    app.init_asset::<DynamicScene>().run();
+}
+
+// Reflect-type registration shared by the production `setup()` and the headless
+// builder so the reflect registry is byte-for-byte identical between them.
+pub fn register_all_types(app: &mut App) {
+    app.register_type::<combat::Combo>()
         .register_type::<common::Destination>()
         .register_type::<common::Target>()
         .register_type::<common::Transport>()
@@ -196,7 +216,31 @@ pub fn setup(command: &String) {
         .register_type::<trade::Prices>()
         .register_type::<trade::TradePort>()
         .register_type::<trade::TradePorts>()
-        .register_type::<trade::WantedItem>()
-        .init_asset::<DynamicScene>()
-        .run();
+        .register_type::<trade::WantedItem>();
+}
+
+// Build the Bevy `App` for the in-process headless test harness: no
+// `ScheduleRunnerPlugin` (the harness pumps `app.update()` manually) and no
+// `LogPlugin` (quiet + fast; `LOG_RELOAD_HANDLE` simply stays `None`). Otherwise
+// identical plugin/reflect wiring to `setup()`. The harness inserts the network
+// resources (`NetworkReceiver`/`Clients`/`DatabaseManagers`) before pumping.
+pub fn build_headless_app() -> App {
+    let mut app = App::new();
+
+    app.add_plugins(StatesPlugin)
+        .add_plugins(AssetPlugin::default())
+        .add_plugins(ScenePlugin::default())
+        .add_plugins(TaskPoolPlugin::default())
+        .add_plugins(FrameCountPlugin::default())
+        .add_plugins(GamePlugin {
+            new_game: true,
+            headless: true,
+        })
+        .init_state::<AppState>();
+
+    register_all_types(&mut app);
+
+    app.init_asset::<DynamicScene>();
+
+    app
 }

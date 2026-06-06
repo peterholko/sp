@@ -17,3 +17,7 @@ Thumbs.db
 Cargo.lock
 
 logs
+
+# Headless balance/metrics runner output
+headless_runs.csv
+headless_runs.json

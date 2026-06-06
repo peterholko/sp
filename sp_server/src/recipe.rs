@@ -161,7 +161,9 @@ impl Recipes {
             }
         }
 
-        println!("Recipes: {:?}", self.recipes);
+        // debug! (not println!) so this full recipe dump doesn't spam stdout on
+        // every game setup — notably when running many headless games.
+        debug!("Recipes: {:?}", self.recipes);
     }
 
     pub fn get_by_name(&self, name: String) -> Option<Recipe> {
