@@ -476,6 +476,8 @@
   produces:
     - Bristleback Raw Meat
     - Bristleback Raw Meat
+    - Bristleback Raw Meat
+    - Bristleback Raw Meat
     - Bristleback Raw Hide
     - bones
 
@@ -488,6 +490,7 @@
   refine_skill_req: 0
   refine_time: 30
   produces:
+    - Swiftstep Raw Meat
     - Swiftstep Raw Meat
     - Swiftstep Raw Hide
 
@@ -816,7 +819,7 @@
   weight: 1
   attrs:
     - name: Feed
-      value: 15
+      value: 6
 
 - name: Amitanian Grape
   class: Food
@@ -834,7 +837,7 @@
   weight: 1
   attrs:
     - name: Feed
-      value: 20
+      value: 8
 
 - name: Pine Nuts
   class: Food

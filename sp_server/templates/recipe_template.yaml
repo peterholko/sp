@@ -357,7 +357,7 @@
   image: cookedmeat
   weight: 1
   item_name_from_req: true
-  crafting_time: 50
+  crafting_time: 20
   structure_req:
     - Campfire
     - Crafting Tent
@@ -372,7 +372,7 @@
   subclass: Cooked Fish
   image: cookedfish
   weight: 1
-  crafting_time: 50
+  crafting_time: 20
   structure_req:
     - Campfire
     - Crafting Tent

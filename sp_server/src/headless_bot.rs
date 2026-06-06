@@ -42,6 +42,9 @@ const CONSUME_AT: f32 = 70.0;
 const CRITICAL_TIRED: f32 = 85.0;
 // Above this hunger, eat raw meat now instead of taking time to cook it.
 const CRITICAL_HUNGER: f32 = 85.0;
+// Feed value that counts as "real" food worth relying on. Foraged berries (~6) and
+// mushrooms (~8) fall below it, so the hero hunts + cooks for proper meals.
+const GOOD_FEED: f32 = 40.0;
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
@@ -213,6 +216,22 @@ impl Bot {
             }
             if let Some(action) = self.food_action(&hero, view, map) {
                 return Some(action);
+            }
+        }
+
+        // 2c. Once meat is in hand, see the butcher->cook through: raw meat can't be
+        //     safely eaten (food poisoning) and a finished batch of Cooked Meat
+        //     (Feed 100) is many days of food, so completing the cook outranks
+        //     routine chores. Yield only to a close threat.
+        if !threat {
+            let has_meat = view
+                .inventory
+                .iter()
+                .any(|i| i.class == "Game Animal" || i.subclass == "Raw Meat");
+            if has_meat {
+                if let Some(action) = self.food_action(&hero, view, map) {
+                    return Some(action);
+                }
             }
         }
 
@@ -590,7 +609,15 @@ impl Bot {
     // Explicitly eat an edible food / drink a waterskin when hungry/thirsty.
     fn consume_action(&self, hero: &HeroView, view: &WorldView) -> Option<PlayerEvent> {
         if hero.hunger >= CONSUME_AT {
-            if let Some(id) = view.inventory.iter().find(|i| i.is_edible()).map(|i| i.id) {
+            // Eat the HIGHEST-Feed food first (Cooked Meat 100 over berries ~6) so
+            // the hero refills in one bite and isn't stuck eating constantly.
+            if let Some(id) = view
+                .inventory
+                .iter()
+                .filter(|i| i.is_edible())
+                .max_by(|a, b| a.feed.partial_cmp(&b.feed).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|i| i.id)
+            {
                 return Some(PlayerEvent::Use {
                     player_id: self.player_id,
                     obj_id: hero.id,
@@ -630,18 +657,42 @@ impl Bot {
             });
         }
 
-        // 2. Cook raw meat into Cooked Meat (the craft) unless desperately hungry,
-        //    in which case the raw meat is just auto-eaten.
+        // 2. Cook raw meat into Cooked Meat (the craft). Cooking is fast (20 ticks)
+        //    and raw meat is poisonous, so always cook rather than eat it raw.
         let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
-        if has_raw_meat && hero.hunger < CRITICAL_HUNGER {
+        if has_raw_meat {
             if let Some(action) = self.cook_action(hero, view, map) {
                 return Some(action);
             }
         }
 
-        // 3. Out of edible food and getting hungry: restock.
-        if hero.hunger >= CONSUME_AT && !has_edible(&view.inventory) {
-            // Pull food from the Burrow's stores first.
+        // 3. Low on GOOD food (high-Feed): restock. Foraged berries/mushrooms have
+        //    tiny Feed, so the hero would eat them nonstop and never sleep — the
+        //    efficient answer is to hunt and cook a batch of Cooked Meat (Feed 100).
+        // 3. Maintain a stock of GOOD food (Cooked Meat, Feed 100). Foraged
+        //    berries/mushrooms (~6-8 Feed) only bootstrap the first day — relying on
+        //    them means eating nonstop. So once a campfire stands and game is in
+        //    reach, hunt + cook proactively to keep a few Cooked Meat on hand. Gated
+        //    on calm needs so the hunt/cook doesn't itself trigger a crisis.
+        let good_food: i32 = view
+            .inventory
+            .iter()
+            .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
+            .map(|i| i.quantity)
+            .sum();
+        if good_food < 3
+            && hero.tired < CONSUME_AT
+            && hero.thirst < CONSUME_AT
+            && self.can_hunt_locally(hero, view)
+        {
+            if let Some(action) = self.hunt_action(hero, view, map) {
+                return Some(action);
+            }
+        }
+
+        // 4. No good food and actually hungry: pull from the Burrow, else forage to
+        //    limp along (early game / no campfire / no game nearby).
+        if hero.hunger >= CONSUME_AT && good_food == 0 {
             if let Some((spos, sid, item_id)) = storage_food(view) {
                 if Map::is_adjacent_including_source(hero.pos, spos) {
                     return Some(PlayerEvent::ItemTransfer {
@@ -653,15 +704,6 @@ impl Bot {
                 }
                 return self.step_adjacent_to(hero.pos, spos, view, map);
             }
-            // Hunt game for meat — but only when we can cook it locally (campfire
-            // + firewood + game near home). Otherwise the carcass becomes raw meat
-            // we can't safely eat (0.99 food poisoning) and never get back to cook.
-            if self.can_hunt_locally(hero, view) {
-                if let Some(action) = self.hunt_action(hero, view, map) {
-                    return Some(action);
-                }
-            }
-            // Otherwise forage (berries / mushrooms) — cheap and on-tile.
             return Some(PlayerEvent::Gather {
                 player_id: self.player_id,
             });
@@ -670,10 +712,12 @@ impl Bot {
         None
     }
 
-    // Only hunt when the carcass can actually be turned into Cooked Meat near
-    // home: a built campfire, firewood on hand, and a game tile close to home.
+    // Hunt only when the carcass can be turned into Cooked Meat: a built campfire,
+    // firewood on hand, and a game tile within reach of home. The radius is wide —
+    // one hunt yields a big batch of meat (many days of food), so an occasional
+    // longer trip is worth it.
     fn can_hunt_locally(&self, hero: &HeroView, view: &WorldView) -> bool {
-        const HUNT_RADIUS: u32 = 6;
+        const HUNT_RADIUS: u32 = 20;
         if !view.has_built("campfire") {
             return false;
         }
