@@ -391,7 +391,7 @@ pub fn new(
             let mut bow_attrs = HashMap::new();
             bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
             bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
-            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(3.0));
+            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(2.0));
             bow_attrs.insert(item::AttrKey::Accuracy, item::AttrVal::Num(85.0));
 
             let bow = inventory.new_with_attrs(
@@ -514,8 +514,11 @@ pub fn new(
 
     debug!("map_events: {:?}", map_events);
 
-    // Create campfire at hero's location only if it's dusk or night
-    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
+    // Always start the hero with a lit campfire so the cook-and-stockpile food
+    // economy is available from day 1. The calm early days are when a food reserve
+    // must be banked (before crises cut off hunting), and that needs cooking up
+    // front rather than waiting ~5 days to gather Stick+Resin and build one.
+    let _ = time_of_day;
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
