@@ -434,29 +434,21 @@ impl Bot {
             }
         }
 
-        // 5. Build the base BEFORE expansion (recruit/hire/sanctuary). The campfire
-        //    is foundational — it gates the whole cook-and-stockpile food economy —
-        //    so getting it up on day 1 (the hero starts with the Stick+Resin) opens
-        //    the calm early window for banking a food reserve before crises bite.
-        if self.job.is_some() {
-            if let Some(action) = self.advance_job(view, map) {
-                return Some(action);
-            }
-        }
-        if let Some(job) = self.next_build_job(view, map) {
-            self.job = Some(job);
-            if let Some(action) = self.advance_job(view, map) {
-                return Some(action);
-            }
-        }
-
-        // 4d. Recruit the first villager (one-time): investigate the Shipwreck POI,
-        //     which sets scavenge_shipwreck so the castaway villager arrives ~day 1.
-        //     Only when safe, no villager yet, AND all needs have comfortable buffer
-        //     — the walk to the wreck must never come at the cost of eat/drink/sleep.
+        // Needs gating for the expansion steps below. Recruiting the shipwreck
+        // villager is a cheap one-time trip right by spawn and that villager then
+        // farms food into the larder, so it gets a LOOSE gate (just "not about to
+        // need something"). Hiring is a longer trip to the merchant, so it stays
+        // moderately gated.
+        let needs_ok =
+            hero.hunger < CONSUME_AT && hero.thirst < CONSUME_AT && hero.tired < CONSUME_AT;
         let needs_comfortable =
-            hero.hunger < 45.0 && hero.thirst < 45.0 && hero.tired < 45.0;
-        if safe && needs_comfortable && !self.recruit_attempted && view.villagers.is_empty() {
+            hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
+
+        // 4c. Recruit the shipwreck villager EARLY — before building. It's the
+        //     settlement's first farmer (and one-time), so getting it on day 1 is
+        //     worth more than rushing the campfire. The wreck sits next to spawn, so
+        //     a loose safe + not-critically-needy gate makes this fire reliably.
+        if safe && needs_ok && !self.recruit_attempted && view.villagers.is_empty() {
             if let Some(ship) = view.pois.iter().find(|p| p.template == "Shipwreck") {
                 if hex_dist(hero.pos, ship.pos) <= 1 {
                     self.recruit_attempted = true;
@@ -468,6 +460,21 @@ impl Bot {
                 if let Some(mv) = self.step_adjacent_to(hero.pos, ship.pos, view, map) {
                     return Some(mv);
                 }
+            }
+        }
+
+        // 5. Build the base. The campfire gates the cook-and-stockpile economy, so
+        //    it goes up early (the hero starts with the Stick+Resin) — just after
+        //    securing the first villager.
+        if self.job.is_some() {
+            if let Some(action) = self.advance_job(view, map) {
+                return Some(action);
+            }
+        }
+        if let Some(job) = self.next_build_job(view, map) {
+            self.job = Some(job);
+            if let Some(action) = self.advance_job(view, map) {
+                return Some(action);
             }
         }
 
