@@ -2484,9 +2484,11 @@ fn threat_risk_severity_has_warning_before_crisis_threshold() {
 }
 
 #[test]
-fn survival_director_starts_after_day_six_or_objective() {
-    assert!(!survival_director_active(5, None));
-    assert!(survival_director_active(6, None));
+fn survival_director_starts_after_day_eight_or_objective() {
+    // Heavy scaling hordes hold off until day 8 (days 6-7 stay on the gentle ramp),
+    // widening the early calm window for banking a food reserve.
+    assert!(!survival_director_active(7, None));
+    assert!(survival_director_active(8, None));
 
     let objectives = PlayerObjectives {
         survive_5_nights: true,

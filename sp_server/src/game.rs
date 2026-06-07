@@ -692,7 +692,10 @@ pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
 }
 
 pub fn survival_director_active(day: i32, objectives: Option<&PlayerObjectives>) -> bool {
-    day >= 6 || objectives.map(|obj| obj.survive_5_nights).unwrap_or(false)
+    // Heavy scaling hordes hold off until day 8, widening the early calm window so
+    // the player can hunt + cook + bank a food reserve before food-gathering gets
+    // cut off by nightly sieges. (Days 2-7 still face the lighter fixed waves.)
+    day >= 8 || objectives.map(|obj| obj.survive_5_nights).unwrap_or(false)
 }
 
 pub fn survival_horde_size(day: i32, crisis_tier: i32, active_legendary_count: i32) -> usize {
@@ -11423,6 +11426,17 @@ fn nightly_threat_system(
                 5 => (
                     vec!["Skeleton", "Skeleton", "Zombie"],
                     "The dead stir as night approaches...",
+                ),
+                // Days 6-7 stay on the gentle ramp so the player has a calm window
+                // to bank a food reserve; the heavy scaling horde takes over at day 8
+                // (see survival_director_active).
+                6 => (
+                    vec!["Wolf", "Wolf", "Skeleton", "Spider"],
+                    "Something larger stirs in the dark...",
+                ),
+                7 => (
+                    vec!["Skeleton", "Skeleton", "Zombie", "Spider"],
+                    "The dead are restless tonight...",
                 ),
                 _ => (
                     vec!["Skeleton", "Skeleton", "Zombie", "Zombie", "Shadow"],
