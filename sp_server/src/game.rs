@@ -363,6 +363,86 @@ pub struct SanctuaryExcursionEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
 
+// Soulshards charged to raise a Monolith's sanctuary by one level.
+pub const SANCTUARY_UPGRADE_COST: i32 = 3;
+// Highest sanctuary level (keeps the suppression radius from swallowing the map).
+pub const SANCTUARY_MAX_LEVEL: i32 = 5;
+// Extra in-zone defensive multiplier per sanctuary level (applied to the Sanctuary
+// effect's amplifier, which combat multiplies the sanctuary defense by).
+pub const SANCTUARY_DEFENSE_PER_LEVEL: f32 = 0.25;
+
+/// Effective full-suppression radius for a sanctuary at `level`. Inside this
+/// radius random encounters are fully suppressed and the defensive bonus applies.
+/// Level 0 = the innate `SANCTUARY_RANGE`; each level adds one tile.
+pub fn sanctuary_full_radius(level: i32) -> u32 {
+    (SANCTUARY_RANGE as i32 + level.max(0)) as u32
+}
+
+/// Effective weak-sanctuary radius (outer ring) for a sanctuary at `level`.
+pub fn sanctuary_weak_radius(level: i32) -> u32 {
+    (WEAK_SANCTUARY_RANGE as i32 + level.max(0)) as u32
+}
+
+/// A single Monolith's protective zone, kept in the [`SanctuaryZones`] resource so
+/// every system (encounter suppression, wildness regen, crisis spawning, the
+/// defensive bonus) reads one source of truth instead of re-querying Monoliths.
+#[derive(Debug, Clone, Copy)]
+pub struct SanctuaryZone {
+    pub pos: Position,
+    pub level: i32,
+}
+
+impl SanctuaryZone {
+    pub fn full_radius(&self) -> u32 {
+        sanctuary_full_radius(self.level)
+    }
+    pub fn weak_radius(&self) -> u32 {
+        sanctuary_weak_radius(self.level)
+    }
+}
+
+/// monolith obj id -> its current sanctuary zone. Rebuilt each tick by
+/// `sanctuary_zones_sync_system` from the live Monolith entities.
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SanctuaryZones(pub HashMap<i32, SanctuaryZone>);
+
+impl SanctuaryZones {
+    /// True if `pos` is within the full-suppression radius of any sanctuary
+    /// (matches the `dist < full_radius` boundary used for encounter suppression).
+    pub fn in_full_zone(&self, pos: Position) -> bool {
+        self.0
+            .values()
+            .any(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)) < z.full_radius())
+    }
+
+    /// The nearest sanctuary zone to `pos`, if any (by centre distance).
+    pub fn nearest(&self, pos: Position) -> Option<SanctuaryZone> {
+        self.0
+            .values()
+            .min_by_key(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)))
+            .copied()
+    }
+}
+
+// Rebuild the SanctuaryZones lookup from the live Monolith entities each tick.
+// Cheap (a handful of Monoliths) and keeps the single source of truth in sync
+// with sanctuary-level upgrades without threading the resource through spawn code.
+fn sanctuary_zones_sync_system(
+    mut zones: ResMut<SanctuaryZones>,
+    monolith_query: Query<(&Id, &Position, &Monolith)>,
+) {
+    zones.0.clear();
+    for (id, pos, monolith) in monolith_query.iter() {
+        zones.0.insert(
+            id.0,
+            SanctuaryZone {
+                pos: *pos,
+                level: monolith.sanctuary_level,
+            },
+        );
+    }
+}
+
 // Players that just logged in and need their hero's sanctuary state re-sent.
 // The server only emits sanctuary effect packets on movement transitions, so on
 // (re)login the client has no idea whether the hero is currently protected.
@@ -967,6 +1047,11 @@ pub struct EffectAdded {
 #[derive(Debug, Component)]
 pub struct Monolith {
     pub soulshards: i32,
+    /// How far the player has empowered this Monolith's protective sanctuary.
+    /// Level 0 is the innate zone; each level (bought with Soulshards via
+    /// `PlayerEvent::UpgradeSanctuary`) widens the suppression radius and the
+    /// in-zone defensive bonus. See [`sanctuary_full_radius`] / [`SanctuaryZones`].
+    pub sanctuary_level: i32,
 }
 
 #[derive(Debug, Component)]
@@ -1404,7 +1489,15 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                wildness_regen_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
                 objectives_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                sanctuary_zones_sync_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -1685,6 +1778,7 @@ impl Game {
         let player_stats = PlayerStats(HashMap::new());
         let crisis_state = CrisisState(HashMap::new());
         let sanctuary_excursions = SanctuaryExcursions(HashMap::new());
+        let sanctuary_zones = SanctuaryZones(HashMap::new());
         let spawn_positions = SpawnPositions(HashMap::new());
         let player_intro_state = PlayerIntroState(HashMap::new());
         let initial_encounter_state = InitialEncounterState(HashMap::new());
@@ -1712,6 +1806,7 @@ impl Game {
         commands.insert_resource(player_stats);
         commands.insert_resource(crisis_state);
         commands.insert_resource(sanctuary_excursions);
+        commands.insert_resource(sanctuary_zones);
         commands.insert_resource(spawn_positions);
         commands.insert_resource(player_intro_state);
         commands.insert_resource(initial_encounter_state);
@@ -1960,6 +2055,7 @@ fn init_objs(
 
         let monolith_attrs = Monolith {
             soulshards: INIT_MONOLITH_SOULSHARDS,
+            sanctuary_level: 0,
         };
         // Spawn entity
         let monolith_entity_id = commands.spawn((monolith.clone(), monolith_attrs)).id();
@@ -2314,6 +2410,7 @@ fn move_event_completed_system(
     templates: Res<Templates>,
     player_intro_state: Res<PlayerIntroState>,
     mut sanctuary_excursions: ResMut<SanctuaryExcursions>,
+    sanctuary_zones: Res<SanctuaryZones>,
     (
         mover_query,
         map_obj_query,
@@ -2369,9 +2466,18 @@ fn move_event_completed_system(
             }
 
             if *obj.subclass == Subclass::Monolith {
-                if Map::dist(*mover_pos, *obj.pos) < SANCTUARY_RANGE {
+                // Suppression radius scales with the Monolith's sanctuary level
+                // (upgraded with Soulshards); fall back to the innate range if the
+                // zone hasn't been synced yet this frame.
+                let (full_r, weak_r) = sanctuary_zones
+                    .0
+                    .get(&obj.id.0)
+                    .map(|z| (z.full_radius(), z.weak_radius()))
+                    .unwrap_or((SANCTUARY_RANGE, WEAK_SANCTUARY_RANGE));
+                let dist = Map::dist(*mover_pos, *obj.pos);
+                if dist < full_r {
                     in_range_sanctuary = Some((obj.id.0, obj.pos.clone()));
-                } else if Map::dist(*mover_pos, *obj.pos) < WEAK_SANCTUARY_RANGE {
+                } else if dist < weak_r {
                     in_range_weak_sanctuary = Some((obj.id.0, obj.pos.clone()));
                 }
             } else if *obj.subclass == Subclass::Shelter {
@@ -2529,12 +2635,16 @@ fn move_event_completed_system(
             };
 
             if let Some((monolith_id, monolith_pos)) = in_range_sanctuary {
+                // In-zone defensive bonus scales with how far the sanctuary is upgraded.
+                let sanctuary_amp = 1.0
+                    + sanctuary_zones.0.get(&monolith_id).map(|z| z.level).unwrap_or(0) as f32
+                        * SANCTUARY_DEFENSE_PER_LEVEL;
                 // Check if coming from weak sanctuary
                 if effects.has(Effect::WeakSanctuary) {
                     // Add weak sanctuary
                     effects
                         .0
-                        .insert(Effect::Sanctuary, (game_tick.0 + 1, 1.0, 1));
+                        .insert(Effect::Sanctuary, (game_tick.0 + 1, sanctuary_amp, 1));
 
                     commands.entity(mover_entity).insert(Sanctuary {
                         id: monolith_id,
@@ -2560,7 +2670,7 @@ fn move_event_completed_system(
                 } else if !effects.has(Effect::Sanctuary) {
                     effects
                         .0
-                        .insert(Effect::Sanctuary, (game_tick.0 + 1, 1.0, 1));
+                        .insert(Effect::Sanctuary, (game_tick.0 + 1, sanctuary_amp, 1));
 
                     commands.entity(mover_entity).insert(Sanctuary {
                         id: monolith_id,
@@ -11241,6 +11351,7 @@ fn nightly_threat_system(
     objectives: Res<Objectives>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
+    sanctuary_zones: Res<SanctuaryZones>,
     mut run_score_state: ResMut<RunScoreState>,
     mut last_threat_day: Local<HashMap<i32, i32>>,
 ) {
@@ -11319,43 +11430,22 @@ fn nightly_threat_system(
         };
         send_to_client(player_id.0, packet, &clients);
 
-        // Find spawn position 5-7 tiles from hero
+        // The horde rises from the wilderness beyond the sanctuary and marches in
+        // (it ignores the sanctuary — that's the scheduled threat you prepare for).
         let mut spawned = false;
-        for _attempt in 0..10 {
-            let spawn_pos = get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
-
-            if let Some(spawn_pos) = spawn_pos {
-                let path = Map::find_path(
-                    *pos,
+        if let Some(spawn_pos) = crisis_spawn_pos(player_id.0, &sanctuary_zones, *pos, &map) {
+            for creature_type in &creatures {
+                Encounter::spawn_npc(
+                    NPC_PLAYER_ID,
                     spawn_pos,
-                    &map,
-                    player_id.0,
-                    Vec::new(),
-                    true,
-                    false,
-                    false,
-                    true,
-                    true,
+                    creature_type.to_string(),
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
                 );
-
-                if let Some((path, _cost)) = path {
-                    if path.len() < 20 {
-                        for creature_type in &creatures {
-                            Encounter::spawn_npc(
-                                NPC_PLAYER_ID,
-                                spawn_pos,
-                                creature_type.to_string(),
-                                &mut commands,
-                                &mut ids,
-                                &mut entity_map,
-                                &templates,
-                            );
-                        }
-                        spawned = true;
-                        break;
-                    }
-                }
             }
+            spawned = true;
         }
 
         if spawned {
@@ -11989,6 +12079,41 @@ fn reduce_wildness_at_pos(map: &mut Map, pos: Position) -> bool {
 
     map.update_wildness(pos.x, pos.y, -1);
     true
+}
+
+// Default/maximum wildness a tile drifts back toward (matches the spawn-time init).
+const WILDNESS_MAX: i32 = 4;
+// How often the wilderness reclaims pacified ground. Every interval a cleared tile
+// gains +1 wildness, so clearing a tile buys ~WILDNESS_MAX intervals of calm before
+// random spawns return there. Tiles inside a sanctuary are held at 0.
+const WILDNESS_REGEN_INTERVAL: i32 = 600;
+
+// Slowly regrow wildness on tiles the player has pacified (so the wilderness stays
+// dangerous all game), while keeping sanctuary ground suppressed. This is what makes
+// "clear the area" temporary outside the zone and permanent inside it.
+fn wildness_regen_system(
+    game_tick: Res<GameTick>,
+    mut map: ResMut<Map>,
+    sanctuary_zones: Res<SanctuaryZones>,
+) {
+    if game_tick.0 % WILDNESS_REGEN_INTERVAL != 0 {
+        return;
+    }
+
+    for y in 0..crate::map::HEIGHT {
+        for x in 0..crate::map::WIDTH {
+            let pos = Position { x, y };
+            let w = map.get_wildness(x, y);
+            if sanctuary_zones.in_full_zone(pos) {
+                // Inside the sanctuary the ground stays pacified.
+                if w > 0 {
+                    map.update_wildness(x, y, -w);
+                }
+            } else if w < WILDNESS_MAX {
+                map.update_wildness(x, y, 1);
+            }
+        }
+    }
 }
 
 fn wildness_reduction_on_enemy_death_system(
@@ -16086,6 +16211,54 @@ fn get_random_adjacent_pos(
     }
 
     return selected_pos;
+}
+
+// Spawn position for a timed/event crisis: a passable, reachable tile just beyond
+// the nearest sanctuary's outer ring, so the wave appears out in the wilderness and
+// marches inward toward the settlement (the NPCs' own AI handles the approach). When
+// no sanctuary is near `fallback` (the hero), it reverts to the old ring around the
+// hero. This is what makes crises "ignore the sanctuary, spawn outside, and move in."
+fn crisis_spawn_pos(
+    player_id: i32,
+    sanctuary_zones: &SanctuaryZones,
+    fallback: Position,
+    map: &Map,
+) -> Option<Position> {
+    let Some(zone) = sanctuary_zones.nearest(fallback) else {
+        return get_random_pos_at_range(player_id, fallback.x, fallback.y, 6, Vec::new(), map);
+    };
+
+    let mut rng = rand::thread_rng();
+    for _ in 0..16 {
+        let ring_r = zone.weak_radius() as i32 + 1 + rng.gen_range(0..3);
+        let ring = Map::ring((zone.pos.x, zone.pos.y), ring_r);
+        if ring.is_empty() {
+            continue;
+        }
+        let (x, y) = ring[rng.gen_range(0..ring.len())];
+        if !Map::is_valid_pos((x, y)) || !Map::is_passable(x, y, map) {
+            continue;
+        }
+        let pos = Position { x, y };
+        // Must be able to march in to the settlement.
+        if Map::find_path(
+            pos,
+            zone.pos,
+            map,
+            player_id,
+            Vec::new(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+        .is_some()
+        {
+            return Some(pos);
+        }
+    }
+    None
 }
 
 fn get_random_pos_at_range(

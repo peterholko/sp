@@ -21,11 +21,11 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_loot_poi, is_pos_empty, survey_status_for_tile, Clients, DamageRecord, DebugObjs, GameTick,
-    InitialEncounterState, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
-    MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PlayerIntroState, PlayerObjectives,
-    PlayerRunScore, PlayerStat, PlayerStats, RunScoreState, SpawnPositions, SurveyHistory,
-    WeakSanctuary,
+    is_loot_poi, is_pos_empty, sanctuary_weak_radius, survey_status_for_tile, Clients, DamageRecord,
+    DebugObjs, GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith,
+    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
+    PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
+    SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL, SANCTUARY_UPGRADE_COST,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -464,6 +464,10 @@ pub enum PlayerEvent {
         merchant_id: i32,
         target_id: i32,
     },
+    UpgradeSanctuary {
+        player_id: i32,
+        monolith_id: i32,
+    },
     BuyItem {
         player_id: i32,
         seller_id: i32,
@@ -708,6 +712,7 @@ impl Plugin for PlayerPlugin {
                 remove_system,
                 set_experiment_item_system,
                 hire_system,
+                upgrade_sanctuary_system,
                 buy_sell_system,
                 activate_system,
             )
@@ -9969,6 +9974,119 @@ fn hire_system(
             ResponsePacket::Notice {
                 noticemsg: "A villager joins your camp.".to_string(),
                 expiry: Some(3000),
+            },
+            &clients,
+        );
+    }
+
+    for event_id in events_to_remove.iter() {
+        events.remove(event_id);
+    }
+}
+
+// Empower a Monolith's sanctuary by one level, paid in Soulshards. The hero must
+// be within the sanctuary's outer ring; each level widens the random-spawn
+// suppression radius and the in-zone defensive bonus (see move_event_completed_system
+// and combat damage reduction). Soulshards come from killing the random spawns the
+// sanctuary is meant to push back — the core "clear your area, then fortify it" loop.
+fn upgrade_sanctuary_system(
+    mut events: ResMut<PlayerEvents>,
+    ids: Res<Ids>,
+    entity_map: Res<EntityObjMap>,
+    clients: Res<Clients>,
+    pos_query: Query<&Position>,
+    mut hero_inv_query: Query<&mut Inventory, With<SubclassHero>>,
+    mut monolith_query: Query<&mut Monolith>,
+) {
+    let mut events_to_remove: Vec<i32> = Vec::new();
+
+    for (event_id, event) in events.iter() {
+        let PlayerEvent::UpgradeSanctuary {
+            player_id,
+            monolith_id,
+        } = event
+        else {
+            continue;
+        };
+        events_to_remove.push(*event_id);
+
+        let Some(hero_id) = ids.get_hero(*player_id) else {
+            continue;
+        };
+        let (Some(hero_entity), Some(monolith_entity)) = (
+            entity_map.get_entity(hero_id),
+            entity_map.get_entity(*monolith_id),
+        ) else {
+            continue;
+        };
+
+        let Ok(mut monolith) = monolith_query.get_mut(monolith_entity) else {
+            continue;
+        };
+
+        // Must be within (the current) sanctuary to channel the upgrade.
+        let (Ok(hero_pos), Ok(monolith_pos)) =
+            (pos_query.get(hero_entity), pos_query.get(monolith_entity))
+        else {
+            continue;
+        };
+        if Map::dist(*hero_pos, *monolith_pos) > sanctuary_weak_radius(monolith.sanctuary_level) {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Error {
+                    errmsg: "You must be within the sanctuary to empower it.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        }
+
+        if monolith.sanctuary_level >= SANCTUARY_MAX_LEVEL {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Notice {
+                    noticemsg: "The sanctuary is already at its full strength.".to_string(),
+                    expiry: Some(3000),
+                },
+                &clients,
+            );
+            continue;
+        }
+
+        let Ok(mut hero_inv) = hero_inv_query.get_mut(hero_entity) else {
+            continue;
+        };
+        let shards = hero_inv
+            .get_by_class(item::SOULSHARD.to_string())
+            .map(|s| s.quantity)
+            .unwrap_or(0);
+        if shards < SANCTUARY_UPGRADE_COST {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Error {
+                    errmsg: format!(
+                        "Empowering the sanctuary needs {} Soulshards.",
+                        SANCTUARY_UPGRADE_COST
+                    ),
+                    },
+                &clients,
+            );
+            continue;
+        }
+
+        if let Some(shard_item) = hero_inv.get_by_class(item::SOULSHARD.to_string()) {
+            hero_inv.remove_quantity(shard_item.id, SANCTUARY_UPGRADE_COST);
+        }
+        monolith.sanctuary_level += 1;
+
+        send_to_client(
+            *player_id,
+            ResponsePacket::Notice {
+                noticemsg: format!(
+                    "The Monolith blazes brighter. Your sanctuary expands (level {}).",
+                    monolith.sanctuary_level
+                ),
+                expiry: Some(4000),
             },
             &clients,
         );

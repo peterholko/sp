@@ -890,4 +890,69 @@ mod tests {
             .sum();
         assert_eq!(gold_after, 25, "the wage (25) should be deducted from the hero");
     }
+
+    // Empowering the Monolith sanctuary: pay Soulshards, level rises, and the
+    // suppression radius grows with it.
+    #[test]
+    fn upgrade_sanctuary_raises_level_and_radius() {
+        use crate::game::{sanctuary_full_radius, Monolith, SANCTUARY_UPGRADE_COST};
+        use crate::ids::Ids;
+        use crate::templates::Templates;
+
+        let mut game = HeadlessGame::new(5_000);
+        let pid = game.spawn_hero("Warrior", "SancBot");
+        game.tick(50);
+
+        // Find the Monolith and confirm it starts at sanctuary level 0.
+        let (monolith_id, monolith_pos, level0) = {
+            let world = game.app.world_mut();
+            let mut q = world.query::<(&Id, &Position, &Monolith)>();
+            let (id, pos, m) = q.iter(world).next().expect("a monolith exists");
+            (id.0, *pos, m.sanctuary_level)
+        };
+        assert_eq!(level0, 0, "sanctuary starts at level 0");
+
+        // Stand the hero on the Monolith and give them enough Soulshards.
+        {
+            let world = game.app.world_mut();
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut q =
+                world.query_filtered::<(&mut Position, &mut Inventory), With<SubclassHero>>();
+            let (mut hpos, mut hinv) = q.iter_mut(world).next().expect("hero");
+            *hpos = monolith_pos;
+            hinv.new(
+                item_id,
+                "Soulshard".to_string(),
+                SANCTUARY_UPGRADE_COST + 1,
+                &item_templates,
+            );
+        }
+
+        game.inject(PlayerEvent::UpgradeSanctuary {
+            player_id: pid,
+            monolith_id,
+        });
+        game.tick(20);
+
+        let level1 = {
+            let world = game.app.world_mut();
+            let mut q = world.query::<&Monolith>();
+            q.iter(world).next().expect("monolith").sanctuary_level
+        };
+        assert_eq!(level1, 1, "upgrade should raise the sanctuary level");
+        assert!(
+            sanctuary_full_radius(level1) > sanctuary_full_radius(level0),
+            "the suppression radius should grow with level"
+        );
+
+        let shards: i32 = game
+            .observe()
+            .inventory
+            .iter()
+            .filter(|i| i.class == "Soulshard")
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(shards, 1, "the upgrade cost should be deducted in Soulshards");
+    }
 }
