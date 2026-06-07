@@ -23,11 +23,12 @@ use crate::{
     game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
     item::{self, AttrKey, Inventory, Item, ItemLocation},
-    map::{Map, MapPos},
+    map::{Map, MapPos, TileType},
     network::{send_to_client, ResponsePacket},
     obj::{Name, StartBuild, State, *},
     player::{ActiveInfoType, ActiveInfos},
     recipe::Recipes,
+    resource::{Resource, Resources},
     templates::Templates,
     villager_debug, villager_error, villager_info, villager_trace,
     villager_util::VillagerUtil,
@@ -133,6 +134,45 @@ pub struct FindDrink;
 #[derive(Debug, Clone, Component)]
 pub struct NoDrinks {
     pub at_tick: i32,
+}
+
+// A villager with no drink item of its own is heading to / drinking at a natural
+// water source (a revealed spring near base). Set by find_drink_system's fallback,
+// consumed by drink_action_system. Lets settlement villagers stay hydrated without
+// being handed waterskins.
+#[derive(Debug, Clone, Component)]
+pub struct DrinkingFromWater;
+
+// How far a thirsty villager will look for a revealed spring to drink at.
+const VILLAGER_WATER_RANGE: i32 = 15;
+
+// Nearest natural water the villager can drink at, within `range`: a passable tile
+// that either holds a revealed spring (stand on it, like the hero) or sits beside a
+// river (drink from the bank). Rivers are always visible, so this gives villagers a
+// reliable water source even before the hero has prospected a spring nearby.
+fn nearest_water(
+    pos: &Position,
+    resources: &Resources,
+    map: &Map,
+    range: i32,
+) -> Option<Position> {
+    for r in 0..=range {
+        for (x, y) in Map::ring((pos.x, pos.y), r) {
+            if !Map::is_valid_pos((x, y)) {
+                continue;
+            }
+            let tile = Position { x, y };
+            if !Resource::get_by_type(tile, SPRING_WATER.to_string(), resources, true).is_empty() {
+                return Some(tile);
+            }
+            if Map::is_passable(x, y, map)
+                && Map::are_tile_types_nearby(tile, vec![TileType::River], map)
+            {
+                return Some(tile);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Component)]
@@ -3141,6 +3181,7 @@ pub fn find_drink_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     map: Res<Map>,
+    resources: Res<Resources>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
@@ -3212,6 +3253,22 @@ pub fn find_drink_system(
                     DRINK.to_string(),
                     &map,
                 ) else {
+                    // No drink item on hand or in storage: fall back to a natural
+                    // water source (a revealed spring, or a river bank). The villager
+                    // walks there and drinks directly.
+                    if let Some(water) =
+                        nearest_water(&villager.pos, &resources, &map, VILLAGER_WATER_RANGE)
+                    {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, None, "Heading to water to drink");
+                        });
+                        commands.entity(*actor).remove::<NoDrinks>();
+                        commands.entity(*actor).insert(DrinkingFromWater);
+                        commands.entity(*actor).insert(Destination { pos: water });
+                        *state = ActionState::Success;
+                        continue;
+                    }
+
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot find any drinks");
                     });
@@ -3223,8 +3280,10 @@ pub fn find_drink_system(
                     continue;
                 };
 
-                // Remove NoDrinks if a drink is found
+                // Found a drink item: clear any pending water-drink intent and the
+                // NoDrinks marker.
                 commands.entity(*actor).remove::<NoDrinks>();
+                commands.entity(*actor).remove::<DrinkingFromWater>();
 
                 // Add TargetItem component
                 commands.entity(*actor).insert(TargetItem(item.clone()));
@@ -3580,6 +3639,7 @@ pub fn transfer_drink_system(
     mut ids: ResMut<Ids>,
     templates: Res<Templates>,
     villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
+    water_query: Query<&DrinkingFromWater>,
     mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
     mut action_query: Query<(&Actor, &mut ActionState, &TransferDrink, &ActionSpan)>,
 ) {
@@ -3594,6 +3654,11 @@ pub fn transfer_drink_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                // Drinking straight from a spring — nothing to transfer.
+                if water_query.get(*actor).is_ok() {
+                    *state = ActionState::Success;
+                    continue;
+                }
                 let Ok((_villager_player_id, villager_id, target_item)) =
                     villager_query.get(*actor)
                 else {
@@ -3709,6 +3774,8 @@ pub fn drink_action_system(
     mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
     mut event_executing_query: Query<&mut EventExecuting>,
     last_combat_tick_query: Query<&LastCombatTick>,
+    water_query: Query<&DrinkingFromWater>,
+    mut thirst_query: Query<&mut Thirst>,
     mut query: Query<(&Actor, &mut ActionState, &Drink, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _drink, span) in &mut query {
@@ -3726,6 +3793,20 @@ pub fn drink_action_system(
                         villager_debug!(*actor, obj_id, None, "Cannot drink while in combat");
                     });
                     *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Drinking straight from the spring we walked to — quench directly,
+                // no waterskin/drink item involved.
+                if water_query.get(*actor).is_ok() {
+                    if let Ok(mut thirst) = thirst_query.get_mut(*actor) {
+                        thirst.thirst = 0.0;
+                    }
+                    commands.entity(*actor).remove::<DrinkingFromWater>();
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "Drank from water");
+                    });
+                    *state = ActionState::Success;
                     continue;
                 }
 
