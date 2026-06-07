@@ -987,6 +987,39 @@ pub fn new(
         0.0,
     );
 
+    // Castaway villagers the merchant carries for hire. Spawned offshore at
+    // empire_pos alongside the merchant, owned by the merchant, as bare cargo
+    // (Obj + BaseAttrs + Skills, no AI/needs). `info_hire_system` lists them off
+    // `Transport.hauling`; the hire flow re-homes the chosen one to the player and
+    // attaches its villager behaviour (see player::hire_system /
+    // Encounter::convert_cargo_to_villager).
+    const MERCHANT_HIRE_VILLAGERS: usize = 3;
+    let mut hauling: Vec<i32> = Vec::new();
+    for _ in 0..MERCHANT_HIRE_VILLAGERS {
+        let cargo_id = ids.new_obj_id();
+        let mut cargo = Obj::create_nospawn(
+            cargo_id,
+            merchant_player_id,
+            "Human Villager".to_string(),
+            empire_pos,
+            State::None,
+            Inventory {
+                owner: cargo_id,
+                items: Vec::new(),
+            },
+            templates,
+        );
+        cargo.name = Name(VillagerUtil::generate_name());
+
+        let cargo_attrs = VillagerUtil::generate_attributes(1);
+        let cargo_skills = VillagerUtil::generate_skills(cargo_id, &templates.skill_templates);
+
+        let cargo_entity = commands.spawn((cargo, cargo_attrs, cargo_skills)).id();
+        ids.new_obj(cargo_id, merchant_player_id);
+        entity_map.new_obj(cargo_id, cargo_entity);
+        hauling.push(cargo_id);
+    }
+
     let merchant_entity_id = commands
         .spawn((
             merchant,
@@ -994,6 +1027,17 @@ pub fn new(
                 range: viewshed_range,
             },
             merchant_component,
+            Transport {
+                route: Vec::new(),
+                next_stop: 0,
+                hauling,
+            },
+            // Required by the move-application system (move_system) — without it the
+            // merchant's sail MoveEvents never resolve and it stays stuck offshore.
+            EventExecuting {
+                event_type: "".to_string(),
+                state: EventExecutingState::None,
+            },
         ))
         .id();
 

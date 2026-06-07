@@ -48,6 +48,9 @@ const GOOD_FEED: f32 = 40.0;
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
+// Villager economy: hire from the travelling merchant up to the Prosperity goal.
+const HIRE_WAGE: i32 = 25; // Gold Coins charged per hire (matches the server)
+const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
 // Structure recipes the bot builds (req type -> quantity), matching the
 // obj_template.yaml `req` fields. Campfire uses the hero's starting Stick+Resin;
@@ -149,9 +152,21 @@ impl Bot {
                 .iter()
                 .filter(|t| t.plant_revealed)
                 .count();
+            let hgold = hero_gold(&view.inventory);
+            let hdist = view
+                .hero
+                .as_ref()
+                .zip(view.merchant.as_ref())
+                .map(|(h, m)| hex_dist(h.pos, m.pos) as i32)
+                .unwrap_or(-1);
+            let (mstate, mhire, mpos) = match &view.merchant {
+                Some(m) if m.at_landing => ("docked", m.hireable.len(), m.pos),
+                Some(m) => ("sailing", m.hireable.len(), m.pos),
+                None => ("none", 0, Position { x: -1, y: -1 }),
+            };
             eprintln!(
-                "[vil] t={} villagers={} idle={} order={} gathering={} carried={} storage_food={} plant_nodes={}",
-                view.game_tick, view.villagers.len(), idle, with_order, gathering, carried, sfood, plant_nodes
+                "[vil] t={} villagers={} idle={} order={} gathering={} carried={} storage_food={} plant_nodes={} gold={} merchant={} hireable={} mpos={},{} hdist={}",
+                view.game_tick, view.villagers.len(), idle, with_order, gathering, carried, sfood, plant_nodes, hgold, mstate, mhire, mpos.x, mpos.y, hdist
             );
         }
 
@@ -362,6 +377,20 @@ impl Bot {
                 if let Some(mv) = self.step_adjacent_to(hero.pos, ship.pos, view, map) {
                     return Some(mv);
                 }
+            }
+        }
+
+        // 4e. Hire more villagers from the travelling merchant, up to the
+        //     Prosperity goal. Only when safe + needs comfortable (same as recruit).
+        //     The hero pays in Gold Coins, which start in the Burrow, so it first
+        //     withdraws gold, then walks to the docked merchant and hires.
+        if safe
+            && needs_comfortable
+            && view.villagers.len() < TARGET_VILLAGERS
+            && self.recruit_attempted
+        {
+            if let Some(action) = self.hire_action(&hero, view, map) {
+                return Some(action);
             }
         }
 
@@ -617,6 +646,48 @@ impl Bot {
             });
         }
         None
+    }
+
+    // Hire a villager from the docked merchant. The wage is paid in Gold Coins from
+    // the hero's pack; the starting gold sits in the Burrow, so the hero withdraws a
+    // gold stack first, then walks to the merchant and hires. Returns None when no
+    // merchant is docked, nothing is for hire, or there is no gold to be had.
+    fn hire_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
+        const HIRE_MAX_DIST: u32 = 22; // don't trek across the map to the merchant
+        let merchant = view.merchant.as_ref()?;
+        if !merchant.at_landing || merchant.hireable.is_empty() {
+            return None;
+        }
+        // Only bother when the docked merchant is reasonably near — a long escort
+        // costs more survival time than a villager is worth.
+        if hex_dist(hero.pos, merchant.pos) > HIRE_MAX_DIST {
+            return None;
+        }
+
+        // Need the wage in hand; if short, pull a Gold Coins stack from the Burrow.
+        if hero_gold(&view.inventory) < HIRE_WAGE {
+            let (spos, sid, item_id) = storage_gold(view)?;
+            if Map::is_adjacent_including_source(hero.pos, spos) {
+                return Some(PlayerEvent::ItemTransfer {
+                    player_id: self.player_id,
+                    source_id: sid,
+                    target_id: hero.id,
+                    item_id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, spos, view, map);
+        }
+
+        // Gold in hand: get next to the merchant and hire the first villager aboard.
+        let target_id = *merchant.hireable.first()?;
+        if Map::is_adjacent_including_source(hero.pos, merchant.pos) {
+            return Some(PlayerEvent::Hire {
+                player_id: self.player_id,
+                merchant_id: merchant.id,
+                target_id,
+            });
+        }
+        self.step_adjacent_to(hero.pos, merchant.pos, view, map)
     }
 
     // ---- Water -------------------------------------------------------------
@@ -1183,6 +1254,30 @@ fn storage_item_for_missing(
 fn storage_food(view: &WorldView) -> Option<(Position, i32, i32)> {
     for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
         if let Some(item) = s.inventory.iter().find(|i| i.class == "Food" && i.quantity > 0) {
+            return Some((s.pos, s.id, item.id));
+        }
+    }
+    None
+}
+
+// Total Gold Coins the hero is carrying.
+fn hero_gold(inventory: &[ItemView]) -> i32 {
+    inventory
+        .iter()
+        .filter(|i| i.class == "Gold Coins")
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// A Gold Coins stack sitting in an owned storage (the Burrow starts with 50) to
+// withdraw for hiring. Returns (storage_pos, storage_id, item_id).
+fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
+    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        if let Some(item) = s
+            .inventory
+            .iter()
+            .find(|i| i.class == "Gold Coins" && i.quantity > 0)
+        {
             return Some((s.pos, s.id, item.id));
         }
     }

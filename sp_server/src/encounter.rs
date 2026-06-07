@@ -680,6 +680,137 @@ impl Encounter {
         return (villager_entity, Id(villager_id));
     }
 
+    /// Turn an existing merchant cargo villager (a bare `Obj` + `BaseAttrs` +
+    /// `Skills`, owned by the merchant) into a fully-functional player villager,
+    /// in place. Used by the hire flow: the same entity (and thus its advertised
+    /// attributes/skills) carries over, so a hired villager matches what the hire
+    /// menu showed. Inserts the needs + big-brain Thinker bundle that the cargo
+    /// entity lacked, and re-homes it to `player_id` at `pos`.
+    ///
+    /// Keep the inserted component set in sync with `spawn_villager` above.
+    pub fn convert_cargo_to_villager(
+        commands: &mut Commands,
+        entity: Entity,
+        pos: Position,
+        player_id: i32,
+        inventory: &Inventory,
+        templates: &Res<Templates>,
+        game_tick: &Res<GameTick>,
+    ) {
+        let villager_template_name = "Human Villager".to_string();
+
+        let flee = Steps::build()
+            .label("Flee")
+            .step(SetFleeDestination)
+            .step(MoveTo);
+
+        let find_move_to_and_drink = Steps::build()
+            .label("FindMoveToAndDrink")
+            .step(FindDrink)
+            .step(MoveTo)
+            .step(TransferDrink)
+            .step(Drink);
+
+        let find_move_to_and_eat = Steps::build()
+            .label("FindMoveToAndEat")
+            .step(FindFood)
+            .step(MoveTo)
+            .step(TransferFood)
+            .step(Eat);
+
+        let find_move_to_and_sleep = Steps::build()
+            .label("FindMoveToAndSleep")
+            .step(FindShelter {
+                trigger_event: "Sleep".to_string(),
+            })
+            .step(MoveTo)
+            .step(Sleep);
+
+        let find_move_to_and_shelter = Steps::build()
+            .label("FindMoveToAndShelter")
+            .step(FindShelter {
+                trigger_event: "Shelter".to_string(),
+            })
+            .step(MoveTo)
+            .step(Idle {
+                start_time: 0,
+                duration: 100,
+            });
+
+        let process_order = Steps::build()
+            .label("ProcessOrder")
+            .step(SetOrderDestination)
+            .step(MoveTo)
+            .step(ProcessOrder);
+
+        let unload_items = Steps::build()
+            .label("UnloadItems")
+            .step(SetStorageDestination)
+            .step(MoveTo)
+            .step(UnloadItems);
+
+        let load_items = Steps::build().label("LoadItems").step(LoadItems);
+
+        commands.entity(entity).insert((
+            PlayerId(player_id),
+            pos,
+            Viewshed {
+                range: Obj::set_viewshed_range(
+                    0,
+                    villager_template_name,
+                    game_tick.0,
+                    inventory,
+                    templates,
+                    0.0,
+                ),
+            },
+            SubclassVillager,
+            EncounterMoves(0),
+            EventExecuting {
+                event_type: "".to_string(),
+                state: EventExecutingState::None,
+            },
+            ActiveTask::None,
+            Order::None,
+            ActiveShelter(NO_SHELTER),
+            VillagerUtil::generate_personality(),
+        ));
+
+        commands.entity(entity).insert((
+            Thirst::new(
+                RESCUED_VILLAGER_STARTING_THIRST,
+                RESCUED_VILLAGER_NEED_PER_TICK,
+            ),
+            Hunger::new(
+                RESCUED_VILLAGER_STARTING_HUNGER,
+                RESCUED_VILLAGER_NEED_PER_TICK,
+            ),
+            Tired::new(0.0, 0.02),
+            Heat::new(50.0),
+            Morale::new(50.0),
+            Thinker::build()
+                .label("Villager")
+                .picker(Highest)
+                .when(ArmedRetaliationScorer, FightBack)
+                .when(EnemyDistanceScorer, flee)
+                .when(ThirstyScorer, find_move_to_and_drink)
+                .when(HungryScorer, find_move_to_and_eat)
+                .when(DrowsyScorer, find_move_to_and_sleep)
+                .when(ExhaustedScorer, Sleep)
+                .when(HeatScorer, find_move_to_and_shelter)
+                .when(StructureCapacityScorer, load_items)
+                .when(CapacityScorer, unload_items)
+                .when(
+                    IdleScorer,
+                    Idle {
+                        start_time: 0,
+                        duration: 100,
+                    },
+                )
+                .when(GoodMorale, process_order),
+        ));
+    }
+
     pub fn spawn_tax_collector(
         player_id: i32,
         landing_pos: Position,

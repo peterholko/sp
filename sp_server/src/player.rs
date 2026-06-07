@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::common::{Destination, Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
+use crate::encounter::Encounter;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
@@ -9837,87 +9838,140 @@ fn set_experiment_item_system(
     }*/
 }
 
+/// Wage charged (in Gold Coins) to hire one villager from the merchant. Mirrors
+/// the `wage` advertised by `info_hire_system`.
+const HIRE_WAGE: i32 = 25;
+
 fn hire_system(
-    commands: Commands,
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     mut events: ResMut<PlayerEvents>,
-    ids: ResMut<Ids>,
+    mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
-    map_events: ResMut<MapEvents>,
-    pos_query: Query<&mut Position>,
-    merchant_query: Query<&Transport, With<Merchant>>,
-    player_query: Query<&mut PlayerId>,
+    templates: Res<Templates>,
+    mut transport_query: Query<&mut Transport, With<Merchant>>,
+    pos_query: Query<&Position>,
+    mut inventory_query: Query<&mut Inventory>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
     for (event_id, event) in events.iter() {
-        match event {
-            PlayerEvent::Hire {
-                player_id,
-                merchant_id,
-                target_id,
-            } => {
-                events_to_remove.push(*event_id);
+        let PlayerEvent::Hire {
+            player_id,
+            merchant_id,
+            target_id,
+        } = event
+        else {
+            continue;
+        };
+        events_to_remove.push(*event_id);
 
-                // Adding AI to villager
-                /*let find_move_to_and_drink = Steps::build()
-                    .label("FindMoveToAndDrink")
-                    .step(FindDrink)
-                    .step(MoveTo)
-                    .step(TransferDrink)
-                    .step(Drink { until: 70.0 });
+        // Resolve the hero, merchant, and the cargo villager being hired.
+        let Some(hero_id) = ids.get_hero(*player_id) else {
+            error!("Hire: cannot find hero for player {player_id}");
+            continue;
+        };
+        let (Some(hero_entity), Some(merchant_entity), Some(cargo_entity)) = (
+            entity_map.get_entity(hero_id),
+            entity_map.get_entity(*merchant_id),
+            entity_map.get_entity(*target_id),
+        ) else {
+            error!("Hire: cannot resolve hero/merchant/villager entities");
+            continue;
+        };
 
-                let find_move_to_and_eat = Steps::build()
-                    .label("FindMoveToAndEat")
-                    .step(FindFood)
-                    .step(MoveToFoodSource)
-                    .step(TransferFood)
-                    .step(Eat);
-
-                let find_move_to_and_sleep = Steps::build()
-                    .label("FindMoveToAndSleep")
-                    .step(FindShelter { trigger_event: "Sleep".to_string() })
-                    .step(MoveToShelterAction)
-                    .step(Sleep);
-
-                let find_move_to_and_shelter = Steps::build()
-                    .label("FindMoveToAndShelter")
-                    .step(FindShelter { trigger_event: "Shelter".to_string() })
-                    .step(MoveToShelterAction)
-                    .step(Idle {
-                        start_time: 0,
-                        duration: 100,
-                    });
-
-                    commands.entity(target_entity).insert((
-                        Thirst::new(80.0, 0.025), //0.1 before
-                        Hunger::new(0.0, 0.025),
-                        Tired::new(0.0, 0.025),
-                        Heat::new(50.0),
-                        Morale::new(50.0),
-                        Thinker::build()
-                            .label("Villager")
-                            .picker(Highest)
-                            .when(EnemyDistanceScorer, Flee)
-                            .when(ThirstyScorer, find_move_to_and_drink)
-                            .when(HungryScorer, find_move_to_and_eat)
-                            .when(DrowsyScorer, find_move_to_and_sleep)
-                            .when(ExhaustedScorer, Sleep)
-                            .when(HeatScorer, find_move_to_and_shelter)
-                            .when(CapacityScorer, UnloadItems)
-                            .when(
-                                IdleScorer,
-                                Idle {
-                                    start_time: 0,
-                                    duration: 100,
-                                },
-                            )
-                            .when(GoodMorale, ProcessOrder),
-                    ));*/
-            }
-            _ => {}
+        // The villager must currently be aboard this merchant.
+        let Ok(mut transport) = transport_query.get_mut(merchant_entity) else {
+            error!("Hire: merchant {merchant_id} has no Transport");
+            continue;
+        };
+        if !transport.hauling.contains(target_id) {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Error {
+                    errmsg: "That villager is not for hire.".to_string(),
+                },
+                &clients,
+            );
+            continue;
         }
+
+        // Must be standing next to the merchant to hire.
+        let (Ok(hero_pos), Ok(merchant_pos)) =
+            (pos_query.get(hero_entity), pos_query.get(merchant_entity))
+        else {
+            continue;
+        };
+        let hero_pos = *hero_pos;
+        if !Map::is_adjacent_including_source(hero_pos, *merchant_pos) {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Error {
+                    errmsg: "You must be next to the merchant to hire.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        }
+
+        // Charge the wage in Gold Coins from the hero's pack.
+        let Ok([mut hero_inventory, mut merchant_inventory]) =
+            inventory_query.get_many_mut([hero_entity, merchant_entity])
+        else {
+            error!("Hire: cannot access hero/merchant inventories");
+            continue;
+        };
+        if hero_inventory.get_total_gold() < HIRE_WAGE {
+            send_to_client(
+                *player_id,
+                ResponsePacket::Error {
+                    errmsg: "Not enough gold to hire.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        }
+        let mut next_id = ids.new_item_id();
+        Inventory::transfer_gold(
+            &mut hero_inventory,
+            &mut merchant_inventory,
+            HIRE_WAGE,
+            &mut next_id,
+            &templates.item_templates,
+        );
+
+        // The villager disembarks: re-home it to the player at the hero's tile and
+        // attach its villager behaviour (needs + AI). The same entity carries its
+        // advertised attributes/skills over.
+        transport.hauling.retain(|&x| x != *target_id);
+
+        Encounter::convert_cargo_to_villager(
+            &mut commands,
+            cargo_entity,
+            hero_pos,
+            *player_id,
+            &Inventory {
+                owner: *target_id,
+                items: Vec::new(),
+            },
+            &templates,
+            &game_tick,
+        );
+        ids.new_obj(*target_id, *player_id);
+
+        commands.trigger(NewObj {
+            entity: cargo_entity,
+        });
+
+        send_to_client(
+            *player_id,
+            ResponsePacket::Notice {
+                noticemsg: "A villager joins your camp.".to_string(),
+                expiry: Some(3000),
+            },
+            &clients,
+        );
     }
 
     for event_id in events_to_remove.iter() {

@@ -24,9 +24,11 @@ use crate::constants::{
     DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
 };
 use crate::database::DatabaseEvent;
+use crate::common::Transport;
 use crate::game::{
-    Client, Clients, DatabaseClient, DatabaseManagers, GameTick, NetworkReceiver, Objectives,
-    PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState, VictoryState,
+    Client, Clients, DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState,
+    NetworkReceiver, Objectives, PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory,
+    RunScoreState, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
@@ -56,6 +58,7 @@ pub struct WorldView {
     pub enemies: Vec<UnitView>,
     pub villagers: Vec<VillagerView>,
     pub pois: Vec<PoiView>,
+    pub merchant: Option<MerchantView>,
     pub structures: Vec<StructureView>,
     pub resource_tiles: Vec<ResTileView>,
     pub occupied: HashSet<(i32, i32)>,
@@ -176,6 +179,17 @@ pub struct PoiView {
     pub id: i32,
     pub pos: Position,
     pub template: String, // e.g. "Shipwreck"
+}
+
+#[derive(Clone)]
+pub struct MerchantView {
+    pub id: i32,
+    pub pos: Position,
+    /// True only while the merchant has sailed in and is docked (trade window
+    /// open). The bot should only approach/hire when this is true.
+    pub at_landing: bool,
+    /// Obj ids of the villagers currently aboard the merchant, available to hire.
+    pub hireable: Vec<i32>,
 }
 
 #[derive(Clone)]
@@ -536,6 +550,20 @@ impl HeadlessGame {
                 .collect::<Vec<_>>()
         };
 
+        // The travelling merchant (if any). Its `Transport.hauling` are the
+        // villagers available to hire; `sail_state` says whether it's docked.
+        let merchant = {
+            let mut q = world.query::<(&Id, &Position, &Merchant, &Transport)>();
+            q.iter(world)
+                .next()
+                .map(|(id, pos, merchant, transport)| MerchantView {
+                    id: id.0,
+                    pos: *pos,
+                    at_landing: merchant.sail_state == MerchantSailState::AtLanding,
+                    hireable: transport.hauling.clone(),
+                })
+        };
+
         // The player's structures (+ inventories so the bot can pull build
         // resources from the Burrow and check foundation contents).
         let structures = {
@@ -601,6 +629,7 @@ impl HeadlessGame {
             enemies,
             villagers,
             pois,
+            merchant,
             structures,
             resource_tiles,
             occupied,
@@ -780,5 +809,85 @@ mod tests {
         // Metrics readable.
         let m = game.metrics();
         assert!(m.ticks >= 0);
+    }
+
+    // The merchant hire mechanic, end-to-end and isolated from the bot's survival:
+    // dock the merchant on the hero's tile, give the hero gold, send Hire, and
+    // confirm a player-owned villager appears and the wage is deducted.
+    #[test]
+    fn hire_from_merchant_adds_villager() {
+        use crate::ids::Ids;
+        use crate::templates::Templates;
+
+        let mut game = HeadlessGame::new(5_000);
+        let pid = game.spawn_hero("Warrior", "HireBot");
+        game.tick(50); // let new_player setup spawn the merchant + cargo villagers
+
+        // Hero position (the merchant will dock here so the adjacency check passes).
+        let hero_pos = {
+            let world = game.app.world_mut();
+            let mut q = world.query_filtered::<&Position, With<SubclassHero>>();
+            *q.iter(world).next().expect("hero exists")
+        };
+
+        // Give the hero 50 Gold Coins to pay the wage from.
+        {
+            let world = game.app.world_mut();
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut q = world.query_filtered::<&mut Inventory, With<SubclassHero>>();
+            let mut hero_inv = q.iter_mut(world).next().expect("hero inventory");
+            hero_inv.new(item_id, "Gold Coins".to_string(), 50, &item_templates);
+        }
+        let gold_before: i32 = game
+            .observe()
+            .inventory
+            .iter()
+            .filter(|i| i.class == "Gold Coins")
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(gold_before, 50, "hero should be carrying the gold we added");
+
+        // Dock the merchant on the hero's tile and grab a cargo villager to hire.
+        let (merchant_id, target_id) = {
+            let world = game.app.world_mut();
+            let mut q = world.query::<(&Id, &mut Position, &mut Merchant, &Transport)>();
+            let (id, mut pos, mut merchant, transport) =
+                q.iter_mut(world).next().expect("merchant exists");
+            *pos = hero_pos;
+            merchant.sail_state = MerchantSailState::AtLanding;
+            let target = *transport
+                .hauling
+                .first()
+                .expect("merchant carries cargo villagers");
+            (id.0, target)
+        };
+
+        assert_eq!(
+            game.observe().villagers.len(),
+            0,
+            "player has no villager before hiring"
+        );
+
+        game.inject(PlayerEvent::Hire {
+            player_id: pid,
+            merchant_id,
+            target_id,
+        });
+        game.tick(20);
+
+        assert_eq!(
+            game.observe().villagers.len(),
+            1,
+            "hiring should give the player one villager"
+        );
+        let gold_after: i32 = game
+            .observe()
+            .inventory
+            .iter()
+            .filter(|i| i.class == "Gold Coins")
+            .map(|i| i.quantity)
+            .sum();
+        assert_eq!(gold_after, 25, "the wage (25) should be deducted from the hero");
     }
 }

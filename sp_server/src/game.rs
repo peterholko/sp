@@ -15261,7 +15261,7 @@ fn merchant_sailing_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
-    mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant), Without<EventInProgress>>,
+    mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant)>,
 ) {
     for (entity, mut obj, merchant) in merchant_query.iter_mut() {
         let dest = match merchant.sail_state {
@@ -15334,11 +15334,13 @@ fn merchant_sailing_system(
             },
         };
 
-        let move_map_event = map_events.new(obj.id.0, game_tick.0 + move_duration, move_event);
+        map_events.new(obj.id.0, game_tick.0 + move_duration, move_event);
 
-        commands.entity(entity).insert(EventInProgress {
-            event_id: move_map_event.event_id,
-        });
+        // NOTE: this used to also insert `EventInProgress` as a "currently sailing"
+        // guard, but nothing ever removed it after a move completed (unlike the
+        // gather/refine/craft paths), so the merchant sailed exactly one tile then
+        // froze forever. The `*obj.state != State::None` check above already gates
+        // re-issuing a move while one is in flight, so the guard was redundant.
     }
 }
 
