@@ -1249,6 +1249,14 @@ pub fn structure_capacity_scorer_system(
     }
 }
 
+// Foraged food is light (weight 1). The haul-to-storage action (CapacityScorer)
+// only outscores gathering (GoodMorale = 0.6) once resource_weight passes ~90, so
+// raw food weight would make a villager hoard a near-full stack before stocking
+// the larder. Counting each food unit as this many weight units makes a foraging
+// villager carry its harvest back after ~12 items — frequent enough that the
+// hero's larder actually fills during a run.
+const FOOD_HAUL_WEIGHT: i32 = 8;
+
 pub fn capacity_scorer_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
@@ -1268,9 +1276,16 @@ pub fn capacity_scorer_system(
         let total_weight = inventory.get_total_weight();
         let total_weight_ore = inventory.get_total_weight_by_class(ORE.to_string());
         let total_weight_log = inventory.get_total_weight_by_class(LOG.to_string());
+        // Food gathered for the larder is haulable too: a villager assigned to
+        // forage (Plant -> berries/mushrooms) should carry its harvest back to a
+        // storage so the hero can eat it, just like ore/logs. Food is light
+        // (weight 1), so without a count multiplier the haul would only trigger
+        // after ~90 items; FOOD_HAUL_WEIGHT makes a foraging villager top up the
+        // larder after a reasonable trip instead of hoarding a full stack.
+        let total_weight_food = inventory.get_total_weight_by_class(FOOD.to_string());
 
-        let resource_weight = total_weight_ore + total_weight_log;
-        let non_resource_weight = total_weight - resource_weight;
+        let resource_weight = total_weight_ore + total_weight_log + total_weight_food * FOOD_HAUL_WEIGHT;
+        let non_resource_weight = total_weight - total_weight_ore - total_weight_log - total_weight_food;
 
         let capacity = Obj::get_capacity(&villager_template.0, &templates.obj_templates);
 

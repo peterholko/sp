@@ -54,6 +54,8 @@ const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
 // Stockade walls use Sticks (foraged abundantly), so a refuge is affordable.
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Stick", 3)];
+// Resource type villagers can harvest tool-free (yields berries/grapes -> food).
+const PLANT_RES: &str = "Plant";
 
 const EXPLORE_OFFSETS: [(i32, i32); 8] = [
     (6, 0),
@@ -93,6 +95,7 @@ pub struct Bot {
     explore_cursor: usize,
     job: Option<BuildJob>,
     walls_attempted: usize,
+    recruit_attempted: bool, // investigated the shipwreck to recruit a villager
 }
 
 impl Bot {
@@ -104,6 +107,7 @@ impl Bot {
             explore_cursor: 0,
             job: None,
             walls_attempted: 0,
+            recruit_attempted: false,
         }
     }
 
@@ -127,6 +131,30 @@ impl Bot {
             }
         }
 
+        if std::env::var("BOT_DEBUG").is_ok() {
+            let idle = view.villagers.iter().filter(|v| v.idle).count();
+            let sfood: i32 = view
+                .structures
+                .iter()
+                .filter(|s| s.subclass == "storage")
+                .flat_map(|s| &s.inventory)
+                .filter(|i| i.class == "Food")
+                .map(|i| i.quantity)
+                .sum();
+            let gathering = view.villagers.iter().filter(|v| v.gathering_now).count();
+            let with_order = view.villagers.iter().filter(|v| v.gathering_order).count();
+            let carried: i32 = view.villagers.iter().map(|v| v.food_carried).sum();
+            let plant_nodes = view
+                .resource_tiles
+                .iter()
+                .filter(|t| t.plant_revealed)
+                .count();
+            eprintln!(
+                "[vil] t={} villagers={} idle={} order={} gathering={} carried={} storage_food={} plant_nodes={}",
+                view.game_tick, view.villagers.len(), idle, with_order, gathering, carried, sfood, plant_nodes
+            );
+        }
+
         // The hero acts only while idle; a busy hero still lets us command a villager.
         if hero.is_idle() {
             if let Some(action) = self.hero_action(view, map) {
@@ -134,6 +162,8 @@ impl Bot {
             }
         }
 
+        // The hero is busy or has no move: delegate to an idle villager if one can
+        // be put to work on a Plant node the hero is standing on.
         self.villager_action(view)
     }
 
@@ -314,6 +344,27 @@ impl Bot {
             }
         }
 
+        // 4d. Recruit the first villager (one-time): investigate the Shipwreck POI,
+        //     which sets scavenge_shipwreck so the castaway villager arrives ~day 1.
+        //     Only when safe, no villager yet, AND all needs have comfortable buffer
+        //     — the walk to the wreck must never come at the cost of eat/drink/sleep.
+        let needs_comfortable =
+            hero.hunger < 45.0 && hero.thirst < 45.0 && hero.tired < 45.0;
+        if safe && needs_comfortable && !self.recruit_attempted && view.villagers.is_empty() {
+            if let Some(ship) = view.pois.iter().find(|p| p.template == "Shipwreck") {
+                if hex_dist(hero.pos, ship.pos) <= 1 {
+                    self.recruit_attempted = true;
+                    return Some(PlayerEvent::InvestigatePOI {
+                        player_id: self.player_id,
+                        target_id: ship.id,
+                    });
+                }
+                if let Some(mv) = self.step_adjacent_to(hero.pos, ship.pos, view, map) {
+                    return Some(mv);
+                }
+            }
+        }
+
         // 5. Drive the in-progress build job.
         if self.job.is_some() {
             if let Some(action) = self.advance_job(view, map) {
@@ -329,12 +380,26 @@ impl Bot {
             }
         }
 
-        // 7. Forage: gather on a revealed resource tile, else walk to one.
+        // 7. Put an idle villager to work — but only opportunistically, never via a
+        //    dedicated march (escorting the hero to a far Plant node to delegate
+        //    food-gathering cost more survival time than the food was worth). If the
+        //    hero happens to already be standing on a revealed Plant node (e.g.
+        //    mid-forage) and a villager is idle, hold position one tick so
+        //    villager_action can issue the OrderGather. The order then persists, so
+        //    the villager keeps harvesting that node and hauling food to the Burrow.
+        if safe && view.villagers.iter().any(|v| v.idle) {
+            let here = view.resource_tiles.iter().find(|t| t.pos == hero.pos);
+            if here.map_or(false, |t| t.plant_revealed) {
+                return None;
+            }
+        }
+
+        // 8. Forage: gather on a revealed resource tile, else walk to one.
         if let Some(action) = self.forage(view, map) {
             return Some(action);
         }
 
-        // 8. Explore.
+        // 9. Explore.
         self.explore(hero.pos, view, map)
     }
 
@@ -533,13 +598,25 @@ impl Bot {
     // ---- Villager orders ----------------------------------------------------
 
     fn villager_action(&self, view: &WorldView) -> Option<PlayerEvent> {
-        // Keep one idle villager gathering wood near the hero.
         let villager = view.villagers.iter().find(|v| v.idle)?;
-        Some(PlayerEvent::OrderGather {
-            player_id: self.player_id,
-            source_id: villager.id,
-            res_type: "Log".to_string(),
-        })
+        let hero = view.hero?;
+        // OrderGather is only valid when the hero stands on a revealed node of that
+        // type. Plant needs no tool, so when the hero happens to be on a revealed
+        // Plant node, order the idle villager to harvest it. The villager works that
+        // spot and (once it has carried ~12 berries) hauls them to the Burrow, which
+        // the hero eats from.
+        if view
+            .resource_tiles
+            .iter()
+            .any(|t| t.pos == hero.pos && t.plant_revealed)
+        {
+            return Some(PlayerEvent::OrderGather {
+                player_id: self.player_id,
+                source_id: villager.id,
+                res_type: PLANT_RES.to_string(),
+            });
+        }
+        None
     }
 
     // ---- Water -------------------------------------------------------------

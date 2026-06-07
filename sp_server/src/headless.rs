@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::{Hunger, Thirst, Tired};
-use crate::constants::{DATABASE_MANAGER_ID, GAME_ANIMAL, GAME_TICKS_PER_DAY, SPRING_WATER};
+use crate::constants::{
+    DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
+};
 use crate::database::DatabaseEvent;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, NetworkReceiver, Objectives,
@@ -30,7 +32,7 @@ use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
 use crate::obj::{
     ClassStructure, Id, Order, PlayerId, Position, State, StateDead, Stats, Subclass, SubclassHero,
-    SubclassNPC, SubclassVillager, TrueDeath,
+    SubclassNPC, SubclassVillager, Template, TrueDeath,
 };
 use crate::resource::Resources;
 use crate::skill::Skills;
@@ -53,6 +55,7 @@ pub struct WorldView {
     pub inventory: Vec<ItemView>,
     pub enemies: Vec<UnitView>,
     pub villagers: Vec<VillagerView>,
+    pub pois: Vec<PoiView>,
     pub structures: Vec<StructureView>,
     pub resource_tiles: Vec<ResTileView>,
     pub occupied: HashSet<(i32, i32)>,
@@ -160,6 +163,19 @@ pub struct VillagerView {
     pub id: i32,
     pub pos: Position,
     pub idle: bool,
+    /// True while the villager has a Gather order (vs. None/other).
+    pub gathering_order: bool,
+    /// True while the villager is actively in the Gathering state.
+    pub gathering_now: bool,
+    /// Count of Food-class items the villager is currently carrying.
+    pub food_carried: i32,
+}
+
+#[derive(Clone)]
+pub struct PoiView {
+    pub id: i32,
+    pub pos: Position,
+    pub template: String, // e.g. "Shipwreck"
 }
 
 #[derive(Clone)]
@@ -181,6 +197,8 @@ pub struct ResTileView {
     pub spring_revealed: bool, // ...and it's revealed -> waterskins refill here
     pub has_game: bool,        // a Game Animal resource exists here (maybe hidden)
     pub game_revealed: bool,   // ...and it's revealed -> huntable with a Hunting tool
+    pub has_plant: bool,       // a Plant resource exists here (maybe hidden)
+    pub plant_revealed: bool,  // ...and it's revealed -> villagers gather it tool-free
 }
 
 fn to_item_view(item: &crate::item::Item) -> ItemView {
@@ -486,15 +504,34 @@ impl HeadlessGame {
                 .collect::<Vec<_>>()
         };
 
-        // The player's villagers, with whether they are idle (Order::None).
+        // The player's villagers, with whether they are idle (Order::None),
+        // whether they hold a gather order / are actively gathering, and how much
+        // food they are carrying (to diagnose the forage->haul->larder loop).
         let villagers = {
-            let mut q = world.query_filtered::<(&Id, &PlayerId, &Position, &State, &Order), With<SubclassVillager>>();
+            let mut q = world.query_filtered::<(&Id, &PlayerId, &Position, &State, &Order, &Inventory), With<SubclassVillager>>();
             q.iter(world)
-                .filter(|(_, p, _, state, _)| p.0 == pid && **state != State::Dead)
-                .map(|(id, _p, pos, _state, order)| VillagerView {
+                .filter(|(_, p, _, state, _, _)| p.0 == pid && **state != State::Dead)
+                .map(|(id, _p, pos, state, order, inv)| VillagerView {
                     id: id.0,
                     pos: *pos,
                     idle: *order == Order::None,
+                    gathering_order: matches!(order, Order::Gather { .. }),
+                    gathering_now: *state == State::Gathering,
+                    food_carried: inv.get_total_weight_by_class(FOOD.to_string()),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Points of interest (e.g. the Shipwreck — investigating it recruits the
+        // first villager).
+        let pois = {
+            let mut q = world.query::<(&Id, &Position, &Subclass, &Template)>();
+            q.iter(world)
+                .filter(|(_, _, subclass, _)| **subclass == Subclass::Poi)
+                .map(|(id, pos, _subclass, template)| PoiView {
+                    id: id.0,
+                    pos: *pos,
+                    template: template.0.clone(),
                 })
                 .collect::<Vec<_>>()
         };
@@ -541,6 +578,10 @@ impl HeadlessGame {
                     .values()
                     .filter(|r| r.res_type == GAME_ANIMAL)
                     .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
+                let (has_plant, plant_revealed) = res_on_tile
+                    .values()
+                    .filter(|r| r.res_type == PLANT)
+                    .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
                 ResTileView {
                     pos: *pos,
                     revealed: res_on_tile.values().any(|r| r.reveal),
@@ -548,6 +589,8 @@ impl HeadlessGame {
                     spring_revealed,
                     has_game,
                     game_revealed,
+                    has_plant,
+                    plant_revealed,
                 }
             })
             .collect::<Vec<_>>();
@@ -557,6 +600,7 @@ impl HeadlessGame {
             inventory,
             enemies,
             villagers,
+            pois,
             structures,
             resource_tiles,
             occupied,
