@@ -492,6 +492,7 @@ impl Encounter {
     pub fn spawn_villager(
         player_id: i32,
         pos: Position,
+        hsl: Vec<i32>,
         commands: &mut Commands,
         ids: &mut ResMut<Ids>,
         entity_map: &mut ResMut<EntityObjMap>,
@@ -522,7 +523,7 @@ impl Encounter {
             state: State::None,
             misc: Misc {
                 image: image,
-                hsl: Vec::new(),
+                hsl: hsl,
                 groups: Vec::new(),
             },
             stats: Stats {

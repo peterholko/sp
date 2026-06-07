@@ -441,7 +441,7 @@ pub fn new(
         state: State::None,
         misc: Misc {
             image: str::replace(hero_template.template.as_str(), " ", "").to_lowercase(),
-            hsl: Vec::new(),
+            hsl: start_location.hsl.clone(),
             groups: Vec::new(),
         },
         stats: Stats {
@@ -1706,6 +1706,37 @@ pub struct StartLocation {
     pub sealed_cavern_pos: Option<Vec<i32>>,
     #[serde(default)]
     pub abandoned_mine_pos: Option<Vec<i32>>,
+    // Team color (HSL: [hue 0-360, sat 0-100, light 0-100]) assigned at startup by
+    // `assign_start_location_colors`. Empty in the YAML; filled in after load so the
+    // hero + villagers spawned at this location share a distinct color. Travels to the
+    // client via each obj's `Misc.hsl`, where the pinkish "team" pixels are recolored.
+    #[serde(default)]
+    pub hsl: Vec<i32>,
+}
+
+/// Curated, visually-distinct HSL colors ([hue, sat, light]). One is assigned to
+/// each start location so every player's hero and villagers read as a distinct team
+/// color. There are more entries than start locations so the shuffle has slack.
+pub const LOCATION_COLOR_PALETTE: [[i32; 3]; 6] = [
+    [210, 75, 55], // blue
+    [130, 55, 45], // green
+    [28, 90, 55],  // orange
+    [275, 65, 60], // purple
+    [350, 75, 55], // crimson
+    [48, 90, 55],  // gold
+];
+
+/// Randomly assign a distinct palette color to each start location, in place.
+/// Called once after `player_start.yaml` is loaded. If there happen to be more
+/// locations than palette entries the palette wraps (still deterministic per run).
+pub fn assign_start_location_colors(locations: &mut [StartLocation]) {
+    use rand::seq::SliceRandom;
+    let mut palette: Vec<[i32; 3]> = LOCATION_COLOR_PALETTE.to_vec();
+    palette.shuffle(&mut rand::thread_rng());
+    for (i, location) in locations.iter_mut().enumerate() {
+        let color = palette[i % palette.len()];
+        location.hsl = vec![color[0], color[1], color[2]];
+    }
 }
 
 #[derive(Debug, Resource, Deref, DerefMut)]

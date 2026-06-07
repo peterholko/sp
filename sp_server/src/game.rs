@@ -880,6 +880,8 @@ pub struct GameEventExtras<'w, 's> {
     pub initial_encounter_state: Res<'w, InitialEncounterState>,
     pub plans: ResMut<'w, Plans>,
     pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
+    // Used to give a spawned villager its player's start-location team color.
+    pub assigned_start_locations: Res<'w, AssignedStartLocations>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -1521,6 +1523,12 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 watchtower_reveal_system
+                    .run_if(in_state(AppState::Running))
+                    .before(perception_system),
+            )
+            .add_systems(
+                Update,
+                reveal_unhidden_system
                     .run_if(in_state(AppState::Running))
                     .before(perception_system),
             )
@@ -9474,6 +9482,41 @@ fn watchtower_reveal_system(
     }
 }
 
+// When a unit leaves stealth — combat breaking it, chasing a target, a
+// watchtower revealing it, etc. — it was removed from observers' clients when
+// it hid (HideEvent -> obj_delete). A plain state update can't bring a deleted
+// object back, so the tick a unit stops hiding we refresh every connected
+// player's perception, re-creating the now-visible unit for anyone in range.
+// Tracking the previous hidden set catches the transition no matter how the
+// state changed (observer trigger or a direct write like the chase move).
+fn reveal_unhidden_system(
+    clients: Res<Clients>,
+    mut perception_updates: ResMut<PerceptionUpdates>,
+    state_query: Query<(&Id, &State), With<SubclassNPC>>,
+    mut hiding_ids: Local<HashSet<i32>>,
+) {
+    let mut still_hiding = HashSet::new();
+    let mut revealed = false;
+
+    for (id, state) in state_query.iter() {
+        if *state == State::Hiding {
+            still_hiding.insert(id.0);
+        } else if hiding_ids.contains(&id.0) {
+            revealed = true;
+        }
+    }
+
+    // A despawned hider also drops out of `still_hiding`; refreshing perception
+    // in that case is harmless.
+    if revealed {
+        for (_client_id, client) in clients.lock().unwrap().iter() {
+            perception_updates.insert((client.player_id, PerceptionUpdateType::UpdatePerception));
+        }
+    }
+
+    *hiding_ids = still_hiding;
+}
+
 fn perception_system(
     map: Res<Map>,
     mut explored_map: ResMut<ExploredMap>,
@@ -10133,9 +10176,16 @@ fn game_event_system(
                         continue;
                     }
 
+                    let villager_hsl = extras
+                        .assigned_start_locations
+                        .get(player_id)
+                        .map(|location| location.hsl.clone())
+                        .unwrap_or_default();
+
                     let (villager_entity, villager_id) = Encounter::spawn_villager(
                         *player_id,
                         *pos,
+                        villager_hsl,
                         &mut commands,
                         &mut ids,
                         &mut entity_map,
@@ -12971,7 +13021,8 @@ pub struct PlayerVictory {
 pub struct VictoryState(pub HashMap<i32, PlayerVictory>);
 
 fn rescue_victory_ready(player_day: i32, victory: &PlayerVictory) -> bool {
-    player_day >= 11 && victory.rescue_progress == 0
+    // Rescue arrives after surviving 50 full days (i.e. on day 51).
+    player_day >= 51 && victory.rescue_progress == 0
 }
 
 // Victory condition check system
@@ -13006,7 +13057,7 @@ fn victory_check_system(
         if rescue_victory_ready(player_day, victory) {
             victory.rescue_progress = 1;
             let packet = ResponsePacket::Notice {
-                noticemsg: "VICTORY! You have survived 10 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),
+                noticemsg: "VICTORY! You have survived 50 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),
                 expiry: Some(30000),
             };
             send_to_client(player_id.0, packet, &clients);

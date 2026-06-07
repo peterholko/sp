@@ -168,6 +168,21 @@ impl Combat {
         }
     }
 
+    // Combat breaks stealth. Returns (reveal_attacker, reveal_target). The
+    // attacker always reveals (it never dies from its own swing); the target
+    // reveals only if it survived — a slain target is shown as a corpse rather
+    // than a revealed unit.
+    pub fn combat_reveals(
+        attacker_state: State,
+        target_state: State,
+        target_hp: i32,
+    ) -> (bool, bool) {
+        (
+            attacker_state == State::Hiding,
+            target_hp > 0 && target_state == State::Hiding,
+        )
+    }
+
     pub fn fortified_outbound_attack_error(
         attacker_effects: &Effects,
         attacker_fortified: Option<&Fortified>,
@@ -461,6 +476,24 @@ impl Combat {
         }
 
         debug!("Total Damage: {:?}", total_damage);
+
+        // Combat breaks stealth. Reveal the combatants flagged below; the
+        // tick they leave Hiding, `reveal_unhidden_system` refreshes nearby
+        // players' perception so the now-visible unit re-appears on clients.
+        let (reveal_attacker, reveal_target) =
+            Self::combat_reveals(*attacker.state, *target.state, target.stats.hp);
+        if reveal_attacker {
+            commands.trigger(StateChange {
+                entity: attacker.entity,
+                new_state: State::None,
+            });
+        }
+        if reveal_target {
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::None,
+            });
+        }
 
         // Return combo name
         /*let mut combo_name = None;
@@ -1146,6 +1179,30 @@ mod tests {
                 true,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn combat_reveals_hidden_attacker_and_surviving_hidden_target() {
+        // A hidden attacker striking a hidden, surviving target: both reveal.
+        assert_eq!(
+            Combat::combat_reveals(State::Hiding, State::Hiding, 10),
+            (true, true)
+        );
+        // A slain hidden target is shown as a corpse, not revealed as a unit.
+        assert_eq!(
+            Combat::combat_reveals(State::Hiding, State::Hiding, 0),
+            (true, false)
+        );
+        // Non-hidden combatants are unaffected.
+        assert_eq!(
+            Combat::combat_reveals(State::None, State::None, 10),
+            (false, false)
+        );
+        // A hidden defender struck by a visible attacker reveals.
+        assert_eq!(
+            Combat::combat_reveals(State::None, State::Hiding, 5),
+            (false, true)
         );
     }
 

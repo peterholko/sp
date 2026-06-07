@@ -153,7 +153,7 @@ export default class TileResourceDetailPanel extends React.Component<TileResourc
 
 
     return (
-      <HalfPanel left={false}
+      <HalfPanel left={true}
         panelType={'tile_resource_detail'}
         hideExitButton={false}>
 

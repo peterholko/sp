@@ -1911,6 +1911,7 @@ export class Network {
         y: obj.y,
         vision: obj.vision,
         image: obj.image,
+        hsl: obj.hsl,
         work_done: obj.work_done,
         total_work: obj.total_work,
         work_per_sec: obj.work_per_sec,
@@ -1967,6 +1968,7 @@ export class Network {
         Global.objectStates[observer.id].x = observer.x;
         Global.objectStates[observer.id].y = observer.y;
         Global.objectStates[observer.id].image = observer.image;
+        Global.objectStates[observer.id].hsl = observer.hsl;
         Global.objectStates[observer.id].work_done = observer.work_done;
         Global.objectStates[observer.id].total_work = observer.total_work;
         Global.objectStates[observer.id].work_per_sec = observer.work_per_sec;
@@ -1989,6 +1991,7 @@ export class Network {
           y: observer.y,
           vision: observer.vision,
           image: observer.image,
+          hsl: observer.hsl,
           work_done: observer.work_done,
           total_work: observer.total_work,
           work_per_sec: observer.work_per_sec,
@@ -2025,6 +2028,7 @@ export class Network {
         Global.objectStates[visibleObj.id].x = visibleObj.x;
         Global.objectStates[visibleObj.id].y = visibleObj.y;
         Global.objectStates[visibleObj.id].image = visibleObj.image;
+        Global.objectStates[visibleObj.id].hsl = visibleObj.hsl;
         Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
         Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
         Global.objectStates[visibleObj.id].work_per_sec = visibleObj.work_per_sec;
@@ -2047,6 +2051,7 @@ export class Network {
           y: visibleObj.y,
           vision: visibleObj.vision,
           image: visibleObj.image,
+          hsl: visibleObj.hsl,
           work_done: visibleObj.work_done,
           total_work: visibleObj.total_work,
           work_per_sec: visibleObj.work_per_sec,

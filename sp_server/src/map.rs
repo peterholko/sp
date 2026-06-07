@@ -639,6 +639,12 @@ impl Map {
     }
 
     pub fn tile_type(x: i32, y: i32, map: &Map) -> TileType {
+        // Treat off-map coordinates as open water (edge of the world) rather
+        // than indexing out of bounds and panicking with a usize underflow.
+        if !Map::is_valid_pos((x, y)) {
+            return TileType::Ocean;
+        }
+
         let tile_index = y * WIDTH + x;
         let tile_index_usize = tile_index as usize;
         //let layers = map.base[tile_index_usize].layers.clone();

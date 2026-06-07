@@ -214,6 +214,37 @@ fn washed_ashore_loot_poi_only_uses_ocean_adjacent_land() {
 }
 
 #[test]
+fn map_lookups_handle_out_of_bounds_coords() {
+    // Regression: rings around an edge-adjacent center (e.g. goblin_raid_system
+    // spawning near the map border) produce off-map coordinates. The map helpers
+    // must treat these as off-map instead of indexing out of bounds and panicking
+    // with a usize underflow (y * WIDTH + x going negative).
+    let map = flat_land_map();
+
+    for (x, y) in [
+        (-1, 0),
+        (0, -1),
+        (-43, 0),
+        (WIDTH, 0),
+        (0, HEIGHT),
+        (WIDTH, HEIGHT),
+    ] {
+        assert!(!Map::is_passable(x, y, &map));
+        assert!(!Map::is_passable_by_obj(x, y, true, false, false, &map));
+        assert_eq!(Map::tile_type(x, y, &map), TileType::Ocean);
+    }
+
+    // are_tile_types_nearby walks the ring around the corner tile, which includes
+    // off-map neighbours; it must not panic.
+    let corner = Position { x: 0, y: 0 };
+    assert!(Map::are_tile_types_nearby(
+        corner,
+        vec![TileType::Grasslands],
+        &map
+    ));
+}
+
+#[test]
 fn info_tile_packet_serializes_survey_status() {
     let packet = ResponsePacket::InfoTile {
         x: 1,
@@ -2572,7 +2603,7 @@ fn rescue_victory_uses_player_survival_day() {
     ));
     assert!(rescue_victory_ready(
         player_survival_day(
-            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 10)),
+            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 50)),
             7,
             &intro_state,
         ),
@@ -2583,7 +2614,7 @@ fn rescue_victory_uses_player_survival_day() {
         rescue_progress: 1,
         ..Default::default()
     };
-    assert!(!rescue_victory_ready(11, &already_rescued));
+    assert!(!rescue_victory_ready(51, &already_rescued));
 }
 
 #[test]

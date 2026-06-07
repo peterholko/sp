@@ -16,9 +16,9 @@ use siege_perilous::headless::{HeadlessGame, RunMetrics};
 use siege_perilous::headless_bot::Bot;
 
 // Game ticks a single run may advance past hero spawn before being capped.
-// 2400 ticks = 1 in-game day; 30k ≈ 12.5 days, enough to reach the rescue
-// victory / late survival waves while staying fast.
-const DEFAULT_MAX_TICKS: i32 = 30_000;
+// 2400 ticks = 1 in-game day; 120k = ~50 days, enough to reach the Rescue
+// victory (now at 50 days survived).
+const DEFAULT_MAX_TICKS: i32 = 120_000;
 const DEFAULT_NUM_GAMES: u32 = 20;
 // Game ticks advanced between bot decisions. A hero move resolves in ~12 ticks;
 // 8 lets the move start before the bot re-evaluates without cancelling it.

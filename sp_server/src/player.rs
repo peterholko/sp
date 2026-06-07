@@ -640,8 +640,10 @@ impl Plugin for PlayerPlugin {
 
         let start_file =
             fs::File::open("templates/player_start.yaml").expect("Could not open file.");
-        let start_locations =
+        let mut start_locations =
             StartLocations(serde_yaml::from_reader(start_file).expect("Could not read values."));
+        // Give each start location a distinct random team color (hero + villagers).
+        crate::player_setup::assign_start_location_colors(&mut start_locations.0);
 
         app.add_systems(
             Update,
