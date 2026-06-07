@@ -39,10 +39,17 @@ const CRITICAL_HP: f32 = 0.3; // emergency heal below this
 // Yield to the game's auto-consume just under its 75.0 trigger so the hero is
 // already idle when a need crosses the threshold.
 const CONSUME_AT: f32 = 70.0;
+// Proactively top needs up at every safe window, well before CONSUME_AT, so the
+// hero enters each enemy-pressure window with a big buffer. Sustained combat
+// denies the idle windows needed to eat/drink/sleep, so banking buffer while calm
+// is the main defense against needs-deaths early game.
+const PROACTIVE_CONSUME: f32 = 45.0;
 // Above this tiredness, surviving (resting) overrides fighting.
 const CRITICAL_TIRED: f32 = 85.0;
 // Above this hunger, eat raw meat now instead of taking time to cook it.
 const CRITICAL_HUNGER: f32 = 85.0;
+// Above this thirst, drinking outranks everything but fleeing a close enemy.
+const CRITICAL_THIRST: f32 = 85.0;
 // Feed value that counts as "real" food worth relying on. Foraged berries (~6) and
 // mushrooms (~8) fall below it, so the hero hunts + cooks for proper meals.
 const GOOD_FEED: f32 = 40.0;
@@ -100,6 +107,7 @@ pub struct Bot {
     job: Option<BuildJob>,
     walls_attempted: usize,
     recruit_attempted: bool, // investigated the shipwreck to recruit a villager
+    upgrade_enabled: bool,   // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
 }
 
 impl Bot {
@@ -112,6 +120,8 @@ impl Bot {
             job: None,
             walls_attempted: 0,
             recruit_attempted: false,
+            // A/B toggle for measuring the sanctuary loop's contribution.
+            upgrade_enabled: std::env::var("BOT_NO_UPGRADE").is_err(),
         }
     }
 
@@ -269,6 +279,24 @@ impl Bot {
             }
         }
 
+        // 2b-ii. Critical thirst: drink now (break from a close enemy first). There
+        //        is no passive recovery and no auto-drink while combat-locked, so an
+        //        un-handled thirst spike under pressure is a silent dehydration death.
+        if hero.thirst >= CRITICAL_THIRST {
+            if threat {
+                let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+                if let Some(mv) = self.retreat_step(hero.pos, view, map, home) {
+                    return Some(mv);
+                }
+            }
+            if let Some(action) = self.consume_action(&hero, view, f32::MAX, CRITICAL_THIRST) {
+                return Some(action);
+            }
+            if let Some(action) = self.water_action(&hero, view, map) {
+                return Some(action);
+            }
+        }
+
         // 2c. Once meat is in hand, see the butcher->cook through: raw meat can't be
         //     safely eaten (food poisoning) and a finished batch of Cooked Meat
         //     (Feed 100) is many days of food, so completing the cook outranks
@@ -344,22 +372,23 @@ impl Bot {
             }
             // Sleep BEFORE foraging: sleep is a short (30-tick) action, while a
             // forage is ~150 ticks — letting a forage pre-empt sleep is how the
-            // hero ends up dying of exhaustion mid-gather.
-            if hero.tired >= CONSUME_AT {
+            // hero ends up dying of exhaustion mid-gather. Rest proactively so the
+            // hero banks a tiredness buffer for the next pressure window.
+            if hero.tired >= PROACTIVE_CONSUME {
                 return Some(PlayerEvent::Sleep {
                     player_id: self.player_id,
                     structure_id: 0, // ignored by the handler
                 });
             }
+            // Drink proactively (renewable), but only eat when actually hungry (food
+            // is scarce). Do this BEFORE the longer food-gathering pipeline so a calm
+            // moment isn't spent foraging while a drink/meal is already in the pack.
+            if let Some(action) = self.consume_action(&hero, view, CONSUME_AT, PROACTIVE_CONSUME) {
+                return Some(action);
+            }
             // Food pipeline: butcher carcasses -> cook raw meat -> hunt/forage for
             // more. See food_action.
             if let Some(action) = self.food_action(&hero, view, map) {
-                return Some(action);
-            }
-            // Eat / drink EXPLICITLY via Use rather than waiting for the game's
-            // auto-consume — auto-consume is blocked by several transient states,
-            // so an idle hero can sit on food at hunger 100 and starve.
-            if let Some(action) = self.consume_action(&hero, view) {
                 return Some(action);
             }
         }
@@ -401,7 +430,7 @@ impl Bot {
 
         // 4f. Loot Soulshards off nearby corpses (fresh kills are usually adjacent),
         //     the currency for empowering the sanctuary. Only when safe.
-        if safe {
+        if self.upgrade_enabled && safe {
             if let Some(action) = self.loot_soulshards(&hero, view, map) {
                 return Some(action);
             }
@@ -411,7 +440,7 @@ impl Bot {
         //     shrinks random spawns around the base — the primary early-game survival
         //     investment. Only when safe and needs have buffer (it's a short trip to
         //     the nearby Monolith).
-        if safe && needs_comfortable {
+        if self.upgrade_enabled && safe && needs_comfortable {
             if let Some(action) = self.upgrade_sanctuary_action(&hero, view, map) {
                 return Some(action);
             }
@@ -826,8 +855,18 @@ impl Bot {
     }
 
     // Explicitly eat an edible food / drink a waterskin when hungry/thirsty.
-    fn consume_action(&self, hero: &HeroView, view: &WorldView) -> Option<PlayerEvent> {
-        if hero.hunger >= CONSUME_AT {
+    // Eat/drink from the hero's pack, each with its own threshold. Drinking is
+    // renewable (springs refill waterskins) so it's tended proactively, but food is
+    // scarce — eating proactively just burns the larder faster and starves the hero,
+    // so `eat_threshold` is kept high while `drink_threshold` can be low.
+    fn consume_action(
+        &self,
+        hero: &HeroView,
+        view: &WorldView,
+        eat_threshold: f32,
+        drink_threshold: f32,
+    ) -> Option<PlayerEvent> {
+        if hero.hunger >= eat_threshold {
             // Eat the HIGHEST-Feed food first (Cooked Meat 100 over berries ~6) so
             // the hero refills in one bite and isn't stuck eating constantly.
             if let Some(id) = view
@@ -844,7 +883,7 @@ impl Bot {
                 });
             }
         }
-        if hero.thirst >= CONSUME_AT {
+        if hero.thirst >= drink_threshold {
             if let Some(id) = view.inventory.iter().find(|i| i.is_drink()).map(|i| i.id) {
                 return Some(PlayerEvent::Use {
                     player_id: self.player_id,
