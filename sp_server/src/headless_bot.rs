@@ -53,6 +53,13 @@ const CRITICAL_THIRST: f32 = 85.0;
 // Feed value that counts as "real" food worth relying on. Foraged berries (~6) and
 // mushrooms (~8) fall below it, so the hero hunts + cooks for proper meals.
 const GOOD_FEED: f32 = 40.0;
+// Food economy: build a reserve of proper meals (Cooked Meat, Feed 100) during the
+// calm early days so the hero can eat through the crisis-heavy days (6+) when
+// leaving base to hunt isn't possible. The hero keeps ON_HAND_FOOD meals on its
+// person and banks the rest in the Burrow until the reserve hits STOCKPILE_TARGET.
+const STOCKPILE_TARGET: i32 = 12; // ~20 hero-days of food banked before crises bite
+const ON_HAND_FOOD: i32 = 3; // meals kept on the hero; surplus goes to the Burrow
+const LOW_FIREWOOD: i32 = 4; // craft Firewood (1 Log -> 5) below this so cooking never stalls
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
@@ -108,6 +115,7 @@ pub struct Bot {
     walls_attempted: usize,
     recruit_attempted: bool, // investigated the shipwreck to recruit a villager
     upgrade_enabled: bool,   // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
+    dbg_last_day: i32,       // last day a FOOD_DEBUG line was emitted
 }
 
 impl Bot {
@@ -122,6 +130,7 @@ impl Bot {
             recruit_attempted: false,
             // A/B toggle for measuring the sanctuary loop's contribution.
             upgrade_enabled: std::env::var("BOT_NO_UPGRADE").is_err(),
+            dbg_last_day: -1,
         }
     }
 
@@ -143,6 +152,38 @@ impl Bot {
             if view.game_tick - job.started_tick > JOB_WATCHDOG_TICKS {
                 self.job = None;
             }
+        }
+
+        // Food economy probe (FOOD_DEBUG): once per day, show hunger, on-hand good
+        // food + total edible feed, and the burrow stockpile — to see whether a
+        // reserve ever builds.
+        if std::env::var("FOOD_DEBUG").is_ok() && view.day != self.dbg_last_day {
+            self.dbg_last_day = view.day;
+            let good: i32 = view
+                .inventory
+                .iter()
+                .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
+                .map(|i| i.quantity)
+                .sum();
+            let feed_onhand: i32 = view
+                .inventory
+                .iter()
+                .filter(|i| i.is_edible())
+                .map(|i| i.quantity * i.feed as i32)
+                .sum();
+            let stock: i32 = view
+                .structures
+                .iter()
+                .filter(|s| s.subclass == "storage")
+                .flat_map(|s| &s.inventory)
+                .filter(|i| i.class == "Food")
+                .map(|i| i.quantity)
+                .sum();
+            eprintln!(
+                "[food] day={} hunger={:.0} good_onhand={} feed_onhand={} burrow_food={} villagers={} sanc={}",
+                view.day, hero.hunger, good, feed_onhand, stock,
+                view.villagers.len(), view.monolith.map(|m| m.level).unwrap_or(-1)
+            );
         }
 
         if std::env::var("BOT_DEBUG").is_ok() {
@@ -393,6 +434,22 @@ impl Bot {
             }
         }
 
+        // 5. Build the base BEFORE expansion (recruit/hire/sanctuary). The campfire
+        //    is foundational — it gates the whole cook-and-stockpile food economy —
+        //    so getting it up on day 1 (the hero starts with the Stick+Resin) opens
+        //    the calm early window for banking a food reserve before crises bite.
+        if self.job.is_some() {
+            if let Some(action) = self.advance_job(view, map) {
+                return Some(action);
+            }
+        }
+        if let Some(job) = self.next_build_job(view, map) {
+            self.job = Some(job);
+            if let Some(action) = self.advance_job(view, map) {
+                return Some(action);
+            }
+        }
+
         // 4d. Recruit the first villager (one-time): investigate the Shipwreck POI,
         //     which sets scavenge_shipwreck so the castaway villager arrives ~day 1.
         //     Only when safe, no villager yet, AND all needs have comfortable buffer
@@ -442,21 +499,6 @@ impl Bot {
         //     the nearby Monolith).
         if self.upgrade_enabled && safe && needs_comfortable {
             if let Some(action) = self.upgrade_sanctuary_action(&hero, view, map) {
-                return Some(action);
-            }
-        }
-
-        // 5. Drive the in-progress build job.
-        if self.job.is_some() {
-            if let Some(action) = self.advance_job(view, map) {
-                return Some(action);
-            }
-        }
-
-        // 6. Start the next build job (campfire, then walls).
-        if let Some(job) = self.next_build_job(view, map) {
-            self.job = Some(job);
-            if let Some(action) = self.advance_job(view, map) {
                 return Some(action);
             }
         }
@@ -916,40 +958,78 @@ impl Bot {
         }
 
         // 2. Cook raw meat into Cooked Meat (the craft). Cooking is fast (20 ticks)
-        //    and raw meat is poisonous, so always cook rather than eat it raw.
+        //    and raw meat is poisonous, so always cook rather than eat it raw. If
+        //    we're out of fuel, split a Log into Firewood first (1 Log -> 5).
         let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
         if has_raw_meat {
+            if firewood_count(&view.inventory) < LOW_FIREWOOD
+                && view.inventory.iter().any(|i| i.class == "Log")
+            {
+                return Some(PlayerEvent::Craft {
+                    player_id: self.player_id,
+                    recipe_name: "Firewood".to_string(),
+                });
+            }
             if let Some(action) = self.cook_action(hero, view, map) {
                 return Some(action);
             }
         }
 
-        // 3. Low on GOOD food (high-Feed): restock. Foraged berries/mushrooms have
-        //    tiny Feed, so the hero would eat them nonstop and never sleep — the
-        //    efficient answer is to hunt and cook a batch of Cooked Meat (Feed 100).
-        // 3. Maintain a stock of GOOD food (Cooked Meat, Feed 100). Foraged
-        //    berries/mushrooms (~6-8 Feed) only bootstrap the first day — relying on
-        //    them means eating nonstop. So once a campfire stands and game is in
-        //    reach, hunt + cook proactively to keep a few Cooked Meat on hand. Gated
-        //    on calm needs so the hunt/cook doesn't itself trigger a crisis.
-        let good_food: i32 = view
-            .inventory
-            .iter()
-            .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
-            .map(|i| i.quantity)
-            .sum();
-        if good_food < 3
+        let good_food = onhand_good_food(&view.inventory);
+
+        // 2.5 Bank surplus meals into the Burrow larder. The hero keeps ON_HAND_FOOD
+        //     on its person and stockpiles the rest, so a reserve actually
+        //     accumulates instead of being eaten as fast as it's cooked.
+        if good_food > ON_HAND_FOOD {
+            if let Some(meal) = view
+                .inventory
+                .iter()
+                .find(|i| i.is_edible() && i.feed >= GOOD_FEED)
+            {
+                if let Some(s) = view
+                    .structures
+                    .iter()
+                    .find(|s| s.subclass == "storage" && s.built)
+                {
+                    if Map::is_adjacent_including_source(hero.pos, s.pos) {
+                        return Some(PlayerEvent::ItemTransfer {
+                            player_id: self.player_id,
+                            source_id: hero.id,
+                            target_id: s.id,
+                            item_id: meal.id,
+                        });
+                    }
+                    return self.step_adjacent_to(hero.pos, s.pos, view, map);
+                }
+            }
+        }
+
+        // 3. Build the food stockpile while calm: hunt + cook proper meals (Cooked
+        //    Meat, Feed 100) until the reserve (on hand + banked in the Burrow) hits
+        //    STOCKPILE_TARGET. Foraged berries (~6 Feed) only bootstrap the first
+        //    day. Keep fuel topped up so the cook never stalls. Gated on calm needs
+        //    so the hunt trip doesn't itself trigger a crisis.
+        let reserve = good_food + stored_good_food(view);
+        if reserve < STOCKPILE_TARGET
             && hero.tired < CONSUME_AT
             && hero.thirst < CONSUME_AT
             && self.can_hunt_locally(hero, view)
         {
+            if firewood_count(&view.inventory) < LOW_FIREWOOD
+                && view.inventory.iter().any(|i| i.class == "Log")
+            {
+                return Some(PlayerEvent::Craft {
+                    player_id: self.player_id,
+                    recipe_name: "Firewood".to_string(),
+                });
+            }
             if let Some(action) = self.hunt_action(hero, view, map) {
                 return Some(action);
             }
         }
 
-        // 4. No good food and actually hungry: pull from the Burrow, else forage to
-        //    limp along (early game / no campfire / no game nearby).
+        // 4. No good food and actually hungry: pull from the Burrow larder, else
+        //    forage to limp along (early game / no campfire / no game nearby).
         if hero.hunger >= CONSUME_AT && good_food == 0 {
             if let Some((spos, sid, item_id)) = storage_food(view) {
                 if Map::is_adjacent_including_source(hero.pos, spos) {
@@ -979,7 +1059,10 @@ impl Bot {
         if !view.has_built("campfire") {
             return false;
         }
-        if !view.inventory.iter().any(|i| i.name == "Firewood" && i.quantity > 0) {
+        // Need fuel to cook the kill — Firewood on hand, or a Log to split into some.
+        let has_fuel = firewood_count(&view.inventory) > 0
+            || view.inventory.iter().any(|i| i.class == "Log");
+        if !has_fuel {
             return false;
         }
         let home = view.home().or(self.anchor).unwrap_or(hero.pos);
@@ -1384,6 +1467,35 @@ fn hero_soulshards(inventory: &[ItemView]) -> i32 {
     inventory
         .iter()
         .filter(|i| i.class == "Soulshard")
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// Firewood the hero is carrying (cooking fuel).
+fn firewood_count(inventory: &[ItemView]) -> i32 {
+    inventory
+        .iter()
+        .filter(|i| i.name == "Firewood")
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// Proper meals (high-Feed food) the hero is carrying.
+fn onhand_good_food(inventory: &[ItemView]) -> i32 {
+    inventory
+        .iter()
+        .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// Proper meals banked in owned storage (the Burrow larder).
+fn stored_good_food(view: &WorldView) -> i32 {
+    view.structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+        .flat_map(|s| &s.inventory)
+        .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
         .map(|i| i.quantity)
         .sum()
 }
