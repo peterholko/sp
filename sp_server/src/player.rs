@@ -21,11 +21,11 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_loot_poi, is_pos_empty, sanctuary_weak_radius, survey_status_for_tile, Clients, DamageRecord,
-    DebugObjs, GameTick, InitialEncounterState, LogLevelOverrides, Merchant, Monolith,
-    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
+    is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius, survey_status_for_tile,
+    Clients, DamageRecord, DebugObjs, GameTick, InitialEncounterState, LogLevelOverrides, Merchant,
+    Monolith, MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
     PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
-    SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL, SANCTUARY_UPGRADE_COST,
+    SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -10053,6 +10053,7 @@ fn upgrade_sanctuary_system(
             continue;
         }
 
+        let cost = sanctuary_upgrade_cost(monolith.sanctuary_level);
         let Ok(mut hero_inv) = hero_inv_query.get_mut(hero_entity) else {
             continue;
         };
@@ -10060,22 +10061,19 @@ fn upgrade_sanctuary_system(
             .get_by_class(item::SOULSHARD.to_string())
             .map(|s| s.quantity)
             .unwrap_or(0);
-        if shards < SANCTUARY_UPGRADE_COST {
+        if shards < cost {
             send_to_client(
                 *player_id,
                 ResponsePacket::Error {
-                    errmsg: format!(
-                        "Empowering the sanctuary needs {} Soulshards.",
-                        SANCTUARY_UPGRADE_COST
-                    ),
-                    },
+                    errmsg: format!("Empowering the sanctuary needs {} Soulshards.", cost),
+                },
                 &clients,
             );
             continue;
         }
 
         if let Some(shard_item) = hero_inv.get_by_class(item::SOULSHARD.to_string()) {
-            hero_inv.remove_quantity(shard_item.id, SANCTUARY_UPGRADE_COST);
+            hero_inv.remove_quantity(shard_item.id, cost);
         }
         monolith.sanctuary_level += 1;
 

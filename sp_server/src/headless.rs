@@ -27,8 +27,8 @@ use crate::database::DatabaseEvent;
 use crate::common::Transport;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState,
-    NetworkReceiver, Objectives, PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory,
-    RunScoreState, VictoryState,
+    Monolith, NetworkReceiver, Objectives, PlayerObjectives, PlayerRunScore, PlayerStats,
+    PlayerVictory, RunScoreState, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
@@ -59,6 +59,8 @@ pub struct WorldView {
     pub villagers: Vec<VillagerView>,
     pub pois: Vec<PoiView>,
     pub merchant: Option<MerchantView>,
+    pub monolith: Option<MonolithView>,
+    pub corpses: Vec<CorpseView>,
     pub structures: Vec<StructureView>,
     pub resource_tiles: Vec<ResTileView>,
     pub occupied: HashSet<(i32, i32)>,
@@ -190,6 +192,22 @@ pub struct MerchantView {
     pub at_landing: bool,
     /// Obj ids of the villagers currently aboard the merchant, available to hire.
     pub hireable: Vec<i32>,
+}
+
+#[derive(Clone, Copy)]
+pub struct MonolithView {
+    pub id: i32,
+    pub pos: Position,
+    /// Current sanctuary level (0 = innate); upgraded with Soulshards.
+    pub level: i32,
+}
+
+#[derive(Clone, Copy)]
+pub struct CorpseView {
+    pub id: i32,
+    pub pos: Position,
+    /// Item id of a Soulshard stack sitting on this corpse, ready to loot.
+    pub soulshard_item: i32,
 }
 
 #[derive(Clone)]
@@ -399,7 +417,48 @@ impl HeadlessGame {
         self.tick(8);
         self.spawn_tick = self.game_tick();
 
+        // Experiment hook: SANCTUARY_LEVEL re-homes the nearest Monolith onto the
+        // hero's base and sets its level, so we can A/B "how much does a stronger
+        // sanctuary extend survival?" without first wiring the bot to earn/spend
+        // Soulshards. Unset = stock behaviour.
+        if let Ok(level) = std::env::var("SANCTUARY_LEVEL") {
+            if let Ok(level) = level.parse::<i32>() {
+                self.set_sanctuary_at_base(level);
+            }
+        }
+
         pid
+    }
+
+    // Move the nearest Monolith onto the hero's tile and set its sanctuary level.
+    // Test/experiment use only (see the SANCTUARY_LEVEL hook in spawn_hero).
+    fn set_sanctuary_at_base(&mut self, level: i32) {
+        let world = self.app.world_mut();
+        let hero_pos = {
+            let mut q = world.query_filtered::<&Position, With<SubclassHero>>();
+            match q.iter(world).next() {
+                Some(p) => *p,
+                None => return,
+            }
+        };
+        let mut nearest: Option<(Entity, u32)> = None;
+        {
+            let mut q = world.query_filtered::<(Entity, &Position), With<Monolith>>();
+            for (e, p) in q.iter(world) {
+                let d = Map::distance((hero_pos.x, hero_pos.y), (p.x, p.y));
+                if nearest.map_or(true, |(_, bd)| d < bd) {
+                    nearest = Some((e, d));
+                }
+            }
+        }
+        if let Some((entity, _)) = nearest {
+            if let Some(mut pos) = world.get_mut::<Position>(entity) {
+                *pos = hero_pos;
+            }
+            if let Some(mut monolith) = world.get_mut::<Monolith>(entity) {
+                monolith.sanctuary_level = level;
+            }
+        }
     }
 
     pub fn inject(&mut self, event: PlayerEvent) {
@@ -564,6 +623,46 @@ impl HeadlessGame {
                 })
         };
 
+        // The Monolith nearest the hero — the sanctuary the bot empowers.
+        let hero_pos_opt = hero.as_ref().map(|h| h.pos);
+        let monolith = {
+            let mut q = world.query::<(&Id, &Position, &Monolith)>();
+            let mut best: Option<MonolithView> = None;
+            let mut best_d = u32::MAX;
+            for (id, pos, m) in q.iter(world) {
+                let d = hero_pos_opt
+                    .map(|hp| Map::distance((hp.x, hp.y), (pos.x, pos.y)))
+                    .unwrap_or(0);
+                if d < best_d {
+                    best_d = d;
+                    best = Some(MonolithView {
+                        id: id.0,
+                        pos: *pos,
+                        level: m.sanctuary_level,
+                    });
+                }
+            }
+            best
+        };
+
+        // Enemy corpses still holding a Soulshard, ready to loot for upgrades.
+        let corpses = {
+            let mut q = world.query::<(&Id, &PlayerId, &Position, &State, &Inventory)>();
+            q.iter(world)
+                .filter(|(_, p, _, state, _)| p.0 != pid && **state == State::Dead)
+                .filter_map(|(id, _p, pos, _state, inv)| {
+                    inv.items
+                        .iter()
+                        .find(|i| i.class == "Soulshard")
+                        .map(|item| CorpseView {
+                            id: id.0,
+                            pos: *pos,
+                            soulshard_item: item.id,
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+
         // The player's structures (+ inventories so the bot can pull build
         // resources from the Burrow and check foundation contents).
         let structures = {
@@ -630,6 +729,8 @@ impl HeadlessGame {
             villagers,
             pois,
             merchant,
+            monolith,
+            corpses,
             structures,
             resource_tiles,
             occupied,

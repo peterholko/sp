@@ -363,10 +363,18 @@ pub struct SanctuaryExcursionEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
 
-// Soulshards charged to raise a Monolith's sanctuary by one level.
+// Base Soulshard cost for the first sanctuary upgrade. Cost escalates per level
+// (see [`sanctuary_upgrade_cost`]) so maxing the sanctuary is a multi-stage goal
+// stretched across the run rather than done in the first few days.
 pub const SANCTUARY_UPGRADE_COST: i32 = 3;
 // Highest sanctuary level (keeps the suppression radius from swallowing the map).
 pub const SANCTUARY_MAX_LEVEL: i32 = 5;
+
+/// Soulshards required to go from `current_level` to the next level. Escalates:
+/// 3, 6, 9, 12, 15 (45 total to max), so each tier is a bigger commitment.
+pub fn sanctuary_upgrade_cost(current_level: i32) -> i32 {
+    SANCTUARY_UPGRADE_COST * (current_level.max(0) + 1)
+}
 // Extra in-zone defensive multiplier per sanctuary level (applied to the Sanctuary
 // effect's amplifier, which combat multiplies the sanctuary defense by).
 pub const SANCTUARY_DEFENSE_PER_LEVEL: f32 = 0.25;

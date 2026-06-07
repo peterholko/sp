@@ -21,6 +21,7 @@
 // because the server's MoveEvent only accepts a destination adjacent to the mover.
 
 use crate::constants::{WATERSKIN_EMPTY, WATERSKIN_FILLED};
+use crate::game::{sanctuary_upgrade_cost, sanctuary_weak_radius, SANCTUARY_MAX_LEVEL};
 use crate::headless::{HeroView, ItemView, StructureView, UnitView, WorldView};
 use crate::map::{Map, TileType};
 use crate::obj::Position;
@@ -153,6 +154,9 @@ impl Bot {
                 .filter(|t| t.plant_revealed)
                 .count();
             let hgold = hero_gold(&view.inventory);
+            let shards = hero_soulshards(&view.inventory);
+            let sanc = view.monolith.map(|m| m.level).unwrap_or(-1);
+            let corpses = view.corpses.len();
             let hdist = view
                 .hero
                 .as_ref()
@@ -165,9 +169,10 @@ impl Bot {
                 None => ("none", 0, Position { x: -1, y: -1 }),
             };
             eprintln!(
-                "[vil] t={} villagers={} idle={} order={} gathering={} carried={} storage_food={} plant_nodes={} gold={} merchant={} hireable={} mpos={},{} hdist={}",
-                view.game_tick, view.villagers.len(), idle, with_order, gathering, carried, sfood, plant_nodes, hgold, mstate, mhire, mpos.x, mpos.y, hdist
+                "[vil] t={} villagers={} gold={} merchant={} hireable={} sanc_lvl={} shards={} corpses={}",
+                view.game_tick, view.villagers.len(), hgold, mstate, mhire, sanc, shards, corpses
             );
+            let _ = (idle, with_order, gathering, carried, sfood, plant_nodes, mpos, hdist);
         }
 
         // The hero acts only while idle; a busy hero still lets us command a villager.
@@ -390,6 +395,24 @@ impl Bot {
             && self.recruit_attempted
         {
             if let Some(action) = self.hire_action(&hero, view, map) {
+                return Some(action);
+            }
+        }
+
+        // 4f. Loot Soulshards off nearby corpses (fresh kills are usually adjacent),
+        //     the currency for empowering the sanctuary. Only when safe.
+        if safe {
+            if let Some(action) = self.loot_soulshards(&hero, view, map) {
+                return Some(action);
+            }
+        }
+
+        // 4g. Empower the Monolith sanctuary when we can afford the next level. This
+        //     shrinks random spawns around the base — the primary early-game survival
+        //     investment. Only when safe and needs have buffer (it's a short trip to
+        //     the nearby Monolith).
+        if safe && needs_comfortable {
+            if let Some(action) = self.upgrade_sanctuary_action(&hero, view, map) {
                 return Some(action);
             }
         }
@@ -688,6 +711,54 @@ impl Bot {
             });
         }
         self.step_adjacent_to(hero.pos, merchant.pos, view, map)
+    }
+
+    // Walk to the nearest corpse holding a Soulshard and loot it. Kills usually
+    // drop adjacent, so this is normally a 0-1 tile detour right after a fight.
+    fn loot_soulshards(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
+        const LOOT_RADIUS: u32 = 6;
+        // No point hoarding once the sanctuary is maxed.
+        if view.monolith.map_or(true, |m| m.level >= SANCTUARY_MAX_LEVEL) {
+            return None;
+        }
+        let corpse = view
+            .corpses
+            .iter()
+            .filter(|c| hex_dist(hero.pos, c.pos) <= LOOT_RADIUS)
+            .min_by_key(|c| hex_dist(hero.pos, c.pos))?;
+        if Map::is_adjacent_including_source(hero.pos, corpse.pos) {
+            return Some(PlayerEvent::ItemTransfer {
+                player_id: self.player_id,
+                source_id: corpse.id,
+                target_id: hero.id,
+                item_id: corpse.soulshard_item,
+            });
+        }
+        self.step_adjacent_to(hero.pos, corpse.pos, view, map)
+    }
+
+    // Empower the nearby Monolith when the hero can afford the next level. Walks
+    // into the sanctuary's outer ring, then issues UpgradeSanctuary.
+    fn upgrade_sanctuary_action(
+        &self,
+        hero: &HeroView,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        let mono = view.monolith.as_ref()?;
+        if mono.level >= SANCTUARY_MAX_LEVEL {
+            return None;
+        }
+        if hero_soulshards(&view.inventory) < sanctuary_upgrade_cost(mono.level) {
+            return None;
+        }
+        if hex_dist(hero.pos, mono.pos) <= sanctuary_weak_radius(mono.level) {
+            return Some(PlayerEvent::UpgradeSanctuary {
+                player_id: self.player_id,
+                monolith_id: mono.id,
+            });
+        }
+        self.step_adjacent_to(hero.pos, mono.pos, view, map)
     }
 
     // ---- Water -------------------------------------------------------------
@@ -1265,6 +1336,15 @@ fn hero_gold(inventory: &[ItemView]) -> i32 {
     inventory
         .iter()
         .filter(|i| i.class == "Gold Coins")
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// Total Soulshards the hero is carrying (currency for sanctuary upgrades).
+fn hero_soulshards(inventory: &[ItemView]) -> i32 {
+    inventory
+        .iter()
+        .filter(|i| i.class == "Soulshard")
         .map(|i| i.quantity)
         .sum()
 }
