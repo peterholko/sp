@@ -51,9 +51,9 @@ const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
 
 // Structure recipes the bot builds (req type -> quantity), matching the
 // obj_template.yaml `req` fields. Campfire uses the hero's starting Stick+Resin;
-// Stockade walls use Logs pulled from the Burrow / foraged.
+// Stockade walls use Sticks (foraged abundantly), so a refuge is affordable.
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
-const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 3)];
+const STOCKADE_REQS: &[(&str, i32)] = &[("Stick", 3)];
 
 const EXPLORE_OFFSETS: [(i32, i32); 8] = [
     (6, 0),
