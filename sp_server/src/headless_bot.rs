@@ -72,6 +72,10 @@ const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 // Stockade walls use Sticks (foraged abundantly), so a refuge is affordable.
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Stick", 3)];
+// Crafting Tent: the gateway crafting/refining structure (refines Log->Timber,
+// Ore->Ingot, butchers game; upgrades to Blacksmith). Built from logs (Burrow) +
+// hides accumulated from butchering hunts.
+const TENT_REQS: &[(&str, i32)] = &[("Log", 5), ("Hide", 5)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
 const PLANT_RES: &str = "Plant";
 
@@ -179,10 +183,12 @@ impl Bot {
                 .filter(|i| i.class == "Food")
                 .map(|i| i.quantity)
                 .sum();
+            let hides = count_matching(&view.inventory, "Hide");
+            let has_tent = view.structures.iter().any(|s| s.subclass == "craft" && s.built);
             eprintln!(
-                "[food] day={} hunger={:.0} good_onhand={} feed_onhand={} burrow_food={} villagers={} sanc={}",
+                "[food] day={} hunger={:.0} good_onhand={} feed_onhand={} burrow_food={} villagers={} sanc={} hides={} tent={}",
                 view.day, hero.hunger, good, feed_onhand, stock,
-                view.villagers.len(), view.monolith.map(|m| m.level).unwrap_or(-1)
+                view.villagers.len(), view.monolith.map(|m| m.level).unwrap_or(-1), hides, has_tent
             );
         }
 
@@ -555,6 +561,25 @@ impl Bot {
                 ));
             }
             return None;
+        }
+
+        // Crafting Tent — the gateway to refining + gear crafting (and it upgrades
+        // into a Blacksmith). Build once we've banked enough hides (from butchering
+        // hunts) to go with the Burrow's logs. Falls through to walls while waiting.
+        if !view.structures.iter().any(|s| s.subclass == "craft") {
+            let have_hides = count_matching(&view.inventory, "Hide") >= 5;
+            let have_logs = count_matching(&view.inventory, "Log") >= 5
+                || storage_with_req(view, &[("Log", 5)]).is_some();
+            if have_hides && have_logs {
+                let site = self.anchor.unwrap_or(hero.pos);
+                return Some(BuildJob::new(
+                    "Crafting Tent",
+                    "craft",
+                    TENT_REQS,
+                    site,
+                    view.game_tick,
+                ));
+            }
         }
 
         // Then ring the base with walls.
