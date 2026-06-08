@@ -514,11 +514,12 @@ pub fn new(
 
     debug!("map_events: {:?}", map_events);
 
-    // Always start the hero with a lit campfire so the cook-and-stockpile food
-    // economy is available from day 1. The calm early days are when a food reserve
-    // must be banked (before crises cut off hunting), and that needs cooking up
-    // front rather than waiting ~5 days to gather Stick+Resin and build one.
-    let _ = time_of_day;
+    // Create campfire at hero's location only if it's dusk or night. (Starting with
+    // an always-on campfire let the bot hunt from day 1, which exposed a pathological
+    // hunt loop -- it spins hunting/cooking and never eats, starving faster than when
+    // it builds its own campfire ~day 5-6. Reverted to the original gate; fixing the
+    // hunt/cook/eat loop is the prerequisite for an early campfire to help.)
+    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
@@ -549,11 +550,16 @@ pub fn new(
         // Get the campfire template to check for vision
         let campfire_template = templates.obj_templates.get("Campfire".to_string());
 
-        // Spawn the campfire entity
+        // Spawn the campfire entity. ClassStructure is required so it registers as a
+        // structure (perception, the bot's structure view, cook/craft lookups);
+        // without it the starting campfire is invisible to structure queries and the
+        // hero can never cook or hunt-cook.
         let campfire_entity_id = if let Some(vision) = campfire_template.base_vision {
-            commands.spawn((campfire, Viewshed { range: vision })).id()
+            commands
+                .spawn((campfire, ClassStructure, Viewshed { range: vision }))
+                .id()
         } else {
-            commands.spawn(campfire).id()
+            commands.spawn((campfire, ClassStructure)).id()
         };
 
         // Create mappings

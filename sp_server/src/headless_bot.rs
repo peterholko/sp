@@ -72,10 +72,6 @@ const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 // Stockade walls use Sticks (foraged abundantly), so a refuge is affordable.
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Stick", 3)];
-// Crafting Tent: the gateway crafting/refining structure (refines Log->Timber,
-// Ore->Ingot, butchers game; upgrades to Blacksmith). Built from logs (Burrow) +
-// hides accumulated from butchering hunts.
-const TENT_REQS: &[(&str, i32)] = &[("Log", 5), ("Hide", 5)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
 const PLANT_RES: &str = "Plant";
 
@@ -120,6 +116,7 @@ pub struct Bot {
     recruit_attempted: bool, // investigated the shipwreck to recruit a villager
     upgrade_enabled: bool,   // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
     dbg_last_day: i32,       // last day a FOOD_DEBUG line was emitted
+    hunts: u32,              // hunt actions issued (diagnostic)
 }
 
 impl Bot {
@@ -135,6 +132,7 @@ impl Bot {
             // A/B toggle for measuring the sanctuary loop's contribution.
             upgrade_enabled: std::env::var("BOT_NO_UPGRADE").is_err(),
             dbg_last_day: -1,
+            hunts: 0,
         }
     }
 
@@ -185,11 +183,25 @@ impl Bot {
                 .sum();
             let hides = count_matching(&view.inventory, "Hide");
             let has_tent = view.structures.iter().any(|s| s.subclass == "craft" && s.built);
+            let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+            let game_near = view
+                .resource_tiles
+                .iter()
+                .filter(|t| t.has_game && hex_dist(home, t.pos) <= 20)
+                .count();
+            let game_revealed_near = view
+                .resource_tiles
+                .iter()
+                .filter(|t| t.game_revealed && hex_dist(home, t.pos) <= 20)
+                .count();
+            let can_hunt = self.can_hunt_locally(&hero, view);
+            let firewood = firewood_count(&view.inventory);
             eprintln!(
-                "[food] day={} hunger={:.0} good_onhand={} feed_onhand={} burrow_food={} villagers={} sanc={} hides={} tent={}",
+                "[food] day={} hunger={:.0} meals={} feed={} larder={} hides={} can_hunt={} game_near={} game_revealed={} firewood={} hunts={}",
                 view.day, hero.hunger, good, feed_onhand, stock,
-                view.villagers.len(), view.monolith.map(|m| m.level).unwrap_or(-1), hides, has_tent
+                hides, can_hunt, game_near, game_revealed_near, firewood, self.hunts
             );
+            let _ = has_tent;
         }
 
         if std::env::var("BOT_DEBUG").is_ok() {
@@ -563,24 +575,11 @@ impl Bot {
             return None;
         }
 
-        // Crafting Tent — the gateway to refining + gear crafting (and it upgrades
-        // into a Blacksmith). Build once we've banked enough hides (from butchering
-        // hunts) to go with the Burrow's logs. Falls through to walls while waiting.
-        if !view.structures.iter().any(|s| s.subclass == "craft") {
-            let have_hides = count_matching(&view.inventory, "Hide") >= 5;
-            let have_logs = count_matching(&view.inventory, "Log") >= 5
-                || storage_with_req(view, &[("Log", 5)]).is_some();
-            if have_hides && have_logs {
-                let site = self.anchor.unwrap_or(hero.pos);
-                return Some(BuildJob::new(
-                    "Crafting Tent",
-                    "craft",
-                    TENT_REQS,
-                    site,
-                    view.game_tick,
-                ));
-            }
-        }
+        // NOTE: a Crafting Tent build target lived here, but it consumed the Burrow's
+        // logs that the cook economy needs for Firewood (the hero has no other log
+        // supply yet), which broke cooking and starved the hero. Gear progression is
+        // parked (see docs/gear_progression_plan.md) until the hero has a sustainable
+        // log supply (wood gathering) so building doesn't starve cooking.
 
         // Then ring the base with walls.
         let wall_count = view.structures.iter().filter(|s| s.subclass == "wall").count();
@@ -994,13 +993,8 @@ impl Bot {
         //    we're out of fuel, split a Log into Firewood first (1 Log -> 5).
         let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
         if has_raw_meat {
-            if firewood_count(&view.inventory) < LOW_FIREWOOD
-                && view.inventory.iter().any(|i| i.class == "Log")
-            {
-                return Some(PlayerEvent::Craft {
-                    player_id: self.player_id,
-                    recipe_name: "Firewood".to_string(),
-                });
+            if let Some(action) = self.ensure_firewood(hero, view, map) {
+                return Some(action);
             }
             if let Some(action) = self.cook_action(hero, view, map) {
                 return Some(action);
@@ -1047,15 +1041,11 @@ impl Bot {
             && hero.thirst < CONSUME_AT
             && self.can_hunt_locally(hero, view)
         {
-            if firewood_count(&view.inventory) < LOW_FIREWOOD
-                && view.inventory.iter().any(|i| i.class == "Log")
-            {
-                return Some(PlayerEvent::Craft {
-                    player_id: self.player_id,
-                    recipe_name: "Firewood".to_string(),
-                });
+            if let Some(action) = self.ensure_firewood(hero, view, map) {
+                return Some(action);
             }
             if let Some(action) = self.hunt_action(hero, view, map) {
+                self.hunts += 1;
                 return Some(action);
             }
         }
@@ -1091,9 +1081,11 @@ impl Bot {
         if !view.has_built("campfire") {
             return false;
         }
-        // Need fuel to cook the kill — Firewood on hand, or a Log to split into some.
+        // Need fuel to cook the kill — Firewood on hand, or a Log to split into 5
+        // (in hand or in the Burrow, which the hero will withdraw via ensure_firewood).
         let has_fuel = firewood_count(&view.inventory) > 0
-            || view.inventory.iter().any(|i| i.class == "Log");
+            || view.inventory.iter().any(|i| i.class == "Log")
+            || storage_with_req(view, &[("Log", 1)]).is_some();
         if !has_fuel {
             return false;
         }
@@ -1101,6 +1093,33 @@ impl Bot {
         view.resource_tiles
             .iter()
             .any(|t| t.has_game && hex_dist(home, t.pos) <= HUNT_RADIUS)
+    }
+
+    // Keep cooking fuel flowing when low: split a Log into Firewood (1 -> 5) if one
+    // is in hand, otherwise withdraw a Log from the Burrow first. Returns the action
+    // to take, or None if firewood is fine / no logs are anywhere. This is why the
+    // hero stops starving: the Burrow's logs become a long firewood supply instead
+    // of the cook stalling once the 10 starting Firewood run out.
+    fn ensure_firewood(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
+        if firewood_count(&view.inventory) >= LOW_FIREWOOD {
+            return None;
+        }
+        if view.inventory.iter().any(|i| i.class == "Log") {
+            return Some(PlayerEvent::Craft {
+                player_id: self.player_id,
+                recipe_name: "Firewood".to_string(),
+            });
+        }
+        let (spos, sid, item_id) = storage_item_for_missing(view, &[("Log".to_string(), 1)])?;
+        if Map::is_adjacent_including_source(hero.pos, spos) {
+            return Some(PlayerEvent::ItemTransfer {
+                player_id: self.player_id,
+                source_id: sid,
+                target_id: hero.id,
+                item_id,
+            });
+        }
+        self.step_adjacent_to(hero.pos, spos, view, map)
     }
 
     // Hunt a Game Animal: equip the Hunting weapon (the starting Sharpened Stick),
