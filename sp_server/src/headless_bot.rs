@@ -196,11 +196,13 @@ impl Bot {
                 .count();
             let can_hunt = self.can_hunt_locally(&hero, view);
             let firewood = firewood_count(&view.inventory);
+            let cf_pending = campfire_meat_pending(view);
             eprintln!(
-                "[food] day={} hunger={:.0} meals={} feed={} larder={} hides={} can_hunt={} game_near={} game_revealed={} firewood={} hunts={}",
-                view.day, hero.hunger, good, feed_onhand, stock,
-                hides, can_hunt, game_near, game_revealed_near, firewood, self.hunts
+                "[food] day={} hunger={:.0} thirst={:.0} state={:?} meals={} feed={} larder={} cf_meat={} hides={} can_hunt={} firewood={} hunts={}",
+                view.day, hero.hunger, hero.thirst, hero.state, good, feed_onhand, stock,
+                cf_pending, hides, can_hunt, firewood, self.hunts
             );
+            let _ = (game_near, game_revealed_near);
             let _ = has_tent;
         }
 
@@ -356,15 +358,28 @@ impl Bot {
             }
         }
 
-        // 2c. Once meat is in hand, see the butcher->cook through: raw meat can't be
-        //     safely eaten (food poisoning) and a finished batch of Cooked Meat
-        //     (Feed 100) is many days of food, so completing the cook outranks
+        // 2b-iii. Hungry with food already in the pack: EAT FIRST — a single quick
+        //         Use. This must outrank the cook pipeline below; previously the
+        //         multi-step cook errands (walk to campfire, stage, craft, retrieve)
+        //         preempted eating every decision tick and the hero starved to death
+        //         while carrying cooked meals.
+        if !threat && hero.hunger >= CONSUME_AT {
+            if let Some(action) = self.consume_action(&hero, view, CONSUME_AT, f32::MAX) {
+                return Some(action);
+            }
+        }
+
+        // 2c. Once meat is in the pipeline (carcass/raw meat in hand, or staged /
+        //     finishing at the campfire), see the butcher->cook through: raw meat
+        //     can't be safely eaten (food poisoning) and a finished batch of Cooked
+        //     Meat (Feed 100) is many days of food, so completing the cook outranks
         //     routine chores. Yield only to a close threat.
         if !threat {
             let has_meat = view
                 .inventory
                 .iter()
-                .any(|i| i.class == "Game Animal" || i.subclass == "Raw Meat");
+                .any(|i| i.class == "Game Animal" || i.subclass == "Raw Meat")
+                || campfire_meat_pending(view) > 0;
             if has_meat {
                 if let Some(action) = self.food_action(&hero, view, map) {
                     return Some(action);
@@ -989,14 +1004,22 @@ impl Bot {
         }
 
         // 2. Cook raw meat into Cooked Meat (the craft). Cooking is fast (20 ticks)
-        //    and raw meat is poisonous, so always cook rather than eat it raw. If
-        //    we're out of fuel, split a Log into Firewood first (1 Log -> 5).
+        //    and raw meat is poisonous, so always cook rather than eat it raw.
+        //    The trigger must include meat ALREADY STAGED in the campfire and
+        //    finished meals awaiting pickup — cook_action deposits raw meat into the
+        //    campfire, so a hero-inventory-only check abandoned the cook the moment
+        //    the meat left the pack (staged meat rotted unattended while the bot
+        //    wandered off to hunt more).
+        //    COOK FIRST: the campfire carries its own firewood stock (it starts with
+        //    10), so cooking usually needs no hero-side fuel at all — only fall back
+        //    to ensure_firewood (split a Burrow Log into 5 Firewood) when the cook
+        //    can't proceed for lack of fuel anywhere.
         let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
-        if has_raw_meat {
-            if let Some(action) = self.ensure_firewood(hero, view, map) {
+        if has_raw_meat || campfire_meat_pending(view) > 0 {
+            if let Some(action) = self.cook_action(hero, view, map) {
                 return Some(action);
             }
-            if let Some(action) = self.cook_action(hero, view, map) {
+            if let Some(action) = self.ensure_firewood(hero, view, map) {
                 return Some(action);
             }
         }
@@ -1035,7 +1058,28 @@ impl Bot {
         //    STOCKPILE_TARGET. Foraged berries (~6 Feed) only bootstrap the first
         //    day. Keep fuel topped up so the cook never stalls. Gated on calm needs
         //    so the hunt trip doesn't itself trigger a crisis.
-        let reserve = good_food + stored_good_food(view);
+        //
+        //    Crucially, the reserve also counts UNPROCESSED kills (raw meat in the
+        //    pack + meat still inside carcasses). Counting only cooked food made the
+        //    gate stay true while the slow cook lagged behind, so the hero hunted
+        //    nonstop (60+ hunts), never finished cooking, and starved with kills in
+        //    hand. With pending meat counted, a couple of hunts satisfy the target
+        //    and the bot switches to butchering + cooking what it already has.
+        let pending_meat: i32 = view
+            .inventory
+            .iter()
+            .filter(|i| i.subclass == "Raw Meat")
+            .map(|i| i.quantity)
+            .sum::<i32>()
+            + view
+                .inventory
+                .iter()
+                .filter(|i| i.class == "Game Animal")
+                .map(|i| i.quantity)
+                .sum::<i32>()
+                * 4 // conservative meat per carcass (boar 6, hare 3)
+            + campfire_meat_pending(view); // staged/finishing at the campfire
+        let reserve = good_food + stored_good_food(view) + pending_meat;
         if reserve < STOCKPILE_TARGET
             && hero.tired < CONSUME_AT
             && hero.thirst < CONSUME_AT
@@ -1081,11 +1125,18 @@ impl Bot {
         if !view.has_built("campfire") {
             return false;
         }
-        // Need fuel to cook the kill — Firewood on hand, or a Log to split into 5
-        // (in hand or in the Burrow, which the hero will withdraw via ensure_firewood).
-        let has_fuel = firewood_count(&view.inventory) > 0
+        // Need fuel to cook the kill — Firewood on hand or in the campfire, or a
+        // real Log (class "Log", not Timber) to split into 5 via ensure_firewood.
+        let campfire_fuel = view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "campfire" && s.built)
+            .flat_map(|s| &s.inventory)
+            .any(|i| i.name == "Firewood" && i.quantity > 0);
+        let has_fuel = campfire_fuel
+            || firewood_count(&view.inventory) > 0
             || view.inventory.iter().any(|i| i.class == "Log")
-            || storage_with_req(view, &[("Log", 1)]).is_some();
+            || storage_log(view).is_some();
         if !has_fuel {
             return false;
         }
@@ -1105,12 +1156,23 @@ impl Bot {
             return None;
         }
         if view.inventory.iter().any(|i| i.class == "Log") {
+            if std::env::var("FOOD_DEBUG").is_ok() {
+                eprintln!("[fuel] t={} crafting Firewood from Log", view.game_tick);
+            }
             return Some(PlayerEvent::Craft {
                 player_id: self.player_id,
                 recipe_name: "Firewood".to_string(),
             });
         }
-        let (spos, sid, item_id) = storage_item_for_missing(view, &[("Log".to_string(), 1)])?;
+        // Fetch an ACTUAL Log (class "Log") from storage. Do not use the generic
+        // req-matching here: matches_req conflates Timber with "Log" (fine for
+        // build reqs), which made this fetch grab the Burrow's Timber stack — the
+        // Firewood recipe can't use Timber, and the conflated "already have a Log"
+        // count then stalled the fuel chain permanently.
+        let (spos, sid, item_id) = storage_log(view)?;
+        if std::env::var("FOOD_DEBUG").is_ok() {
+            eprintln!("[fuel] t={} fetching Log from storage", view.game_tick);
+        }
         if Map::is_adjacent_including_source(hero.pos, spos) {
             return Some(PlayerEvent::ItemTransfer {
                 player_id: self.player_id,
@@ -1549,6 +1611,35 @@ fn stored_good_food(view: &WorldView) -> i32 {
         .filter(|i| i.is_edible() && i.feed >= GOOD_FEED)
         .map(|i| i.quantity)
         .sum()
+}
+
+// Food mid-pipeline at the campfire: raw meat staged for cooking plus finished
+// Cooked Meat awaiting pickup. The cook loop and the hunt gate must both see this
+// — meat deposited into the campfire is invisible to hero-inventory checks, which
+// previously orphaned the cook and re-opened the hunt gate.
+fn campfire_meat_pending(view: &WorldView) -> i32 {
+    view.structures
+        .iter()
+        .filter(|s| s.subclass == "campfire" && s.built)
+        .flat_map(|s| &s.inventory)
+        .filter(|i| i.subclass == "Raw Meat" || i.subclass == "Cooked Meat")
+        .map(|i| i.quantity)
+        .sum()
+}
+
+// An actual Log stack (class "Log" strictly — Timber doesn't smelt into Firewood)
+// sitting in an owned storage. Returns (storage_pos, storage_id, item_id).
+fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
+    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        if let Some(item) = s
+            .inventory
+            .iter()
+            .find(|i| i.class == "Log" && i.quantity > 0)
+        {
+            return Some((s.pos, s.id, item.id));
+        }
+    }
+    None
 }
 
 // A Gold Coins stack sitting in an owned storage (the Burrow starts with 50) to

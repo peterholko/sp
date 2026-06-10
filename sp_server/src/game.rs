@@ -5411,13 +5411,6 @@ fn structure_craft_event_system(
                         continue;
                     };
 
-                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
-                        query.get_mut(structure_entity)
-                    else {
-                        error!("Cannot find structure from entity {:?}", structure_entity);
-                        continue;
-                    };
-
                     let Ok((crafter_state, mut crafter_skills)) =
                         crafter_query.get_mut(crafter_entity)
                     else {
@@ -5436,11 +5429,22 @@ fn structure_craft_event_system(
                         continue;
                     }
 
-                    // Add State Change Event to None
+                    // The craft event is consumed past this point, so release the
+                    // crafter BEFORE the structure lookup can bail — failing that
+                    // lookup (structure despawned / missing WorkQueue) used to leave
+                    // the crafter wedged in State::Crafting forever, paralyzing it
+                    // until it died of thirst.
                     commands.trigger(StateChange {
                         entity: crafter_entity,
                         new_state: State::None,
                     });
+
+                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
+                        query.get_mut(structure_entity)
+                    else {
+                        error!("Cannot find structure from entity {:?}", structure_entity);
+                        continue;
+                    };
 
                     let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
                         error!(

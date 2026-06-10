@@ -912,6 +912,64 @@ mod tests {
         assert!(m.ticks >= 0);
     }
 
+    // Hand-crafting Firewood from a Log — the cook economy's fuel chain. The bot
+    // relies on this to keep cooking past the 10 starting Firewood.
+    #[test]
+    fn craft_firewood_from_log() {
+        use crate::ids::Ids;
+        use crate::templates::Templates;
+
+        let mut game = HeadlessGame::new(5_000);
+        let pid = game.spawn_hero("Warrior", "FuelBot");
+        game.tick(50);
+
+        // Give the hero a Log (same item the Burrow stocks).
+        {
+            let world = game.app.world_mut();
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut q = world.query_filtered::<&mut Inventory, With<SubclassHero>>();
+            let mut inv = q.iter_mut(world).next().expect("hero inventory");
+            inv.new(
+                item_id,
+                "Springbranch Maple Log".to_string(),
+                1,
+                &item_templates,
+            );
+        }
+        let firewood_before: i32 = game
+            .observe()
+            .inventory
+            .iter()
+            .filter(|i| i.name == "Firewood")
+            .map(|i| i.quantity)
+            .sum();
+
+        game.inject(PlayerEvent::Craft {
+            player_id: pid,
+            recipe_name: "Firewood".to_string(),
+        });
+        game.tick(100); // crafting_time is 60 ticks
+
+        let view = game.observe();
+        let firewood_after: i32 = view
+            .inventory
+            .iter()
+            .filter(|i| i.name == "Firewood")
+            .map(|i| i.quantity)
+            .sum();
+        let gained = firewood_after - firewood_before;
+        // Inventory::craft rolls a random 1..=amount yield (amount=5 for Firewood).
+        assert!(
+            (1..=5).contains(&gained),
+            "crafting should turn 1 Log into 1-5 Firewood, got {gained}"
+        );
+        assert!(
+            !view.inventory.iter().any(|i| i.class == "Log"),
+            "the Log should be consumed by the craft"
+        );
+    }
+
     // The merchant hire mechanic, end-to-end and isolated from the bot's survival:
     // dock the merchant on the hero's tile, give the hero gold, send Hire, and
     // confirm a player-owned villager appears and the wage is deducted.

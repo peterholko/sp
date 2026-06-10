@@ -13,7 +13,10 @@ use crate::game::{
     PlayerIntroEntry, PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
 };
 use crate::item::{Inventory, Slot};
-use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
+use crate::obj::{
+    ActiveShelter, AddLightEffect, Assignments, Campfire, LastCombatTick, NewObj, UpdateObj,
+    WorkQueue,
+};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
 use crate::world::get_time_of_day;
@@ -514,12 +517,12 @@ pub fn new(
 
     debug!("map_events: {:?}", map_events);
 
-    // Create campfire at hero's location only if it's dusk or night. (Starting with
-    // an always-on campfire let the bot hunt from day 1, which exposed a pathological
-    // hunt loop -- it spins hunting/cooking and never eats, starving faster than when
-    // it builds its own campfire ~day 5-6. Reverted to the original gate; fixing the
-    // hunt/cook/eat loop is the prerequisite for an early campfire to help.)
-    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
+    // Always start the hero with a lit campfire: hunting + cooking is a legitimate
+    // early food source for a small population, so the cook economy must be
+    // available from day 1 (not after ~5 days of gathering Stick+Resin to build
+    // one). The bot-side hunt/cook/eat loop bugs that once made an early campfire
+    // counterproductive (hunt spinning, cook errands preempting eating) are fixed.
+    let _ = time_of_day;
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
@@ -550,16 +553,32 @@ pub fn new(
         // Get the campfire template to check for vision
         let campfire_template = templates.obj_templates.get("Campfire".to_string());
 
-        // Spawn the campfire entity. ClassStructure is required so it registers as a
-        // structure (perception, the bot's structure view, cook/craft lookups);
-        // without it the starting campfire is invisible to structure queries and the
-        // hero can never cook or hunt-cook.
+        // Spawn the campfire entity with the same companion components a
+        // foundation-built structure gets (see the CreateFoundation handler):
+        // ClassStructure registers it with structure queries (perception, cook/craft
+        // lookups), and WorkQueue/Assignments are required by the structure-craft
+        // and work-assignment systems — StructureCraft at a structure missing
+        // WorkQueue fails its query and (before the wedge fix) left the crafter
+        // stuck in State::Crafting.
         let campfire_entity_id = if let Some(vision) = campfire_template.base_vision {
             commands
-                .spawn((campfire, ClassStructure, Viewshed { range: vision }))
+                .spawn((
+                    campfire,
+                    ClassStructure,
+                    WorkQueue(Vec::new()),
+                    Assignments(Vec::new()),
+                    Viewshed { range: vision },
+                ))
                 .id()
         } else {
-            commands.spawn((campfire, ClassStructure)).id()
+            commands
+                .spawn((
+                    campfire,
+                    ClassStructure,
+                    WorkQueue(Vec::new()),
+                    Assignments(Vec::new()),
+                ))
+                .id()
         };
 
         // Create mappings
