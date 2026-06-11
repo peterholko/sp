@@ -2,12 +2,41 @@
 
 ## Project Overview
 
-Siege Perilous is a multiplayer turn-based strategy/survival game server written in Rust. It uses the **Bevy ECS** engine for game logic, **WebSocket over TLS** for networking, and **PostgreSQL** for persistence. Players control heroes in a procedurally generated world with resource gathering, crafting, combat, NPC AI, and economic systems.
+Siege Perilous is a single-player-per-world **survival** game server written in Rust. It uses the **Bevy ECS** engine for game logic, **WebSocket over TLS** for networking, and **PostgreSQL** for persistence. Each player controls a hero (plus villagers and structures) in a procedurally generated world with resource gathering, crafting, combat, and NPC AI on top of an escalating survival loop.
 
 - **Package:** `siege_perilous` v0.5.0
 - **Rust Edition:** 2021
 - **Binary:** `siege_perilous`
 - **Entry point:** `src/main.rs` → `src/lib.rs::setup()`
+
+### Game Direction (the north star)
+
+The game is a **prepare-and-survive** experience: the world periodically floods the player
+with escalating waves of enemies, and the goal is to **survive as long as possible** while
+preparing (gathering, building, fortifying, recruiting). The final score rewards how long and
+how well you survived, not conquest. Most of this logic lives in `game.rs`. Key systems:
+
+- **Per-player survival timing** — each player's clock starts when their intro chain begins
+  (`PlayerIntroState`), so survival day/time is measured per player, not off the global tick.
+- **Crisis tiers (1–5)** — `PlayerCrisis` / `crisis_tier()` escalate threats: rat spoilage →
+  wolf pack → goblin raid → undead incursion → goblin pillager. Each tier fires on an organic
+  condition with a time-based **fallback deadline** so passive players still face escalation.
+- **Survival director & hordes** — from ~day 6 (`survival_director_active`), `survival_horde_size`
+  / `survival_horde_composition` send periodic night hordes that scale with day, crisis tier, and
+  active legendary threats.
+- **Legendary threat** — a day-6 rumor / day-7 activation arc (`LegendaryThreat`) culminating in
+  the **Ashen Warlord** and the **Warlord Hideout**, with follower/captain waves and a reveal.
+- **Monolith / Sanctuary** — `Monolith` (collects soulshards), `BoundMonolith`, `Sanctuary` /
+  `WeakSanctuary` provide protected zones; sealing the Monolith is the major end-game legacy goal.
+- **Scoring** — `calculate_run_score_breakdown` produces a 6-component `ScoreBreakdown`
+  (survival, progression, wealth, defense, valor, legacy); `score_total_from_breakdown` applies a
+  highest-pressure-level multiplier. Persisted to the `scores` table on death.
+- **True Death & start-location recycling** — `true_death_system` ends a run; the hero's start
+  location is recycled back into the in-memory pool (`StartLocations`) for reuse. There are 5
+  start locations.
+- **Objectives** — `PlayerObjectives` tracks an onboarding/goal checklist (scavenge shipwreck,
+  build campfire, win first fight, recruit villager, survive 5 nights, find the legendary hideout,
+  defeat the Ashen Warlord, …) that feeds the legacy score component.
 
 ## Build & Run Commands
 
@@ -44,7 +73,9 @@ The server runs as a headless Bevy app at 10 ticks/second (`TIMESTEP_10_PER_SECO
 src/
 ├── main.rs              # CLI entry point, parses "reload" arg
 ├── lib.rs               # Bevy App setup, plugin registration, clippy config
-├── game.rs              # Core game loop, event processing, tick systems (~9.6K lines)
+├── game.rs              # Core game loop, event processing, tick systems AND the
+│                        #   survival loop: crisis tiers, hordes, legendary threat,
+│                        #   monolith/sanctuary, scoring, true death (~16K lines)
 ├── game_tests.rs        # Unit tests for game systems
 │
 ├── Network & Persistence
@@ -98,10 +129,14 @@ src/
 templates/               # YAML game data
 ├── item_template.yaml
 ├── obj_template.yaml
+├── obj_init.yaml
 ├── recipe_template.yaml
+├── refine_template.yaml
 ├── effect_template.yaml
 ├── skill_xp_template.yaml
+├── skills.yaml
 ├── res_template.yaml
+├── res_property_template.yaml
 ├── price_template.yaml
 ├── combo_template.yaml
 ├── dialogue_template.yaml
@@ -203,14 +238,23 @@ Tests day/night cycle effects on viewshed ranges.
 
 **PostgreSQL** with tables: `accounts`, `sessions`, `scores`. Passwords hashed with Argon2. Session-based authentication.
 
+The `scores` table (`scores_schema.sql`) is the run-history / leaderboard sink, written on True
+Death. Beyond `hero_name` / `hero_rank` / `total_xp` / `fate`, it stores the full score breakdown
+(`score_survival`, `score_progression`, `score_wealth`, `score_defense`, `score_valor`,
+`score_legacy`, `total_score`) plus survival telemetry: `days_survived`, `waves_survived`,
+`highest_pressure_level`, `crisis_tier`, `legendary_kills`, `hideouts_cleared`.
+
 ## Network Protocol
 
-WebSocket over TLS. Packets serialized as JSON `ResponsePacket` enums. Key packet types: `Login`, `Register`, `Move`, `Attack`, plus various state update responses.
+WebSocket over TLS. Packets serialized as JSON `ResponsePacket` enums. Key packet types: `Login`, `Register`, `Move`, `Attack`, plus various state update responses. Survival-loop packets carry the
+score/run state — e.g. `ScoreBreakdown` (the 6 score components) and the objectives, sanctuary,
+and true-death updates the client uses to drive its survival UI.
 
 ## Important Notes
 
-- `game.rs` is the largest file (~9.6K lines) containing the core game loop and most system logic
-- `player.rs` (~8.4K lines) handles all player-facing event processing
+- `game.rs` is the largest file (~16K lines): the core game loop, most system logic, **and** the
+  survival loop (crisis tiers, hordes, legendary threat, monolith/sanctuary, scoring, true death)
+- `player.rs` (~11K lines) handles all player-facing event processing
 - The `big-brain` dependency uses a pinned commit from a Codeberg fork, not crates.io
 - AI debug logs rotate daily to `logs/ai_debug.log`
 - The app requires a `.env` file for database and TLS configuration (not checked in)

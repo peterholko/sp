@@ -122,7 +122,7 @@
   refine_time: 120
   produces:
     - Wraithforge Mithril Ingot
-    - Wraighforge Mithril Dust
+    - Wraithforge Mithril Dust
 
 - name:  Stronghold Mithril Ore
   class: Ore
@@ -476,6 +476,10 @@
   produces:
     - Bristleback Raw Meat
     - Bristleback Raw Meat
+    - Bristleback Raw Meat
+    - Bristleback Raw Meat
+    - Bristleback Raw Meat
+    - Bristleback Raw Meat
     - Bristleback Raw Hide
     - bones
 
@@ -488,6 +492,8 @@
   refine_skill_req: 0
   refine_time: 30
   produces:
+    - Swiftstep Raw Meat
+    - Swiftstep Raw Meat
     - Swiftstep Raw Meat
     - Swiftstep Raw Hide
 
@@ -816,7 +822,7 @@
   weight: 1
   attrs:
     - name: Feed
-      value: 15
+      value: 6
 
 - name: Amitanian Grape
   class: Food
@@ -834,7 +840,7 @@
   weight: 1
   attrs:
     - name: Feed
-      value: 20
+      value: 8
 
 - name: Pine Nuts
   class: Food
@@ -948,7 +954,7 @@
     - name: Hunting
       value: 2
     - name: Attack Range
-      value: 3
+      value: 2
     - name: Accuracy
       value: 85
 
@@ -976,6 +982,9 @@
   slot: Helm
   image: copperhelm
   weight: 2
+  attrs:
+    - name: Defense
+      value: 2
 
 - name: Hide Wraps
   class: Armor
@@ -1379,3 +1388,775 @@
   subclass: Quest
   image: sealstone
   weight: 5
+
+###############################################################
+###############################################################
+##### WEAPON / ARMOR EXPANSION (item templates)           #####
+##### Stats live here in `attrs` (recipes inherit them).  #####
+##### Armor uses the plain `Defense` attr because combat  #####
+##### only sums `Defense` for damage reduction.           #####
+##### Proc chances are fractions (0.05 = 5%).             #####
+###############################################################
+###############################################################
+
+######################################
+##### PREREQ: INGOT/DUST COMPLETION ###
+##### Every ore lists ingot+dust in ###
+##### `produces:`; these templates  ###
+##### make those outputs real items ###
+##### (Quickforge Iron Ingot already ##
+#####  existed).                    ###
+######################################
+
+# --- Mithril Ingots (none existed; needed for mithril gear) ---
+- name: Stronghold Mithril Ingot
+  class: Ingot
+  subclass: Mithril Ingot
+  image: strongholdmithrilingot
+  weight: 5
+
+- name: Wraithforge Mithril Ingot
+  class: Ingot
+  subclass: Mithril Ingot
+  image: strongholdmithrilingot
+  weight: 5
+
+# --- Iron Ingot variants (only Quickforge existed) ---
+- name: Mistvale Iron Ingot
+  class: Ingot
+  subclass: Iron Ingot
+  image: ironingot
+  weight: 5
+
+- name: Slateback Iron Ingot
+  class: Ingot
+  subclass: Iron Ingot
+  image: ironingot
+  weight: 5
+
+- name: Thrakan Iron Ingot
+  class: Ingot
+  subclass: Iron Ingot
+  image: ironingot
+  weight: 5
+
+# --- Iron Dusts (none existed) ---
+- name: Quickforge Iron Dust
+  class: Dust
+  subclass: Iron Dust
+  image: quickforgeirondust
+  weight: 10
+
+- name: Mistvale Iron Dust
+  class: Dust
+  subclass: Iron Dust
+  image: quickforgeirondust
+  weight: 10
+
+- name: Slateback Iron Dust
+  class: Dust
+  subclass: Iron Dust
+  image: quickforgeirondust
+  weight: 10
+
+- name: Thrakan Iron Dust
+  class: Dust
+  subclass: Iron Dust
+  image: quickforgeirondust
+  weight: 10
+
+# --- Mithril Dusts (none existed) ---
+- name: Wraithforge Mithril Dust
+  class: Dust
+  subclass: Mithril Dust
+  image: strongholdmithrildust
+  weight: 10
+
+- name: Stronghold Mithril Dust
+  class: Dust
+  subclass: Mithril Dust
+  image: strongholdmithrildust
+  weight: 10
+
+# --- Stiff Leather variants (only Windstride existed; the other hides
+#     tan into these, and the new armor recipes consume `Leather`) ---
+- name: Bristleback Stiff Leather
+  class: Leather
+  subclass: Stiff Leather
+  image: leather
+  weight: 1
+
+- name: Swiftstep Stiff Leather
+  class: Leather
+  subclass: Stiff Leather
+  image: leather
+  weight: 1
+
+- name: Frostmane Stiff Leather
+  class: Leather
+  subclass: Stiff Leather
+  image: leather
+  weight: 1
+
+- name: Dunehorn Stiff Leather
+  class: Leather
+  subclass: Stiff Leather
+  image: leather
+  weight: 1
+
+- name: Stonegrove Stiff Leather
+  class: Leather
+  subclass: Stiff Leather
+  image: leather
+  weight: 1
+
+######################################
+##### TIER 0 - FORAGED / PRIMITIVE ###
+######################################
+
+- name: Bone Dagger
+  class: Weapon
+  subclass: Dagger
+  slot: Main Hand
+  image: bonedagger
+  weight: 2
+  attrs:
+    - name: Damage
+      value: 6
+    - name: Speed
+      value: 10
+    - name: Hunting
+      value: 1
+    - name: Bleed Chance
+      value: 0.05
+
+- name: Flint Hatchet
+  class: Weapon
+  subclass: Axe
+  slot: Main Hand
+  image: flinthatchet
+  weight: 5
+  attrs:
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 6
+    - name: Logging
+      value: 1
+
+- name: Stone-Tipped Spear
+  class: Weapon
+  subclass: Spear
+  slot: Main Hand
+  image: sharpenedstick
+  weight: 5
+  attrs:
+    - name: Damage
+      value: 9
+    - name: Speed
+      value: 5
+    - name: Hunting
+      value: 1
+
+- name: Bone War Club
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: club
+  weight: 6
+  attrs:
+    - name: Damage
+      value: 10
+    - name: Speed
+      value: 4.5
+    - name: Concussed Chance
+      value: 0.05
+
+- name: Throwing Spear
+  class: Weapon
+  subclass: Throwing
+  slot: Main Hand
+  image: throwingspear
+  weight: 3
+  attrs:
+    - name: Damage
+      value: 7
+    - name: Speed
+      value: 8
+    - name: Hunting
+      value: 1
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 75
+
+- name: Hide Cap
+  class: Armor
+  subclass: Helm
+  slot: Helm
+  image: hidecap
+  weight: 1
+  attrs:
+    - name: Defense
+      value: 1
+
+- name: Hide Leggings
+  class: Armor
+  subclass: Pants
+  slot: Pants
+  image: hideleggings
+  weight: 2
+  attrs:
+    - name: Defense
+      value: 1
+
+- name: Hide Boots
+  class: Armor
+  subclass: Boots
+  slot: Boots
+  image: hideboots
+  weight: 1
+  attrs:
+    - name: Defense
+      value: 1
+
+- name: Hide Mantle
+  class: Armor
+  subclass: Shoulder
+  slot: Shoulder
+  image: hidemantle
+  weight: 1
+  attrs:
+    - name: Defense
+      value: 1
+
+######################################
+##### COPPER TIER                  ###
+######################################
+
+- name: Copper Dagger
+  class: Weapon
+  subclass: Dagger
+  slot: Main Hand
+  image: valleyrundagger
+  weight: 3
+  attrs:
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 9
+    - name: Bleed Chance
+      value: 0.06
+
+- name: Copper Spear
+  class: Weapon
+  subclass: Spear
+  slot: Main Hand
+  image: copperspear
+  weight: 8
+  attrs:
+    - name: Damage
+      value: 16
+    - name: Speed
+      value: 5
+
+- name: Copper Mace
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: coppermace
+  weight: 9
+  attrs:
+    - name: Damage
+      value: 18
+    - name: Speed
+      value: 4.5
+    - name: Concussed Chance
+      value: 0.08
+
+- name: Copper Short Sword
+  class: Weapon
+  subclass: Sword
+  slot: Main Hand
+  image: valleyrunsword
+  weight: 8
+  attrs:
+    - name: Damage
+      value: 18
+    - name: Speed
+      value: 5
+    - name: Bleed Chance
+      value: 0.06
+
+- name: Copper Cuirass
+  class: Armor
+  subclass: Chest
+  slot: Chest
+  image: coppercuirass
+  weight: 12
+  attrs:
+    - name: Defense
+      value: 4
+
+- name: Copper Greaves
+  class: Armor
+  subclass: Pants
+  slot: Pants
+  image: coppergreaves
+  weight: 8
+  attrs:
+    - name: Defense
+      value: 3
+
+- name: Copper Sabatons
+  class: Armor
+  subclass: Boots
+  slot: Boots
+  image: coppersabatons
+  weight: 6
+  attrs:
+    - name: Defense
+      value: 2
+
+- name: Copper Pauldrons
+  class: Armor
+  subclass: Shoulder
+  slot: Shoulder
+  image: copperpauldrons
+  weight: 6
+  attrs:
+    - name: Defense
+      value: 2
+
+- name: Copper Buckler
+  class: Armor
+  subclass: Shield
+  slot: Off Hand
+  image: copperbuckler
+  weight: 7
+  attrs:
+    - name: Defense
+      value: 3
+
+######################################
+##### IRON TIER                    ###
+######################################
+
+- name: Iron Sword
+  class: Weapon
+  subclass: Sword
+  slot: Main Hand
+  image: sword
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 30
+    - name: Speed
+      value: 4.5
+    - name: Bleed Chance
+      value: 0.08
+
+- name: Iron War Axe
+  class: Weapon
+  subclass: Axe
+  slot: Main Hand
+  image: gothicaxe
+  weight: 11
+  attrs:
+    - name: Damage
+      value: 38
+    - name: Speed
+      value: 4
+    - name: Logging
+      value: 2
+    - name: Deep Wound Chance
+      value: 0.08
+
+- name: Iron War Hammer
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: ironwarhammer
+  weight: 12
+  attrs:
+    - name: Damage
+      value: 36
+    - name: Speed
+      value: 3.5
+    - name: Concussed Chance
+      value: 0.12
+
+- name: Iron Dagger
+  class: Weapon
+  subclass: Dagger
+  slot: Main Hand
+  image: dagger
+  weight: 4
+  attrs:
+    - name: Damage
+      value: 20
+    - name: Speed
+      value: 10
+    - name: Bleed Chance
+      value: 0.10
+
+- name: Iron Spear
+  class: Weapon
+  subclass: Spear
+  slot: Main Hand
+  image: ironspear
+  weight: 9
+  attrs:
+    - name: Damage
+      value: 28
+    - name: Speed
+      value: 5
+
+- name: Iron Halberd
+  class: Weapon
+  subclass: Polearm
+  slot: Main Hand
+  image: ironhalberd
+  weight: 13
+  attrs:
+    - name: Damage
+      value: 40
+    - name: Speed
+      value: 3.5
+    - name: Deep Wound Chance
+      value: 0.08
+
+- name: Iron Mace
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: ironmace
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 30
+    - name: Speed
+      value: 4
+    - name: Concussed Chance
+      value: 0.10
+
+- name: Iron Helm
+  class: Armor
+  subclass: Helm
+  slot: Helm
+  image: ironhelm
+  weight: 5
+  attrs:
+    - name: Defense
+      value: 6
+
+- name: Iron Chainmail
+  class: Armor
+  subclass: Chest
+  slot: Chest
+  image: quickforgechainmail
+  weight: 15
+  attrs:
+    - name: Defense
+      value: 8
+
+- name: Iron Greaves
+  class: Armor
+  subclass: Pants
+  slot: Pants
+  image: irongreaves
+  weight: 10
+  attrs:
+    - name: Defense
+      value: 6
+
+- name: Iron Sabatons
+  class: Armor
+  subclass: Boots
+  slot: Boots
+  image: ironsabatons
+  weight: 7
+  attrs:
+    - name: Defense
+      value: 4
+
+- name: Iron Pauldrons
+  class: Armor
+  subclass: Shoulder
+  slot: Shoulder
+  image: ironpauldrons
+  weight: 7
+  attrs:
+    - name: Defense
+      value: 4
+
+- name: Iron Kite Shield
+  class: Armor
+  subclass: Shield
+  slot: Off Hand
+  image: ironkiteshield
+  weight: 12
+  attrs:
+    - name: Defense
+      value: 6
+
+######################################
+##### MITHRIL TIER                 ###
+######################################
+
+- name: Mithril Greatsword
+  class: Weapon
+  subclass: Sword
+  slot: Main Hand
+  image: mithrilgreatsword
+  weight: 12
+  attrs:
+    - name: Damage
+      value: 55
+    - name: Speed
+      value: 4
+    - name: Bleed Chance
+      value: 0.12
+
+- name: Mithril War Axe
+  class: Weapon
+  subclass: Axe
+  slot: Main Hand
+  image: mithrilwaraxe
+  weight: 12
+  attrs:
+    - name: Damage
+      value: 60
+    - name: Speed
+      value: 3.5
+    - name: Deep Wound Chance
+      value: 0.12
+
+- name: Mithril Maul
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: mithrilmaul
+  weight: 14
+  attrs:
+    - name: Damage
+      value: 58
+    - name: Speed
+      value: 3
+    - name: Concussed Chance
+      value: 0.18
+    - name: Disarmed Chance
+      value: 0.08
+
+- name: Mithril Dagger
+  class: Weapon
+  subclass: Dagger
+  slot: Main Hand
+  image: mithrildagger
+  weight: 4
+  attrs:
+    - name: Damage
+      value: 32
+    - name: Speed
+      value: 10
+    - name: Bleed Chance
+      value: 0.15
+
+- name: Mithril Halberd
+  class: Weapon
+  subclass: Polearm
+  slot: Main Hand
+  image: mithrilhalberd
+  weight: 14
+  attrs:
+    - name: Damage
+      value: 62
+    - name: Speed
+      value: 3.5
+    - name: Deep Wound Chance
+      value: 0.12
+
+- name: Mithril Glaive
+  class: Weapon
+  subclass: Spear
+  slot: Main Hand
+  image: mithrilglaive
+  weight: 11
+  attrs:
+    - name: Damage
+      value: 50
+    - name: Speed
+      value: 4.5
+
+- name: Mithril Helm
+  class: Armor
+  subclass: Helm
+  slot: Helm
+  image: mithrilhelm
+  weight: 6
+  attrs:
+    - name: Defense
+      value: 10
+
+- name: Mithril Plate
+  class: Armor
+  subclass: Chest
+  slot: Chest
+  image: strongholdchainmail
+  weight: 18
+  attrs:
+    - name: Defense
+      value: 14
+
+- name: Mithril Greaves
+  class: Armor
+  subclass: Pants
+  slot: Pants
+  image: mithrilgreaves
+  weight: 12
+  attrs:
+    - name: Defense
+      value: 10
+
+- name: Mithril Sabatons
+  class: Armor
+  subclass: Boots
+  slot: Boots
+  image: mithrilsabatons
+  weight: 8
+  attrs:
+    - name: Defense
+      value: 7
+
+- name: Mithril Pauldrons
+  class: Armor
+  subclass: Shoulder
+  slot: Shoulder
+  image: mithrilpauldrons
+  weight: 8
+  attrs:
+    - name: Defense
+      value: 7
+
+- name: Mithril Tower Shield
+  class: Armor
+  subclass: Shield
+  slot: Off Hand
+  image: mithriltowershield
+  weight: 16
+  attrs:
+    - name: Defense
+      value: 11
+
+######################################
+##### RANGED & AMMO                ###
+######################################
+
+- name: Hunting Bow
+  class: Weapon
+  subclass: Bow
+  slot: Main Hand
+  image: bow
+  weight: 8
+  attrs:
+    - name: Damage
+      value: 14
+    - name: Hunting
+      value: 3
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 85
+
+- name: Iron-Limbed Longbow
+  class: Weapon
+  subclass: Bow
+  slot: Main Hand
+  image: longbow
+  weight: 9
+  attrs:
+    - name: Damage
+      value: 26
+    - name: Hunting
+      value: 2
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 90
+
+- name: Crossbow
+  class: Weapon
+  subclass: Crossbow
+  slot: Main Hand
+  image: crossbow
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 35
+    - name: Speed
+      value: 3
+    - name: Attack Range
+      value: 2
+    - name: Accuracy
+      value: 95
+
+- name: Iron Broadhead Arrows
+  class: Ammo
+  subclass: Arrow
+  image: arrows
+  weight: 1
+  attrs:
+    - name: Damage
+      value: 8
+    - name: Bleed Chance
+      value: 0.10
+
+- name: Mithril Warbow
+  class: Weapon
+  subclass: Bow
+  slot: Main Hand
+  image: warbow
+  weight: 9
+  attrs:
+    - name: Damage
+      value: 40
+    - name: Hunting
+      value: 2
+    - name: Attack Range
+      value: 3
+    - name: Accuracy
+      value: 92
+
+######################################
+##### STUDDED LEATHER (MEDIUM SET) ###
+######################################
+
+- name: Studded Leather Vest
+  class: Armor
+  subclass: Chest
+  slot: Chest
+  image: studdedleathervest
+  weight: 6
+  attrs:
+    - name: Defense
+      value: 5
+
+- name: Studded Leather Cap
+  class: Armor
+  subclass: Helm
+  slot: Helm
+  image: studdedleathercap
+  weight: 2
+  attrs:
+    - name: Defense
+      value: 3
+
+- name: Reinforced Leather Boots
+  class: Armor
+  subclass: Boots
+  slot: Boots
+  image: reinforcedleatherboots
+  weight: 3
+  attrs:
+    - name: Defense
+      value: 3

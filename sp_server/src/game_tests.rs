@@ -214,6 +214,37 @@ fn washed_ashore_loot_poi_only_uses_ocean_adjacent_land() {
 }
 
 #[test]
+fn map_lookups_handle_out_of_bounds_coords() {
+    // Regression: rings around an edge-adjacent center (e.g. goblin_raid_system
+    // spawning near the map border) produce off-map coordinates. The map helpers
+    // must treat these as off-map instead of indexing out of bounds and panicking
+    // with a usize underflow (y * WIDTH + x going negative).
+    let map = flat_land_map();
+
+    for (x, y) in [
+        (-1, 0),
+        (0, -1),
+        (-43, 0),
+        (WIDTH, 0),
+        (0, HEIGHT),
+        (WIDTH, HEIGHT),
+    ] {
+        assert!(!Map::is_passable(x, y, &map));
+        assert!(!Map::is_passable_by_obj(x, y, true, false, false, &map));
+        assert_eq!(Map::tile_type(x, y, &map), TileType::Ocean);
+    }
+
+    // are_tile_types_nearby walks the ring around the corner tile, which includes
+    // off-map neighbours; it must not panic.
+    let corner = Position { x: 0, y: 0 };
+    assert!(Map::are_tile_types_nearby(
+        corner,
+        vec![TileType::Grasslands],
+        &map
+    ));
+}
+
+#[test]
 fn info_tile_packet_serializes_survey_status() {
     let packet = ResponsePacket::InfoTile {
         x: 1,
@@ -1078,13 +1109,18 @@ fn idle_rested_hero_with_bedroll_does_not_sleep() {
 }
 
 #[test]
-fn first_resurrection_uses_starting_soulshard_cost() {
-    assert_eq!(resurrection_attempt_cost(1, 0), 10);
+fn first_resurrection_uses_flat_affordable_cost() {
+    // Flat and below the monolith's 10 starting shards, even with earned XP.
+    assert_eq!(resurrection_attempt_cost(1, 0), FIRST_DEATH_SOULSHARD_COST);
+    assert_eq!(resurrection_attempt_cost(1, 5000), FIRST_DEATH_SOULSHARD_COST);
 }
 
 #[test]
-fn later_resurrections_scale_from_completed_deaths() {
-    assert_eq!(resurrection_attempt_cost(2, 0), 12);
+fn later_resurrections_scale_from_second_death() {
+    // Second death starts the formula at the base cost...
+    assert_eq!(resurrection_attempt_cost(2, 0), 10);
+    // ...and each further death applies the 1.2x escalation.
+    assert_eq!(resurrection_attempt_cost(3, 0), 12);
 }
 
 #[test]
@@ -2453,9 +2489,11 @@ fn threat_risk_severity_has_warning_before_crisis_threshold() {
 }
 
 #[test]
-fn survival_director_starts_after_day_six_or_objective() {
-    assert!(!survival_director_active(5, None));
-    assert!(survival_director_active(6, None));
+fn survival_director_starts_after_day_eight_or_objective() {
+    // Heavy scaling hordes hold off until day 8 (days 6-7 stay on the gentle ramp),
+    // widening the early calm window for banking a food reserve.
+    assert!(!survival_director_active(7, None));
+    assert!(survival_director_active(8, None));
 
     let objectives = PlayerObjectives {
         survive_5_nights: true,
@@ -2572,7 +2610,7 @@ fn rescue_victory_uses_player_survival_day() {
     ));
     assert!(rescue_victory_ready(
         player_survival_day(
-            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 10)),
+            &GameTick(join_tick + (GAME_TICKS_PER_DAY * 50)),
             7,
             &intro_state,
         ),
@@ -2583,7 +2621,7 @@ fn rescue_victory_uses_player_survival_day() {
         rescue_progress: 1,
         ..Default::default()
     };
-    assert!(!rescue_victory_ready(11, &already_rescued));
+    assert!(!rescue_victory_ready(51, &already_rescued));
 }
 
 #[test]

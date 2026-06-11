@@ -564,6 +564,27 @@ mod tests {
     }
 
     #[test]
+    fn only_bats_traverse_mountains() {
+        assert!(can_traverse_mountains("Cave Bat"));
+        assert!(can_traverse_mountains("Frost Bat"));
+        assert!(!can_traverse_mountains("Giant Rat"));
+        assert!(!can_traverse_mountains("Wolf"));
+    }
+
+    #[test]
+    fn mountains_and_forests_both_count_as_cover() {
+        let mut map = flat_test_map();
+        let mountain = Position { x: 2, y: 0 };
+        let forest = Position { x: 3, y: 0 };
+        map.base[(mountain.y * WIDTH + mountain.x) as usize].tile_type = TileType::Mountain;
+        map.base[(forest.y * WIDTH + forest.x) as usize].tile_type = TileType::DeciduousForest;
+
+        assert!(is_cover_position(&map, mountain));
+        assert!(is_cover_position(&map, forest));
+        assert!(!is_cover_position(&map, Position { x: 0, y: 0 }));
+    }
+
+    #[test]
     fn wander_then_hide_wanders_before_threshold() {
         let mut app = App::new();
         app.add_systems(
@@ -2703,9 +2724,15 @@ pub fn random_wander_action_system(
                     continue;
                 }
 
-                let Some(next_pos) =
-                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
-                else {
+                let mountainwalk = can_traverse_mountains(&npc.template.0);
+
+                let Some(next_pos) = select_random_adjacent_step(
+                    *npc.pos,
+                    npc_player_id,
+                    &map,
+                    &collision_list,
+                    mountainwalk,
+                ) else {
                     span.span().in_scope(|| {
                         npc_debug!(*actor, obj_id, None, "No random wander step available");
                     });
@@ -2831,16 +2858,25 @@ pub fn move_to_forest_action_system(
                     continue;
                 }
 
+                let mountainwalk = can_traverse_mountains(&npc.template.0);
+
                 let Some(next_pos) = find_nearest_cover_path(
                     *npc.pos,
                     fallback.last_seen_pos,
                     npc_player_id,
                     &map,
                     &collision_list,
+                    mountainwalk,
                 )
                 .and_then(|(path, _cost)| path.get(1).cloned())
                 .or_else(|| {
-                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
+                    select_random_adjacent_step(
+                        *npc.pos,
+                        npc_player_id,
+                        &map,
+                        &collision_list,
+                        mountainwalk,
+                    )
                 }) else {
                     span.span().in_scope(|| {
                         npc_debug!(*actor, obj_id, None, "No forest or fallback move found");
@@ -2927,16 +2963,25 @@ pub fn move_to_forest_action_system(
                     continue;
                 }
 
+                let mountainwalk = can_traverse_mountains(&npc.template.0);
+
                 let Some(next_pos) = find_nearest_cover_path(
                     *npc.pos,
                     fallback.last_seen_pos,
                     npc_player_id,
                     &map,
                     &collision_list,
+                    mountainwalk,
                 )
                 .and_then(|(path, _cost)| path.get(1).cloned())
                 .or_else(|| {
-                    select_random_adjacent_step(*npc.pos, npc_player_id, &map, &collision_list)
+                    select_random_adjacent_step(
+                        *npc.pos,
+                        npc_player_id,
+                        &map,
+                        &collision_list,
+                        mountainwalk,
+                    )
                 }) else {
                     span.span().in_scope(|| {
                         npc_debug!(*actor, obj_id, None, "No forest or fallback move found");
@@ -3373,6 +3418,7 @@ pub fn move_to_target_system(
                 let npc_int = npc_template.int.unwrap_or("mindless".to_string());
                 let allow_attackable_blockers =
                     !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
+                let mountainwalk = can_traverse_mountains(&npc.template.0);
 
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
@@ -3407,7 +3453,7 @@ pub fn move_to_target_system(
                         collision_list,
                         true,
                         false,
-                        false,
+                        mountainwalk,
                         true, // Allow move onto position with transport
                         allow_attackable_blockers,
                     ) else {
@@ -3527,6 +3573,7 @@ pub fn move_to_target_system(
                 let npc_int = npc_template.int.unwrap_or("mindless".to_string());
                 let allow_attackable_blockers =
                     !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
+                let mountainwalk = can_traverse_mountains(&npc.template.0);
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
@@ -3570,7 +3617,7 @@ pub fn move_to_target_system(
                         collision_list,
                         true,
                         false,
-                        false,
+                        mountainwalk,
                         true, // Allow move onto position with transport
                         allow_attackable_blockers,
                     ) else {
@@ -5784,6 +5831,11 @@ fn animal_fallback_kind_for_template(template: &str) -> Option<AnimalFallbackKin
     }
 }
 
+// Bats fly, so they can cross mountain terrain that ground-bound NPCs cannot.
+fn can_traverse_mountains(template: &str) -> bool {
+    template.contains("Bat")
+}
+
 fn npc_move_duration(
     base_speed: Option<i32>,
     effects: &Effects,
@@ -5804,6 +5856,7 @@ fn select_random_adjacent_step(
     npc_player_id: i32,
     map: &Map,
     blocking_list: &Vec<Blocker>,
+    mountainwalk: bool,
 ) -> Option<MapPos> {
     let steps = Map::get_neighbour_tiles(
         npc_pos.x,
@@ -5813,7 +5866,7 @@ fn select_random_adjacent_step(
         blocking_list,
         true,
         false,
-        false,
+        mountainwalk,
         false,
         false,
         MapPos(npc_pos.x, npc_pos.y),
@@ -5835,6 +5888,7 @@ fn find_nearest_cover_path(
     npc_player_id: i32,
     map: &Map,
     blocking_list: &Vec<Blocker>,
+    mountainwalk: bool,
 ) -> Option<(Vec<MapPos>, u32)> {
     let mut best_path: Option<(Vec<MapPos>, u32, u32)> = None;
 
@@ -5852,7 +5906,7 @@ fn find_nearest_cover_path(
             blocking_list.clone(),
             true,
             false,
-            false,
+            mountainwalk,
             // Allow the goal tile itself to be impassable terrain (e.g. a
             // mountain) so animals can take cover on mountain tiles too.
             true,

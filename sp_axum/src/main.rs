@@ -232,6 +232,14 @@ fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     peer.ip()
 }
 
+// The game server (sp_server network.rs) rejects sessions older than 1 day,
+// so handing back a stored session indefinitely lets a returning player
+// authenticate here but never connect to the WebSocket. Rotate well before
+// that cutoff.
+fn session_is_stale(created_at: DateTime<Utc>) -> bool {
+    Utc::now().signed_duration_since(created_at) > chrono::Duration::hours(20)
+}
+
 fn too_many_requests() -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
@@ -743,15 +751,47 @@ async fn auth_handler(
     if found_account && password_match {
         let session_row = conn
             .query_one(
-                "SELECT session FROM sessions WHERE player_id = $1",
+                "SELECT session, created_at FROM sessions WHERE player_id = $1",
                 &[&player_id],
             )
             .await;
 
         match session_row {
             Ok(session_row) => {
-                // Get session string from database
-                session = Some(session_row.get::<_, String>("session"));
+                let stored_session: String = session_row.get("session");
+                let created_at: DateTime<Utc> = session_row.get("created_at");
+
+                if session_is_stale(created_at) {
+                    // Rotate in place so the game server accepts the session.
+                    let new_session = {
+                        let mut rng = state.rng.lock().await;
+                        rng.gen::<u128>().to_string()
+                    };
+                    let result = conn
+                        .execute(
+                            "UPDATE sessions SET session = $1, created_at = current_timestamp WHERE player_id = $2",
+                            &[&new_session, &player_id],
+                        )
+                        .await;
+                    match result {
+                        Ok(_) => {
+                            println!("Rotated stale session for player {}", player_id);
+                            session = Some(new_session);
+                        }
+                        Err(e) => {
+                            println!("Error rotating session: {}", e);
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(AuthError {
+                                    msg: "Unknown error".to_string(),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                } else {
+                    session = Some(stored_session);
+                }
             }
             Err(_) => {
                 let mut rng = state.rng.lock().await;
@@ -1012,7 +1052,7 @@ async fn fingerprint_auth_handler(
     // First check for existing session
     let session_row = conn
         .query_opt(
-            "SELECT session FROM sessions WHERE player_id = $1",
+            "SELECT session, created_at FROM sessions WHERE player_id = $1",
             &[&player_id],
         )
         .await;
@@ -1020,7 +1060,35 @@ async fn fingerprint_auth_handler(
     let (session, store_new) = match session_row {
         Ok(Some(row)) => {
             let session: String = row.get("session");
-            (session, false)
+            let created_at: DateTime<Utc> = row.get("created_at");
+
+            if session_is_stale(created_at) {
+                // Rotate in place so the game server accepts the session.
+                let new_session = {
+                    let mut rng = state.rng.lock().await;
+                    rng.gen::<u128>().to_string()
+                };
+                let result = conn
+                    .execute(
+                        "UPDATE sessions SET session = $1, created_at = current_timestamp WHERE player_id = $2",
+                        &[&new_session, &player_id],
+                    )
+                    .await;
+                match result {
+                    Ok(_) => {
+                        println!("Rotated stale session for player {}", player_id);
+                        (new_session, false)
+                    }
+                    Err(e) => {
+                        // Fall back to the stored session — broken for the game
+                        // server but better than failing auth outright.
+                        println!("Error rotating session: {}", e);
+                        (session, false)
+                    }
+                }
+            } else {
+                (session, false)
+            }
         }
         Ok(None) => {
             let mut rng = state.rng.lock().await;

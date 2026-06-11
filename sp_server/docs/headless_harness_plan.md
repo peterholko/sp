@@ -1,8 +1,31 @@
 # In-Process Headless Test Harness — Implementation Plan
 
-> Status: **approved design, not yet implemented.** This document is the build brief for an
-> in-process Rust test harness that drives the Bevy game `App` directly so we can run many full
-> games quickly for balance/metrics testing.
+> Status: **implemented.** This document is the build brief for the in-process Rust test harness
+> that drives the Bevy game `App` directly so we can run many full games quickly for
+> balance/metrics testing.
+>
+> Implementation lives in `src/headless.rs` (`HeadlessGame` + `RunMetrics` + smoke test),
+> `src/headless_bot.rs` (deterministic `Bot`), and `src/bin/headless_runner.rs` (multi-game
+> runner → `headless_runs.{csv,json}` + summary). The setup split is in `src/game.rs`
+> (`world_init`/`network_init`/`new_game_setup_headless`, `GamePlugin.headless`) and the headless
+> app builder + shared `register_all_types` are in `src/lib.rs` (`build_headless_app`).
+>
+> Run with: `cargo run --bin headless_runner [N] [MAX_TICKS]` and
+> `cargo test --lib headless::tests::smoke`. Must run via cargo (the map loads relative to
+> `CARGO_MANIFEST_DIR`).
+>
+> Notes from the build:
+> - The hero's `player_id` is **1** (`< MAX_PLAYER_ID` so it counts as human); 1000 is the NPC id.
+> - Movement is single-hex-step: the server's `MoveEvent` only accepts a destination adjacent to
+>   the mover, so the bot greedily steps toward targets and only acts while the hero is idle.
+> - Runs are **not** bit-identical across the same bot because the game uses `rand::thread_rng()`
+>   in ~50 places (world gen, enemy choice, loot, combat rolls). Isolation is instead guaranteed
+>   structurally (a fresh `App` per run; no shared mutable statics) and observed empirically:
+>   back-to-back runs match on every metric except RNG-driven combat hp.
+> - The runner found and the build fixed a latent crash: `Map::is_passable` indexed out of bounds
+>   when `goblin_raid_system` placed a spawn off-map; both passability helpers now bounds-check.
+>   The runner also wraps each game in `catch_unwind` so any future game panic is recorded as a
+>   `Panic` outcome instead of aborting the batch.
 
 ## Context
 

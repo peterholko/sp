@@ -14,6 +14,7 @@ export interface ObjectState {
     prevY? : integer;
     vision : integer;
     image : string;
+    hsl? : number[];
     work_done?: number;
     total_work?: number;
     work_per_sec?: number;

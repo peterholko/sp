@@ -69,7 +69,7 @@ use crate::obj::{
     WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
-use crate::player_setup::{AssignedStartLocations, StartLocations};
+use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
@@ -86,11 +86,20 @@ use crate::{villager_util, AppState};
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
 
-#[derive(Resource, Deref, DerefMut, Clone, Debug)]
+#[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct DatabaseManagers(Arc<Mutex<HashMap<i32, DatabaseClient>>>);
 
 #[derive(Resource, Deref, DerefMut)]
 pub struct NetworkReceiver(CBReceiver<PlayerEvent>);
+
+impl NetworkReceiver {
+    // Constructor so the headless harness (a sibling module) can wrap a crossbeam
+    // receiver it owns the sending half of. The production path builds this inline
+    // in `Game::network_init`.
+    pub fn new(receiver: CBReceiver<PlayerEvent>) -> Self {
+        Self(receiver)
+    }
+}
 
 #[derive(Resource, Deref, DerefMut, Reflect, Debug)]
 #[reflect(Resource)]
@@ -354,6 +363,94 @@ pub struct SanctuaryExcursionEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
 
+// Base Soulshard cost for the first sanctuary upgrade. Cost escalates per level
+// (see [`sanctuary_upgrade_cost`]) so maxing the sanctuary is a multi-stage goal
+// stretched across the run rather than done in the first few days.
+pub const SANCTUARY_UPGRADE_COST: i32 = 3;
+// Highest sanctuary level (keeps the suppression radius from swallowing the map).
+pub const SANCTUARY_MAX_LEVEL: i32 = 5;
+
+/// Soulshards required to go from `current_level` to the next level. Escalates:
+/// 3, 6, 9, 12, 15 (45 total to max), so each tier is a bigger commitment.
+pub fn sanctuary_upgrade_cost(current_level: i32) -> i32 {
+    SANCTUARY_UPGRADE_COST * (current_level.max(0) + 1)
+}
+// Extra in-zone defensive multiplier per sanctuary level (applied to the Sanctuary
+// effect's amplifier, which combat multiplies the sanctuary defense by).
+pub const SANCTUARY_DEFENSE_PER_LEVEL: f32 = 0.25;
+
+/// Effective full-suppression radius for a sanctuary at `level`. Inside this
+/// radius random encounters are fully suppressed and the defensive bonus applies.
+/// Level 0 = the innate `SANCTUARY_RANGE`; each level adds one tile.
+pub fn sanctuary_full_radius(level: i32) -> u32 {
+    (SANCTUARY_RANGE as i32 + level.max(0)) as u32
+}
+
+/// Effective weak-sanctuary radius (outer ring) for a sanctuary at `level`.
+pub fn sanctuary_weak_radius(level: i32) -> u32 {
+    (WEAK_SANCTUARY_RANGE as i32 + level.max(0)) as u32
+}
+
+/// A single Monolith's protective zone, kept in the [`SanctuaryZones`] resource so
+/// every system (encounter suppression, wildness regen, crisis spawning, the
+/// defensive bonus) reads one source of truth instead of re-querying Monoliths.
+#[derive(Debug, Clone, Copy)]
+pub struct SanctuaryZone {
+    pub pos: Position,
+    pub level: i32,
+}
+
+impl SanctuaryZone {
+    pub fn full_radius(&self) -> u32 {
+        sanctuary_full_radius(self.level)
+    }
+    pub fn weak_radius(&self) -> u32 {
+        sanctuary_weak_radius(self.level)
+    }
+}
+
+/// monolith obj id -> its current sanctuary zone. Rebuilt each tick by
+/// `sanctuary_zones_sync_system` from the live Monolith entities.
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SanctuaryZones(pub HashMap<i32, SanctuaryZone>);
+
+impl SanctuaryZones {
+    /// True if `pos` is within the full-suppression radius of any sanctuary
+    /// (matches the `dist < full_radius` boundary used for encounter suppression).
+    pub fn in_full_zone(&self, pos: Position) -> bool {
+        self.0
+            .values()
+            .any(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)) < z.full_radius())
+    }
+
+    /// The nearest sanctuary zone to `pos`, if any (by centre distance).
+    pub fn nearest(&self, pos: Position) -> Option<SanctuaryZone> {
+        self.0
+            .values()
+            .min_by_key(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)))
+            .copied()
+    }
+}
+
+// Rebuild the SanctuaryZones lookup from the live Monolith entities each tick.
+// Cheap (a handful of Monoliths) and keeps the single source of truth in sync
+// with sanctuary-level upgrades without threading the resource through spawn code.
+fn sanctuary_zones_sync_system(
+    mut zones: ResMut<SanctuaryZones>,
+    monolith_query: Query<(&Id, &Position, &Monolith)>,
+) {
+    zones.0.clear();
+    for (id, pos, monolith) in monolith_query.iter() {
+        zones.0.insert(
+            id.0,
+            SanctuaryZone {
+                pos: *pos,
+                level: monolith.sanctuary_level,
+            },
+        );
+    }
+}
+
 // Players that just logged in and need their hero's sanctuary state re-sent.
 // The server only emits sanctuary effect packets on movement transitions, so on
 // (re)login the client has no idea whether the hero is currently protected.
@@ -566,13 +663,14 @@ const GOBLIN_PILLAGER_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 5;
 
 // Fallback deadlines: if a crisis tier has not fired from its organic condition
 // within this much survival time, force it so the threat curve keeps advancing
-// for passive players. Tiers 4 and 5 already trigger on survival time well
-// before these deadlines; their fallback is a guarantee that still holds should
-// those primary thresholds ever be raised past it.
-const WOLF_PACK_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 20; // 20 min
-const GOBLIN_RAID_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 30; // 30 min
-const UNDEAD_INCURSION_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 40; // 40 min
-const GOBLIN_PILLAGER_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 60; // 60 min
+// for passive players. Staggered so escalation arrives in tier order even for a
+// player who never leaves camp: T2@8m, T3@10m, then the tier 4/5 survival-time
+// primaries (3 days ≈ 12m, 5 days ≈ 20m) take over; the 16m/24m fallbacks are
+// pure backstops should those primary thresholds ever be raised past them.
+const WOLF_PACK_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 8; // 8 min
+const GOBLIN_RAID_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 10; // 10 min
+const UNDEAD_INCURSION_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 16; // 16 min
+const GOBLIN_PILLAGER_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 24; // 24 min
 
 pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
     let mut tier = 0;
@@ -595,7 +693,10 @@ pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
 }
 
 pub fn survival_director_active(day: i32, objectives: Option<&PlayerObjectives>) -> bool {
-    day >= 6 || objectives.map(|obj| obj.survive_5_nights).unwrap_or(false)
+    // Heavy scaling hordes hold off until day 8, widening the early calm window so
+    // the player can hunt + cook + bank a food reserve before food-gathering gets
+    // cut off by nightly sieges. (Days 2-7 still face the lighter fixed waves.)
+    day >= 8 || objectives.map(|obj| obj.survive_5_nights).unwrap_or(false)
 }
 
 pub fn survival_horde_size(day: i32, crisis_tier: i32, active_legendary_count: i32) -> usize {
@@ -871,6 +972,8 @@ pub struct GameEventExtras<'w, 's> {
     pub initial_encounter_state: Res<'w, InitialEncounterState>,
     pub plans: ResMut<'w, Plans>,
     pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
+    // Used to give a spawned villager its player's start-location team color.
+    pub assigned_start_locations: Res<'w, AssignedStartLocations>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -956,6 +1059,11 @@ pub struct EffectAdded {
 #[derive(Debug, Component)]
 pub struct Monolith {
     pub soulshards: i32,
+    /// How far the player has empowered this Monolith's protective sanctuary.
+    /// Level 0 is the innate zone; each level (bought with Soulshards via
+    /// `PlayerEvent::UpgradeSanctuary`) widens the suppression radius and the
+    /// in-zone defensive bonus. See [`sanctuary_full_radius`] / [`SanctuaryZones`].
+    pub sanctuary_level: i32,
 }
 
 #[derive(Debug, Component)]
@@ -1204,18 +1312,30 @@ pub struct VillagerQuery {
 }
 pub struct GamePlugin {
     pub new_game: bool,
+    // When true the production network/tokio path is skipped and the world is
+    // built with `new_game_setup_headless`. The in-process headless test harness
+    // (see `headless.rs`) inserts the network resources itself. Always false for
+    // the real server.
+    pub headless: bool,
 }
 
 impl Default for GamePlugin {
     fn default() -> Self {
-        Self { new_game: true }
+        Self {
+            new_game: true,
+            headless: false,
+        }
     }
 }
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         if self.new_game {
-            app.add_systems(PreStartup, Game::new_game_setup);
+            if self.headless {
+                app.add_systems(PreStartup, Game::new_game_setup_headless);
+            } else {
+                app.add_systems(PreStartup, Game::new_game_setup);
+            }
         } else {
             app.add_systems(PreStartup, Game::reload_game);
             //app.add_systems(PreUpdate, Game::check_resources_ready.run_if(in_state(AppState::PreRunning));
@@ -1381,7 +1501,15 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                wildness_regen_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
                 objectives_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                sanctuary_zones_sync_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -1473,6 +1601,7 @@ impl Plugin for GamePlugin {
                 Update,
                 (
                     remove_dead_system.run_if(in_state(AppState::Running)),
+                    hero_needs_warning_system.run_if(in_state(AppState::Running)),
                     dehydrated_system.run_if(in_state(AppState::Running)),
                     starving_system.run_if(in_state(AppState::Running)),
                     exhausted_system.run_if(in_state(AppState::Running)),
@@ -1500,6 +1629,12 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 watchtower_reveal_system
+                    .run_if(in_state(AppState::Running))
+                    .before(perception_system),
+            )
+            .add_systems(
+                Update,
+                reveal_unhidden_system
                     .run_if(in_state(AppState::Running))
                     .before(perception_system),
             )
@@ -1542,17 +1677,72 @@ pub struct Game {
 }
 
 impl Game {
+    // Production new-game setup: build the world, wire up the network/tokio path,
+    // then enter Running. Behaviour-preserving wrapper around `world_init` +
+    // `network_init` (split so the headless harness can reuse `world_init` and
+    // supply its own in-process network resources instead).
     pub fn new_game_setup(
         mut commands: Commands,
-        mut recipes: ResMut<Recipes>,
-        mut resources: ResMut<Resources>,
-        mut terrain_features: ResMut<TerrainFeatures>,
+        recipes: ResMut<Recipes>,
+        resources: ResMut<Resources>,
+        terrain_features: ResMut<TerrainFeatures>,
         templates: Res<Templates>,
         map: Res<Map>,
         mut next_state: ResMut<NextState<AppState>>,
     ) {
         println!("Bevy Setup System");
 
+        Self::world_init(
+            &mut commands,
+            recipes,
+            resources,
+            terrain_features,
+            templates,
+            map,
+        );
+        Self::network_init(&mut commands);
+
+        next_state.set(AppState::Running);
+    }
+
+    // Headless new-game setup for the in-process test harness: build the world
+    // and enter Running, WITHOUT spawning the tokio/WebSocket/Postgres network
+    // path. The harness inserts `NetworkReceiver`/`Clients`/`DatabaseManagers`
+    // itself (see `headless.rs`) before pumping the app.
+    pub fn new_game_setup_headless(
+        mut commands: Commands,
+        recipes: ResMut<Recipes>,
+        resources: ResMut<Resources>,
+        terrain_features: ResMut<TerrainFeatures>,
+        templates: Res<Templates>,
+        map: Res<Map>,
+        mut next_state: ResMut<NextState<AppState>>,
+    ) {
+        Self::world_init(
+            &mut commands,
+            recipes,
+            resources,
+            terrain_features,
+            templates,
+            map,
+        );
+
+        next_state.set(AppState::Running);
+    }
+
+    // World-only initialization: spawn resources/terrain, load recipes/prices and
+    // insert every per-game state resource. Deliberately EXCLUDES the three
+    // network resources (`NetworkReceiver`/`Clients`/`DatabaseManagers`) and the
+    // tokio_setup spawn — those are handled by `network_init` (production) or by
+    // the headless harness. Does not change AppState.
+    pub fn world_init(
+        commands: &mut Commands,
+        mut recipes: ResMut<Recipes>,
+        mut resources: ResMut<Resources>,
+        mut terrain_features: ResMut<TerrainFeatures>,
+        templates: Res<Templates>,
+        map: Res<Map>,
+    ) {
         // Initialize game tick
         let game_tick: GameTick = GameTick(EVENING); // Set to Evening for testing campfire vision
 
@@ -1568,33 +1758,6 @@ impl Game {
         let explored_map: ExploredMap = ExploredMap(HashMap::new());
         let survey_history: SurveyHistory = SurveyHistory(HashMap::new());
         let investigated_pois: InvestigatedPOIs = InvestigatedPOIs(HashMap::new());
-
-        // Initialize database manager arc mutex sender
-        let database_managers = DatabaseManagers(Arc::new(Mutex::new(HashMap::new())));
-
-        //Create the database to game channel, note the sender will be cloned by each connected client
-        let (database_to_game_sender, _database_to_game_receiver) = unbounded::<DatabaseEvent>();
-
-        //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
-        let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
-
-        //Create the client to game channel, note the sender will be cloned by each connected client
-        let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
-
-        let thread_pool = IoTaskPool::get();
-
-        //Spawn the tokio runtime setup using a Compat with the clients and client to game channel
-        thread_pool
-            .spawn(Compat::new(network::tokio_setup(
-                database_to_game_sender,
-                database_managers.clone(),
-                client_to_game_sender,
-                clients.clone(),
-                true,
-            )))
-            .detach();
-
-        let network_receiver = NetworkReceiver(client_to_game_receiver);
 
         // Initialize indexes
         let ids: Ids = Ids {
@@ -1628,6 +1791,7 @@ impl Game {
         let player_stats = PlayerStats(HashMap::new());
         let crisis_state = CrisisState(HashMap::new());
         let sanctuary_excursions = SanctuaryExcursions(HashMap::new());
+        let sanctuary_zones = SanctuaryZones(HashMap::new());
         let spawn_positions = SpawnPositions(HashMap::new());
         let player_intro_state = PlayerIntroState(HashMap::new());
         let initial_encounter_state = InitialEncounterState(HashMap::new());
@@ -1640,12 +1804,8 @@ impl Game {
         let debug_objs = DebugObjs(HashSet::new());
         let log_overrides = LogLevelOverrides::default();
 
-        //Insert the clients and client to game channel into the Bevy resources
         commands.insert_resource(ids);
         commands.insert_resource(entity_obj_map);
-        commands.insert_resource(database_managers);
-        commands.insert_resource(clients);
-        commands.insert_resource(network_receiver);
         commands.insert_resource(game_tick);
         commands.insert_resource(map_events);
         commands.insert_resource(processed_map_events);
@@ -1659,6 +1819,7 @@ impl Game {
         commands.insert_resource(player_stats);
         commands.insert_resource(crisis_state);
         commands.insert_resource(sanctuary_excursions);
+        commands.insert_resource(sanctuary_zones);
         commands.insert_resource(spawn_positions);
         commands.insert_resource(player_intro_state);
         commands.insert_resource(initial_encounter_state);
@@ -1669,8 +1830,43 @@ impl Game {
         commands.insert_resource(victory_state);
         commands.insert_resource(debug_objs);
         commands.insert_resource(log_overrides);
+    }
 
-        next_state.set(AppState::Running);
+    // Network initialization for the production path: create the crossbeam client
+    // channel + database channel, spawn the tokio/WebSocket/Postgres runtime via
+    // the IO task pool, and insert the three network resources. NOT used by the
+    // headless harness.
+    pub fn network_init(commands: &mut Commands) {
+        // Initialize database manager arc mutex sender
+        let database_managers = DatabaseManagers(Arc::new(Mutex::new(HashMap::new())));
+
+        //Create the database to game channel, note the sender will be cloned by each connected client
+        let (database_to_game_sender, _database_to_game_receiver) = unbounded::<DatabaseEvent>();
+
+        //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
+        let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
+
+        //Create the client to game channel, note the sender will be cloned by each connected client
+        let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
+
+        let thread_pool = IoTaskPool::get();
+
+        //Spawn the tokio runtime setup using a Compat with the clients and client to game channel
+        thread_pool
+            .spawn(Compat::new(network::tokio_setup(
+                database_to_game_sender,
+                database_managers.clone(),
+                client_to_game_sender,
+                clients.clone(),
+                true,
+            )))
+            .detach();
+
+        let network_receiver = NetworkReceiver(client_to_game_receiver);
+
+        commands.insert_resource(database_managers);
+        commands.insert_resource(clients);
+        commands.insert_resource(network_receiver);
     }
 
     pub fn reload_game(
@@ -1872,6 +2068,7 @@ fn init_objs(
 
         let monolith_attrs = Monolith {
             soulshards: INIT_MONOLITH_SOULSHARDS,
+            sanctuary_level: 0,
         };
         // Spawn entity
         let monolith_entity_id = commands.spawn((monolith.clone(), monolith_attrs)).id();
@@ -2226,6 +2423,7 @@ fn move_event_completed_system(
     templates: Res<Templates>,
     player_intro_state: Res<PlayerIntroState>,
     mut sanctuary_excursions: ResMut<SanctuaryExcursions>,
+    sanctuary_zones: Res<SanctuaryZones>,
     (
         mover_query,
         map_obj_query,
@@ -2281,9 +2479,18 @@ fn move_event_completed_system(
             }
 
             if *obj.subclass == Subclass::Monolith {
-                if Map::dist(*mover_pos, *obj.pos) < SANCTUARY_RANGE {
+                // Suppression radius scales with the Monolith's sanctuary level
+                // (upgraded with Soulshards); fall back to the innate range if the
+                // zone hasn't been synced yet this frame.
+                let (full_r, weak_r) = sanctuary_zones
+                    .0
+                    .get(&obj.id.0)
+                    .map(|z| (z.full_radius(), z.weak_radius()))
+                    .unwrap_or((SANCTUARY_RANGE, WEAK_SANCTUARY_RANGE));
+                let dist = Map::dist(*mover_pos, *obj.pos);
+                if dist < full_r {
                     in_range_sanctuary = Some((obj.id.0, obj.pos.clone()));
-                } else if Map::dist(*mover_pos, *obj.pos) < WEAK_SANCTUARY_RANGE {
+                } else if dist < weak_r {
                     in_range_weak_sanctuary = Some((obj.id.0, obj.pos.clone()));
                 }
             } else if *obj.subclass == Subclass::Shelter {
@@ -2441,12 +2648,16 @@ fn move_event_completed_system(
             };
 
             if let Some((monolith_id, monolith_pos)) = in_range_sanctuary {
+                // In-zone defensive bonus scales with how far the sanctuary is upgraded.
+                let sanctuary_amp = 1.0
+                    + sanctuary_zones.0.get(&monolith_id).map(|z| z.level).unwrap_or(0) as f32
+                        * SANCTUARY_DEFENSE_PER_LEVEL;
                 // Check if coming from weak sanctuary
                 if effects.has(Effect::WeakSanctuary) {
                     // Add weak sanctuary
                     effects
                         .0
-                        .insert(Effect::Sanctuary, (game_tick.0 + 1, 1.0, 1));
+                        .insert(Effect::Sanctuary, (game_tick.0 + 1, sanctuary_amp, 1));
 
                     commands.entity(mover_entity).insert(Sanctuary {
                         id: monolith_id,
@@ -2472,7 +2683,7 @@ fn move_event_completed_system(
                 } else if !effects.has(Effect::Sanctuary) {
                     effects
                         .0
-                        .insert(Effect::Sanctuary, (game_tick.0 + 1, 1.0, 1));
+                        .insert(Effect::Sanctuary, (game_tick.0 + 1, sanctuary_amp, 1));
 
                     commands.entity(mover_entity).insert(Sanctuary {
                         id: monolith_id,
@@ -5202,13 +5413,6 @@ fn structure_craft_event_system(
                         continue;
                     };
 
-                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
-                        query.get_mut(structure_entity)
-                    else {
-                        error!("Cannot find structure from entity {:?}", structure_entity);
-                        continue;
-                    };
-
                     let Ok((crafter_state, mut crafter_skills)) =
                         crafter_query.get_mut(crafter_entity)
                     else {
@@ -5227,11 +5431,22 @@ fn structure_craft_event_system(
                         continue;
                     }
 
-                    // Add State Change Event to None
+                    // The craft event is consumed past this point, so release the
+                    // crafter BEFORE the structure lookup can bail — failing that
+                    // lookup (structure despawned / missing WorkQueue) used to leave
+                    // the crafter wedged in State::Crafting forever, paralyzing it
+                    // until it died of thirst.
                     commands.trigger(StateChange {
                         entity: crafter_entity,
                         new_state: State::None,
                     });
+
+                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
+                        query.get_mut(structure_entity)
+                    else {
+                        error!("Cannot find structure from entity {:?}", structure_entity);
+                        continue;
+                    };
 
                     let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
                         error!(
@@ -9394,6 +9609,41 @@ fn watchtower_reveal_system(
     }
 }
 
+// When a unit leaves stealth — combat breaking it, chasing a target, a
+// watchtower revealing it, etc. — it was removed from observers' clients when
+// it hid (HideEvent -> obj_delete). A plain state update can't bring a deleted
+// object back, so the tick a unit stops hiding we refresh every connected
+// player's perception, re-creating the now-visible unit for anyone in range.
+// Tracking the previous hidden set catches the transition no matter how the
+// state changed (observer trigger or a direct write like the chase move).
+fn reveal_unhidden_system(
+    clients: Res<Clients>,
+    mut perception_updates: ResMut<PerceptionUpdates>,
+    state_query: Query<(&Id, &State), With<SubclassNPC>>,
+    mut hiding_ids: Local<HashSet<i32>>,
+) {
+    let mut still_hiding = HashSet::new();
+    let mut revealed = false;
+
+    for (id, state) in state_query.iter() {
+        if *state == State::Hiding {
+            still_hiding.insert(id.0);
+        } else if hiding_ids.contains(&id.0) {
+            revealed = true;
+        }
+    }
+
+    // A despawned hider also drops out of `still_hiding`; refreshing perception
+    // in that case is harmless.
+    if revealed {
+        for (_client_id, client) in clients.lock().unwrap().iter() {
+            perception_updates.insert((client.player_id, PerceptionUpdateType::UpdatePerception));
+        }
+    }
+
+    *hiding_ids = still_hiding;
+}
+
 fn perception_system(
     map: Res<Map>,
     mut explored_map: ResMut<ExploredMap>,
@@ -9518,10 +9768,15 @@ fn perception_system(
                 visible_objs_list = visible_objs.iter().cloned().collect();
             }
 
-            println!(
-                "Perceptions to send player: {:?} observers: {:?}",
-                player_id, observer_objs
-            );
+            // Gated behind NETWORK_DEBUG (same convention as message_broker_system)
+            // so this per-tick perception spam stays off by default — it otherwise
+            // floods stdout, e.g. when running many headless games.
+            if std::env::var("NETWORK_DEBUG").is_ok() {
+                println!(
+                    "Perceptions to send player: {:?} observers: {:?}",
+                    player_id, observer_objs
+                );
+            }
 
             let mut visible_tiles: &mut Vec<(i32, i32)> = tiles_to_send.get_mut(player_id).unwrap();
 
@@ -10048,9 +10303,16 @@ fn game_event_system(
                         continue;
                     }
 
+                    let villager_hsl = extras
+                        .assigned_start_locations
+                        .get(player_id)
+                        .map(|location| location.hsl.clone())
+                        .unwrap_or_default();
+
                     let (villager_entity, villager_id) = Encounter::spawn_villager(
                         *player_id,
                         *pos,
+                        villager_hsl,
                         &mut commands,
                         &mut ids,
                         &mut entity_map,
@@ -11093,6 +11355,17 @@ fn goblin_pillager_system(
 }
 
 // Nightly threat: spawns enemies near the hero at dusk each day, scaling with day count
+// Nightly horde senses. NPC AI only chases targets within its viewshed and
+// wanders otherwise; the default spawn viewshed of 2 left hordes milling around
+// at the sanctuary ring instead of attacking. 14 covers the spawn ring radius
+// plus the spread of a camp, so the horde actually descends on the settlement.
+const HORDE_HUNT_VISION: u32 = 14;
+
+// How far from a dead player's camp True Death sweeps NPC hostiles before the
+// start location is recycled. Kept tight: start locations sit as close as 9
+// tiles apart, so a wider sweep could delete enemies engaging a neighbour.
+const RUN_CLEANUP_RADIUS: u32 = 8;
+
 fn nightly_threat_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -11106,7 +11379,9 @@ fn nightly_threat_system(
     objectives: Res<Objectives>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
+    sanctuary_zones: Res<SanctuaryZones>,
     mut run_score_state: ResMut<RunScoreState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     mut last_threat_day: Local<HashMap<i32, i32>>,
 ) {
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
@@ -11170,6 +11445,17 @@ fn nightly_threat_system(
                     vec!["Skeleton", "Skeleton", "Zombie"],
                     "The dead stir as night approaches...",
                 ),
+                // Days 6-7 stay on the gentle ramp so the player has a calm window
+                // to bank a food reserve; the heavy scaling horde takes over at day 8
+                // (see survival_director_active).
+                6 => (
+                    vec!["Wolf", "Wolf", "Skeleton", "Spider"],
+                    "Something larger stirs in the dark...",
+                ),
+                7 => (
+                    vec!["Skeleton", "Skeleton", "Zombie", "Spider"],
+                    "The dead are restless tonight...",
+                ),
                 _ => (
                     vec!["Skeleton", "Skeleton", "Zombie", "Zombie", "Shadow"],
                     "An unnatural darkness gathers...",
@@ -11184,43 +11470,33 @@ fn nightly_threat_system(
         };
         send_to_client(player_id.0, packet, &clients);
 
-        // Find spawn position 5-7 tiles from hero
+        // The horde rises from the wilderness beyond the sanctuary and marches in
+        // (it ignores the sanctuary — that's the scheduled threat you prepare for).
         let mut spawned = false;
-        for _attempt in 0..10 {
-            let spawn_pos = get_random_pos_at_range(player_id.0, pos.x, pos.y, 6, Vec::new(), &map);
-
-            if let Some(spawn_pos) = spawn_pos {
-                let path = Map::find_path(
-                    *pos,
+        if let Some(spawn_pos) = crisis_spawn_pos(player_id.0, &sanctuary_zones, *pos, &map) {
+            for creature_type in &creatures {
+                let (npc_entity, npc_id, _, _) = Encounter::spawn_npc(
+                    NPC_PLAYER_ID,
                     spawn_pos,
-                    &map,
-                    player_id.0,
-                    Vec::new(),
-                    true,
-                    false,
-                    false,
-                    true,
-                    true,
+                    creature_type.to_string(),
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
                 );
-
-                if let Some((path, _cost)) = path {
-                    if path.len() < 20 {
-                        for creature_type in &creatures {
-                            Encounter::spawn_npc(
-                                NPC_PLAYER_ID,
-                                spawn_pos,
-                                creature_type.to_string(),
-                                &mut commands,
-                                &mut ids,
-                                &mut entity_map,
-                                &templates,
-                            );
-                        }
-                        spawned = true;
-                        break;
-                    }
-                }
+                // Widen the horde's senses so it can find the settlement from
+                // the spawn ring (see HORDE_HUNT_VISION).
+                commands.entity(npc_entity).insert(Viewshed {
+                    range: HORDE_HUNT_VISION,
+                });
+                // Attribute the wave to this run so True Death removes any
+                // survivors — they spawn outside the camp-cleanup radius.
+                run_spawned_objs
+                    .entry(player_id.0)
+                    .or_default()
+                    .push(npc_id.0);
             }
+            spawned = true;
         }
 
         if spawned {
@@ -11552,6 +11828,7 @@ fn legendary_threat_system(
     dead_query: Query<&Id, With<StateDead>>,
     mut objectives: ResMut<Objectives>,
     mut legendary_threat_state: ResMut<LegendaryThreatState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -11579,6 +11856,12 @@ fn legendary_threat_system(
                 &mut entity_map,
                 &templates,
             );
+            // Attribute the hideout + boss to this run so True Death removes
+            // them — they sit far outside the camp-cleanup radius.
+            run_spawned_objs
+                .entry(player_id.0)
+                .or_default()
+                .extend([hideout_id, boss_id]);
             legendary_threat_state.insert(
                 player_id.0,
                 LegendaryThreat {
@@ -11703,6 +11986,13 @@ fn legendary_threat_system(
             );
             wave_ids.push(follower_id);
         }
+
+        // Followers roam between their spawn point and the player's camp;
+        // attribute them to this run so True Death removes any survivors.
+        run_spawned_objs
+            .entry(player_id.0)
+            .or_default()
+            .extend(wave_ids.iter().copied());
 
         threat.follower_waves.push(LegendaryFollowerWave {
             ids: wave_ids,
@@ -11854,6 +12144,41 @@ fn reduce_wildness_at_pos(map: &mut Map, pos: Position) -> bool {
 
     map.update_wildness(pos.x, pos.y, -1);
     true
+}
+
+// Default/maximum wildness a tile drifts back toward (matches the spawn-time init).
+const WILDNESS_MAX: i32 = 4;
+// How often the wilderness reclaims pacified ground. Every interval a cleared tile
+// gains +1 wildness, so clearing a tile buys ~WILDNESS_MAX intervals of calm before
+// random spawns return there. Tiles inside a sanctuary are held at 0.
+const WILDNESS_REGEN_INTERVAL: i32 = 600;
+
+// Slowly regrow wildness on tiles the player has pacified (so the wilderness stays
+// dangerous all game), while keeping sanctuary ground suppressed. This is what makes
+// "clear the area" temporary outside the zone and permanent inside it.
+fn wildness_regen_system(
+    game_tick: Res<GameTick>,
+    mut map: ResMut<Map>,
+    sanctuary_zones: Res<SanctuaryZones>,
+) {
+    if game_tick.0 % WILDNESS_REGEN_INTERVAL != 0 {
+        return;
+    }
+
+    for y in 0..crate::map::HEIGHT {
+        for x in 0..crate::map::WIDTH {
+            let pos = Position { x, y };
+            let w = map.get_wildness(x, y);
+            if sanctuary_zones.in_full_zone(pos) {
+                // Inside the sanctuary the ground stays pacified.
+                if w > 0 {
+                    map.update_wildness(x, y, -w);
+                }
+            } else if w < WILDNESS_MAX {
+                map.update_wildness(x, y, 1);
+            }
+        }
+    }
 }
 
 fn wildness_reduction_on_enemy_death_system(
@@ -12886,7 +13211,8 @@ pub struct PlayerVictory {
 pub struct VictoryState(pub HashMap<i32, PlayerVictory>);
 
 fn rescue_victory_ready(player_day: i32, victory: &PlayerVictory) -> bool {
-    player_day >= 11 && victory.rescue_progress == 0
+    // Rescue arrives after surviving 50 full days (i.e. on day 51).
+    player_day >= 51 && victory.rescue_progress == 0
 }
 
 // Victory condition check system
@@ -12921,7 +13247,7 @@ fn victory_check_system(
         if rescue_victory_ready(player_day, victory) {
             victory.rescue_progress = 1;
             let packet = ResponsePacket::Notice {
-                noticemsg: "VICTORY! You have survived 10 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),
+                noticemsg: "VICTORY! You have survived 50 days on the island. A passing ship spots your settlement and sends a rescue party! You may continue playing or celebrate your achievement.".to_string(),
                 expiry: Some(30000),
             };
             send_to_client(player_id.0, packet, &clients);
@@ -12973,8 +13299,16 @@ fn soulshard_count(inventory: &Inventory) -> i32 {
         .unwrap_or(0)
 }
 
+// The first death must always be affordable from the monolith's starting stash
+// (10 shards) regardless of XP earned, so a run never hard-ends on the first
+// mistake. The XP/death-count formula takes over from the second death.
+pub const FIRST_DEATH_SOULSHARD_COST: i32 = 5;
+
 fn resurrection_attempt_cost(num_deaths: u32, total_xp: i32) -> i32 {
-    soulshard_res_cost(num_deaths.saturating_sub(1), total_xp)
+    if num_deaths <= 1 {
+        return FIRST_DEATH_SOULSHARD_COST;
+    }
+    soulshard_res_cost(num_deaths.saturating_sub(2), total_xp)
 }
 
 fn send_hero_death_state(
@@ -13019,6 +13353,7 @@ fn resurrect_system(
         mut monolith_inventory_query,
         mut effect_query,
         obj_query,
+        mut needs_query,
     ): (
         Query<
             HeroResurrectQuery,
@@ -13034,6 +13369,7 @@ fn resurrect_system(
         Query<&mut Inventory, With<Monolith>>,
         Query<&mut Effects>,
         Query<ObjQuery, Without<SubclassHero>>,
+        Query<(&mut Thirst, &mut Hunger, &mut Tired)>,
     ),
 ) {
     for mut hero in hero_query.iter_mut() {
@@ -13258,6 +13594,20 @@ fn resurrect_system(
             //Reset hp & state
             hero.stats.hp = hero.stats.base_hp;
             *hero.state = State::None;
+
+            // The Monolith restores the body whole: clear needs and any ticking
+            // needs-death timers, otherwise the hero resurrects mid-countdown
+            // and dies again seconds later.
+            if let Ok((mut thirst, mut hunger, mut tired)) = needs_query.get_mut(hero.entity) {
+                thirst.thirst = 0.0;
+                hunger.hunger = 0.0;
+                tired.tired = 0.0;
+            }
+            commands
+                .entity(hero.entity)
+                .remove::<Dehydrated>()
+                .remove::<Starving>()
+                .remove::<Exhausted>();
 
             //TODO replace with monolith location
             let src = hero.pos.clone();
@@ -14496,28 +14846,31 @@ fn true_death_system(
     (
         mut crisis_state,
         mut spawn_positions,
-        objectives,
+        mut objectives,
         monolith_investigation,
         prices,
         templates,
         mut run_score_state,
         mut legendary_threat_state,
-        player_intro_state,
+        mut player_intro_state,
         mut start_locations,
         mut assigned_start_locations,
+        mut run_spawned_objs,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
-        Res<Objectives>,
+        ResMut<Objectives>,
         Res<MonolithInvestigation>,
         Res<Prices>,
         Res<Templates>,
         ResMut<RunScoreState>,
         ResMut<LegendaryThreatState>,
-        Res<PlayerIntroState>,
+        ResMut<PlayerIntroState>,
         ResMut<StartLocations>,
         ResMut<AssignedStartLocations>,
+        ResMut<RunSpawnedObjs>,
     ),
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
         (
             Entity,
@@ -14528,13 +14881,23 @@ fn true_death_system(
             &Skills,
             &TrueDeath,
             &StateDead,
+            Option<&BoundMonolith>,
         ),
         With<SubclassHero>,
     >,
-    score_obj_query: Query<(&PlayerId, &Inventory, &Class, &Template, &State)>,
+    // p0: score sweep over all owned objects; p1: bound-monolith inventory for
+    // the Soulshard top-up (mutable Inventory access, hence the ParamSet).
+    mut world_queries: ParamSet<(
+        Query<(&PlayerId, &Inventory, &Class, &Template, &State)>,
+        Query<&mut Inventory, With<Monolith>>,
+    )>,
     villager_query: Query<(Entity, &PlayerId, &Id, Option<&StateDead>), With<SubclassVillager>>,
+    cleanup_query: Query<
+        (Entity, &Id, &PlayerId, &Position),
+        (Without<SubclassHero>, Without<SubclassVillager>),
+    >,
 ) {
-    for (entity, player_id, id, name, template, skills, true_death, state_dead) in
+    for (entity, player_id, id, name, template, skills, true_death, state_dead, bound_monolith) in
         hero_query.iter_mut()
     {
         if (game_tick.0 - true_death.true_death_at) > 10 * TICKS_PER_SEC {
@@ -14555,6 +14918,7 @@ fn true_death_system(
             let mut structures_alive = 0;
             let mut upgrades = 0;
 
+            let score_obj_query = world_queries.p0();
             for (obj_player_id, inventory, class, obj_template, obj_state) in score_obj_query.iter()
             {
                 if obj_player_id.0 != player_id.0 || Obj::is_dead(obj_state) {
@@ -14691,9 +15055,16 @@ fn true_death_system(
 
             // Clean up crisis state and spawn position for this player
             crisis_state.remove(&player_id.0);
-            spawn_positions.remove(&player_id.0);
+            let camp_pos = spawn_positions.remove(&player_id.0);
             run_score_state.remove(&player_id.0);
             legendary_threat_state.remove(&player_id.0);
+            // Also drop the scripted per-run state: a dead player's intro /
+            // initial-encounter chains would otherwise keep spawning enemies
+            // at the released start location (observed: a fresh Cave Bat at
+            // the old shipwreck after the cleanup sweep ran).
+            objectives.remove(&player_id.0);
+            player_intro_state.remove(&player_id.0);
+            initial_encounter_state.remove(&player_id.0);
 
             // Release this player's start location back to the pool so a new hero can
             // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
@@ -14716,6 +15087,54 @@ fn true_death_system(
                         entity: villager_entity,
                         attrs: vec![(PLAYER_ID.to_string(), MERCHANT_PLAYER_ID.to_string())],
                     });
+                }
+            }
+
+            // Clean the start area before the location is recycled: the dead
+            // player's own objects (burrow, campfire, structures, corpses),
+            // this run's scripted spawns (shipwreck, POIs, intro NPCs), and
+            // hostiles that accumulated around the camp. Villagers are kept —
+            // they were just transferred to the merchant for re-hire.
+            let run_objs = run_spawned_objs.remove(&player_id.0).unwrap_or_default();
+            let mut removed_obj_ids: Vec<i32> = Vec::new();
+            for (obj_entity, obj_id, obj_player_id, obj_pos) in cleanup_query.iter() {
+                let owned_by_dead_player = obj_player_id.0 == player_id.0;
+                let spawned_for_this_run = run_objs.contains(&obj_id.0);
+                let hostile_near_camp = obj_player_id.0 == NPC_PLAYER_ID
+                    && camp_pos
+                        .map(|camp| Map::dist(camp, *obj_pos) <= RUN_CLEANUP_RADIUS)
+                        .unwrap_or(false);
+
+                if owned_by_dead_player || spawned_for_this_run || hostile_near_camp {
+                    removed_obj_ids.push(obj_id.0);
+                    commands.trigger(RemoveObj { entity: obj_entity });
+                }
+            }
+
+            // Drop pending map events for everything just removed (and the
+            // hero) — an in-flight MoveEvent applying to a despawned entity
+            // panics when its completion command runs.
+            removed_obj_ids.push(id.0);
+            map_events.retain(|_, map_event| !removed_obj_ids.contains(&map_event.obj_id));
+
+            // The next run bound to this monolith must get the same first-death
+            // safety net: restore its Soulshards to the starting amount.
+            if let Some(bound_monolith) = bound_monolith {
+                if let Some(monolith_entity) = entity_map.get_entity(bound_monolith.id) {
+                    let mut monolith_inventory_query = world_queries.p1();
+                    if let Ok(mut monolith_inventory) =
+                        monolith_inventory_query.get_mut(monolith_entity)
+                    {
+                        let current = soulshard_count(&monolith_inventory);
+                        if current < INIT_MONOLITH_SOULSHARDS {
+                            monolith_inventory.new(
+                                ids.new_item_id(),
+                                SOULSHARD.to_string(),
+                                INIT_MONOLITH_SOULSHARDS - current,
+                                &templates.item_templates,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -15125,7 +15544,7 @@ fn merchant_sailing_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
-    mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant), Without<EventInProgress>>,
+    mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant)>,
 ) {
     for (entity, mut obj, merchant) in merchant_query.iter_mut() {
         let dest = match merchant.sail_state {
@@ -15198,11 +15617,13 @@ fn merchant_sailing_system(
             },
         };
 
-        let move_map_event = map_events.new(obj.id.0, game_tick.0 + move_duration, move_event);
+        map_events.new(obj.id.0, game_tick.0 + move_duration, move_event);
 
-        commands.entity(entity).insert(EventInProgress {
-            event_id: move_map_event.event_id,
-        });
+        // NOTE: this used to also insert `EventInProgress` as a "currently sailing"
+        // guard, but nothing ever removed it after a move completed (unlike the
+        // gather/refine/craft paths), so the merchant sailed exactly one tile then
+        // froze forever. The `*obj.state != State::None` check above already gates
+        // re-issuing a move while one is in flight, so the guard was redundant.
     }
 }
 
@@ -15394,6 +15815,105 @@ fn mana_update_system(
                 send_to_client(player_id.0, packet, &clients);
             }
         }
+    }
+}
+
+/// Returns the warning stage (0..=3) when `game_tick` lands exactly on one of
+/// the needs-death countdown boundaries. Relies on this being evaluated once
+/// per tick value — the same contract `vital_dialogue_system` uses.
+fn needs_warning_stage(
+    game_tick: i32,
+    at_tick: i32,
+    warning1_at: i32,
+    warning2_at: i32,
+    death_at: i32,
+) -> Option<usize> {
+    if game_tick == at_tick + 5 {
+        Some(0)
+    } else if game_tick == at_tick + warning1_at {
+        Some(1)
+    } else if game_tick == at_tick + warning2_at {
+        Some(2)
+    } else if game_tick == at_tick + death_at - 20 {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+// Needs are the single largest killer of runs, and the hero's death countdowns
+// were silent (staged warnings existed only as villager speech bubbles). Surface
+// each countdown stage as an explicit notice naming the counter-action.
+fn hero_needs_warning_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    dehydrated_query: Query<(&PlayerId, &Dehydrated), (With<SubclassHero>, Without<StateDead>)>,
+    starving_query: Query<(&PlayerId, &Starving), (With<SubclassHero>, Without<StateDead>)>,
+    exhausted_query: Query<(&PlayerId, &Exhausted), (With<SubclassHero>, Without<StateDead>)>,
+) {
+    const DEHYDRATED_WARNINGS: [&str; 4] = [
+        "You are dehydrated! Drink water before it kills you.",
+        "Dehydration is draining your life. Find water now!",
+        "You are about to die of thirst. Drink immediately!",
+        "Seconds from death — drink NOW!",
+    ];
+    const STARVING_WARNINGS: [&str; 4] = [
+        "You are starving! Eat food before it kills you.",
+        "Starvation is draining your life. Eat now!",
+        "You are about to starve to death. Eat immediately!",
+        "Seconds from death — eat NOW!",
+    ];
+    const EXHAUSTED_WARNINGS: [&str; 4] = [
+        "You are exhausted! Sleep before you collapse.",
+        "Exhaustion is draining your life. Sleep now!",
+        "You are about to collapse. Sleep immediately!",
+        "Seconds from death — sleep NOW!",
+    ];
+
+    let mut warnings: Vec<(i32, &str)> = Vec::new();
+
+    for (player_id, dehydrated) in dehydrated_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            dehydrated.at_tick,
+            DEHYDRATED_WARNING1_AT,
+            DEHYDRATED_WARNING2_AT,
+            DEHYDRATED_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, DEHYDRATED_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, starving) in starving_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            starving.at_tick,
+            STARVING_WARNING1_AT,
+            STARVING_WARNING2_AT,
+            STARVING_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, STARVING_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, exhausted) in exhausted_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            exhausted.at_tick,
+            EXHAUSTED_WARNING1_AT,
+            EXHAUSTED_WARNING2_AT,
+            EXHAUSTED_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, EXHAUSTED_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, msg) in warnings {
+        let packet = ResponsePacket::Notice {
+            noticemsg: msg.to_string(),
+            expiry: Some(8000),
+        };
+        send_to_client(player_id, packet, &clients);
     }
 }
 
@@ -15948,6 +16468,54 @@ fn get_random_adjacent_pos(
     }
 
     return selected_pos;
+}
+
+// Spawn position for a timed/event crisis: a passable, reachable tile just beyond
+// the nearest sanctuary's outer ring, so the wave appears out in the wilderness and
+// marches inward toward the settlement (the NPCs' own AI handles the approach). When
+// no sanctuary is near `fallback` (the hero), it reverts to the old ring around the
+// hero. This is what makes crises "ignore the sanctuary, spawn outside, and move in."
+fn crisis_spawn_pos(
+    player_id: i32,
+    sanctuary_zones: &SanctuaryZones,
+    fallback: Position,
+    map: &Map,
+) -> Option<Position> {
+    let Some(zone) = sanctuary_zones.nearest(fallback) else {
+        return get_random_pos_at_range(player_id, fallback.x, fallback.y, 6, Vec::new(), map);
+    };
+
+    let mut rng = rand::thread_rng();
+    for _ in 0..16 {
+        let ring_r = zone.weak_radius() as i32 + 1 + rng.gen_range(0..3);
+        let ring = Map::ring((zone.pos.x, zone.pos.y), ring_r);
+        if ring.is_empty() {
+            continue;
+        }
+        let (x, y) = ring[rng.gen_range(0..ring.len())];
+        if !Map::is_valid_pos((x, y)) || !Map::is_passable(x, y, map) {
+            continue;
+        }
+        let pos = Position { x, y };
+        // Must be able to march in to the settlement.
+        if Map::find_path(
+            pos,
+            zone.pos,
+            map,
+            player_id,
+            Vec::new(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+        .is_some()
+        {
+            return Some(pos);
+        }
+    }
+    None
 }
 
 fn get_random_pos_at_range(

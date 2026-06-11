@@ -39,6 +39,30 @@
 - name: DehydratedDying
   text: "Ughhh... water..."
 
+- name: StarvingLevel1
+  text: "I'm starving... I need to eat something."
+
+- name: StarvingLevel2
+  text: "My stomach twists... I can't think of anything but food."
+
+- name: StarvingLevel3
+  text: "I have no strength left... food, anything..."
+
+- name: StarvingDying
+  text: "So... hungry..."
+
+- name: ExhaustedLevel1
+  text: "I'm exhausted... I need to sleep."
+
+- name: ExhaustedLevel2
+  text: "My eyes keep closing... I must rest soon."
+
+- name: ExhaustedLevel3
+  text: "I can't stay on my feet... I have to sleep now."
+
+- name: ExhaustedDying
+  text: "Can't... stay... awake..."
+
 - name: NoFood
   text: "I can't find anything to eat"
 

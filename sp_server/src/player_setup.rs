@@ -13,7 +13,10 @@ use crate::game::{
     PlayerIntroEntry, PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
 };
 use crate::item::{Inventory, Slot};
-use crate::obj::{ActiveShelter, AddLightEffect, Campfire, LastCombatTick, NewObj, UpdateObj};
+use crate::obj::{
+    ActiveShelter, AddLightEffect, Assignments, Campfire, LastCombatTick, NewObj, UpdateObj,
+    WorkQueue,
+};
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
 use crate::world::get_time_of_day;
@@ -67,6 +70,7 @@ pub fn new(
     spawn_positions: &mut ResMut<SpawnPositions>,
     player_intro_state: &mut ResMut<PlayerIntroState>,
     initial_encounter_state: &mut ResMut<InitialEncounterState>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
 ) -> Result<(), String> {
     // Select a start location and remove it from the list
     let start_location = match start_locations.get_start_location() {
@@ -76,6 +80,10 @@ pub fn new(
 
     // Remember the assignment so True Death can release this location back to the pool.
     assigned_start_locations.insert(player_id, start_location.clone());
+
+    // Ids of this run's scripted spawns, recorded so True Death can clean the
+    // start area before the location is recycled.
+    let mut run_obj_ids: Vec<i32> = Vec::new();
 
     // Record spawn position for crisis tracking
     spawn_positions.insert(
@@ -124,10 +132,13 @@ pub fn new(
         feed_attrs,
         &templates.item_templates,
     );
+    // Keep starter gold under the 30-gold goblin-raid threshold
+    // (goblin_raid_system): 50 tripped the tier-3 crisis ~80s into every run
+    // before the player made any choice.
     burrow_inventory.new(
         ids.new_item_id(),
         "Gold Coins".to_string(),
-        50,
+        20,
         &templates.item_templates,
     );
     burrow_inventory.new(
@@ -325,6 +336,14 @@ pub fn new(
         2,
         &templates.item_templates,
     );
+    // Bedroll enables auto-sleep (hero_auto_consume_system) — without one,
+    // tiredness has no automatic counter and Exhaustion silently ends the run.
+    inventory.new(
+        ids.new_item_id(),
+        "Bedroll".to_string(),
+        1,
+        &templates.item_templates,
+    );
     let sharpened_stick = inventory.new(
         ids.new_item_id(),
         "Sharpened Stick".to_string(),
@@ -391,7 +410,7 @@ pub fn new(
             let mut bow_attrs = HashMap::new();
             bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
             bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
-            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(3.0));
+            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(2.0));
             bow_attrs.insert(item::AttrKey::Accuracy, item::AttrVal::Num(85.0));
 
             let bow = inventory.new_with_attrs(
@@ -441,7 +460,7 @@ pub fn new(
         state: State::None,
         misc: Misc {
             image: str::replace(hero_template.template.as_str(), " ", "").to_lowercase(),
-            hsl: Vec::new(),
+            hsl: start_location.hsl.clone(),
             groups: Vec::new(),
         },
         stats: Stats {
@@ -495,10 +514,13 @@ pub fn new(
             EncounterMoves(0),
             bound_monolith,
             hero_class,
-            SubclassHero,            // Hero component tag
-            Thirst::new(0.0, 0.025), //0.1 before
-            Hunger::new(0.0, 0.025),
-            Tired::new(0.0, 0.025),
+            SubclassHero, // Hero component tag
+            // 0.012/tick ≈ full→lethal in ~20 real minutes (~5 game days), so the
+            // threat curve — not biology — is what ends a run. (Was 0.025: needs
+            // outran the first nightly wave and killed 80% of recorded runs.)
+            Thirst::new(0.0, 0.012),
+            Hunger::new(0.0, 0.012),
+            Tired::new(0.0, 0.012),
             Heat::new(50.0),
         ))
         .id();
@@ -514,8 +536,12 @@ pub fn new(
 
     debug!("map_events: {:?}", map_events);
 
-    // Create campfire at hero's location only if it's dusk or night
-    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
+    // Always start the hero with a lit campfire: hunting + cooking is a legitimate
+    // early food source for a small population, so the cook economy must be
+    // available from day 1 (not after ~5 days of gathering Stick+Resin to build
+    // one). The bot-side hunt/cook/eat loop bugs that once made an early campfire
+    // counterproductive (hunt spinning, cook errands preempting eating) are fixed.
+    let _ = time_of_day;
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
@@ -546,11 +572,32 @@ pub fn new(
         // Get the campfire template to check for vision
         let campfire_template = templates.obj_templates.get("Campfire".to_string());
 
-        // Spawn the campfire entity
+        // Spawn the campfire entity with the same companion components a
+        // foundation-built structure gets (see the CreateFoundation handler):
+        // ClassStructure registers it with structure queries (perception, cook/craft
+        // lookups), and WorkQueue/Assignments are required by the structure-craft
+        // and work-assignment systems — StructureCraft at a structure missing
+        // WorkQueue fails its query and (before the wedge fix) left the crafter
+        // stuck in State::Crafting.
         let campfire_entity_id = if let Some(vision) = campfire_template.base_vision {
-            commands.spawn((campfire, Viewshed { range: vision })).id()
+            commands
+                .spawn((
+                    campfire,
+                    ClassStructure,
+                    WorkQueue(Vec::new()),
+                    Assignments(Vec::new()),
+                    Viewshed { range: vision },
+                ))
+                .id()
         } else {
-            commands.spawn(campfire).id()
+            commands
+                .spawn((
+                    campfire,
+                    ClassStructure,
+                    WorkQueue(Vec::new()),
+                    Assignments(Vec::new()),
+                ))
+                .id()
         };
 
         // Create mappings
@@ -937,6 +984,7 @@ pub fn new(
     );
 
     let merchant_id = merchant.id.0;
+    run_obj_ids.push(merchant_id);
 
     // Wanted items keyed by subclass so any biome/colour variant matches via the
     // name → subclass → class fallthrough in trade.rs::find_buy_price.
@@ -987,6 +1035,40 @@ pub fn new(
         0.0,
     );
 
+    // Castaway villagers the merchant carries for hire. Spawned offshore at
+    // empire_pos alongside the merchant, owned by the merchant, as bare cargo
+    // (Obj + BaseAttrs + Skills, no AI/needs). `info_hire_system` lists them off
+    // `Transport.hauling`; the hire flow re-homes the chosen one to the player and
+    // attaches its villager behaviour (see player::hire_system /
+    // Encounter::convert_cargo_to_villager).
+    const MERCHANT_HIRE_VILLAGERS: usize = 3;
+    let mut hauling: Vec<i32> = Vec::new();
+    for _ in 0..MERCHANT_HIRE_VILLAGERS {
+        let cargo_id = ids.new_obj_id();
+        let mut cargo = Obj::create_nospawn(
+            cargo_id,
+            merchant_player_id,
+            "Human Villager".to_string(),
+            empire_pos,
+            State::None,
+            Inventory {
+                owner: cargo_id,
+                items: Vec::new(),
+            },
+            templates,
+        );
+        cargo.name = Name(VillagerUtil::generate_name());
+
+        let cargo_attrs = VillagerUtil::generate_attributes(1);
+        let cargo_skills = VillagerUtil::generate_skills(cargo_id, &templates.skill_templates);
+
+        let cargo_entity = commands.spawn((cargo, cargo_attrs, cargo_skills)).id();
+        ids.new_obj(cargo_id, merchant_player_id);
+        entity_map.new_obj(cargo_id, cargo_entity);
+        run_obj_ids.push(cargo_id);
+        hauling.push(cargo_id);
+    }
+
     let merchant_entity_id = commands
         .spawn((
             merchant,
@@ -994,6 +1076,17 @@ pub fn new(
                 range: viewshed_range,
             },
             merchant_component,
+            Transport {
+                route: Vec::new(),
+                next_stop: 0,
+                hauling,
+            },
+            // Required by the move-application system (move_system) — without it the
+            // merchant's sail MoveEvents never resolve and it stays stuck offshore.
+            EventExecuting {
+                event_type: "".to_string(),
+                state: EventExecutingState::None,
+            },
         ))
         .id();
 
@@ -1153,13 +1246,14 @@ pub fn new(
 
     ids.new_obj(shipwreck_id, MERCHANT_PLAYER_ID);
     entity_map.new_obj(shipwreck_id, shipwreck_entity_id);
+    run_obj_ids.push(shipwreck_id);
 
     commands.trigger(NewObj {
         entity: shipwreck_entity_id,
     });
 
     // Create human corpse
-    Obj::create(
+    let (corpse1_id, _corpse1_entity) = Obj::create(
         999,
         "Human Corpse".to_string(),
         Position {
@@ -1175,8 +1269,7 @@ pub fn new(
         &templates,
     );
 
-    // Create human corpse
-    Obj::create(
+    let (corpse2_id, _corpse2_entity) = Obj::create(
         999,
         "Human Corpse".to_string(),
         Position {
@@ -1205,6 +1298,9 @@ pub fn new(
         items,
         &templates,
     );*/
+
+    run_obj_ids.push(corpse1_id);
+    run_obj_ids.push(corpse2_id);
 
     // Scripted shipwreck intro pacing is handled relative to the player's join time
     let shipwreck_pos = Position {
@@ -1276,6 +1372,10 @@ pub fn new(
     let mausoleum_entity = commands.spawn(mausoleum).id();
     ids.new_obj(mausoleum_id, NPC_PLAYER_ID);
     entity_map.new_obj(mausoleum_id, mausoleum_entity);
+
+    run_obj_ids.push(necromancer_id.0);
+    run_obj_ids.push(mausoleum_id);
+    run_obj_ids.extend(rat_ids.iter().copied());
 
     initial_encounter_state.insert(
         player_id,
@@ -1400,6 +1500,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn skeletons guarding the burned house after 8 minutes
@@ -1464,6 +1565,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn zombies at the graveyard after 12 minutes
@@ -1534,6 +1636,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn spiders guarding the cavern after 14 minutes
@@ -1610,6 +1713,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn low-tier pests in the mine after 10 minutes
@@ -1648,6 +1752,8 @@ pub fn new(
         &game_tick,
         map_events,
     );*/
+
+    run_spawned_objs.insert(player_id, run_obj_ids);
 
     Ok(())
 }
@@ -1706,6 +1812,37 @@ pub struct StartLocation {
     pub sealed_cavern_pos: Option<Vec<i32>>,
     #[serde(default)]
     pub abandoned_mine_pos: Option<Vec<i32>>,
+    // Team color (HSL: [hue 0-360, sat 0-100, light 0-100]) assigned at startup by
+    // `assign_start_location_colors`. Empty in the YAML; filled in after load so the
+    // hero + villagers spawned at this location share a distinct color. Travels to the
+    // client via each obj's `Misc.hsl`, where the pinkish "team" pixels are recolored.
+    #[serde(default)]
+    pub hsl: Vec<i32>,
+}
+
+/// Curated, visually-distinct HSL colors ([hue, sat, light]). One is assigned to
+/// each start location so every player's hero and villagers read as a distinct team
+/// color. There are more entries than start locations so the shuffle has slack.
+pub const LOCATION_COLOR_PALETTE: [[i32; 3]; 6] = [
+    [210, 75, 55], // blue
+    [130, 55, 45], // green
+    [28, 90, 55],  // orange
+    [275, 65, 60], // purple
+    [350, 75, 55], // crimson
+    [48, 90, 55],  // gold
+];
+
+/// Randomly assign a distinct palette color to each start location, in place.
+/// Called once after `player_start.yaml` is loaded. If there happen to be more
+/// locations than palette entries the palette wraps (still deterministic per run).
+pub fn assign_start_location_colors(locations: &mut [StartLocation]) {
+    use rand::seq::SliceRandom;
+    let mut palette: Vec<[i32; 3]> = LOCATION_COLOR_PALETTE.to_vec();
+    palette.shuffle(&mut rand::thread_rng());
+    for (i, location) in locations.iter_mut().enumerate() {
+        let color = palette[i % palette.len()];
+        location.hsl = vec![color[0], color[1], color[2]];
+    }
 }
 
 #[derive(Debug, Resource, Deref, DerefMut)]
@@ -1717,6 +1854,14 @@ pub struct StartLocations(pub Vec<StartLocation>);
 // itself, which reloads from player_start.yaml).
 #[derive(Debug, Default, Resource, Deref, DerefMut)]
 pub struct AssignedStartLocations(pub HashMap<i32, StartLocation>);
+
+// Non-player-owned objects spawned for one player's run (shipwreck, corpses,
+// intro NPCs, POIs, merchant...), keyed by player id. True Death removes them
+// before the start location is recycled — without this the next hero at the
+// same location spawns into the previous run's leftovers. In-memory only,
+// like AssignedStartLocations.
+#[derive(Debug, Default, Resource, Deref, DerefMut)]
+pub struct RunSpawnedObjs(pub HashMap<i32, Vec<i32>>);
 
 impl StartLocations {
     pub fn get_start_location(&mut self) -> Result<StartLocation, String> {
