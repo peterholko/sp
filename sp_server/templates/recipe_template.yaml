@@ -143,7 +143,7 @@
     - name: Hunting
       value: 2
     - name: Attack Range
-      value: 3
+      value: 2
     - name: Accuracy
       value: 85
   structure_req:
@@ -478,3 +478,903 @@
       quantity: 10
     - type: Copper Ingot
       quantity: 3
+
+###############################################################
+###############################################################
+##### WEAPON / ARMOR EXPANSION (recipes)                  #####
+##### Combat stats are inherited from item_template attrs #####
+##### at recipe-load, so recipes carry reagents + gates.  #####
+###############################################################
+###############################################################
+
+######################################
+##### TIER 0 - FORAGED / PRIMITIVE ###
+######################################
+
+- name: Bone Dagger
+  class: Weapon
+  subclass: Dagger
+  image: bonedagger
+  slot: Main Hand
+  weight: 2
+  crafting_time: 40
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: bones
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Flint Hatchet
+  class: Weapon
+  subclass: Axe
+  image: flinthatchet
+  slot: Main Hand
+  weight: 5
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Flint Shard
+      quantity: 1
+    - type: Stick
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Stone-Tipped Spear
+  class: Weapon
+  subclass: Spear
+  image: sharpenedstick
+  slot: Main Hand
+  weight: 5
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Stick
+      quantity: 1
+    - type: Pebble
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Bone War Club
+  class: Weapon
+  subclass: Hammer
+  image: club
+  slot: Main Hand
+  weight: 6
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: bones
+      quantity: 1
+    - type: Stick
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Throwing Spear
+  class: Weapon
+  subclass: Throwing
+  image: throwingspear
+  slot: Main Hand
+  weight: 3
+  crafting_time: 40
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Stick
+      quantity: 1
+    - type: Flint Shard
+      quantity: 1
+
+- name: Hide Cap
+  class: Armor
+  subclass: Helm
+  image: hidecap
+  slot: Helm
+  weight: 1
+  crafting_time: 60
+  structure_req:
+    - Crafting Tent
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Hide
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Hide Leggings
+  class: Armor
+  subclass: Pants
+  image: hideleggings
+  slot: Pants
+  weight: 2
+  crafting_time: 70
+  structure_req:
+    - Crafting Tent
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Hide
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Hide Boots
+  class: Armor
+  subclass: Boots
+  image: hideboots
+  slot: Boots
+  weight: 1
+  crafting_time: 60
+  structure_req:
+    - Crafting Tent
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Hide
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Hide Mantle
+  class: Armor
+  subclass: Shoulder
+  image: hidemantle
+  slot: Shoulder
+  weight: 1
+  crafting_time: 60
+  structure_req:
+    - Crafting Tent
+  stamina_req: 6
+  skill_req: 0
+  req:
+    - type: Hide
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+######################################
+##### COPPER TIER                  ###
+######################################
+
+- name: Copper Dagger
+  class: Weapon
+  subclass: Dagger
+  image: valleyrundagger
+  tier: 1
+  slot: Main Hand
+  weight: 3
+  structure_req:
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 0
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 1
+
+- name: Copper Spear
+  class: Weapon
+  subclass: Spear
+  image: copperspear
+  tier: 1
+  slot: Main Hand
+  weight: 8
+  structure_req:
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 0
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 2
+
+- name: Copper Mace
+  class: Weapon
+  subclass: Hammer
+  image: coppermace
+  tier: 1
+  slot: Main Hand
+  weight: 9
+  structure_req:
+    - Blacksmith
+  stamina_req: 11
+  skill_req: 10
+  req:
+    - type: Copper Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Copper Short Sword
+  class: Weapon
+  subclass: Sword
+  image: valleyrunsword
+  tier: 1
+  slot: Main Hand
+  weight: 8
+  structure_req:
+    - Blacksmith
+  stamina_req: 11
+  skill_req: 10
+  req:
+    - type: Copper Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Copper Cuirass
+  class: Armor
+  subclass: Chest
+  image: coppercuirass
+  tier: 1
+  slot: Chest
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 12
+  skill_req: 15
+  req:
+    - type: Copper Ingot
+      quantity: 3
+    - type: Leather
+      quantity: 1
+
+- name: Copper Greaves
+  class: Armor
+  subclass: Pants
+  image: coppergreaves
+  tier: 1
+  slot: Pants
+  weight: 8
+  structure_req:
+    - Blacksmith
+  stamina_req: 11
+  skill_req: 10
+  req:
+    - type: Copper Ingot
+      quantity: 2
+    - type: Leather
+      quantity: 1
+
+- name: Copper Sabatons
+  class: Armor
+  subclass: Boots
+  image: coppersabatons
+  tier: 1
+  slot: Boots
+  weight: 6
+  structure_req:
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 5
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Leather
+      quantity: 1
+
+- name: Copper Pauldrons
+  class: Armor
+  subclass: Shoulder
+  image: copperpauldrons
+  tier: 1
+  slot: Shoulder
+  weight: 6
+  structure_req:
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 5
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Leather
+      quantity: 1
+
+- name: Copper Buckler
+  class: Armor
+  subclass: Shield
+  image: copperbuckler
+  tier: 1
+  slot: Off Hand
+  weight: 7
+  structure_req:
+    - Blacksmith
+  stamina_req: 10
+  skill_req: 5
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 1
+
+######################################
+##### IRON TIER                    ###
+######################################
+
+- name: Iron Sword
+  class: Weapon
+  subclass: Sword
+  image: sword
+  tier: 2
+  slot: Main Hand
+  weight: 10
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 25
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Iron War Axe
+  class: Weapon
+  subclass: Axe
+  image: gothicaxe
+  tier: 2
+  slot: Main Hand
+  weight: 11
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Iron War Hammer
+  class: Weapon
+  subclass: Hammer
+  image: ironwarhammer
+  tier: 2
+  slot: Main Hand
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 14
+  skill_req: 35
+  req:
+    - type: Iron Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
+
+- name: Iron Dagger
+  class: Weapon
+  subclass: Dagger
+  image: dagger
+  tier: 2
+  slot: Main Hand
+  weight: 4
+  structure_req:
+    - Blacksmith
+  stamina_req: 12
+  skill_req: 25
+  req:
+    - type: Iron Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 1
+
+- name: Iron Spear
+  class: Weapon
+  subclass: Spear
+  image: ironspear
+  tier: 2
+  slot: Main Hand
+  weight: 9
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 25
+  req:
+    - type: Iron Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 2
+
+- name: Iron Halberd
+  class: Weapon
+  subclass: Polearm
+  image: ironhalberd
+  tier: 2
+  slot: Main Hand
+  weight: 13
+  structure_req:
+    - Blacksmith
+  stamina_req: 14
+  skill_req: 40
+  req:
+    - type: Iron Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 2
+
+- name: Iron Mace
+  class: Weapon
+  subclass: Hammer
+  image: ironmace
+  tier: 2
+  slot: Main Hand
+  weight: 10
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Iron Helm
+  class: Armor
+  subclass: Helm
+  image: ironhelm
+  tier: 2
+  slot: Helm
+  weight: 5
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Leather
+      quantity: 1
+
+- name: Iron Chainmail
+  class: Armor
+  subclass: Chest
+  image: quickforgechainmail
+  tier: 2
+  slot: Chest
+  weight: 15
+  structure_req:
+    - Blacksmith
+  stamina_req: 15
+  skill_req: 40
+  req:
+    - type: Iron Ingot
+      quantity: 4
+    - type: Leather
+      quantity: 1
+
+- name: Iron Greaves
+  class: Armor
+  subclass: Pants
+  image: irongreaves
+  tier: 2
+  slot: Pants
+  weight: 10
+  structure_req:
+    - Blacksmith
+  stamina_req: 14
+  skill_req: 35
+  req:
+    - type: Iron Ingot
+      quantity: 3
+    - type: Leather
+      quantity: 1
+
+- name: Iron Sabatons
+  class: Armor
+  subclass: Boots
+  image: ironsabatons
+  tier: 2
+  slot: Boots
+  weight: 7
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Leather
+      quantity: 1
+
+- name: Iron Pauldrons
+  class: Armor
+  subclass: Shoulder
+  image: ironpauldrons
+  tier: 2
+  slot: Shoulder
+  weight: 7
+  structure_req:
+    - Blacksmith
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Leather
+      quantity: 1
+
+- name: Iron Kite Shield
+  class: Armor
+  subclass: Shield
+  image: ironkiteshield
+  tier: 2
+  slot: Off Hand
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 14
+  skill_req: 35
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 2
+
+######################################
+##### MITHRIL TIER                 ###
+######################################
+
+- name: Mithril Greatsword
+  class: Weapon
+  subclass: Sword
+  image: mithrilgreatsword
+  tier: 3
+  slot: Main Hand
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 60
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
+
+- name: Mithril War Axe
+  class: Weapon
+  subclass: Axe
+  image: mithrilwaraxe
+  tier: 3
+  slot: Main Hand
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 65
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Maul
+  class: Weapon
+  subclass: Hammer
+  image: mithrilmaul
+  tier: 3
+  slot: Main Hand
+  weight: 14
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 70
+  req:
+    - type: Mithril Ingot
+      quantity: 4
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Dagger
+  class: Weapon
+  subclass: Dagger
+  image: mithrildagger
+  tier: 3
+  slot: Main Hand
+  weight: 4
+  structure_req:
+    - Blacksmith
+  stamina_req: 15
+  skill_req: 60
+  req:
+    - type: Mithril Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Halberd
+  class: Weapon
+  subclass: Polearm
+  image: mithrilhalberd
+  tier: 3
+  slot: Main Hand
+  weight: 14
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 75
+  req:
+    - type: Mithril Ingot
+      quantity: 4
+    - type: Timber
+      quantity: 2
+
+- name: Mithril Glaive
+  class: Weapon
+  subclass: Spear
+  image: mithrilglaive
+  tier: 3
+  slot: Main Hand
+  weight: 11
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 65
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 2
+
+- name: Mithril Helm
+  class: Armor
+  subclass: Helm
+  image: mithrilhelm
+  tier: 3
+  slot: Helm
+  weight: 6
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 65
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Leather
+      quantity: 1
+
+- name: Mithril Plate
+  class: Armor
+  subclass: Chest
+  image: strongholdchainmail
+  tier: 3
+  slot: Chest
+  weight: 18
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 80
+  req:
+    - type: Mithril Ingot
+      quantity: 5
+    - type: Leather
+      quantity: 2
+
+- name: Mithril Greaves
+  class: Armor
+  subclass: Pants
+  image: mithrilgreaves
+  tier: 3
+  slot: Pants
+  weight: 12
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 70
+  req:
+    - type: Mithril Ingot
+      quantity: 4
+    - type: Leather
+      quantity: 1
+
+- name: Mithril Sabatons
+  class: Armor
+  subclass: Boots
+  image: mithrilsabatons
+  tier: 3
+  slot: Boots
+  weight: 8
+  structure_req:
+    - Blacksmith
+  stamina_req: 15
+  skill_req: 65
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Leather
+      quantity: 1
+
+- name: Mithril Pauldrons
+  class: Armor
+  subclass: Shoulder
+  image: mithrilpauldrons
+  tier: 3
+  slot: Shoulder
+  weight: 8
+  structure_req:
+    - Blacksmith
+  stamina_req: 15
+  skill_req: 65
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Leather
+      quantity: 1
+
+- name: Mithril Tower Shield
+  class: Armor
+  subclass: Shield
+  image: mithriltowershield
+  tier: 3
+  slot: Off Hand
+  weight: 16
+  structure_req:
+    - Blacksmith
+  stamina_req: 16
+  skill_req: 70
+  req:
+    - type: Mithril Ingot
+      quantity: 4
+    - type: Timber
+      quantity: 2
+
+######################################
+##### RANGED & AMMO                ###
+######################################
+
+- name: Hunting Bow
+  class: Weapon
+  subclass: Bow
+  image: bow
+  slot: Main Hand
+  weight: 8
+  structure_req:
+    - Workshop
+  stamina_req: 10
+  skill_req: 0
+  req:
+    - type: Timber
+      quantity: 3
+    - type: Twine
+      quantity: 1
+
+- name: Iron-Limbed Longbow
+  class: Weapon
+  subclass: Bow
+  image: longbow
+  slot: Main Hand
+  weight: 9
+  structure_req:
+    - Workshop
+  stamina_req: 12
+  skill_req: 25
+  req:
+    - type: Timber
+      quantity: 3
+    - type: Iron Ingot
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Crossbow
+  class: Weapon
+  subclass: Crossbow
+  image: crossbow
+  slot: Main Hand
+  weight: 10
+  structure_req:
+    - Workshop
+  stamina_req: 13
+  skill_req: 30
+  req:
+    - type: Timber
+      quantity: 2
+    - type: Iron Ingot
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Iron Broadhead Arrows
+  class: Ammo
+  subclass: Arrow
+  image: arrows
+  weight: 1
+  crafting_time: 60
+  amount: 5
+  structure_req:
+    - Workshop
+  skill_req: 25
+  req:
+    - type: Iron Ingot
+      quantity: 1
+    - type: Stick
+      quantity: 1
+    - type: Resin
+      quantity: 1
+
+- name: Mithril Warbow
+  class: Weapon
+  subclass: Bow
+  image: warbow
+  slot: Main Hand
+  weight: 9
+  structure_req:
+    - Workshop
+  stamina_req: 13
+  skill_req: 60
+  req:
+    - type: Timber
+      quantity: 2
+    - type: Mithril Ingot
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+######################################
+##### STUDDED LEATHER (MEDIUM SET) ###
+######################################
+
+- name: Studded Leather Vest
+  class: Armor
+  subclass: Chest
+  image: studdedleathervest
+  slot: Chest
+  weight: 6
+  crafting_time: 90
+  structure_req:
+    - Crafting Tent
+  stamina_req: 10
+  skill_req: 20
+  req:
+    - type: Leather
+      quantity: 2
+    - type: Copper Ingot
+      quantity: 1
+    - type: Twine
+      quantity: 1
+
+- name: Studded Leather Cap
+  class: Armor
+  subclass: Helm
+  image: studdedleathercap
+  slot: Helm
+  weight: 2
+  crafting_time: 80
+  structure_req:
+    - Crafting Tent
+  stamina_req: 10
+  skill_req: 20
+  req:
+    - type: Leather
+      quantity: 1
+    - type: Copper Ingot
+      quantity: 1
+
+- name: Reinforced Leather Boots
+  class: Armor
+  subclass: Boots
+  image: reinforcedleatherboots
+  slot: Boots
+  weight: 3
+  crafting_time: 80
+  structure_req:
+    - Crafting Tent
+  stamina_req: 10
+  skill_req: 20
+  req:
+    - type: Leather
+      quantity: 2
+    - type: Twine
+      quantity: 1
