@@ -40,7 +40,7 @@ use crate::obj::{
     StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
     Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
-use crate::player_setup::{AssignedStartLocations, StartLocations};
+use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::Recipes;
 use crate::resource::{Resource, Resources};
 use crate::skill::{SkillData, Skills, MAX_RANK};
@@ -756,7 +756,8 @@ impl Plugin for PlayerPlugin {
         .insert_resource(player_events)
         .insert_resource(active_infos)
         .insert_resource(start_locations)
-        .init_resource::<AssignedStartLocations>();
+        .init_resource::<AssignedStartLocations>()
+        .init_resource::<RunSpawnedObjs>();
     }
 }
 
@@ -784,7 +785,11 @@ fn new_player_system(
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
     // Bundled into one tuple param to stay within Bevy's 16 system-parameter limit.
-    mut start_location_res: (ResMut<StartLocations>, ResMut<AssignedStartLocations>),
+    mut start_location_res: (
+        ResMut<StartLocations>,
+        ResMut<AssignedStartLocations>,
+        ResMut<RunSpawnedObjs>,
+    ),
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     mut recipes: ResMut<Recipes>,
@@ -830,6 +835,7 @@ fn new_player_system(
                         &mut spawn_positions,
                         &mut player_intro_state,
                         &mut initial_encounter_state,
+                        &mut start_location_res.2,
                     )
                 };
 

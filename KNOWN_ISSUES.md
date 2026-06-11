@@ -1,74 +1,29 @@
 # Known Issues
 
 Findings from the 2026-06-10 instrumented-play analysis (5 headless bot runs +
-105 recorded runs in `scores`, cross-checked against code). The four top fixes
-from that analysis (hero needs warnings, death economy, wave pursuit, needs/
-crisis pacing) landed in `Survival fixes: needs warnings, death economy, wave
-pursuit, pacing`. Everything below is still open, ordered by priority.
+105 recorded runs in `scores`, cross-checked against code). Everything below
+is still open, ordered by priority.
 
----
+Already fixed from that analysis:
 
-## Run-poisoning bugs
+- Hero needs warnings, death economy (flat first-death cost + needs reset on
+  resurrect), nightly-wave pursuit, and needs/crisis pacing — commit
+  `Survival fixes: needs warnings, death economy, wave pursuit, pacing`.
+- The three run-poisoning bugs: stale-session login dead-end (sp_axum now
+  rotates sessions older than 20h in `/auth` and `/fingerprint-auth`), dirty
+  start-location recycling (True Death now removes the player's objects, the
+  run's spawns tracked in `RunSpawnedObjs` — setup POIs, nightly waves,
+  legendary hideout/boss/followers — plus NPC hostiles within
+  `RUN_CLEANUP_RADIUS` of camp; clears the per-run intro/encounter/objectives
+  state that kept spawning enemies after death; purges pending map events for
+  removed objects, which otherwise panicked the server; and refills the bound
+  monolith's Soulshards to the starting 10), and the Burrow's 50 starting gold
+  instantly triggering the tier-3 raid (now 20, under the 30-gold threshold).
 
-### 1. Stale-session login dead-end (S)
-
-**Symptom:** a returning account cannot connect. The game server accepts the
-WebSocket, then drops it; the client sees an immediate disconnect with no
-explanation.
-
-**Cause:** `sp_axum` `/auth` (`auth_handler`, `sp_axum/src/main.rs`) reuses the
-stored `sessions` row forever — it only generates a new session when no row
-exists. The game server (`network.rs`) rejects sessions older than 1 day
-(`Session expired: created ... is older than 1 day`). Any account that last
-logged in more than a day ago is hard-blocked until its `sessions` row is
-deleted by hand.
-
-**Observed:** `agent1` (last session 2026-04-02) could not connect on
-2026-06-10 until `DELETE FROM sessions WHERE player_id = 2`.
-
-**Fix:** in `auth_handler`, when the stored session's `created_at` is older
-than (or near) the game server's max age, generate a fresh session and update
-the row instead of returning the stale one. Alternatively refresh
-`created_at` on every successful auth.
-
-### 2. Dirty start-location recycling (M)
-
-**Symptom:** a new hero can spawn into the previous run's leftovers — looted
-or duplicate Burrow/Shipwreck, orphaned structures, and still-aggro NPCs.
-
-**Cause:** `true_death_system` (`sp_server/src/game.rs`) releases the start
-location back to the pool and despawns the hero, but does not clean up the
-dead player's world objects or the hostile NPCs that accumulated around the
-camp. With only 5 start locations, every 6th run is guaranteed a recycled,
-dirty slot — and it gets worse now that nightly waves actually reach the camp
-(leftover wave creatures will camp the spawn).
-
-**Observed:** a fresh hero on recycled `startpos4` was attacked at spawn by
-the Cave Bat that killed the previous hero; the tier-3 gold-raid crisis
-re-fired for the *dead* player's orphaned Burrow one second after the slot was
-released.
-
-**Fix:** on true death, despawn the player's structures/containers (or recycle
-them into fresh starter state) and clear hostile NPCs within a radius of the
-start position before pushing the location back into `StartLocations`.
-
-### 3. Burrow starting gold instantly triggers the tier-3 crisis (S)
-
-**Symptom:** the goblin wolf-rider raid (crisis tier 3) fires ~80 seconds into
-every run, before tiers 1–2 can occur, handing every player +3000 defense
-score and +3000 crisis-bonus XP for free and scrambling the escalation ladder.
-
-**Cause:** the starter Burrow spawns with 50 Gold Coins
-(`player_setup.rs`, Burrow starting items) — already over the 30-gold
-threshold in `goblin_raid_system` (`game.rs`). The "gold attracts raiders"
-risk is tripped by the developer-provided kit, not a player choice.
-
-**Observed:** fired at ~80s for every player in every instrumented run,
-including after the 2026-06-10 rebalance. Explains why all 105 recorded runs
-have `crisis_tier >= 3` regardless of play.
-
-**Fix:** reduce starter gold to 15–20, or exempt starter storage from the
-trigger, or raise the threshold above the starting kit's value.
+  Minor residual: the POI-guard `SpawnNPC` game events scheduled at setup
+  (+6000 ticks) are not player-attributed; if a run ends before they fire,
+  a few enemies still appear at the POIs (not the camp) of the released
+  location afterwards.
 
 ---
 

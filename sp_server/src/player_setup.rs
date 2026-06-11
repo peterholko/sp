@@ -70,6 +70,7 @@ pub fn new(
     spawn_positions: &mut ResMut<SpawnPositions>,
     player_intro_state: &mut ResMut<PlayerIntroState>,
     initial_encounter_state: &mut ResMut<InitialEncounterState>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
 ) -> Result<(), String> {
     // Select a start location and remove it from the list
     let start_location = match start_locations.get_start_location() {
@@ -79,6 +80,10 @@ pub fn new(
 
     // Remember the assignment so True Death can release this location back to the pool.
     assigned_start_locations.insert(player_id, start_location.clone());
+
+    // Ids of this run's scripted spawns, recorded so True Death can clean the
+    // start area before the location is recycled.
+    let mut run_obj_ids: Vec<i32> = Vec::new();
 
     // Record spawn position for crisis tracking
     spawn_positions.insert(
@@ -127,10 +132,13 @@ pub fn new(
         feed_attrs,
         &templates.item_templates,
     );
+    // Keep starter gold under the 30-gold goblin-raid threshold
+    // (goblin_raid_system): 50 tripped the tier-3 crisis ~80s into every run
+    // before the player made any choice.
     burrow_inventory.new(
         ids.new_item_id(),
         "Gold Coins".to_string(),
-        50,
+        20,
         &templates.item_templates,
     );
     burrow_inventory.new(
@@ -976,6 +984,7 @@ pub fn new(
     );
 
     let merchant_id = merchant.id.0;
+    run_obj_ids.push(merchant_id);
 
     // Wanted items keyed by subclass so any biome/colour variant matches via the
     // name → subclass → class fallthrough in trade.rs::find_buy_price.
@@ -1056,6 +1065,7 @@ pub fn new(
         let cargo_entity = commands.spawn((cargo, cargo_attrs, cargo_skills)).id();
         ids.new_obj(cargo_id, merchant_player_id);
         entity_map.new_obj(cargo_id, cargo_entity);
+        run_obj_ids.push(cargo_id);
         hauling.push(cargo_id);
     }
 
@@ -1236,13 +1246,14 @@ pub fn new(
 
     ids.new_obj(shipwreck_id, MERCHANT_PLAYER_ID);
     entity_map.new_obj(shipwreck_id, shipwreck_entity_id);
+    run_obj_ids.push(shipwreck_id);
 
     commands.trigger(NewObj {
         entity: shipwreck_entity_id,
     });
 
     // Create human corpse
-    Obj::create(
+    let (corpse1_id, _corpse1_entity) = Obj::create(
         999,
         "Human Corpse".to_string(),
         Position {
@@ -1258,8 +1269,7 @@ pub fn new(
         &templates,
     );
 
-    // Create human corpse
-    Obj::create(
+    let (corpse2_id, _corpse2_entity) = Obj::create(
         999,
         "Human Corpse".to_string(),
         Position {
@@ -1288,6 +1298,9 @@ pub fn new(
         items,
         &templates,
     );*/
+
+    run_obj_ids.push(corpse1_id);
+    run_obj_ids.push(corpse2_id);
 
     // Scripted shipwreck intro pacing is handled relative to the player's join time
     let shipwreck_pos = Position {
@@ -1359,6 +1372,10 @@ pub fn new(
     let mausoleum_entity = commands.spawn(mausoleum).id();
     ids.new_obj(mausoleum_id, NPC_PLAYER_ID);
     entity_map.new_obj(mausoleum_id, mausoleum_entity);
+
+    run_obj_ids.push(necromancer_id.0);
+    run_obj_ids.push(mausoleum_id);
+    run_obj_ids.extend(rat_ids.iter().copied());
 
     initial_encounter_state.insert(
         player_id,
@@ -1483,6 +1500,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn skeletons guarding the burned house after 8 minutes
@@ -1547,6 +1565,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn zombies at the graveyard after 12 minutes
@@ -1617,6 +1636,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn spiders guarding the cavern after 14 minutes
@@ -1693,6 +1713,7 @@ pub fn new(
         let poi_entity = commands.spawn(poi).id();
         ids.new_obj(poi_id, MERCHANT_PLAYER_ID);
         entity_map.new_obj(poi_id, poi_entity);
+        run_obj_ids.push(poi_id);
         commands.trigger(NewObj { entity: poi_entity });
 
         // Spawn low-tier pests in the mine after 10 minutes
@@ -1731,6 +1752,8 @@ pub fn new(
         &game_tick,
         map_events,
     );*/
+
+    run_spawned_objs.insert(player_id, run_obj_ids);
 
     Ok(())
 }
@@ -1831,6 +1854,14 @@ pub struct StartLocations(pub Vec<StartLocation>);
 // itself, which reloads from player_start.yaml).
 #[derive(Debug, Default, Resource, Deref, DerefMut)]
 pub struct AssignedStartLocations(pub HashMap<i32, StartLocation>);
+
+// Non-player-owned objects spawned for one player's run (shipwreck, corpses,
+// intro NPCs, POIs, merchant...), keyed by player id. True Death removes them
+// before the start location is recycled — without this the next hero at the
+// same location spawns into the previous run's leftovers. In-memory only,
+// like AssignedStartLocations.
+#[derive(Debug, Default, Resource, Deref, DerefMut)]
+pub struct RunSpawnedObjs(pub HashMap<i32, Vec<i32>>);
 
 impl StartLocations {
     pub fn get_start_location(&mut self) -> Result<StartLocation, String> {

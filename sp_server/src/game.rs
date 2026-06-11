@@ -69,7 +69,7 @@ use crate::obj::{
     WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
-use crate::player_setup::{AssignedStartLocations, StartLocations};
+use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
@@ -11361,6 +11361,11 @@ fn goblin_pillager_system(
 // plus the spread of a camp, so the horde actually descends on the settlement.
 const HORDE_HUNT_VISION: u32 = 14;
 
+// How far from a dead player's camp True Death sweeps NPC hostiles before the
+// start location is recycled. Kept tight: start locations sit as close as 9
+// tiles apart, so a wider sweep could delete enemies engaging a neighbour.
+const RUN_CLEANUP_RADIUS: u32 = 8;
+
 fn nightly_threat_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -11376,6 +11381,7 @@ fn nightly_threat_system(
     legendary_threat_state: Res<LegendaryThreatState>,
     sanctuary_zones: Res<SanctuaryZones>,
     mut run_score_state: ResMut<RunScoreState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     mut last_threat_day: Local<HashMap<i32, i32>>,
 ) {
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
@@ -11469,7 +11475,7 @@ fn nightly_threat_system(
         let mut spawned = false;
         if let Some(spawn_pos) = crisis_spawn_pos(player_id.0, &sanctuary_zones, *pos, &map) {
             for creature_type in &creatures {
-                let (npc_entity, _, _, _) = Encounter::spawn_npc(
+                let (npc_entity, npc_id, _, _) = Encounter::spawn_npc(
                     NPC_PLAYER_ID,
                     spawn_pos,
                     creature_type.to_string(),
@@ -11483,6 +11489,12 @@ fn nightly_threat_system(
                 commands.entity(npc_entity).insert(Viewshed {
                     range: HORDE_HUNT_VISION,
                 });
+                // Attribute the wave to this run so True Death removes any
+                // survivors — they spawn outside the camp-cleanup radius.
+                run_spawned_objs
+                    .entry(player_id.0)
+                    .or_default()
+                    .push(npc_id.0);
             }
             spawned = true;
         }
@@ -11816,6 +11828,7 @@ fn legendary_threat_system(
     dead_query: Query<&Id, With<StateDead>>,
     mut objectives: ResMut<Objectives>,
     mut legendary_threat_state: ResMut<LegendaryThreatState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -11843,6 +11856,12 @@ fn legendary_threat_system(
                 &mut entity_map,
                 &templates,
             );
+            // Attribute the hideout + boss to this run so True Death removes
+            // them — they sit far outside the camp-cleanup radius.
+            run_spawned_objs
+                .entry(player_id.0)
+                .or_default()
+                .extend([hideout_id, boss_id]);
             legendary_threat_state.insert(
                 player_id.0,
                 LegendaryThreat {
@@ -11967,6 +11986,13 @@ fn legendary_threat_system(
             );
             wave_ids.push(follower_id);
         }
+
+        // Followers roam between their spawn point and the player's camp;
+        // attribute them to this run so True Death removes any survivors.
+        run_spawned_objs
+            .entry(player_id.0)
+            .or_default()
+            .extend(wave_ids.iter().copied());
 
         threat.follower_waves.push(LegendaryFollowerWave {
             ids: wave_ids,
@@ -14820,28 +14846,31 @@ fn true_death_system(
     (
         mut crisis_state,
         mut spawn_positions,
-        objectives,
+        mut objectives,
         monolith_investigation,
         prices,
         templates,
         mut run_score_state,
         mut legendary_threat_state,
-        player_intro_state,
+        mut player_intro_state,
         mut start_locations,
         mut assigned_start_locations,
+        mut run_spawned_objs,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
-        Res<Objectives>,
+        ResMut<Objectives>,
         Res<MonolithInvestigation>,
         Res<Prices>,
         Res<Templates>,
         ResMut<RunScoreState>,
         ResMut<LegendaryThreatState>,
-        Res<PlayerIntroState>,
+        ResMut<PlayerIntroState>,
         ResMut<StartLocations>,
         ResMut<AssignedStartLocations>,
+        ResMut<RunSpawnedObjs>,
     ),
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
         (
             Entity,
@@ -14852,13 +14881,23 @@ fn true_death_system(
             &Skills,
             &TrueDeath,
             &StateDead,
+            Option<&BoundMonolith>,
         ),
         With<SubclassHero>,
     >,
-    score_obj_query: Query<(&PlayerId, &Inventory, &Class, &Template, &State)>,
+    // p0: score sweep over all owned objects; p1: bound-monolith inventory for
+    // the Soulshard top-up (mutable Inventory access, hence the ParamSet).
+    mut world_queries: ParamSet<(
+        Query<(&PlayerId, &Inventory, &Class, &Template, &State)>,
+        Query<&mut Inventory, With<Monolith>>,
+    )>,
     villager_query: Query<(Entity, &PlayerId, &Id, Option<&StateDead>), With<SubclassVillager>>,
+    cleanup_query: Query<
+        (Entity, &Id, &PlayerId, &Position),
+        (Without<SubclassHero>, Without<SubclassVillager>),
+    >,
 ) {
-    for (entity, player_id, id, name, template, skills, true_death, state_dead) in
+    for (entity, player_id, id, name, template, skills, true_death, state_dead, bound_monolith) in
         hero_query.iter_mut()
     {
         if (game_tick.0 - true_death.true_death_at) > 10 * TICKS_PER_SEC {
@@ -14879,6 +14918,7 @@ fn true_death_system(
             let mut structures_alive = 0;
             let mut upgrades = 0;
 
+            let score_obj_query = world_queries.p0();
             for (obj_player_id, inventory, class, obj_template, obj_state) in score_obj_query.iter()
             {
                 if obj_player_id.0 != player_id.0 || Obj::is_dead(obj_state) {
@@ -15015,9 +15055,16 @@ fn true_death_system(
 
             // Clean up crisis state and spawn position for this player
             crisis_state.remove(&player_id.0);
-            spawn_positions.remove(&player_id.0);
+            let camp_pos = spawn_positions.remove(&player_id.0);
             run_score_state.remove(&player_id.0);
             legendary_threat_state.remove(&player_id.0);
+            // Also drop the scripted per-run state: a dead player's intro /
+            // initial-encounter chains would otherwise keep spawning enemies
+            // at the released start location (observed: a fresh Cave Bat at
+            // the old shipwreck after the cleanup sweep ran).
+            objectives.remove(&player_id.0);
+            player_intro_state.remove(&player_id.0);
+            initial_encounter_state.remove(&player_id.0);
 
             // Release this player's start location back to the pool so a new hero can
             // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
@@ -15040,6 +15087,54 @@ fn true_death_system(
                         entity: villager_entity,
                         attrs: vec![(PLAYER_ID.to_string(), MERCHANT_PLAYER_ID.to_string())],
                     });
+                }
+            }
+
+            // Clean the start area before the location is recycled: the dead
+            // player's own objects (burrow, campfire, structures, corpses),
+            // this run's scripted spawns (shipwreck, POIs, intro NPCs), and
+            // hostiles that accumulated around the camp. Villagers are kept —
+            // they were just transferred to the merchant for re-hire.
+            let run_objs = run_spawned_objs.remove(&player_id.0).unwrap_or_default();
+            let mut removed_obj_ids: Vec<i32> = Vec::new();
+            for (obj_entity, obj_id, obj_player_id, obj_pos) in cleanup_query.iter() {
+                let owned_by_dead_player = obj_player_id.0 == player_id.0;
+                let spawned_for_this_run = run_objs.contains(&obj_id.0);
+                let hostile_near_camp = obj_player_id.0 == NPC_PLAYER_ID
+                    && camp_pos
+                        .map(|camp| Map::dist(camp, *obj_pos) <= RUN_CLEANUP_RADIUS)
+                        .unwrap_or(false);
+
+                if owned_by_dead_player || spawned_for_this_run || hostile_near_camp {
+                    removed_obj_ids.push(obj_id.0);
+                    commands.trigger(RemoveObj { entity: obj_entity });
+                }
+            }
+
+            // Drop pending map events for everything just removed (and the
+            // hero) — an in-flight MoveEvent applying to a despawned entity
+            // panics when its completion command runs.
+            removed_obj_ids.push(id.0);
+            map_events.retain(|_, map_event| !removed_obj_ids.contains(&map_event.obj_id));
+
+            // The next run bound to this monolith must get the same first-death
+            // safety net: restore its Soulshards to the starting amount.
+            if let Some(bound_monolith) = bound_monolith {
+                if let Some(monolith_entity) = entity_map.get_entity(bound_monolith.id) {
+                    let mut monolith_inventory_query = world_queries.p1();
+                    if let Ok(mut monolith_inventory) =
+                        monolith_inventory_query.get_mut(monolith_entity)
+                    {
+                        let current = soulshard_count(&monolith_inventory);
+                        if current < INIT_MONOLITH_SOULSHARDS {
+                            monolith_inventory.new(
+                                ids.new_item_id(),
+                                SOULSHARD.to_string(),
+                                INIT_MONOLITH_SOULSHARDS - current,
+                                &templates.item_templates,
+                            );
+                        }
+                    }
                 }
             }
 
