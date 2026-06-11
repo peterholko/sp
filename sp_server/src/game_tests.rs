@@ -1109,13 +1109,18 @@ fn idle_rested_hero_with_bedroll_does_not_sleep() {
 }
 
 #[test]
-fn first_resurrection_uses_starting_soulshard_cost() {
-    assert_eq!(resurrection_attempt_cost(1, 0), 10);
+fn first_resurrection_uses_flat_affordable_cost() {
+    // Flat and below the monolith's 10 starting shards, even with earned XP.
+    assert_eq!(resurrection_attempt_cost(1, 0), FIRST_DEATH_SOULSHARD_COST);
+    assert_eq!(resurrection_attempt_cost(1, 5000), FIRST_DEATH_SOULSHARD_COST);
 }
 
 #[test]
-fn later_resurrections_scale_from_completed_deaths() {
-    assert_eq!(resurrection_attempt_cost(2, 0), 12);
+fn later_resurrections_scale_from_second_death() {
+    // Second death starts the formula at the base cost...
+    assert_eq!(resurrection_attempt_cost(2, 0), 10);
+    // ...and each further death applies the 1.2x escalation.
+    assert_eq!(resurrection_attempt_cost(3, 0), 12);
 }
 
 #[test]

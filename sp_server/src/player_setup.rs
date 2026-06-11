@@ -328,6 +328,14 @@ pub fn new(
         2,
         &templates.item_templates,
     );
+    // Bedroll enables auto-sleep (hero_auto_consume_system) — without one,
+    // tiredness has no automatic counter and Exhaustion silently ends the run.
+    inventory.new(
+        ids.new_item_id(),
+        "Bedroll".to_string(),
+        1,
+        &templates.item_templates,
+    );
     let sharpened_stick = inventory.new(
         ids.new_item_id(),
         "Sharpened Stick".to_string(),
@@ -498,10 +506,13 @@ pub fn new(
             EncounterMoves(0),
             bound_monolith,
             hero_class,
-            SubclassHero,            // Hero component tag
-            Thirst::new(0.0, 0.025), //0.1 before
-            Hunger::new(0.0, 0.025),
-            Tired::new(0.0, 0.025),
+            SubclassHero, // Hero component tag
+            // 0.012/tick ≈ full→lethal in ~20 real minutes (~5 game days), so the
+            // threat curve — not biology — is what ends a run. (Was 0.025: needs
+            // outran the first nightly wave and killed 80% of recorded runs.)
+            Thirst::new(0.0, 0.012),
+            Hunger::new(0.0, 0.012),
+            Tired::new(0.0, 0.012),
             Heat::new(50.0),
         ))
         .id();

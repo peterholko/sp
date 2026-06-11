@@ -663,13 +663,14 @@ const GOBLIN_PILLAGER_SURVIVAL_TICKS: i32 = GAME_TICKS_PER_DAY * 5;
 
 // Fallback deadlines: if a crisis tier has not fired from its organic condition
 // within this much survival time, force it so the threat curve keeps advancing
-// for passive players. Tiers 4 and 5 already trigger on survival time well
-// before these deadlines; their fallback is a guarantee that still holds should
-// those primary thresholds ever be raised past it.
-const WOLF_PACK_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 20; // 20 min
-const GOBLIN_RAID_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 30; // 30 min
-const UNDEAD_INCURSION_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 40; // 40 min
-const GOBLIN_PILLAGER_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 60; // 60 min
+// for passive players. Staggered so escalation arrives in tier order even for a
+// player who never leaves camp: T2@8m, T3@10m, then the tier 4/5 survival-time
+// primaries (3 days ≈ 12m, 5 days ≈ 20m) take over; the 16m/24m fallbacks are
+// pure backstops should those primary thresholds ever be raised past them.
+const WOLF_PACK_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 8; // 8 min
+const GOBLIN_RAID_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 10; // 10 min
+const UNDEAD_INCURSION_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 16; // 16 min
+const GOBLIN_PILLAGER_FALLBACK_TICKS: i32 = TICKS_PER_SEC * 60 * 24; // 24 min
 
 pub fn crisis_tier(crisis: &PlayerCrisis) -> i32 {
     let mut tier = 0;
@@ -1600,6 +1601,7 @@ impl Plugin for GamePlugin {
                 Update,
                 (
                     remove_dead_system.run_if(in_state(AppState::Running)),
+                    hero_needs_warning_system.run_if(in_state(AppState::Running)),
                     dehydrated_system.run_if(in_state(AppState::Running)),
                     starving_system.run_if(in_state(AppState::Running)),
                     exhausted_system.run_if(in_state(AppState::Running)),
@@ -11353,6 +11355,12 @@ fn goblin_pillager_system(
 }
 
 // Nightly threat: spawns enemies near the hero at dusk each day, scaling with day count
+// Nightly horde senses. NPC AI only chases targets within its viewshed and
+// wanders otherwise; the default spawn viewshed of 2 left hordes milling around
+// at the sanctuary ring instead of attacking. 14 covers the spawn ring radius
+// plus the spread of a camp, so the horde actually descends on the settlement.
+const HORDE_HUNT_VISION: u32 = 14;
+
 fn nightly_threat_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -11461,7 +11469,7 @@ fn nightly_threat_system(
         let mut spawned = false;
         if let Some(spawn_pos) = crisis_spawn_pos(player_id.0, &sanctuary_zones, *pos, &map) {
             for creature_type in &creatures {
-                Encounter::spawn_npc(
+                let (npc_entity, _, _, _) = Encounter::spawn_npc(
                     NPC_PLAYER_ID,
                     spawn_pos,
                     creature_type.to_string(),
@@ -11470,6 +11478,11 @@ fn nightly_threat_system(
                     &mut entity_map,
                     &templates,
                 );
+                // Widen the horde's senses so it can find the settlement from
+                // the spawn ring (see HORDE_HUNT_VISION).
+                commands.entity(npc_entity).insert(Viewshed {
+                    range: HORDE_HUNT_VISION,
+                });
             }
             spawned = true;
         }
@@ -13260,8 +13273,16 @@ fn soulshard_count(inventory: &Inventory) -> i32 {
         .unwrap_or(0)
 }
 
+// The first death must always be affordable from the monolith's starting stash
+// (10 shards) regardless of XP earned, so a run never hard-ends on the first
+// mistake. The XP/death-count formula takes over from the second death.
+pub const FIRST_DEATH_SOULSHARD_COST: i32 = 5;
+
 fn resurrection_attempt_cost(num_deaths: u32, total_xp: i32) -> i32 {
-    soulshard_res_cost(num_deaths.saturating_sub(1), total_xp)
+    if num_deaths <= 1 {
+        return FIRST_DEATH_SOULSHARD_COST;
+    }
+    soulshard_res_cost(num_deaths.saturating_sub(2), total_xp)
 }
 
 fn send_hero_death_state(
@@ -13306,6 +13327,7 @@ fn resurrect_system(
         mut monolith_inventory_query,
         mut effect_query,
         obj_query,
+        mut needs_query,
     ): (
         Query<
             HeroResurrectQuery,
@@ -13321,6 +13343,7 @@ fn resurrect_system(
         Query<&mut Inventory, With<Monolith>>,
         Query<&mut Effects>,
         Query<ObjQuery, Without<SubclassHero>>,
+        Query<(&mut Thirst, &mut Hunger, &mut Tired)>,
     ),
 ) {
     for mut hero in hero_query.iter_mut() {
@@ -13545,6 +13568,20 @@ fn resurrect_system(
             //Reset hp & state
             hero.stats.hp = hero.stats.base_hp;
             *hero.state = State::None;
+
+            // The Monolith restores the body whole: clear needs and any ticking
+            // needs-death timers, otherwise the hero resurrects mid-countdown
+            // and dies again seconds later.
+            if let Ok((mut thirst, mut hunger, mut tired)) = needs_query.get_mut(hero.entity) {
+                thirst.thirst = 0.0;
+                hunger.hunger = 0.0;
+                tired.tired = 0.0;
+            }
+            commands
+                .entity(hero.entity)
+                .remove::<Dehydrated>()
+                .remove::<Starving>()
+                .remove::<Exhausted>();
 
             //TODO replace with monolith location
             let src = hero.pos.clone();
@@ -15683,6 +15720,105 @@ fn mana_update_system(
                 send_to_client(player_id.0, packet, &clients);
             }
         }
+    }
+}
+
+/// Returns the warning stage (0..=3) when `game_tick` lands exactly on one of
+/// the needs-death countdown boundaries. Relies on this being evaluated once
+/// per tick value — the same contract `vital_dialogue_system` uses.
+fn needs_warning_stage(
+    game_tick: i32,
+    at_tick: i32,
+    warning1_at: i32,
+    warning2_at: i32,
+    death_at: i32,
+) -> Option<usize> {
+    if game_tick == at_tick + 5 {
+        Some(0)
+    } else if game_tick == at_tick + warning1_at {
+        Some(1)
+    } else if game_tick == at_tick + warning2_at {
+        Some(2)
+    } else if game_tick == at_tick + death_at - 20 {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+// Needs are the single largest killer of runs, and the hero's death countdowns
+// were silent (staged warnings existed only as villager speech bubbles). Surface
+// each countdown stage as an explicit notice naming the counter-action.
+fn hero_needs_warning_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    dehydrated_query: Query<(&PlayerId, &Dehydrated), (With<SubclassHero>, Without<StateDead>)>,
+    starving_query: Query<(&PlayerId, &Starving), (With<SubclassHero>, Without<StateDead>)>,
+    exhausted_query: Query<(&PlayerId, &Exhausted), (With<SubclassHero>, Without<StateDead>)>,
+) {
+    const DEHYDRATED_WARNINGS: [&str; 4] = [
+        "You are dehydrated! Drink water before it kills you.",
+        "Dehydration is draining your life. Find water now!",
+        "You are about to die of thirst. Drink immediately!",
+        "Seconds from death — drink NOW!",
+    ];
+    const STARVING_WARNINGS: [&str; 4] = [
+        "You are starving! Eat food before it kills you.",
+        "Starvation is draining your life. Eat now!",
+        "You are about to starve to death. Eat immediately!",
+        "Seconds from death — eat NOW!",
+    ];
+    const EXHAUSTED_WARNINGS: [&str; 4] = [
+        "You are exhausted! Sleep before you collapse.",
+        "Exhaustion is draining your life. Sleep now!",
+        "You are about to collapse. Sleep immediately!",
+        "Seconds from death — sleep NOW!",
+    ];
+
+    let mut warnings: Vec<(i32, &str)> = Vec::new();
+
+    for (player_id, dehydrated) in dehydrated_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            dehydrated.at_tick,
+            DEHYDRATED_WARNING1_AT,
+            DEHYDRATED_WARNING2_AT,
+            DEHYDRATED_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, DEHYDRATED_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, starving) in starving_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            starving.at_tick,
+            STARVING_WARNING1_AT,
+            STARVING_WARNING2_AT,
+            STARVING_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, STARVING_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, exhausted) in exhausted_query.iter() {
+        if let Some(stage) = needs_warning_stage(
+            game_tick.0,
+            exhausted.at_tick,
+            EXHAUSTED_WARNING1_AT,
+            EXHAUSTED_WARNING2_AT,
+            EXHAUSTED_DEATH_AT,
+        ) {
+            warnings.push((player_id.0, EXHAUSTED_WARNINGS[stage]));
+        }
+    }
+
+    for (player_id, msg) in warnings {
+        let packet = ResponsePacket::Notice {
+            noticemsg: msg.to_string(),
+            expiry: Some(8000),
+        };
+        send_to_client(player_id, packet, &clients);
     }
 }
 
