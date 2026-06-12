@@ -36,7 +36,7 @@ HUNGER_TRIGGER = {"Hungry", "Peckish", "Famished", "Ravenous"}
 TIRED_TRIGGER = {"Weary", "Tired", "Exhausted", "Depleted"}
 HOSTILE_SUBCLASSES = {"npc", "undead", "demon", "bandit"}
 LOOT_SOURCES = ("Burrow", "Shipwreck", "Supply Cache", "Washed Ashore Materials", "Cache")
-LOOT_CLASSES = ("Food", "Drink", "Bedroll")
+LOOT_CLASSES = ("Food", "Drink", "Bedroll", "Log", "Timber")
 
 DRINK_ITEMS = ("Waterskin (Filled)", "Waterskin")
 FOOD_HINTS = ("Meat", "Berries", "Fish", "Bread", "Stew", "Ration", "Apple", "Egg")
@@ -63,6 +63,9 @@ class NeedsRun:
         self.ws = None
         self._needs_class_select = False
         self.forage = False
+        self.build_stockade = False
+        self._stockade_phase = "none"  # none -> founded_wait -> stocked -> building -> done
+        self._stockade_id = None
         self._loot_queue = []      # (item_id, source_id, name)
         self._looted_ids = set()
         self._storage_poll = 0.0
@@ -141,6 +144,7 @@ class NeedsRun:
                     if o["id"] == self.hero_id:
                         self.hero_pos = (o.get("x", 0), o.get("y", 0))
                         self.state = o.get("state", self.state)
+                    self._track_stockade(o)
                 elif et == "obj_update":
                     oid = ev.get("obj_id")
                     if oid in self.objects:
@@ -148,6 +152,12 @@ class NeedsRun:
                             self.objects[oid][a["attr"]] = a["value"]
                         if oid == self.hero_id:
                             self.state = self.objects[oid].get("state", self.state)
+                        if oid == self._stockade_id:
+                            new_state = self.objects[oid].get("state")
+                            self.note(f"stockade {oid} state -> {new_state}")
+                            if self._stockade_phase == "building" and new_state in ("none", "None"):
+                                self._stockade_phase = "done"
+                                self.note("STOCKADE COMPLETE — built from shipwreck logs")
                 elif et == "obj_delete":
                     self.objects.pop(ev.get("obj_id"), None)
 
@@ -189,6 +199,21 @@ class NeedsRun:
 
         elif ptype == "Notice":
             self.note(f"NOTICE: {pkt.get('noticemsg','')[:110]}")
+
+        elif ptype == "Error":
+            self.note(f"ERROR: {pkt.get('errmsg','')}")
+
+        elif ptype == "build":
+            self.note(f"build accepted, build_time={pkt.get('build_time')}")
+
+    def _track_stockade(self, o):
+        if (
+            self._stockade_id is None
+            and o.get("name") == "Stockade"
+            and o.get("player") == self.player_id
+        ):
+            self._stockade_id = o["id"]
+            self.note(f"stockade foundation seen id={o['id']} state={o.get('state')}")
 
     # ------------------------------------------------------------- main
     async def run(self, duration):
@@ -248,8 +273,16 @@ class NeedsRun:
             if now - last_action < 4.0:
                 continue
 
-            # Priority 0 (forage mode): walk to and loot queued food/drink/bedroll
-            if self.forage and self._loot_queue and not self.hostiles(1.6):
+            # Priority 0 (forage mode): walk to and loot queued food/drink/bedroll.
+            # Defer further looting while a stockade build is pending and we
+            # already hold logs — the wall is the higher-value errand.
+            stockade_pending = (
+                self.build_stockade
+                and self._stockade_phase != "done"
+                and any(i.get("class") == "Log" for i in self.inventory)
+            )
+            if self.forage and self._loot_queue and not stockade_pending \
+                    and not self.hostiles(1.6):
                 item_id, src_id, name = self._loot_queue[0]
                 src = self.objects.get(src_id)
                 if src is None:
@@ -258,7 +291,7 @@ class NeedsRun:
                 hx, hy = self.hero_pos
                 d = math.dist((src.get("x",0), src.get("y",0)), (hx, hy))
                 last_action = now
-                if d > 1.6:
+                if d > 2.4:
                     await self.send({"cmd": "move_unit",
                                      "x": src.get("x"), "y": src.get("y")})
                     self.note(f"moving to {src.get('name')} for {name} (d={d:.1f})",
@@ -269,6 +302,55 @@ class NeedsRun:
                                      "source_id": src_id, "target_id": self.hero_id})
                     self.note(f"looting {name} from {src.get('name')}")
                 continue
+
+            # Stockade build test: foundation at hero pos -> transfer logs -> build
+            if (
+                self.build_stockade
+                and self._stockade_phase != "done"
+                and not self.hostiles(1.6)
+            ):
+                logs = next(
+                    (i for i in self.inventory if i.get("class") == "Log"), None
+                )
+                if self._stockade_phase == "none":
+                    if logs and logs.get("quantity", 1) >= 3:
+                        last_action = now
+                        await self.send({
+                            "cmd": "create_foundation",
+                            "source_id": self.hero_id,
+                            "structure": "Stockade",
+                        })
+                        self._stockade_phase = "founded_wait"
+                        self.note("requested Stockade foundation")
+                        continue
+                elif self._stockade_phase == "founded_wait" and self._stockade_id:
+                    if logs:
+                        last_action = now
+                        await self.send({
+                            "cmd": "item_transfer",
+                            "item": logs["id"],
+                            "source_id": self.hero_id,
+                            "target_id": self._stockade_id,
+                        })
+                        await self.send({"cmd": "info_inventory", "id": self.hero_id})
+                        self._stockade_phase = "stocked"
+                        self.note(
+                            f"transferred {logs['name']} x{logs.get('quantity')} "
+                            f"into foundation {self._stockade_id}"
+                        )
+                        continue
+                    else:
+                        self.note("foundation up but no logs in inventory!", key="nolog")
+                elif self._stockade_phase == "stocked":
+                    last_action = now
+                    await self.send({
+                        "cmd": "build",
+                        "source_id": self.hero_id,
+                        "structure_id": self._stockade_id,
+                    })
+                    self._stockade_phase = "building"
+                    self.note(f"build command sent for stockade {self._stockade_id}")
+                    continue
 
             # Priority 1: fight back hostiles in melee range
             close = self.hostiles(1.6)
@@ -333,11 +415,14 @@ def main():
     ap.add_argument("--duration", type=float, default=5400)
     ap.add_argument("--forage", action="store_true",
                     help="also loot food/drink/bedroll from Burrow/Shipwreck")
+    ap.add_argument("--build-stockade", action="store_true",
+                    help="after salvaging logs, build one Stockade segment")
     args = ap.parse_args()
 
     session, player_id = fingerprint_auth(args.auth_base, args.fingerprint)
     run = NeedsRun(args.ws_url, session, player_id, args.hero_name, args.log)
     run.forage = args.forage
+    run.build_stockade = args.build_stockade
     asyncio.run(run.run(args.duration))
 
 

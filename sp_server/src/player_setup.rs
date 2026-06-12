@@ -1195,7 +1195,16 @@ pub fn new(
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Cragroot Maple Timber".to_string(),
-        15,
+        10,
+        &templates.item_templates,
+    );
+    // Hull logs: the wreck is the early-game wood source. Logs (not Timber)
+    // are what the Stockade requires, and chopping fresh ones needs an axe
+    // that only the Warrior starts with — salvage covers the first walls.
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Cragroot Maple Log".to_string(),
+        10,
         &templates.item_templates,
     );
     shipwreck_inventory.new(

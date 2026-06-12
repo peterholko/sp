@@ -1389,10 +1389,10 @@
   capacity: 100
   level: 0
   req:
-    - type: Stick
+    - type: Log
       quantity: 3
   upkeep:
-    - type: Stick
+    - type: Log
       quantity: 1
   upgrade_to: [Palisade]
   upgrade_req:
