@@ -7757,8 +7757,15 @@ fn use_item_system(
                             }
                         }
                         (item::MEDICAL, "Bandage") => {
-                            if explore_cure_for_item(&item.name, &item.class, &item.subclass)
-                                == Some(Effect::Bleed)
+                            // A bandage is the budget heal: stops bleeding and
+                            // closes minor wounds. Consumed when it did either;
+                            // refusing to consume on a full-health, non-bleeding
+                            // target keeps mis-clicks free.
+                            let stopped_bleeding = explore_cure_for_item(
+                                &item.name,
+                                &item.class,
+                                &item.subclass,
+                            ) == Some(Effect::Bleed)
                                 && clear_effect_with_item(
                                     item_owner.player_id.0,
                                     item_owner.id.0,
@@ -7766,8 +7773,33 @@ fn use_item_system(
                                     &mut item_owner.effects,
                                     Effect::Bleed,
                                     &clients,
-                                )
-                            {
+                                );
+
+                            let missing_hp = item_owner.stats.base_hp - item_owner.stats.hp;
+                            let healed = missing_hp.min(BANDAGE_HEAL_HP).max(0);
+
+                            if stopped_bleeding || healed > 0 {
+                                if healed > 0 {
+                                    item_owner.stats.hp += healed;
+
+                                    let packet = ResponsePacket::Stats {
+                                        data: StatsData {
+                                            id: *item_owner_id,
+                                            hp: item_owner.stats.hp,
+                                            base_hp: item_owner.stats.base_hp,
+                                            stamina: 10000, // TODO missing stamina
+                                            base_stamina: 10000,
+                                            mana: item_owner.stats.mana.unwrap_or(0),
+                                            base_mana: item_owner.stats.base_mana.unwrap_or(0),
+                                            thirst: None,
+                                            hunger: None,
+                                            tiredness: None,
+                                            effects: Vec::new(),
+                                        },
+                                    };
+                                    send_to_client(item_owner.player_id.0, packet, &clients);
+                                }
+
                                 item_owner.inventory.remove_quantity(item.id, 1);
 
                                 let info_inventory_packet = ResponsePacket::InfoInventory {
@@ -7785,18 +7817,23 @@ fn use_item_system(
                                     info_inventory_packet,
                                     &clients,
                                 );
-                                send_notice(
-                                    item_owner.player_id.0,
-                                    &format!("{} stops the bleeding.", item.name),
-                                    &clients,
-                                );
-                            } else if explore_cure_for_item(&item.name, &item.class, &item.subclass)
-                                == Some(Effect::Bleed)
-                            {
+
+                                let msg = match (stopped_bleeding, healed > 0) {
+                                    (true, true) => format!(
+                                        "{} stops the bleeding and closes the wound.",
+                                        item.name
+                                    ),
+                                    (true, false) => {
+                                        format!("{} stops the bleeding.", item.name)
+                                    }
+                                    _ => format!("{} closes the wound.", item.name),
+                                };
+                                send_notice(item_owner.player_id.0, &msg, &clients);
+                            } else {
                                 send_to_client(
                                     item_owner.player_id.0,
                                     ResponsePacket::Error {
-                                        errmsg: "There is no bleeding to treat.".to_string(),
+                                        errmsg: "You have no wounds to bandage.".to_string(),
                                     },
                                     &clients,
                                 );
@@ -8154,6 +8191,21 @@ const HERO_AUTO_CONSUME_THRESHOLD: f32 = THIRSTY_SCORE;
 const HERO_AUTO_CONSUME_TICKS: i32 = TICKS_PER_SEC * 3;
 /// Tiredness at which an idle hero will bed down to sleep if a bedroll is on hand.
 const HERO_AUTO_SLEEP_THRESHOLD: f32 = 75.0;
+
+// Sleep heals up to this fraction of max hp, scaled by how tired the sleeper
+// was (a fully exhausted sleeper gets the whole amount; a rested one gets
+// ~nothing, so sleep cannot be spammed as a free heal).
+const SLEEP_HEAL_MAX_FRACTION: f32 = 0.20;
+
+/// Hp restored by a sleep, given how tired the sleeper was when lying down
+/// (0.0 = fully rested, 1.0 = at the exhaustion ceiling).
+pub fn sleep_heal_amount(base_hp: i32, tired_fraction: f32) -> i32 {
+    (base_hp as f32 * SLEEP_HEAL_MAX_FRACTION * tired_fraction.clamp(0.0, 1.0)) as i32
+}
+
+// Flat heal applied by using a bandage — the cheap, craftable counterpart to
+// the Health Potion's Healing attr.
+const BANDAGE_HEAL_HP: i32 = 10;
 
 fn hero_has_pending_map_event(obj_id: i32, map_events: &MapEvents) -> bool {
     map_events.iter().any(|(_, event)| event.obj_id == obj_id)
@@ -8550,19 +8602,54 @@ fn drink_eat_system(
                         continue;
                     };
 
+                    // How tired the sleeper was, before the rest wipes it —
+                    // this scales the heal below.
+                    let tired_fraction = (tired.tired / 100.0).clamp(0.0, 1.0);
+
                     tired.update(-100.0);
 
                     if tired.tired <= 80.0 {
                         commands.entity(entity).remove::<Exhausted>();
                     }
 
-                    // Fully restore stamina on sleep
+                    // Fully restore stamina on sleep, and knit wounds a little:
+                    // up to SLEEP_HEAL_MAX_FRACTION of max hp for a sleeper who
+                    // was fully exhausted, scaling down to ~nothing when rested,
+                    // so spamming sleep is not a free infinite heal.
                     if let Ok(mut stats) = stats_query.get_mut(entity) {
                         if let Some(base_stamina) = stats.base_stamina {
                             stats.stamina = Some(base_stamina);
                         }
                         if let Some(base_mana) = stats.base_mana {
                             stats.mana = Some(base_mana);
+                        }
+
+                        let heal = sleep_heal_amount(stats.base_hp, tired_fraction);
+                        if heal > 0 && stats.hp < stats.base_hp {
+                            stats.hp = (stats.hp + heal).min(stats.base_hp);
+
+                            if ids.is_hero(*obj_id) {
+                                let packet = ResponsePacket::Stats {
+                                    data: StatsData {
+                                        id: *obj_id,
+                                        hp: stats.hp,
+                                        base_hp: stats.base_hp,
+                                        stamina: stats.stamina.unwrap_or(0),
+                                        base_stamina: stats.base_stamina.unwrap_or(0),
+                                        mana: stats.mana.unwrap_or(0),
+                                        base_mana: stats.base_mana.unwrap_or(0),
+                                        thirst: None,
+                                        hunger: None,
+                                        tiredness: None,
+                                        effects: Vec::new(),
+                                    },
+                                };
+                                send_to_client(
+                                    ids.get_player(*obj_id).unwrap(),
+                                    packet,
+                                    &clients,
+                                );
+                            }
                         }
                     }
 

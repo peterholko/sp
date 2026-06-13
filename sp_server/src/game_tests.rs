@@ -1109,6 +1109,18 @@ fn idle_rested_hero_with_bedroll_does_not_sleep() {
 }
 
 #[test]
+fn sleep_heal_scales_with_tiredness() {
+    // Fully exhausted sleeper gets the full fraction of max hp...
+    assert_eq!(sleep_heal_amount(110, 1.0), 22);
+    // ...half-tired gets half...
+    assert_eq!(sleep_heal_amount(110, 0.5), 11);
+    // ...and a rested sleeper gets nothing — sleep is not a spammable heal.
+    assert_eq!(sleep_heal_amount(110, 0.0), 0);
+    assert_eq!(sleep_heal_amount(110, -0.5), 0);
+    assert_eq!(sleep_heal_amount(110, 2.0), 22);
+}
+
+#[test]
 fn first_resurrection_uses_flat_affordable_cost() {
     // Flat and below the monolith's 10 starting shards, even with earned XP.
     assert_eq!(resurrection_attempt_cost(1, 0), FIRST_DEATH_SOULSHARD_COST);

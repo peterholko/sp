@@ -1033,11 +1033,16 @@
     - name: Healing
       value: 5
 
+# Healing attr is what the use-item handler applies — without it a potion
+# cures sickness but restores zero hp.
 - name: Health Potion
   class: Potion
   subclass: Health
   image: potion
   weight: 1
+  attrs:
+    - name: Healing
+      value: 50
 
 - name: Seeds
   class: Seeds
