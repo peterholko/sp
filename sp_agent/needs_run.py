@@ -36,7 +36,7 @@ HUNGER_TRIGGER = {"Hungry", "Peckish", "Famished", "Ravenous"}
 TIRED_TRIGGER = {"Weary", "Tired", "Exhausted", "Depleted"}
 HOSTILE_SUBCLASSES = {"npc", "undead", "demon", "bandit"}
 LOOT_SOURCES = ("Burrow", "Shipwreck", "Supply Cache", "Washed Ashore Materials", "Cache")
-LOOT_CLASSES = ("Food", "Drink", "Bedroll", "Log", "Timber")
+LOOT_CLASSES = ("Food", "Drink", "Bedroll", "Log", "Timber", "Hide", "Potion", "Gold")
 
 DRINK_ITEMS = ("Waterskin (Filled)", "Waterskin")
 FOOD_HINTS = ("Meat", "Berries", "Fish", "Bread", "Stew", "Ration", "Apple", "Egg")
@@ -60,10 +60,20 @@ class NeedsRun:
         self.hp = None
         self.state = "none"
         self.true_death_ts = None
+        self.grace = 120.0           # seconds to linger after true death
+        self.spawned = False         # hero ever placed in the world
+        self._retry_select_at = None  # resend select_class after this ts (no-slot retry)
+        self.no_slot_retries = 0
+        self._name_attempt = 0       # fallback-name attempts (rustrict false positives)
         self.ws = None
         self._needs_class_select = False
         self.forage = False
         self.build_stockade = False
+        self.smart = False           # use HP-recovery / defense / hire behaviors
+        self.max_hp = 100
+        self.home = None             # defensive anchor (campfire / spawn tile)
+        self._hired = False
+        self._heal_notes = 0
         self._stockade_phase = "none"  # none -> founded_wait -> stocked -> building -> done
         self._stockade_id = None
         self._loot_queue = []      # (item_id, source_id, name)
@@ -133,6 +143,9 @@ class NeedsRun:
                     self.hero_id = obs["id"]
                     self.hero_pos = (obs.get("x", 0), obs.get("y", 0))
                     self.objects[obs["id"]] = obs
+                    self.spawned = True
+                    if self.home is None:
+                        self.home = self.hero_pos  # campfire spawns on hero tile
                     self.note(f"hero id={self.hero_id} at {self.hero_pos}")
 
         elif ptype == "perception_changes":
@@ -166,6 +179,10 @@ class NeedsRun:
             self.hunger = pkt.get("hunger", self.hunger)
             self.tired = pkt.get("tiredness", self.tired)
             self.hp = pkt.get("hp", self.hp)
+            for k in ("base_hp", "max_hp", "hp_max", "total_hp"):
+                if pkt.get(k):
+                    self.max_hp = pkt[k]
+                    break
             if pkt.get("items") is not None:
                 self.inventory = pkt["items"]
 
@@ -201,7 +218,22 @@ class NeedsRun:
             self.note(f"NOTICE: {pkt.get('noticemsg','')[:110]}")
 
         elif ptype == "Error":
-            self.note(f"ERROR: {pkt.get('errmsg','')}")
+            emsg = pkt.get("errmsg", "")
+            self.note(f"ERROR: {emsg}")
+            # 5 start locations are shared; a freed slot may not be recycled
+            # the instant we connect. Retry select_class until one opens.
+            if "start location" in emsg.lower() and not self.spawned:
+                self.no_slot_retries += 1
+                self._retry_select_at = time.time() + 6.0
+            elif "inappropriate" in emsg.lower() and not self.spawned:
+                # rustrict false-positives on alphanumeric names; fall back to a
+                # clean dictionary word + player_id (harvest is keyed on player_id).
+                self._name_attempt += 1
+                fb = ("Hero", "Wanderer", "Settler", "Ranger", "Scout",
+                      "Pilgrim", "Drifter", "Nomad")[(self._name_attempt - 1) % 8]
+                self.hero_name = f"{fb}{self.player_id}"
+                self.note(f"name rejected, retrying as {self.hero_name}")
+                self._retry_select_at = time.time() + 0.5
 
         elif ptype == "build":
             self.note(f"build accepted, build_time={pkt.get('build_time')}")
@@ -214,6 +246,92 @@ class NeedsRun:
         ):
             self._stockade_id = o["id"]
             self.note(f"stockade foundation seen id={o['id']} state={o.get('state')}")
+
+    # ------------------------------------------------------------- smart
+    def _gold(self):
+        return sum(i.get("quantity", 0) for i in self.inventory
+                   if "Gold" in i.get("name", ""))
+
+    async def _retreat(self):
+        if not self.home:
+            return
+        await self.send({"cmd": "move_unit", "x": self.home[0], "y": self.home[1]})
+        self.note(f"retreating to home {self.home} hp={self.hp}/{self.max_hp}",
+                  key="retreat", interval=6)
+
+    async def _try_hire(self):
+        # Merchant-borne villagers cost 25 gold (hero starts with 20). Best-effort.
+        if self._hired or self._gold() < 25:
+            return False
+        hx, hy = self.hero_pos
+        for o in self.objects.values():
+            if o.get("id") == self.hero_id:
+                continue
+            sub = (o.get("subclass") or "").lower()
+            if sub == "villager" and o.get("player") != self.player_id:
+                if math.dist((o.get("x", 0), o.get("y", 0)), (hx, hy)) <= 3:
+                    await self.send({"cmd": "hire", "source_id": self.hero_id,
+                                     "target_id": o["id"]})
+                    await self.send({"cmd": "order_follow", "source_id": o["id"]})
+                    self.note(f"HIRING villager {o.get('name')} id={o['id']}")
+                    self._hired = True
+                    return True
+        return False
+
+    async def _smart_step(self, now):
+        """HP-recovery + defensive layer on top of the needs loop.
+        Returns True if it issued an action (caller should gate last_action)."""
+        hp = self.hp if self.hp is not None else self.max_hp
+        hpf = hp / max(1, self.max_hp)
+        melee = self.hostiles(1.6)
+        near = self.hostiles(4.0)
+        around = self.hostiles(6.5)
+
+        # Urgent needs first so a long fight can't kill us via thirst/hunger.
+        if self.thirst in THIRST_TRIGGER:
+            it = self.find_item(names=DRINK_ITEMS, item_class="Water")
+            if it:
+                await self.send({"cmd": "use", "obj_id": self.hero_id, "item_id": it["id"]})
+                return True
+        if self.hunger in HUNGER_TRIGGER:
+            it = self.find_item(hints=FOOD_HINTS, item_class="Food")
+            if it:
+                await self.send({"cmd": "use", "obj_id": self.hero_id, "item_id": it["id"]})
+                return True
+
+        # Emergency heal with a consumable (baseline bot never does this).
+        if hpf < 0.45:
+            it = self.find_item(hints=("Health Potion", "Potion", "Bandage",
+                                       "Poultice", "Salve", "Tonic"))
+            if it:
+                await self.send({"cmd": "use", "obj_id": self.hero_id, "item_id": it["id"]})
+                self.note(f"healing with {it['name']} (hp={hp}/{self.max_hp})")
+                return True
+
+        # Combat: retreat if low and outnumbered, else fight.
+        if melee:
+            if hpf < 0.35 and len(near) >= 2:
+                await self._retreat()
+                return True
+            tgt = melee[0][1]
+            await self.send({"cmd": "attack", "attack_type": "quick",
+                             "source_id": self.hero_id, "target_id": tgt["id"]})
+            self.note(f"attacking {tgt.get('name')} hp={hp}/{self.max_hp}", key="atk", interval=6)
+            return True
+        if near and hpf < 0.3:
+            await self._retreat()
+            return True
+
+        # Safe: recover HP/energy by sleeping (sleep heals), then try to hire.
+        if not around:
+            if self.state != "Sleeping" and (hpf < 0.6 or self.tired in TIRED_TRIGGER):
+                await self.send({"cmd": "sleep", "structure_id": 0})
+                self.note(f"smart sleep to recover (hp={hp}/{self.max_hp}, tired={self.tired})",
+                          key="hpsleep", interval=10)
+                return True
+            if await self._try_hire():
+                return True
+        return False
 
     # ------------------------------------------------------------- main
     async def run(self, duration):
@@ -231,7 +349,7 @@ class NeedsRun:
         deadline = self.start_ts + duration
 
         while time.time() < deadline:
-            if self.true_death_ts and time.time() - self.true_death_ts > 120:
+            if self.true_death_ts and time.time() - self.true_death_ts > self.grace:
                 self.note("true death + grace elapsed, exiting")
                 break
             try:
@@ -246,6 +364,12 @@ class NeedsRun:
                     break
                 continue
 
+            if self._retry_select_at and time.time() >= self._retry_select_at \
+                    and not self.spawned:
+                self._retry_select_at = None
+                self._needs_class_select = True
+                self.note(f"retrying select_class (no-slot retry #{self.no_slot_retries})")
+
             if self._needs_class_select:
                 self._needs_class_select = False
                 self.note("selecting Warrior class...")
@@ -254,6 +378,11 @@ class NeedsRun:
                 continue
 
             if self.hero_id is None or self.true_death_ts:
+                continue
+
+            # Don't act while dead/awaiting resurrection (avoids "dead cannot use
+            # items" spam). hp is restored on respawn via the next info_hero poll.
+            if self.hp is not None and self.hp <= 0:
                 continue
 
             now = time.time()
@@ -272,6 +401,14 @@ class NeedsRun:
 
             if now - last_action < 4.0:
                 continue
+
+            # Smart layer: heal / retreat / HP-recovery sleep / hire run first and
+            # preempt the legacy combat block. Falls through to forage/build when
+            # healthy and safe.
+            if self.smart:
+                if await self._smart_step(now):
+                    last_action = now
+                    continue
 
             # Priority 0 (forage mode): walk to and loot queued food/drink/bedroll.
             # Defer further looting while a stockade build is pending and we
@@ -413,16 +550,26 @@ def main():
     ap.add_argument("--hero-name", default="NeedsBot")
     ap.add_argument("--log", required=True)
     ap.add_argument("--duration", type=float, default=5400)
+    ap.add_argument("--grace", type=float, default=120.0,
+                    help="seconds to linger after true death before exiting")
     ap.add_argument("--forage", action="store_true",
                     help="also loot food/drink/bedroll from Burrow/Shipwreck")
     ap.add_argument("--build-stockade", action="store_true",
                     help="after salvaging logs, build one Stockade segment")
+    ap.add_argument("--smart", action="store_true",
+                    help="enable HP-recovery (heal/sleep), retreat, salvage, "
+                         "stockade, and best-effort hire (implies --forage)")
     args = ap.parse_args()
 
     session, player_id = fingerprint_auth(args.auth_base, args.fingerprint)
     run = NeedsRun(args.ws_url, session, player_id, args.hero_name, args.log)
-    run.forage = args.forage
+    run.smart = args.smart
+    run.forage = args.forage or args.smart
+    # NOTE: a Warrior cannot melee through its own walls ("Only ranged attacks can
+    # be used from behind a wall"), so smart mode does NOT auto-build stockades —
+    # they trap a melee hero. Use --build-stockade explicitly to force one.
     run.build_stockade = args.build_stockade
+    run.grace = args.grace
     asyncio.run(run.run(args.duration))
 
 
