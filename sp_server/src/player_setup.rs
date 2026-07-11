@@ -381,17 +381,10 @@ pub fn new(
 
     match hero_class {
         HeroClass::Warrior => {
-            let weapon_attrs = warrior_starting_weapon_attrs();
-
-            let axe = inventory.new_with_attrs(
-                ids.new_item_id(),
-                hero_id,
-                "Copper Training Axe".to_string(),
-                1,
-                weapon_attrs,
-                &templates.item_templates,
-            );
-            inventory.equip(axe.0.id, Some(Slot::MainHand));
+            // The Copper Training Axe is no longer a starting item — the Warrior
+            // must craft it at a Crafting Tent (recipe granted below). Start with
+            // the crude Sharpened Stick as a stopgap melee weapon.
+            inventory.equip(sharpened_stick.id, Some(Slot::MainHand));
 
             let mut armor_attrs = HashMap::new();
             armor_attrs.insert(item::AttrKey::Defense, item::AttrVal::Num(3.0));
@@ -921,7 +914,7 @@ pub fn new(
     // Starting recipes
     recipes.create(player_id, "Cooked Meat".to_string(), &templates);
     recipes.create(player_id, "Training Pick Axe".to_string(), &templates);
-    //recipes.create(player_id, "Copper Training Axe".to_string(), &templates);
+    recipes.create(player_id, "Copper Training Axe".to_string(), &templates);
     recipes.create(player_id, "Firewood".to_string(), &templates);
     recipes.create(player_id, "Sharpened Stick".to_string(), &templates);
     recipes.create(player_id, "Crude Torch".to_string(), &templates);

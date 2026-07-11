@@ -2444,7 +2444,7 @@ pub fn set_attack_target_system(
                     "Setting attack target to {:?}",
                     visible_target.target
                 );
-                commands.entity(*actor).insert(Target {
+                commands.entity(*actor).try_insert(Target {
                     id: visible_target.target,
                 });
 
@@ -2495,7 +2495,7 @@ pub fn set_torch_target_system(
                     continue;
                 };
 
-                commands.entity(*actor).insert(Target {
+                commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
                 });
                 *state = ActionState::Executing;
@@ -2532,7 +2532,7 @@ pub fn set_spoil_target_system(
                     continue;
                 };
 
-                commands.entity(*actor).insert(Target {
+                commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
                 });
                 *state = ActionState::Executing;
@@ -2569,7 +2569,7 @@ pub fn set_steal_target_system(
                     continue;
                 };
 
-                commands.entity(*actor).insert(Target {
+                commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
                 });
                 *state = ActionState::Executing;
@@ -2606,7 +2606,7 @@ pub fn set_corpse_target_system(
                     continue;
                 };
 
-                commands.entity(*actor).insert(Target {
+                commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
                 });
                 *state = ActionState::Executing;
