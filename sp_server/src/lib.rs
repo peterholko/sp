@@ -140,6 +140,7 @@ pub fn setup(command: &String) {
         .add_plugins(GamePlugin {
             new_game,
             headless: false,
+            survival_director_mode: game::SurvivalDirectorMode::PersonalCrisis,
         })
         .init_state::<AppState>();
 
@@ -225,6 +226,10 @@ pub fn register_all_types(app: &mut App) {
 // identical plugin/reflect wiring to `setup()`. The harness inserts the network
 // resources (`NetworkReceiver`/`Clients`/`DatabaseManagers`) before pumping.
 pub fn build_headless_app() -> App {
+    build_headless_app_with_director(game::SurvivalDirectorMode::PersonalCrisis)
+}
+
+pub fn build_headless_app_with_director(survival_director_mode: game::SurvivalDirectorMode) -> App {
     let mut app = App::new();
 
     app.add_plugins(StatesPlugin)
@@ -235,6 +240,7 @@ pub fn build_headless_app() -> App {
         .add_plugins(GamePlugin {
             new_game: true,
             headless: true,
+            survival_director_mode,
         })
         .init_state::<AppState>();
 

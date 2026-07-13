@@ -2129,6 +2129,14 @@ fn stamina_recovery_skips_dead_entities() {
 // =============================================================================
 
 #[test]
+fn personal_crisis_is_the_default_survival_director_mode() {
+    assert_eq!(
+        SurvivalDirectorConfig::default().mode,
+        SurvivalDirectorMode::PersonalCrisis
+    );
+}
+
+#[test]
 fn crisis_tier_calculation_empty_state() {
     let crisis = PlayerCrisis::default();
     let tier = calculate_crisis_tier(&crisis);

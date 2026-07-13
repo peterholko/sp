@@ -28,7 +28,7 @@ use crate::common::Transport;
 use crate::game::{
     Client, Clients, DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState,
     Monolith, NetworkReceiver, Objectives, PlayerObjectives, PlayerRunScore, PlayerStats,
-    PlayerVictory, RunScoreState, VictoryState,
+    PlayerVictory, RunScoreState, SurvivalDirectorMode, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
@@ -38,7 +38,7 @@ use crate::obj::{
 };
 use crate::resource::Resources;
 use crate::skill::Skills;
-use crate::{build_headless_app, AppState, PlayerEvent, ResponsePacket};
+use crate::{build_headless_app_with_director, AppState, PlayerEvent, ResponsePacket};
 
 // Deterministic player id for the single headless hero. MUST be < MAX_PLAYER_ID
 // (1000) so `PlayerId::is_human()` is true and NPC factions (player id 1000+)
@@ -320,7 +320,11 @@ impl HeadlessGame {
     // Build a fresh headless game. `max_ticks` is the number of game ticks the
     // run is allowed to advance past hero spawn before `is_over()` caps it.
     pub fn new(max_ticks: i32) -> Self {
-        let mut app = build_headless_app();
+        Self::new_with_director(max_ticks, SurvivalDirectorMode::PersonalCrisis)
+    }
+
+    pub fn new_with_director(max_ticks: i32, survival_director_mode: SurvivalDirectorMode) -> Self {
+        let mut app = build_headless_app_with_director(survival_director_mode);
 
         // Player input channel (harness -> game).
         let (event_tx, event_rx) = unbounded::<PlayerEvent>();
@@ -883,6 +887,35 @@ impl HeadlessGame {
 mod tests {
     use super::*;
 
+    fn prepare_for_scheduled_dusk(game: &mut HeadlessGame) {
+        use crate::constants::DUSK;
+        use crate::game::PlayerIntroState;
+
+        let dusk = DUSK + (GAME_TICKS_PER_DAY * 3);
+        let player_id = game.player_id();
+        let world = game.app.world_mut();
+        {
+            let mut intro_state = world.resource_mut::<PlayerIntroState>();
+            let intro = intro_state
+                .get_mut(&player_id)
+                .expect("headless player intro state");
+            intro.start_tick = dusk - 4_801;
+            intro.danger_unlocked = true;
+        }
+        world.resource_mut::<GameTick>().0 = dusk - 2;
+    }
+
+    fn cross_scheduled_dusk(game: &mut HeadlessGame) -> i32 {
+        game.tick(5);
+        game.metrics().waves_survived
+    }
+
+    fn run_intro_check_at_or_after(game: &mut HeadlessGame, due_tick: i32) {
+        let check_tick = ((due_tick + 9) / 10) * 10;
+        game.app.world_mut().resource_mut::<GameTick>().0 = check_tick - 2;
+        game.tick(15);
+    }
+
     // One short capped game end-to-end. Must run with CWD = sp_server/ so the
     // templates/map/tileset files load by relative path.
     #[test]
@@ -910,6 +943,57 @@ mod tests {
         // Metrics readable.
         let m = game.metrics();
         assert!(m.ticks >= 0);
+    }
+
+    #[test]
+    fn personal_crisis_mode_does_not_spawn_a_scheduled_dusk_horde() {
+        let mut game = HeadlessGame::new(10_000);
+        game.spawn_hero("Warrior", "PersonalDuskBot");
+        prepare_for_scheduled_dusk(&mut game);
+
+        assert_eq!(cross_scheduled_dusk(&mut game), 0);
+    }
+
+    #[test]
+    fn legacy_mode_still_runs_the_scheduled_dusk_horde() {
+        let mut game = HeadlessGame::new_with_director(10_000, SurvivalDirectorMode::Legacy);
+        game.spawn_hero("Warrior", "LegacyDuskBot");
+        prepare_for_scheduled_dusk(&mut game);
+
+        assert!(
+            cross_scheduled_dusk(&mut game) > 0,
+            "legacy nightly_threat_system should schedule its dusk wave"
+        );
+    }
+
+    #[test]
+    fn personal_crisis_mode_preserves_the_introductory_encounter() {
+        use crate::game::InitialEncounterState;
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "IntroBot");
+        let entry = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter state")
+            .clone();
+
+        run_intro_check_at_or_after(&mut game, entry.second_rat_spawn_tick);
+
+        assert!(
+            game.world()
+                .resource::<crate::game::PlayerIntroState>()
+                .get(&player_id)
+                .expect("player intro state")
+                .shipwreck_chain_started,
+            "the delayed opening encounter should start in personal-crisis mode"
+        );
+        assert!(matches!(
+            entry.phase1_spawn.as_str(),
+            "Wild Boar" | "Giant Crab"
+        ));
+        assert!(entry.phase1_unlock_tick < entry.spider_unlock_tick);
     }
 
     // Hand-crafting Firewood from a Log — the cook economy's fuel chain. The bot

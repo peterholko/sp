@@ -5,7 +5,7 @@ use bevy::state::app::StatesPlugin;
 use siege_perilous::{
     constants::*,
     event::MapEvents,
-    game::GameTick,
+    game::{GameTick, SurvivalDirectorConfig, SurvivalDirectorMode},
     item::Inventory,
     obj::{Id, Template, Viewshed},
     world::WorldPlugin,
@@ -21,6 +21,9 @@ fn test_day_system_night() {
     app.add_plugins(WorldPlugin);
     app.insert_state(AppState::Running);
     app.insert_resource(GameTick(0));
+    app.insert_resource(SurvivalDirectorConfig::new(
+        SurvivalDirectorMode::PersonalCrisis,
+    ));
     app.insert_resource(MapEvents(HashMap::new()));
 
     // Add a player entity with a viewshed
@@ -41,6 +44,10 @@ fn test_day_system_night() {
     app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
     app.update();
     assert_eq!(app.world().get::<Viewshed>(player_id).unwrap().range, 0);
+    assert_eq!(
+        app.world().resource::<SurvivalDirectorConfig>().mode,
+        SurvivalDirectorMode::PersonalCrisis
+    );
 }
 
 #[test]
