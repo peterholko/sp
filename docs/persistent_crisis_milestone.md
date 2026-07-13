@@ -4,6 +4,126 @@
 
 Proposed implementation milestone.
 
+## Checkpoint 1 implementation record
+
+Checkpoint 1 is limited to director separation. The goblin crisis state machine,
+online/offline crisis timing, assault suspension, crisis packets and UI, and
+headless crisis metrics remain deferred to later checkpoints.
+
+### Architecture findings
+
+* `GameTick` is a reflected Bevy resource in `sp_server/src/game.rs`. It defaults
+  to `DAWN`, is incremented by `update_game_tick`, and provides global day,
+  hour, and time-of-day calculations. It is global rather than player-specific.
+* `WorldPlugin` in `sp_server/src/world.rs` registers `day_system` independently
+  of the settlement-danger systems. At the time boundaries defined in
+  `constants.rs`, `day_system` recalculates non-NPC `Viewshed` ranges from base
+  vision, time of day, equipped-item vision, and effects. It also sends the
+  existing `ResponsePacket::World { time_of_day, day }`. Weather state is held
+  by `WeatherAreas`; `weather_cycle_system` and `weather_effects_system` are
+  registered separately in `GamePlugin` and remain unconditional in both
+  director modes.
+* `PlayerCrisis` and `CrisisState` in `sp_server/src/game.rs` are in-memory,
+  per-player legacy state. `PlayerCrisis` contains five automatic ladder flags
+  (`rat_spoilage`, `wolf_pack`, `goblin_raid`, `undead_incursion`, and
+  `goblin_pillager`) plus `initial_encounter` and `spider_encounter`. Thus the
+  introduction and legacy crisis ladder are not yet cleanly separated.
+* `rat_event_system` checks stored food every 20 ticks after the 4,800-tick
+  introduction grace. `wolf_pack_system` checks distance from spawn every 10
+  ticks and has an eight-minute fallback. `goblin_raid_system` checks for 30
+  stored gold every 30 ticks and has a ten-minute fallback. The undead and
+  pillager systems check every 10 ticks and use three-day/16-minute and
+  five-day/24-minute thresholds respectively.
+* `nightly_threat_system` checks the global tick for exact `DUSK`, skips global
+  day one and players younger than 4,800 ticks, then spawns a day-scaled wave
+  outside the sanctuary. On a successful spawn it records the global day in a
+  system-local map and increments `PlayerRunScore::waves_survived`.
+* `legendary_threat_system` checks every 10 ticks. It creates the Fire Dragon
+  hideout at player survival day six, activates the campaign at day seven, and
+  sends recurring follower waves. `legendary_death_tracking_system` performs
+  cleanup, objective, and score bookkeeping for already-existing legendary
+  entities and is not itself an automatic escalation trigger.
+* `GamePlugin` registers the legacy ladder, nightly horde, and legendary
+  escalation as separate `Update` systems. The introductory
+  `initial_encounter_system` is also separate, so it can remain active while the
+  automatic systems are mode-gated. Economy plugins and their systems are
+  registered independently and require no Checkpoint 1 changes.
+* New-player setup in `player_setup.rs` creates `PlayerIntroState` and
+  `InitialEncounterState`, including two delayed opening enemies, the
+  boar/crab follow-up, spider follow-up, villager timing, merchant, and later
+  necromancer data. `initial_encounter_system` still uses the two introduction
+  flags in `PlayerCrisis`; this temporary coupling is retained for Checkpoint 1.
+* Login enters through `PlayerEvent::Login` in `player.rs`, which schedules a
+  `GameEventType::Login`; `game_event_system` later performs login perception
+  and queues the sanctuary resend. Network disconnect paths remove the active
+  client UUID from the shared `Clients` map. Hero entities can remain in the
+  ECS, so they are not authoritative presence. Presence semantics are inspected
+  but intentionally unchanged until Checkpoints 2 and 3.
+* `build_headless_app` builds the same gameplay plugins without the realtime
+  schedule runner or production network. `HeadlessGame` supplies in-process
+  client/database channels, pumps `App::update`, exposes world observations and
+  run metrics, and drives the existing deterministic bot through
+  `headless_runner`.
+
+### Checkpoint 1 affected files
+
+* `sp_server/src/game.rs` — named director mode/configuration and mode gates on
+  legacy automatic danger systems.
+* `sp_server/src/lib.rs` — explicit personal-crisis default for production and
+  headless app builders.
+* `sp_server/src/headless.rs` — explicit mode-selecting constructor and focused
+  director/introduction regression tests.
+* `sp_server/src/game_tests.rs` — default-mode regression test.
+* `sp_server/tests/day_system_test.rs` — personal-mode night-visibility
+  regression coverage.
+* `docs/persistent_crisis_milestone.md` — this architecture and configuration
+  record.
+
+No resource, recipe, crafting, farming, structure, trade, villager AI, map,
+network protocol, client, database, or deployment file is changed.
+
+### Design conflicts and selected scope
+
+The milestone-level goal and definition of done describe the completed
+four-checkpoint initiative, including a goblin phase machine, offline rules,
+assault attribution, networking, and UI. Section 24 explicitly assigns those
+features to Checkpoints 2 through 4. The Checkpoint 1 request is narrower, so
+this implementation follows Section 24 and does not satisfy or implement those
+later milestone-level items yet.
+
+The preferred design separates introductory state from crisis state, but the
+current introduction reads and writes `PlayerCrisis.initial_encounter` and
+`spider_encounter`. Moving those fields is Checkpoint 2 work and would expand
+this patch. Checkpoint 1 therefore retains `PlayerCrisis` unchanged, leaves
+`initial_encounter_system` active in both modes, and gates `rat_event_system`
+separately because it is the automatic food-spoilage tier rather than the
+shipwreck chain.
+
+### Selected configuration approach
+
+The server uses one named Bevy resource:
+
+```rust
+enum SurvivalDirectorMode {
+    Legacy,
+    PersonalCrisis,
+}
+
+struct SurvivalDirectorConfig {
+    mode: SurvivalDirectorMode,
+}
+```
+
+`PersonalCrisis` is the `Default` and is passed explicitly by both the
+production and standard headless builders. `Legacy` remains selectable by app
+construction and by the headless regression harness. A shared Bevy run
+condition gates only `rat_event_system`, `wolf_pack_system`,
+`goblin_raid_system`, `undead_incursion_system`,
+`goblin_pillager_system`, `nightly_threat_system`, and
+`legendary_threat_system`. Environmental time, weather, visibility, world-time
+packets, introductory encounters, legendary death bookkeeping, and the economy
+remain registered in both modes.
+
 ## Purpose
 
 This document defines the first implementation milestone in the Siege Perilous persistent-world redesign.
@@ -1057,4 +1177,3 @@ At the end of the milestone, the implementation report should include:
 The implementation must not claim that the entire long-term Siege Perilous redesign has been completed.
 
 This milestone implements only the persistent personal-crisis foundation.
-

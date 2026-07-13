@@ -339,6 +339,38 @@ pub struct PlayerCrisis {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct CrisisState(pub HashMap<i32, PlayerCrisis>);
 
+/// Selects which server-authoritative settlement danger model is active.
+/// Environmental time, weather, visibility, and introductory encounters are
+/// intentionally independent of this configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurvivalDirectorMode {
+    Legacy,
+    PersonalCrisis,
+}
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurvivalDirectorConfig {
+    pub mode: SurvivalDirectorMode,
+}
+
+impl Default for SurvivalDirectorConfig {
+    fn default() -> Self {
+        Self {
+            mode: SurvivalDirectorMode::PersonalCrisis,
+        }
+    }
+}
+
+impl SurvivalDirectorConfig {
+    pub const fn new(mode: SurvivalDirectorMode) -> Self {
+        Self { mode }
+    }
+}
+
+fn legacy_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
+    config.mode == SurvivalDirectorMode::Legacy
+}
+
 pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
     "Cave Bat",
     "Cave Bat", //"Thorn Beetle",
@@ -1317,6 +1349,7 @@ pub struct GamePlugin {
     // (see `headless.rs`) inserts the network resources itself. Always false for
     // the real server.
     pub headless: bool,
+    pub survival_director_mode: SurvivalDirectorMode,
 }
 
 impl Default for GamePlugin {
@@ -1324,12 +1357,15 @@ impl Default for GamePlugin {
         Self {
             new_game: true,
             headless: false,
+            survival_director_mode: SurvivalDirectorMode::PersonalCrisis,
         }
     }
 }
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
+        app.insert_resource(SurvivalDirectorConfig::new(self.survival_director_mode));
+
         if self.new_game {
             if self.headless {
                 app.add_systems(PreStartup, Game::new_game_setup_headless);
@@ -1461,31 +1497,51 @@ impl Plugin for GamePlugin {
                 Update,
                 player_intro_state_system.run_if(in_state(AppState::Running)),
             )
-            .add_systems(Update, rat_event_system.run_if(in_state(AppState::Running)))
+            .add_systems(
+                Update,
+                rat_event_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
+            )
             .add_systems(
                 Update,
                 initial_encounter_system.run_if(in_state(AppState::Running)),
             )
-            .add_systems(Update, wolf_pack_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
-                goblin_raid_system.run_if(in_state(AppState::Running)),
+                wolf_pack_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
             )
             .add_systems(
                 Update,
-                undead_incursion_system.run_if(in_state(AppState::Running)),
+                goblin_raid_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
             )
             .add_systems(
                 Update,
-                goblin_pillager_system.run_if(in_state(AppState::Running)),
+                undead_incursion_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
             )
             .add_systems(
                 Update,
-                nightly_threat_system.run_if(in_state(AppState::Running)),
+                goblin_pillager_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
             )
             .add_systems(
                 Update,
-                legendary_threat_system.run_if(in_state(AppState::Running)),
+                nightly_threat_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
+            )
+            .add_systems(
+                Update,
+                legendary_threat_system
+                    .run_if(in_state(AppState::Running))
+                    .run_if(legacy_survival_director),
             )
             .add_systems(
                 Update,
