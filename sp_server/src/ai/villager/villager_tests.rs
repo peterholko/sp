@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::constants::TICKS_PER_SEC;
-use crate::game::{Client, Fortified};
+use crate::game::{Client, Clients, CrisisAssaultUnit, Fortified};
 use crate::network::ResponsePacket;
 use crate::obj::ActiveTask;
 
@@ -1021,6 +1021,7 @@ macro_rules! setup_action_test_app {
         app.world_mut().insert_resource(Ids::default());
         app.world_mut().insert_resource(MapEvents(HashMap::new()));
         app.world_mut().insert_resource(GameEvents(HashMap::new()));
+        app.world_mut().insert_resource(Clients::default());
         app
     }};
 }
@@ -1680,6 +1681,59 @@ fn fight_back_system_attacks_adjacent_last_attacker_when_armed() {
 
     let action_state = app.world().entity(action).get::<ActionState>().unwrap();
     assert_eq!(*action_state, ActionState::Executing);
+}
+
+#[test]
+fn fight_back_system_does_not_progress_an_offline_owner_assault() {
+    let mut app = setup_action_test_app!(fight_back_system);
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_combat_templates());
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(2)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Subclass::Villager);
+    insert_combat_components(app.world_mut(), villager, 30, 10);
+    insert_combat_components(app.world_mut(), attacker, 30, 1);
+    app.world_mut()
+        .entity_mut(attacker)
+        .insert(CrisisAssaultUnit {
+            owner_player_id: 1,
+            assault_id: 7,
+            spawn_generation: 1,
+        });
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, attacker);
+    }
+
+    let action = spawn_action_as_requested(&mut app, &FightBack, villager);
+    app.update();
+
+    assert_eq!(app.world().entity(attacker).get::<Stats>().unwrap().hp, 30);
+    assert!(app.world().entity(villager).get::<LastAttacker>().is_none());
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
 }
 
 #[test]

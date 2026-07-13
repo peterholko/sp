@@ -19,16 +19,17 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::common::Transport;
 use crate::common::{Hunger, Thirst, Tired};
 use crate::constants::{
     DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
 };
 use crate::database::DatabaseEvent;
-use crate::common::Transport;
 use crate::game::{
-    Client, Clients, DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState,
-    Monolith, NetworkReceiver, Objectives, PlayerObjectives, PlayerRunScore, PlayerStats,
-    PlayerVictory, RunScoreState, SurvivalDirectorMode, VictoryState,
+    Client, Clients, CrisisAssaultUnit, DatabaseClient, DatabaseManagers, GameTick, Merchant,
+    MerchantSailState, Monolith, NetworkReceiver, Objectives, PlayerIntroEncounters,
+    PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState, SettlementCrisis,
+    SettlementCrisisState, SurvivalDirectorMode, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
@@ -125,6 +126,16 @@ pub struct UnitView {
     pub id: i32,
     pub player_id: i32,
     pub pos: Position,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrisisAssaultUnitView {
+    pub obj_id: i32,
+    pub template: String,
+    pub owner_player_id: i32,
+    pub assault_id: u64,
+    pub spawn_generation: u32,
+    pub dead: bool,
 }
 
 #[derive(Clone)]
@@ -340,10 +351,10 @@ impl HeadlessGame {
         let clients = Clients::default();
 
         let database_managers = DatabaseManagers::default();
-        database_managers.lock().unwrap().insert(
-            DATABASE_MANAGER_ID,
-            DatabaseClient { sender: db_tx },
-        );
+        database_managers
+            .lock()
+            .unwrap()
+            .insert(DATABASE_MANAGER_ID, DatabaseClient { sender: db_tx });
 
         app.insert_resource(NetworkReceiver::new(event_rx));
         app.insert_resource(clients.clone());
@@ -513,6 +524,70 @@ impl HeadlessGame {
         self.player_id
     }
 
+    /// Removes every active test connection for this player while leaving the
+    /// hero entity in the ECS, matching production disconnect semantics.
+    pub fn disconnect_player(&mut self) {
+        let player_id = self.player_id;
+        self.clients
+            .lock()
+            .unwrap()
+            .retain(|_, client| client.player_id != player_id);
+    }
+
+    /// Re-adds the harness's deterministic active client without recreating the
+    /// hero or resetting run state.
+    pub fn reconnect_player(&mut self) {
+        let client = Client {
+            id: Uuid::from_u128(self.player_id as u128),
+            player_id: self.player_id,
+            sender: self.packet_tx.clone(),
+        };
+        self.clients.lock().unwrap().insert(client.id, client);
+    }
+
+    pub fn settlement_crisis(&self) -> Option<SettlementCrisis> {
+        self.app
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&self.player_id)
+            .cloned()
+    }
+
+    pub fn crisis_assault_units(&mut self) -> Vec<CrisisAssaultUnitView> {
+        let world = self.app.world_mut();
+        let mut query = world.query::<(&Id, &Template, &CrisisAssaultUnit, Option<&StateDead>)>();
+        let mut units = query
+            .iter(world)
+            .map(|(id, template, assault, dead)| CrisisAssaultUnitView {
+                obj_id: id.0,
+                template: template.0.clone(),
+                owner_player_id: assault.owner_player_id,
+                assault_id: assault.assault_id,
+                spawn_generation: assault.spawn_generation,
+                dead: dead.is_some(),
+            })
+            .collect::<Vec<_>>();
+        units.sort_by_key(|unit| unit.obj_id);
+        units
+    }
+
+    pub fn personal_crises_resolved(&self) -> i32 {
+        self.app
+            .world()
+            .resource::<RunScoreState>()
+            .get(&self.player_id)
+            .map(|score| score.personal_crises_resolved)
+            .unwrap_or(0)
+    }
+
+    pub fn intro_encounters(&self) -> Option<PlayerIntroEncounters> {
+        self.app
+            .world()
+            .resource::<crate::game::IntroEncounterState>()
+            .get(&self.player_id)
+            .cloned()
+    }
+
     pub fn game_tick(&self) -> i32 {
         self.app
             .world()
@@ -569,8 +644,8 @@ impl HeadlessGame {
 
         // Living enemy NPCs.
         let enemies = {
-            let mut q = world
-                .query_filtered::<(&Id, &PlayerId, &Position, &State), With<SubclassNPC>>();
+            let mut q =
+                world.query_filtered::<(&Id, &PlayerId, &Position, &State), With<SubclassNPC>>();
             q.iter(world)
                 .filter(|(_, _, _, state)| **state != State::Dead)
                 .map(|(id, p, pos, _)| UnitView {
@@ -765,8 +840,7 @@ impl HeadlessGame {
         }
 
         // Hero permadead or gone?
-        let mut q = world
-            .query_filtered::<(&PlayerId, Option<&TrueDeath>), With<SubclassHero>>();
+        let mut q = world.query_filtered::<(&PlayerId, Option<&TrueDeath>), With<SubclassHero>>();
         match q.iter(world).find(|(p, _)| p.0 == pid) {
             Some((_, td)) => td.is_some(),
             None => true,
@@ -779,7 +853,14 @@ impl HeadlessGame {
         let world = self.app.world_mut();
 
         // Hero end-state (owned primitives so the borrow ends before the next query).
-        let (final_hp, final_skill_total, final_inventory_count, hero_true_death, hero_present, killer) = {
+        let (
+            final_hp,
+            final_skill_total,
+            final_inventory_count,
+            hero_true_death,
+            hero_present,
+            killer,
+        ) = {
             let mut q = world.query_filtered::<(
                 &PlayerId,
                 &Stats,
@@ -888,10 +969,14 @@ mod tests {
     use super::*;
 
     fn prepare_for_scheduled_dusk(game: &mut HeadlessGame) {
+        prepare_for_scheduled_dusk_on_day(game, 3);
+    }
+
+    fn prepare_for_scheduled_dusk_on_day(game: &mut HeadlessGame, day_offset: i32) {
         use crate::constants::DUSK;
         use crate::game::PlayerIntroState;
 
-        let dusk = DUSK + (GAME_TICKS_PER_DAY * 3);
+        let dusk = DUSK + (GAME_TICKS_PER_DAY * day_offset);
         let player_id = game.player_id();
         let world = game.app.world_mut();
         {
@@ -914,6 +999,187 @@ mod tests {
         let check_tick = ((due_tick + 9) / 10) * 10;
         game.app.world_mut().resource_mut::<GameTick>().0 = check_tick - 2;
         game.tick(15);
+    }
+
+    fn mark_obj_ids_dead(game: &mut HeadlessGame, obj_ids: &[i32], dead_at: i32) {
+        let entities = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<(Entity, &Id)>();
+            query
+                .iter(world)
+                .filter(|(_, id)| obj_ids.contains(&id.0))
+                .map(|(entity, _)| entity)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            entities.len(),
+            obj_ids.len(),
+            "every scripted encounter object should exist before being defeated"
+        );
+        for entity in entities {
+            game.app.world_mut().entity_mut(entity).insert((
+                State::Dead,
+                StateDead {
+                    dead_at,
+                    killer: "Headless checkpoint test".to_string(),
+                },
+            ));
+        }
+    }
+
+    fn next_preferred_assault_tick(current_tick: i32) -> i32 {
+        use crate::constants::DUSK;
+        use crate::game::ASSAULT_READY_GRACE_TICKS;
+
+        let mut dusk = current_tick.div_euclid(GAME_TICKS_PER_DAY) * GAME_TICKS_PER_DAY + DUSK;
+        while dusk - ASSAULT_READY_GRACE_TICKS <= current_tick {
+            dusk += GAME_TICKS_PER_DAY;
+        }
+        dusk
+    }
+
+    fn set_personal_assault_ready(game: &mut HeadlessGame) -> i32 {
+        use crate::game::{
+            CrisisKind, CrisisPhase, InitialEncounterState, PlayerIntroState,
+            ASSAULT_READY_GRACE_TICKS,
+        };
+
+        let player_id = game.player_id();
+        let preferred_tick = next_preferred_assault_tick(game.game_tick());
+        let ready_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+        let world = game.app.world_mut();
+        world.resource_mut::<GameTick>().0 = ready_tick;
+        world
+            .resource_mut::<PlayerIntroState>()
+            .get_mut(&player_id)
+            .expect("player intro state")
+            .danger_unlocked = true;
+        world
+            .resource_mut::<InitialEncounterState>()
+            .remove(&player_id);
+        world.resource_mut::<SettlementCrisisState>().insert(
+            player_id,
+            SettlementCrisis {
+                kind: CrisisKind::Goblin,
+                phase: CrisisPhase::AssaultReady,
+                pressure: 100,
+                phase_started_tick: ready_tick,
+                online_active_ticks: 10_000,
+                phase_online_ticks: 0,
+                warning_active: true,
+                last_evaluated_tick: ready_tick,
+                ..SettlementCrisis::default()
+            },
+        );
+        preferred_tick
+    }
+
+    fn advance_ready_clock_to_launch(game: &mut HeadlessGame, preferred_tick: i32) {
+        use crate::game::CrisisPhase;
+
+        game.app.world_mut().resource_mut::<GameTick>().0 = preferred_tick - 2;
+        game.tick(1);
+        let before = game.settlement_crisis().expect("ready crisis");
+        assert_eq!(before.phase, CrisisPhase::AssaultReady);
+        assert!(game.crisis_assault_units().is_empty());
+
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().expect("launched crisis").phase,
+            CrisisPhase::AssaultActive
+        );
+    }
+
+    fn set_reconnect_ready_clock(game: &mut HeadlessGame) -> i32 {
+        use crate::game::ASSAULT_READY_GRACE_TICKS;
+
+        let preferred_tick = next_preferred_assault_tick(game.game_tick());
+        let ready_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+        let world = game.app.world_mut();
+        world.resource_mut::<GameTick>().0 = ready_tick;
+        let mut crises = world.resource_mut::<SettlementCrisisState>();
+        let crisis = crises
+            .get_mut(&game.player_id)
+            .expect("retry crisis remains ready");
+        crisis.phase_online_ticks = 0;
+        crisis.last_evaluated_tick = ready_tick;
+        preferred_tick
+    }
+
+    fn kill_assault_unit_through_normal_combat(
+        game: &mut HeadlessGame,
+        target_id: i32,
+    ) -> Vec<(String, i32)> {
+        use crate::constants::ATTACK_COOLDOWN_TICKS;
+        use crate::ids::EntityObjMap;
+
+        let owner_player_id = game.player_id();
+        let (hero_entity, hero_id, hero_pos, target_entity, loot_before) = {
+            let world = game.app.world_mut();
+            let mut hero_query =
+                world.query_filtered::<(Entity, &Id, &PlayerId, &Position), With<SubclassHero>>();
+            let (hero_entity, hero_id, hero_pos) = hero_query
+                .iter(world)
+                .find(|(_, _, owner, _)| owner.0 == owner_player_id)
+                .map(|(entity, id, _, pos)| (entity, id.0, *pos))
+                .expect("headless hero");
+            let target_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(target_id)
+                .expect("assault target entity");
+            let loot_before = world
+                .get::<Inventory>(target_entity)
+                .expect("assault inventory")
+                .items
+                .iter()
+                .map(|item| (item.name.clone(), item.quantity))
+                .collect::<Vec<_>>();
+            (hero_entity, hero_id, hero_pos, target_entity, loot_before)
+        };
+
+        {
+            let world = game.app.world_mut();
+            *world
+                .get_mut::<Position>(target_entity)
+                .expect("target position") = hero_pos;
+            world
+                .get_mut::<Stats>(target_entity)
+                .expect("target stats")
+                .hp = 0;
+            *world.get_mut::<State>(hero_entity).expect("hero state") = State::None;
+            world
+                .get_mut::<Stats>(hero_entity)
+                .expect("hero stats")
+                .stamina = Some(100);
+            world.resource_mut::<GameTick>().0 += ATTACK_COOLDOWN_TICKS + 1;
+        }
+
+        game.inject(PlayerEvent::Attack {
+            player_id: game.player_id(),
+            attack_type: "quick".to_string(),
+            source_id: hero_id,
+            target_id,
+        });
+        game.tick(3);
+
+        let world = game.app.world();
+        assert!(
+            world.get::<StateDead>(target_entity).is_some(),
+            "real PlayerEvent::Attack should produce StateDead"
+        );
+        assert_eq!(
+            world
+                .get::<Inventory>(target_entity)
+                .expect("normal corpse retains inventory")
+                .items
+                .iter()
+                .map(|item| (item.name.clone(), item.quantity))
+                .collect::<Vec<_>>(),
+            loot_before,
+            "normal combat leaves pre-generated ordinary loot on the corpse"
+        );
+        loot_before
     }
 
     // One short capped game end-to-end. Must run with CWD = sp_server/ so the
@@ -958,17 +1224,33 @@ mod tests {
     fn legacy_mode_still_runs_the_scheduled_dusk_horde() {
         let mut game = HeadlessGame::new_with_director(10_000, SurvivalDirectorMode::Legacy);
         game.spawn_hero("Warrior", "LegacyDuskBot");
-        prepare_for_scheduled_dusk(&mut game);
+
+        // Legacy spawn placement samples wilderness outside the sanctuary. Try
+        // several distinct dusks so random selection of blocked edge tiles
+        // cannot make the director-registration regression flaky.
+        let mut waves = 0;
+        for day_offset in 3..=10 {
+            prepare_for_scheduled_dusk_on_day(&mut game, day_offset);
+            waves = cross_scheduled_dusk(&mut game);
+            if waves > 0 {
+                break;
+            }
+        }
 
         assert!(
-            cross_scheduled_dusk(&mut game) > 0,
+            waves > 0,
             "legacy nightly_threat_system should schedule its dusk wave"
+        );
+        assert!(
+            game.settlement_crisis().is_none(),
+            "legacy mode must not activate the personal crisis state machine"
         );
     }
 
     #[test]
     fn personal_crisis_mode_preserves_the_introductory_encounter() {
-        use crate::game::InitialEncounterState;
+        use crate::event::{GameEventType, GameEvents};
+        use crate::game::{InitialEncounterState, IntroEncounterState, PlayerIntroState};
 
         let mut game = HeadlessGame::new(10_000);
         let player_id = game.spawn_hero("Warrior", "IntroBot");
@@ -978,6 +1260,13 @@ mod tests {
             .get(&player_id)
             .expect("initial encounter state")
             .clone();
+
+        game.app
+            .world_mut()
+            .resource_mut::<Objectives>()
+            .entry(player_id)
+            .or_default()
+            .scavenge_shipwreck = true;
 
         run_intro_check_at_or_after(&mut game, entry.second_rat_spawn_tick);
 
@@ -989,11 +1278,1552 @@ mod tests {
                 .shipwreck_chain_started,
             "the delayed opening encounter should start in personal-crisis mode"
         );
+        let opening_deadline = entry.phase1_unlock_tick;
+        mark_obj_ids_dead(&mut game, &entry.rat_ids, opening_deadline);
+        run_intro_check_at_or_after(&mut game, opening_deadline);
+
+        let phase1_id = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .and_then(|state| state.phase1_npc_id)
+            .expect("boar/crab follow-up should spawn after opening enemies die");
+        assert!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&player_id)
+                .expect("separate intro encounter progress")
+                .initial_encounter
+        );
+
+        mark_obj_ids_dead(&mut game, &[phase1_id], entry.spider_unlock_tick);
+        run_intro_check_at_or_after(&mut game, entry.spider_unlock_tick);
+
+        assert!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&player_id)
+                .expect("separate intro encounter progress")
+                .spider_encounter
+        );
+        let spider_exists = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<(&Template, &Position, Option<&StateDead>)>();
+            query.iter(world).any(|(template, pos, dead)| {
+                template.0 == "Spider" && *pos == entry.spawn_pos && dead.is_none()
+            })
+        };
+        assert!(
+            spider_exists,
+            "the Spider follow-up should be alive at the wreck"
+        );
+
+        assert!(
+            game.world()
+                .resource::<PlayerIntroState>()
+                .get(&player_id)
+                .expect("player intro state")
+                .villager_spawned,
+            "shipwreck inspection should still rescue the villager"
+        );
+        let villager_exists = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&PlayerId, &State), With<SubclassVillager>>();
+            query
+                .iter(world)
+                .any(|(owner, state)| owner.0 == player_id && state.is_alive())
+        };
+        assert!(villager_exists);
+        assert!(game
+            .world()
+            .resource::<GameEvents>()
+            .values()
+            .any(|event| matches!(event.event_type, GameEventType::NecroEvent { .. })));
+
         assert!(matches!(
             entry.phase1_spawn.as_str(),
             "Wild Boar" | "Giant Crab"
         ));
         assert!(entry.phase1_unlock_tick < entry.spider_unlock_tick);
+    }
+
+    #[test]
+    fn true_death_clears_intro_and_personal_crisis_before_a_fresh_run() {
+        use crate::game::{
+            CrisisKind, CrisisPhase, InitialEncounterState, IntroEncounterState,
+            PlayerIntroEncounters, PlayerIntroState, SettlementCrisis, SettlementCrisisState,
+        };
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "FirstRunBot");
+        let neighbor_id = player_id + 1;
+        let current_tick = game.game_tick();
+
+        {
+            let world = game.app.world_mut();
+            let mut intro = world.resource_mut::<IntroEncounterState>();
+            intro.insert(
+                player_id,
+                PlayerIntroEncounters {
+                    initial_encounter: true,
+                    spider_encounter: true,
+                },
+            );
+            intro.insert(
+                neighbor_id,
+                PlayerIntroEncounters {
+                    initial_encounter: true,
+                    spider_encounter: false,
+                },
+            );
+        }
+        game.app
+            .world_mut()
+            .resource_mut::<SettlementCrisisState>()
+            .insert(
+                neighbor_id,
+                SettlementCrisis {
+                    kind: CrisisKind::Goblin,
+                    phase: CrisisPhase::Signs,
+                    pressure: 40,
+                    phase_started_tick: current_tick,
+                    online_active_ticks: 50,
+                    phase_online_ticks: 50,
+                    warning_active: false,
+                    last_evaluated_tick: current_tick,
+                    ..SettlementCrisis::default()
+                },
+            );
+
+        let hero = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("first-run hero")
+        };
+        game.app.world_mut().entity_mut(hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Checkpoint cleanup".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+
+        game.tick(3);
+        assert!(game
+            .world()
+            .resource::<IntroEncounterState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<PlayerIntroState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<IntroEncounterState>()
+            .contains_key(&neighbor_id));
+        assert!(game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .contains_key(&neighbor_id));
+
+        // Model an attributed orphan whose entity-map entry was already removed
+        // by an overlapping cleanup. Fresh-run creation must still sweep it.
+        let (stale_assault_entity, stale_assault_id) = {
+            use crate::ids::Ids;
+
+            let world = game.app.world_mut();
+            let stale_id = world.resource_mut::<Ids>().new_obj_id();
+            world
+                .resource_mut::<Ids>()
+                .new_obj(stale_id, crate::constants::NPC_PLAYER_ID);
+            let entity = world
+                .spawn((
+                    Id(stale_id),
+                    crate::game::CrisisAssaultUnit {
+                        owner_player_id: player_id,
+                        assault_id: 99,
+                        spawn_generation: 1,
+                    },
+                ))
+                .id();
+            (entity, stale_id)
+        };
+
+        game.spawn_hero("Warrior", "FreshRunBot");
+        assert!(game.world().get_entity(stale_assault_entity).is_err());
+        assert!(!game
+            .world()
+            .resource::<crate::ids::Ids>()
+            .obj_player_map
+            .contains_key(&stale_assault_id));
+        assert_eq!(
+            game.intro_encounters(),
+            Some(PlayerIntroEncounters::default())
+        );
+        let fresh_crisis = game
+            .settlement_crisis()
+            .expect("fresh run should lazily initialize a personal crisis");
+        assert_eq!(fresh_crisis.phase, CrisisPhase::Dormant);
+        assert_eq!(fresh_crisis.pressure, 0);
+        assert_eq!(fresh_crisis.online_active_ticks, 0);
+        assert_eq!(fresh_crisis.assault_id, None);
+        assert!(fresh_crisis.assault_unit_ids.is_empty());
+        assert!(fresh_crisis.assault_remaining_templates.is_empty());
+        assert_eq!(fresh_crisis.assault_spawn_generation, 0);
+        assert_eq!(fresh_crisis.assault_retry_count, 0);
+        assert!(!fresh_crisis.resolution_recorded);
+    }
+
+    #[test]
+    fn intro_encounter_does_not_queue_spawns_for_a_true_death_owner() {
+        use crate::game::InitialEncounterState;
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "IntroCleanupRaceBot");
+        let current_tick = game.game_tick();
+        let opening_ids = {
+            let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
+            let encounter = encounters
+                .get_mut(&player_id)
+                .expect("initial encounter state");
+            encounter.first_rat_spawn_tick = current_tick;
+            encounter.second_rat_spawn_tick = current_tick;
+            encounter.phase1_unlock_tick = current_tick;
+            encounter.rat_ids.clone()
+        };
+
+        let hero = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("hero")
+        };
+        game.app.world_mut().entity_mut(hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Checkpoint cleanup race".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick,
+            },
+        ));
+
+        // Cross at least one 10-tick intro evaluation while remaining inside
+        // the True Death system's cleanup delay.
+        game.tick(20);
+
+        let spawned_opening_enemy = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&Id>();
+            query.iter(world).any(|id| opening_ids.contains(&id.0))
+        };
+        assert!(
+            !spawned_opening_enemy,
+            "deferred intro spawns must not escape a dying run's cleanup"
+        );
+    }
+
+    #[test]
+    fn headless_connection_helpers_leave_the_offline_hero_in_the_world() {
+        let mut game = HeadlessGame::new(1_000);
+        let player_id = game.spawn_hero("Warrior", "PresenceBot");
+        assert!(game
+            .world()
+            .resource::<Clients>()
+            .is_player_online(player_id));
+
+        game.disconnect_player();
+        assert!(!game
+            .world()
+            .resource::<Clients>()
+            .is_player_online(player_id));
+        assert!(
+            game.observe().hero.is_some(),
+            "hero existence must not be treated as online presence"
+        );
+
+        game.reconnect_player();
+        assert!(game
+            .world()
+            .resource::<Clients>()
+            .is_player_online(player_id));
+    }
+
+    #[test]
+    fn checkpoint2_short_personal_crisis_simulation() {
+        use crate::constants::TICKS_PER_SEC;
+        use crate::game::{
+            CrisisPhase, InitialEncounterState, PlayerIntroState, SettlementCrisisState,
+        };
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "CrisisFoundationBot");
+        game.set_sanctuary_at_base(5);
+
+        {
+            let world = game.app.world_mut();
+            world
+                .resource_mut::<PlayerIntroState>()
+                .get_mut(&player_id)
+                .expect("player intro state")
+                .danger_unlocked = true;
+            {
+                let mut objectives = world.resource_mut::<Objectives>();
+                let objective = objectives.entry(player_id).or_default();
+                objective.explore_poi = true;
+                objective.choose_expansion = true;
+            }
+            world
+                .resource_mut::<InitialEncounterState>()
+                .remove(&player_id);
+
+            // Existing-world facts only: completed owned structures and a
+            // living recruited villager. These test entities carry exactly the
+            // components read by the crisis evaluator.
+            for _ in 0..3 {
+                world.spawn((PlayerId(player_id), State::None, ClassStructure));
+            }
+            world.spawn((PlayerId(player_id), State::None, SubclassVillager));
+        }
+
+        game.tick(1);
+        assert_eq!(game.settlement_crisis().unwrap().phase, CrisisPhase::Signs);
+
+        let next_tick = game.game_tick() + (60 * TICKS_PER_SEC);
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_tick;
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Pressure
+        );
+
+        let next_tick = game.game_tick() + (120 * TICKS_PER_SEC);
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_tick;
+        game.tick(1);
+        let preparing = game.settlement_crisis().unwrap();
+        assert_eq!(preparing.phase, CrisisPhase::Preparing);
+        assert!(preparing.warning_active);
+
+        let enemies_before_ready = game
+            .observe()
+            .enemies
+            .into_iter()
+            .map(|enemy| enemy.id)
+            .collect::<std::collections::HashSet<_>>();
+        let next_tick = game.game_tick() + (180 * TICKS_PER_SEC);
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_tick;
+        game.tick(1);
+        let final_crisis = game
+            .settlement_crisis()
+            .expect("personal crisis after controlled simulation");
+        let enemies_after_ready = game
+            .observe()
+            .enemies
+            .into_iter()
+            .map(|enemy| enemy.id)
+            .collect::<std::collections::HashSet<_>>();
+        let automatic_dusk_hordes = game.metrics().waves_survived;
+
+        assert_eq!(final_crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(enemies_after_ready, enemies_before_ready);
+        assert_eq!(automatic_dusk_hordes, 0);
+        assert!(game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .contains_key(&player_id));
+
+        println!(
+            "checkpoint2_headless highest_phase={:?} online_active_ticks={} final_pressure={} major_assault_entities_spawned=0 automatic_dusk_hordes_spawned={}",
+            final_crisis.phase,
+            final_crisis.online_active_ticks,
+            final_crisis.pressure,
+            automatic_dusk_hordes
+        );
+    }
+
+    #[test]
+    fn checkpoint3_normal_victory_headless() {
+        use crate::game::{CrisisPhase, GOBLIN_ASSAULT_COMPOSITION};
+        use crate::ids::Ids;
+        use crate::player_setup::RunSpawnedObjs;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultVictoryBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+
+        let launched = game.settlement_crisis().expect("active assault");
+        let assault_id = launched.assault_id.expect("logical assault id");
+        assert_eq!(launched.assault_spawn_generation, 1);
+        assert_eq!(launched.assault_unit_ids.len(), 3);
+        assert!(!launched.resolution_recorded);
+
+        let units = game.crisis_assault_units();
+        assert_eq!(units.len(), GOBLIN_ASSAULT_COMPOSITION.len());
+        let mut actual_templates = units
+            .iter()
+            .map(|unit| unit.template.clone())
+            .collect::<Vec<_>>();
+        let mut expected_templates = GOBLIN_ASSAULT_COMPOSITION
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect::<Vec<_>>();
+        actual_templates.sort();
+        expected_templates.sort();
+        assert_eq!(actual_templates, expected_templates);
+        assert!(units.iter().all(|unit| {
+            unit.owner_player_id == player_id
+                && unit.assault_id == assault_id
+                && unit.spawn_generation == 1
+                && !unit.dead
+        }));
+        let run_ids = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(units.iter().all(|unit| run_ids.contains(&unit.obj_id)));
+
+        // Neither an ordinary legacy goblin nor a normally dead unit attributed
+        // to another owner can advance this settlement's logical remainder.
+        let current_tick = game.game_tick();
+        {
+            let world = game.app.world_mut();
+            let unrelated_id = world.resource_mut::<Ids>().new_obj_id();
+            world.spawn((
+                Id(unrelated_id),
+                Template("Wolf Rider".to_string()),
+                State::Dead,
+                StateDead {
+                    dead_at: current_tick,
+                    killer: "Unrelated".to_string(),
+                },
+            ));
+            let other_owner_id = world.resource_mut::<Ids>().new_obj_id();
+            world.spawn((
+                Id(other_owner_id),
+                Template("Goblin Pillager".to_string()),
+                State::Dead,
+                StateDead {
+                    dead_at: current_tick,
+                    killer: "Other owner".to_string(),
+                },
+                CrisisAssaultUnit {
+                    owner_player_id: player_id + 1,
+                    assault_id: assault_id + 1,
+                    spawn_generation: 1,
+                },
+            ));
+        }
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis()
+                .unwrap()
+                .assault_remaining_templates
+                .len(),
+            GOBLIN_ASSAULT_COMPOSITION.len()
+        );
+
+        // Force two schedule evaluations to observe the exact same GameTick.
+        // Active bookkeeping and generation identity must remain idempotent.
+        let repeated_tick = game.game_tick() + 1;
+        let launched_ids = game
+            .crisis_assault_units()
+            .iter()
+            .filter(|unit| unit.owner_player_id == player_id)
+            .map(|unit| unit.obj_id)
+            .collect::<HashSet<_>>();
+        for _ in 0..2 {
+            game.app.world_mut().resource_mut::<GameTick>().0 = repeated_tick - 1;
+            game.tick(1);
+            assert_eq!(game.game_tick(), repeated_tick);
+            assert_eq!(
+                game.settlement_crisis().unwrap().assault_spawn_generation,
+                1
+            );
+            assert_eq!(
+                game.crisis_assault_units()
+                    .iter()
+                    .filter(|unit| unit.owner_player_id == player_id)
+                    .map(|unit| unit.obj_id)
+                    .collect::<HashSet<_>>(),
+                launched_ids
+            );
+        }
+
+        game.tick(5);
+        assert_eq!(
+            game.crisis_assault_units()
+                .iter()
+                .filter(|unit| unit.owner_player_id == player_id)
+                .count(),
+            3
+        );
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            1,
+            "active evaluation must not duplicate the generation"
+        );
+
+        let unit_ids = units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
+        kill_assault_unit_through_normal_combat(&mut game, unit_ids[0]);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive,
+            "a partial normal defeat cannot resolve the assault"
+        );
+        let hero_entity = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
+            query.iter(world).next().unwrap()
+        };
+        game.app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .insert(crate::common::Target {
+                id: *unit_ids.last().unwrap(),
+            });
+        for unit_id in unit_ids.iter().skip(1) {
+            kill_assault_unit_through_normal_combat(&mut game, *unit_id);
+        }
+        game.tick(1);
+
+        let resolved = game.settlement_crisis().expect("resolved crisis state");
+        assert_eq!(resolved.phase, CrisisPhase::Resolved);
+        assert!(resolved.resolution_recorded);
+        assert!(resolved.resolved_at_tick.is_some());
+        assert!(!resolved.warning_active);
+        assert!(resolved.assault_unit_ids.is_empty());
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert!(game
+            .world()
+            .get::<crate::common::Target>(hero_entity)
+            .is_none());
+        assert_eq!(game.metrics().waves_survived, 0);
+
+        game.tick(20);
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            1
+        );
+
+        println!(
+            "checkpoint3_normal_victory assault_id={} generation={} templates={:?} units={} resolution_count={} automatic_dusk_hordes={}",
+            assault_id,
+            resolved.assault_spawn_generation,
+            actual_templates,
+            units.len(),
+            game.personal_crises_resolved(),
+            game.metrics().waves_survived
+        );
+    }
+
+    #[test]
+    fn checkpoint3_ready_clock_pauses_offline_and_resumes_on_reconnect() {
+        use crate::game::{CrisisPhase, ASSAULT_READY_GRACE_TICKS};
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "AssaultPresenceBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        let ready_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+
+        game.app.world_mut().resource_mut::<GameTick>().0 = ready_tick + 9;
+        game.tick(1);
+        assert_eq!(game.settlement_crisis().unwrap().phase_online_ticks, 10);
+
+        game.disconnect_player();
+        game.app.world_mut().resource_mut::<GameTick>().0 += 5_000;
+        game.tick(1);
+        let offline = game.settlement_crisis().unwrap();
+        assert_eq!(offline.phase, CrisisPhase::AssaultReady);
+        assert_eq!(offline.phase_online_ticks, 10);
+        assert!(game.crisis_assault_units().is_empty());
+
+        let reconnect_preferred = next_preferred_assault_tick(game.game_tick());
+        let remaining_online_ticks = ASSAULT_READY_GRACE_TICKS - 10;
+        {
+            let world = game.app.world_mut();
+            world.resource_mut::<GameTick>().0 = reconnect_preferred - 1;
+            let mut crises = world.resource_mut::<SettlementCrisisState>();
+            crises
+                .get_mut(&game.player_id)
+                .expect("ready crisis")
+                .last_evaluated_tick = reconnect_preferred - remaining_online_ticks;
+        }
+        game.reconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive
+        );
+        assert_eq!(game.crisis_assault_units().len(), 3);
+    }
+
+    #[test]
+    fn checkpoint3_missing_anchor_stays_ready_without_consuming_an_assault_id() {
+        use crate::game::{BoundMonolith, CrisisPhase, SpawnPositions};
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultNoAnchorBot");
+        let preferred_tick = set_personal_assault_ready(&mut game);
+
+        {
+            let world = game.app.world_mut();
+            let hero = {
+                let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+                query
+                    .iter(world)
+                    .find(|(_, owner)| owner.0 == player_id)
+                    .map(|(entity, _)| entity)
+                    .expect("owner hero")
+            };
+            world.entity_mut(hero).remove::<BoundMonolith>();
+
+            let structures = {
+                let mut query = world.query_filtered::<(Entity, &PlayerId), With<ClassStructure>>();
+                query
+                    .iter(world)
+                    .filter(|(_, owner)| owner.0 == player_id)
+                    .map(|(entity, _)| entity)
+                    .collect::<Vec<_>>()
+            };
+            for entity in structures {
+                *world.get_mut::<State>(entity).expect("structure state") = State::Building;
+            }
+            world.resource_mut::<SpawnPositions>().remove(&player_id);
+            world.resource_mut::<GameTick>().0 = preferred_tick - 2;
+        }
+
+        game.tick(2);
+
+        let crisis = game.settlement_crisis().expect("ready crisis remains");
+        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(crisis.assault_id, None);
+        assert_eq!(crisis.assault_spawn_generation, 0);
+        assert!(crisis.assault_unit_ids.is_empty());
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_spawn_failure_stays_ready_without_consuming_a_generation() {
+        use crate::game::CrisisPhase;
+        use crate::map::TileType;
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "AssaultNoSpawnBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+
+        {
+            let world = game.app.world_mut();
+            for tile in &mut world.resource_mut::<Map>().base {
+                tile.tile_type = TileType::Ocean;
+            }
+            world.resource_mut::<GameTick>().0 = preferred_tick - 2;
+        }
+        game.tick(2);
+
+        let crisis = game.settlement_crisis().expect("ready crisis remains");
+        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(crisis.assault_id, None);
+        assert_eq!(crisis.assault_spawn_generation, 0);
+        assert!(crisis.assault_unit_ids.is_empty());
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_disconnect_blocks_an_already_requested_npc_attack() {
+        use big_brain::prelude::{ActionState, Actor};
+
+        use crate::common::AttackTarget;
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "AssaultOfflineDamageBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let unit_id = game.crisis_assault_units()[0].obj_id;
+
+        let (hero_entity, hero_id, hero_pos, hp_before, unit_entity) = {
+            let world = game.app.world_mut();
+            let mut hero_query =
+                world.query_filtered::<(Entity, &Id, &Position, &Stats), With<SubclassHero>>();
+            let (hero_entity, hero_id, hero_pos, hero_stats) =
+                hero_query.iter(world).next().expect("owner hero");
+            let unit_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(unit_id)
+                .expect("assault attacker");
+            (
+                hero_entity,
+                hero_id.0,
+                *hero_pos,
+                hero_stats.hp,
+                unit_entity,
+            )
+        };
+        {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(unit_entity).unwrap() = hero_pos;
+            world.get_mut::<VisibleTarget>(unit_entity).unwrap().target = hero_id;
+            world.spawn((Actor(unit_entity), ActionState::Requested, AttackTarget));
+        }
+
+        game.disconnect_player();
+        game.tick(1);
+
+        assert_eq!(
+            game.world().get::<Stats>(hero_entity).unwrap().hp,
+            hp_before
+        );
+        assert!(game.world().get::<StateDead>(hero_entity).is_none());
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultReady
+        );
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_disconnect_drops_queued_player_combat_without_progress() {
+        use crate::constants::ATTACK_COOLDOWN_TICKS;
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultQueuedCombatBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let target_id = game.crisis_assault_units()[0].obj_id;
+        let score_before = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let (hero_id, hero_entity, hero_pos, target_entity) = {
+            let world = game.app.world_mut();
+            let mut hero_query =
+                world.query_filtered::<(Entity, &Id, &Position), With<SubclassHero>>();
+            let (hero_entity, hero_id, hero_pos) = hero_query.iter(world).next().unwrap();
+            let target_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(target_id)
+                .unwrap();
+            (hero_id.0, hero_entity, *hero_pos, target_entity)
+        };
+        {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(target_entity).unwrap() = hero_pos;
+            world.get_mut::<Stats>(target_entity).unwrap().hp = 0;
+            *world.get_mut::<State>(hero_entity).unwrap() = State::None;
+            world.get_mut::<Stats>(hero_entity).unwrap().stamina = Some(100);
+            world.resource_mut::<GameTick>().0 += ATTACK_COOLDOWN_TICKS + 1;
+        }
+        game.inject(PlayerEvent::Attack {
+            player_id,
+            attack_type: "quick".to_string(),
+            source_id: hero_id,
+            target_id,
+        });
+        game.disconnect_player();
+        game.tick(2);
+
+        let crisis = game.settlement_crisis().unwrap();
+        let score_after = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(crisis.assault_retry_count, 1);
+        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert_eq!(score_after.enemies_killed, score_before.enemies_killed);
+        assert_eq!(score_after.elites_killed, score_before.elites_killed);
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_disconnect_drops_queued_combo_and_block_state() {
+        use crate::combat::{AttackType, ComboTracker};
+        use crate::effect::{Effect, Effects};
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultQueuedComboBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let target_id = game.crisis_assault_units()[0].obj_id;
+        let score_before = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let (hero_id, hero_entity, hero_pos, target_entity) = {
+            let world = game.app.world_mut();
+            let mut hero_query =
+                world.query_filtered::<(Entity, &Id, &Position), With<SubclassHero>>();
+            let (hero_entity, hero_id, hero_pos) = hero_query.iter(world).next().unwrap();
+            let target_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(target_id)
+                .unwrap();
+            (hero_id.0, hero_entity, *hero_pos, target_entity)
+        };
+        {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(target_entity).unwrap() = hero_pos;
+            world.get_mut::<Stats>(target_entity).unwrap().hp = 0;
+            *world.get_mut::<State>(hero_entity).unwrap() = State::None;
+            world.get_mut::<Stats>(hero_entity).unwrap().stamina = Some(100);
+            world.entity_mut(hero_entity).insert(ComboTracker {
+                target_id,
+                attacks: vec![AttackType::Quick, AttackType::Quick],
+            });
+        }
+        game.inject(PlayerEvent::Combo {
+            player_id,
+            source_id: hero_id,
+            target_id,
+            combo_type: "Hamstring".to_string(),
+        });
+        game.inject(PlayerEvent::Block {
+            player_id,
+            source_id: hero_id,
+            defense: "brace".to_string(),
+        });
+        game.disconnect_player();
+        game.tick(2);
+
+        let crisis = game.settlement_crisis().unwrap();
+        let effects = game.world().get::<Effects>(hero_entity).unwrap();
+        let score_after = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert!(!effects.has(Effect::Bracing));
+        assert!(!effects.has(Effect::Dodging));
+        assert!(!effects.has(Effect::Parrying));
+        assert_eq!(score_after.enemies_killed, score_before.enemies_killed);
+        assert_eq!(score_after.elites_killed, score_before.elites_killed);
+        assert_eq!(game.personal_crises_resolved(), 0);
+    }
+
+    #[test]
+    fn checkpoint3_connected_helper_cannot_progress_an_offline_owner_assault() {
+        use crate::constants::ATTACK_COOLDOWN_TICKS;
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+
+        let mut game = HeadlessGame::new(20_000);
+        let owner_player_id = game.spawn_hero("Warrior", "AssaultOfflineOwnerBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let target_id = game.crisis_assault_units()[0].obj_id;
+        let helper_player_id = owner_player_id + 1;
+
+        let helper_client = Client {
+            id: Uuid::from_u128(helper_player_id as u128),
+            player_id: helper_player_id,
+            sender: game.packet_tx.clone(),
+        };
+        game.clients
+            .lock()
+            .unwrap()
+            .insert(helper_client.id, helper_client);
+        game.inject(PlayerEvent::NewPlayer {
+            player_id: helper_player_id,
+            hero_name: "AssaultOnlineHelperBot".to_string(),
+            class_name: "Warrior".to_string(),
+        });
+        game.tick(8);
+
+        let (helper_id, helper_entity, helper_pos, target_entity) = {
+            let world = game.app.world_mut();
+            let mut helper_query =
+                world.query_filtered::<(Entity, &Id, &PlayerId, &Position), With<SubclassHero>>();
+            let (helper_entity, helper_id, _, helper_pos) = helper_query
+                .iter(world)
+                .find(|(_, _, owner, _)| owner.0 == helper_player_id)
+                .expect("connected helper hero");
+            let target_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(target_id)
+                .expect("assault target");
+            (helper_id.0, helper_entity, *helper_pos, target_entity)
+        };
+        let helper_score_before = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&helper_player_id)
+            .cloned()
+            .unwrap_or_default();
+        {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(target_entity).unwrap() = helper_pos;
+            world.get_mut::<Stats>(target_entity).unwrap().hp = 0;
+            *world.get_mut::<State>(helper_entity).unwrap() = State::None;
+            world.get_mut::<Stats>(helper_entity).unwrap().stamina = Some(100);
+            world.resource_mut::<GameTick>().0 += ATTACK_COOLDOWN_TICKS + 1;
+        }
+        game.inject(PlayerEvent::Attack {
+            player_id: helper_player_id,
+            attack_type: "quick".to_string(),
+            source_id: helper_id,
+            target_id,
+        });
+        game.disconnect_player();
+        game.tick(2);
+
+        let helper_score_after = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&helper_player_id)
+            .cloned()
+            .unwrap_or_default();
+        let crisis = game.settlement_crisis().unwrap();
+        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert_eq!(
+            helper_score_after.enemies_killed,
+            helper_score_before.enemies_killed
+        );
+        assert_eq!(
+            helper_score_after.elites_killed,
+            helper_score_before.elites_killed
+        );
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_duplicate_new_player_cannot_erase_an_active_assault() {
+        use crate::game::CrisisPhase;
+        use crate::player_setup::{AssignedStartLocations, StartLocations};
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultDuplicateRunBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let before = game.settlement_crisis().unwrap();
+        let assault_id = before.assault_id.unwrap();
+        let generation = before.assault_spawn_generation;
+        let unit_ids = game
+            .crisis_assault_units()
+            .iter()
+            .filter(|unit| unit.owner_player_id == player_id)
+            .map(|unit| unit.obj_id)
+            .collect::<HashSet<_>>();
+        let starts_before = game.world().resource::<StartLocations>().len();
+
+        game.inject(PlayerEvent::NewPlayer {
+            player_id,
+            hero_name: "DuplicateRunBot".to_string(),
+            class_name: "Warrior".to_string(),
+        });
+        game.tick(8);
+
+        let after = game.settlement_crisis().unwrap();
+        let owned_heroes = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<&PlayerId, With<SubclassHero>>();
+            query
+                .iter(world)
+                .filter(|owner| owner.0 == player_id)
+                .count()
+        };
+        assert_eq!(owned_heroes, 1);
+        assert_eq!(after.phase, CrisisPhase::AssaultActive);
+        assert_eq!(after.assault_id, Some(assault_id));
+        assert_eq!(after.assault_spawn_generation, generation);
+        assert_eq!(
+            game.world().resource::<StartLocations>().len(),
+            starts_before
+        );
+        assert!(game
+            .world()
+            .resource::<AssignedStartLocations>()
+            .contains_key(&player_id));
+        assert_eq!(
+            game.crisis_assault_units()
+                .iter()
+                .filter(|unit| unit.owner_player_id == player_id)
+                .map(|unit| unit.obj_id)
+                .collect::<HashSet<_>>(),
+            unit_ids
+        );
+    }
+
+    #[test]
+    fn checkpoint3_helper_kill_counts_for_owner_without_transferring_crisis() {
+        use crate::constants::ATTACK_COOLDOWN_TICKS;
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultOwnerBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let units = game.crisis_assault_units();
+        let helper_player_id = player_id + 1;
+
+        // Create a real connected helper run and submit the same normal combat
+        // event a nearby human client would send.
+        let helper_client = Client {
+            id: Uuid::from_u128(helper_player_id as u128),
+            player_id: helper_player_id,
+            sender: game.packet_tx.clone(),
+        };
+        game.clients
+            .lock()
+            .unwrap()
+            .insert(helper_client.id, helper_client);
+        game.inject(PlayerEvent::NewPlayer {
+            player_id: helper_player_id,
+            hero_name: "AssaultHelperBot".to_string(),
+            class_name: "Warrior".to_string(),
+        });
+        game.tick(8);
+
+        let target_id = units[0].obj_id;
+        let (helper_id, helper_entity, helper_pos, target_entity) = {
+            let world = game.app.world_mut();
+            let mut helper_query =
+                world.query_filtered::<(Entity, &Id, &PlayerId, &Position), With<SubclassHero>>();
+            let (helper_entity, helper_id, _, helper_pos) = helper_query
+                .iter(world)
+                .find(|(_, _, owner, _)| owner.0 == helper_player_id)
+                .map(|(entity, id, owner, pos)| (entity, id.0, owner.0, *pos))
+                .expect("connected helper hero");
+            let target_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(target_id)
+                .expect("helper combat target");
+            (helper_id, helper_entity, helper_pos, target_entity)
+        };
+        {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(target_entity).unwrap() = helper_pos;
+            world.get_mut::<Stats>(target_entity).unwrap().hp = 0;
+            *world.get_mut::<State>(helper_entity).unwrap() = State::None;
+            world.get_mut::<Stats>(helper_entity).unwrap().stamina = Some(100);
+            world.resource_mut::<GameTick>().0 += ATTACK_COOLDOWN_TICKS + 1;
+        }
+        game.inject(PlayerEvent::Attack {
+            player_id: helper_player_id,
+            attack_type: "quick".to_string(),
+            source_id: helper_id,
+            target_id,
+        });
+        game.tick(3);
+        assert!(game.world().get::<StateDead>(target_entity).is_some());
+
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive
+        );
+        assert_eq!(
+            game.settlement_crisis()
+                .unwrap()
+                .assault_remaining_templates
+                .len(),
+            2
+        );
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&helper_player_id)
+                .map(|score| score.enemies_killed),
+            Some(1),
+            "ordinary kill score follows LastAttacker"
+        );
+
+        for unit in units.iter().skip(1) {
+            kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
+        }
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&helper_player_id)
+                .map(|score| score.personal_crises_resolved)
+                .unwrap_or(0),
+            0,
+            "crisis completion remains with the attributed owner"
+        );
+    }
+
+    #[test]
+    fn checkpoint3_missing_live_unit_resets_instead_of_resolving() {
+        use crate::game::CrisisPhase;
+        use crate::ids::{EntityObjMap, Ids};
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "AssaultMissingUnitBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let units = game.crisis_assault_units();
+        let missing_id = units[0].obj_id;
+        let missing_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(missing_id)
+            .unwrap();
+        {
+            let world = game.app.world_mut();
+            world.resource_mut::<EntityObjMap>().remove_obj(missing_id);
+            world.resource_mut::<Ids>().remove_obj(missing_id);
+            world.despawn(missing_entity);
+        }
+        game.tick(1);
+
+        let reset = game.settlement_crisis().unwrap();
+        assert_eq!(reset.phase, CrisisPhase::AssaultReady);
+        assert_eq!(reset.assault_retry_count, 1);
+        assert!(!reset.resolution_recorded);
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_disconnect_retry_headless_preserves_defeated_slots() {
+        use crate::game::CrisisPhase;
+        use crate::ids::{EntityObjMap, Ids};
+        use crate::player_setup::RunSpawnedObjs;
+
+        let mut game = HeadlessGame::new(30_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultRetryBot");
+        game.set_sanctuary_at_base(3);
+        let run_ids_before = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        let score_before = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+
+        let first = game.settlement_crisis().unwrap();
+        let assault_id = first.assault_id.unwrap();
+        let old_units = game.crisis_assault_units();
+        let old_ids = old_units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
+        let defeated_template = old_units[0].template.clone();
+        kill_assault_unit_through_normal_combat(&mut game, old_units[0].obj_id);
+        assert_eq!(
+            game.settlement_crisis()
+                .unwrap()
+                .assault_remaining_templates
+                .len(),
+            2
+        );
+
+        let hero_entity = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
+            query.iter(world).next().unwrap()
+        };
+        game.app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .insert(crate::common::Target {
+                id: old_units[1].obj_id,
+            });
+
+        game.disconnect_player();
+        game.tick(1);
+        let reset = game.settlement_crisis().expect("ready after disconnect");
+        assert_eq!(reset.phase, CrisisPhase::AssaultReady);
+        assert_eq!(reset.assault_retry_count, 1);
+        assert!(reset.warning_active);
+        assert!(!reset.resolution_recorded);
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(game.crisis_assault_units().is_empty());
+        assert!(game
+            .world()
+            .get::<crate::common::Target>(hero_entity)
+            .is_none());
+        assert!(old_ids.iter().all(|id| game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(*id)
+            .is_none()));
+        assert!(old_ids.iter().all(|id| !game
+            .world()
+            .resource::<Ids>()
+            .obj_player_map
+            .contains_key(id)));
+        let run_ids_after_reset = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert!(run_ids_before
+            .iter()
+            .all(|id| run_ids_after_reset.contains(id)));
+        assert!(old_ids.iter().all(|id| !run_ids_after_reset.contains(id)));
+
+        game.tick(5);
+        assert_eq!(game.settlement_crisis().unwrap().assault_retry_count, 1);
+        assert!(game.crisis_assault_units().is_empty());
+
+        game.reconnect_player();
+        let retry_preferred_tick = set_reconnect_ready_clock(&mut game);
+        advance_ready_clock_to_launch(&mut game, retry_preferred_tick);
+        let relaunched = game.settlement_crisis().expect("retried assault");
+        assert_eq!(relaunched.phase, CrisisPhase::AssaultActive);
+        assert_eq!(relaunched.assault_id, Some(assault_id));
+        assert_eq!(relaunched.assault_spawn_generation, 2);
+        assert_eq!(relaunched.assault_retry_count, 1);
+        let retry_units = game.crisis_assault_units();
+        assert_eq!(retry_units.len(), 2);
+        assert!(retry_units.iter().all(|unit| {
+            unit.assault_id == assault_id
+                && unit.spawn_generation == 2
+                && !old_ids.contains(&unit.obj_id)
+        }));
+        let mut expected_retry_templates = old_units
+            .iter()
+            .map(|unit| unit.template.clone())
+            .collect::<Vec<_>>();
+        let removed_index = expected_retry_templates
+            .iter()
+            .position(|template| template == &defeated_template)
+            .unwrap();
+        expected_retry_templates.remove(removed_index);
+        let mut actual_retry_templates = retry_units
+            .iter()
+            .map(|unit| unit.template.clone())
+            .collect::<Vec<_>>();
+        expected_retry_templates.sort();
+        actual_retry_templates.sort();
+        assert_eq!(actual_retry_templates, expected_retry_templates);
+
+        for unit in retry_units {
+            kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
+        }
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+        assert_eq!(game.personal_crises_resolved(), 1);
+        let score_after = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(score_after.enemies_killed - score_before.enemies_killed, 3);
+        assert_eq!(score_after.elites_killed - score_before.elites_killed, 3);
+
+        game.disconnect_player();
+        game.tick(3);
+        game.reconnect_player();
+        game.tick(3);
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            2
+        );
+
+        println!(
+            "checkpoint3_disconnect_retry assault_id={} retry_count={} units_before_disconnect={} units_after_cleanup=0 new_generation={} retry_units={} completions_before=0 completions_after={} duplicated_completion=false",
+            assault_id,
+            game.settlement_crisis().unwrap().assault_retry_count,
+            old_units.len(),
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            actual_retry_templates.len(),
+            game.personal_crises_resolved()
+        );
+    }
+
+    #[test]
+    fn checkpoint3_legacy_mode_does_not_run_the_personal_assault_lifecycle() {
+        use crate::game::{CrisisPhase, ASSAULT_MAX_ONLINE_WAIT_TICKS};
+
+        let mut game = HeadlessGame::new_with_director(10_000, SurvivalDirectorMode::Legacy);
+        game.spawn_hero("Warrior", "LegacyPersonalAssaultIsolationBot");
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        {
+            let world = game.app.world_mut();
+            world.resource_mut::<GameTick>().0 = preferred_tick;
+            let mut crises = world.resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&game.player_id).unwrap();
+            crisis.phase_online_ticks = ASSAULT_MAX_ONLINE_WAIT_TICKS;
+            crisis.last_evaluated_tick = preferred_tick;
+        }
+        game.tick(3);
+
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultReady
+        );
+        assert!(game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn checkpoint3_true_death_cleanup_isolated_and_idempotent() {
+        use crate::ids::{EntityObjMap, Ids};
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "AssaultTrueDeathBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let own_assault_id = game.settlement_crisis().unwrap().assault_id.unwrap();
+        let own_ids = game
+            .crisis_assault_units()
+            .iter()
+            .map(|unit| unit.obj_id)
+            .collect::<Vec<_>>();
+        let orphaned_entity = {
+            let world = game.app.world_mut();
+            let entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(own_ids[0])
+                .expect("attributed assault entity");
+            world.resource_mut::<EntityObjMap>().remove_obj(own_ids[0]);
+            entity
+        };
+
+        let (other_entity, other_id, unrelated_entity, unrelated_id) = {
+            let world = game.app.world_mut();
+            let other_id = world.resource_mut::<Ids>().new_obj_id();
+            let entity = world
+                .spawn((
+                    Id(other_id),
+                    PlayerId(crate::constants::NPC_PLAYER_ID),
+                    Position { x: 0, y: 0 },
+                    Template("Wolf Rider".to_string()),
+                    CrisisAssaultUnit {
+                        owner_player_id: player_id + 1,
+                        assault_id: own_assault_id + 1,
+                        spawn_generation: 1,
+                    },
+                ))
+                .id();
+            world
+                .resource_mut::<Ids>()
+                .new_obj(other_id, crate::constants::NPC_PLAYER_ID);
+            world
+                .resource_mut::<EntityObjMap>()
+                .new_obj(other_id, entity);
+
+            // An un-attributed world hostile next to the recycled start is not
+            // owned by this run and must not be removed as collateral cleanup.
+            let unrelated_id = world.resource_mut::<Ids>().new_obj_id();
+            let unrelated_entity = world
+                .spawn((
+                    Id(unrelated_id),
+                    PlayerId(crate::constants::NPC_PLAYER_ID),
+                    Position { x: 0, y: 0 },
+                    Template("Wolf".to_string()),
+                ))
+                .id();
+            world
+                .resource_mut::<Ids>()
+                .new_obj(unrelated_id, crate::constants::NPC_PLAYER_ID);
+            world
+                .resource_mut::<EntityObjMap>()
+                .new_obj(unrelated_id, unrelated_entity);
+            (entity, other_id, unrelated_entity, unrelated_id)
+        };
+
+        let current_tick = game.game_tick();
+        let hero = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
+            query.iter(world).next().expect("hero")
+        };
+        game.disconnect_player();
+        game.app.world_mut().entity_mut(hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Checkpoint 3 cleanup".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+        game.tick(3);
+
+        assert!(game.settlement_crisis().is_none());
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(own_ids.iter().all(|id| game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(*id)
+            .is_none()));
+        assert!(
+            game.world().get_entity(orphaned_entity).is_err(),
+            "True Death must despawn an attributed orphan even without its entity-map entry"
+        );
+        assert!(game.world().get_entity(other_entity).is_ok());
+        assert_eq!(
+            game.world()
+                .get::<CrisisAssaultUnit>(other_entity)
+                .unwrap()
+                .owner_player_id,
+            player_id + 1
+        );
+        assert_eq!(
+            game.world().resource::<EntityObjMap>().get_entity(other_id),
+            Some(other_entity)
+        );
+        assert!(game.world().get_entity(unrelated_entity).is_ok());
+        assert_eq!(
+            game.world()
+                .resource::<EntityObjMap>()
+                .get_entity(unrelated_id),
+            Some(unrelated_entity)
+        );
+
+        game.tick(5);
+        assert!(game.world().get_entity(other_entity).is_ok());
+        assert!(game.world().get_entity(unrelated_entity).is_ok());
+    }
+
+    #[test]
+    fn checkpoint3_true_death_while_ready_cancels_without_launch_or_completion() {
+        use crate::game::CrisisPhase;
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "AssaultReadyTrueDeathBot");
+        let _preferred_tick = set_personal_assault_ready(&mut game);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultReady
+        );
+
+        let current_tick = game.game_tick();
+        let hero = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
+            query.iter(world).next().expect("hero")
+        };
+        game.app.world_mut().entity_mut(hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Checkpoint 3 ready cleanup".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+        game.tick(3);
+
+        assert!(game.settlement_crisis().is_none());
+        assert!(game.crisis_assault_units().is_empty());
+        assert_eq!(game.personal_crises_resolved(), 0);
+    }
+
+    #[test]
+    fn checkpoint3_repeated_disconnect_relaunch_sample_has_no_duplicates() {
+        use crate::game::CrisisPhase;
+
+        let mut game = HeadlessGame::new(40_000);
+        game.spawn_hero("Warrior", "AssaultRepeatBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let assault_id = game.settlement_crisis().unwrap().assault_id.unwrap();
+
+        for retry in 1..=3 {
+            game.disconnect_player();
+            game.tick(2);
+            assert!(game.crisis_assault_units().is_empty());
+            assert_eq!(game.settlement_crisis().unwrap().assault_retry_count, retry);
+
+            game.reconnect_player();
+            let preferred_tick = set_reconnect_ready_clock(&mut game);
+            advance_ready_clock_to_launch(&mut game, preferred_tick);
+            let crisis = game.settlement_crisis().unwrap();
+            assert_eq!(crisis.assault_id, Some(assault_id));
+            assert_eq!(crisis.assault_spawn_generation, retry + 1);
+            assert_eq!(game.crisis_assault_units().len(), 3);
+        }
+
+        let final_units = game.crisis_assault_units();
+        for unit in final_units {
+            kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
+        }
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            4
+        );
+
+        println!(
+            "checkpoint3_repeated_safety assault_id={} retries=3 final_generation=4 stale_units=0 completion_count={} duplicate_assault=false panic=false",
+            assault_id,
+            game.personal_crises_resolved()
+        );
     }
 
     // Hand-crafting Firewood from a Log — the cook economy's fuel chain. The bot
@@ -1131,7 +2961,10 @@ mod tests {
             .filter(|i| i.class == "Gold Coins")
             .map(|i| i.quantity)
             .sum();
-        assert_eq!(gold_after, 25, "the wage (25) should be deducted from the hero");
+        assert_eq!(
+            gold_after, 25,
+            "the wage (25) should be deducted from the hero"
+        );
     }
 
     // Empowering the Monolith sanctuary: pay Soulshards, level rises, and the
@@ -1196,6 +3029,9 @@ mod tests {
             .filter(|i| i.class == "Soulshard")
             .map(|i| i.quantity)
             .sum();
-        assert_eq!(shards, 1, "the upgrade cost should be deducted in Soulshards");
+        assert_eq!(
+            shards, 1,
+            "the upgrade cost should be deducted in Soulshards"
+        );
     }
 }

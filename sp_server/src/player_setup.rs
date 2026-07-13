@@ -9,8 +9,9 @@ use crate::effect::Effect;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{
-    InitialEncounterEntry, InitialEncounterState, Merchant, MerchantSailState, Monolith, ObjQuery,
-    PlayerIntroEntry, PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
+    InitialEncounterEntry, InitialEncounterState, IntroEncounterState, Merchant, MerchantSailState,
+    Monolith, ObjQuery, PlayerIntroEncounters, PlayerIntroEntry, PlayerIntroState, SpawnPositions,
+    EARLY_GAME_ENEMY_TEMPLATES,
 };
 use crate::item::{Inventory, Slot};
 use crate::obj::{
@@ -69,6 +70,7 @@ pub fn new(
     monoliths: &Query<ObjQuery, With<Monolith>>,
     spawn_positions: &mut ResMut<SpawnPositions>,
     player_intro_state: &mut ResMut<PlayerIntroState>,
+    intro_encounter_state: &mut ResMut<IntroEncounterState>,
     initial_encounter_state: &mut ResMut<InitialEncounterState>,
     run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
 ) -> Result<(), String> {
@@ -103,6 +105,7 @@ pub fn new(
             danger_unlocked: false,
         },
     );
+    intro_encounter_state.insert(player_id, PlayerIntroEncounters::default());
 
     // Find nearest monolith
     let (monolith_id, monolith_pos) =

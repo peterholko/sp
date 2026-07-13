@@ -10,9 +10,10 @@ use bevy::{
 use bevy::{scene, state};
 
 use big_brain::thinker::ThinkerBuilder;
-use big_brain::BigBrainPlugin;
+use big_brain::{BigBrainPlugin, BigBrainSet};
 use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{reload, EnvFilter, Registry};
@@ -36,7 +37,9 @@ use async_compat::Compat;
 use std::env;
 
 use crate::combat::{Combat, CombatSpellQuery};
-use crate::common::{Dehydrated, Exhausted, Heat, Hunger, Starving, Thirst, Tired, Transport};
+use crate::common::{
+    Dehydrated, Exhausted, Heat, Hunger, Starving, Target, TaskTarget, Thirst, Tired, Transport,
+};
 use crate::constants::*;
 use crate::database::DatabaseEvent;
 use crate::effect::{self, Effect, Effects};
@@ -56,7 +59,7 @@ use crate::network::{
     self, send_to_client, send_to_database, BroadcastEvents, ObjAttr, RefiningItem,
 };
 use crate::network::{ResponsePacket, StatsData};
-use crate::npc::NPCPlugin;
+use crate::npc::{NPCPlugin, VisibleTarget};
 use crate::obj::{
     is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
@@ -85,6 +88,22 @@ use crate::{villager_util, AppState};
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
+
+impl Clients {
+    /// Returns whether at least one active network client belongs to `player_id`.
+    /// Hero entities persist across disconnects, so the client registry is the
+    /// authoritative source of online presence for personal-crisis timing.
+    pub fn is_player_online(&self, player_id: i32) -> bool {
+        match self.0.lock() {
+            Ok(clients) => clients.iter().any(|(client_id, client)| {
+                *client_id == client.id
+                    && client.player_id == player_id
+                    && !client.sender.is_closed()
+            }),
+            Err(_) => false,
+        }
+    }
+}
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct DatabaseManagers(Arc<Mutex<HashMap<i32, DatabaseClient>>>);
@@ -332,8 +351,6 @@ pub struct PlayerCrisis {
     pub goblin_raid: bool,
     pub undead_incursion: bool,
     pub goblin_pillager: bool,
-    pub initial_encounter: bool, // boar/crab spawned after opening enemies killed
-    pub spider_encounter: bool,  // spider spawned after boar/crab killed
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -369,6 +386,126 @@ impl SurvivalDirectorConfig {
 
 fn legacy_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
     config.mode == SurvivalDirectorMode::Legacy
+}
+
+fn personal_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
+    config.mode == SurvivalDirectorMode::PersonalCrisis
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrisisKind {
+    Goblin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CrisisPhase {
+    Dormant,
+    Signs,
+    Pressure,
+    Preparing,
+    AssaultReady,
+    AssaultActive,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementCrisis {
+    pub kind: CrisisKind,
+    pub phase: CrisisPhase,
+    pub pressure: i32,
+    pub phase_started_tick: i32,
+    pub online_active_ticks: i32,
+    pub phase_online_ticks: i32,
+    pub warning_active: bool,
+    pub last_evaluated_tick: i32,
+    pub assault_id: Option<u64>,
+    pub assault_started_tick: Option<i32>,
+    pub assault_online_ticks: i32,
+    pub assault_unit_ids: Vec<i32>,
+    pub assault_unit_templates: Vec<String>,
+    pub assault_remaining_templates: Vec<String>,
+    pub assault_defeated_unit_ids: Vec<i32>,
+    pub assault_spawn_generation: u32,
+    pub assault_retry_count: u32,
+    pub resolution_recorded: bool,
+    pub resolved_at_tick: Option<i32>,
+    pub assault_reset_in_progress: bool,
+    pub assault_reconnect_pending: bool,
+    pub assault_grace_logged: bool,
+    pub assault_anchor_warning_logged: bool,
+    pub assault_spawn_warning_logged: bool,
+}
+
+impl SettlementCrisis {
+    fn new(game_tick: i32) -> Self {
+        Self {
+            kind: CrisisKind::Goblin,
+            phase: CrisisPhase::Dormant,
+            pressure: 0,
+            phase_started_tick: game_tick,
+            online_active_ticks: 0,
+            phase_online_ticks: 0,
+            warning_active: false,
+            last_evaluated_tick: game_tick,
+            assault_id: None,
+            assault_started_tick: None,
+            assault_online_ticks: 0,
+            assault_unit_ids: Vec::new(),
+            assault_unit_templates: Vec::new(),
+            assault_remaining_templates: Vec::new(),
+            assault_defeated_unit_ids: Vec::new(),
+            assault_spawn_generation: 0,
+            assault_retry_count: 0,
+            resolution_recorded: false,
+            resolved_at_tick: None,
+            assault_reset_in_progress: false,
+            assault_reconnect_pending: false,
+            assault_grace_logged: false,
+            assault_anchor_warning_logged: false,
+            assault_spawn_warning_logged: false,
+        }
+    }
+}
+
+impl Default for SettlementCrisis {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SettlementCrisisState(pub HashMap<i32, SettlementCrisis>);
+
+/// Explicit ownership for a personal-crisis combatant. NPC faction ownership
+/// remains `NPC_PLAYER_ID`; this component is the authoritative link to the
+/// settlement owner and logical assault.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrisisAssaultUnit {
+    pub owner_player_id: i32,
+    pub assault_id: u64,
+    pub spawn_generation: u32,
+}
+
+/// Monotonic process-local identity source for logical personal assaults.
+/// Checkpoint 2 state is runtime-only under the prototype snapshot path, so the
+/// matching identity source is intentionally runtime-only as well.
+#[derive(Resource, Debug)]
+pub struct NextCrisisAssaultId {
+    next: u64,
+}
+
+impl Default for NextCrisisAssaultId {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl NextCrisisAssaultId {
+    fn allocate(&mut self) -> Option<u64> {
+        let id = self.next;
+        self.next = self.next.checked_add(1)?;
+        Some(id)
+    }
 }
 
 pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
@@ -512,6 +649,18 @@ pub struct PlayerIntroEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct PlayerIntroState(pub HashMap<i32, PlayerIntroEntry>);
 
+/// Completion flags for the scripted shipwreck combat chain. These are kept
+/// separate from [`PlayerCrisis`], which now contains only legacy director
+/// progression.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PlayerIntroEncounters {
+    pub initial_encounter: bool,
+    pub spider_encounter: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct IntroEncounterState(pub HashMap<i32, PlayerIntroEncounters>);
+
 // Tracks the initial shipwreck encounter chain.
 #[derive(Debug, Clone)]
 pub struct InitialEncounterEntry {
@@ -570,6 +719,9 @@ pub struct PlayerRunScore {
     pub hideouts_cleared: i32,
     pub repairs: i32,
     pub highest_pressure_level: i32,
+    /// Runtime-only Checkpoint 3 completion record. Tangible crisis rewards and
+    /// final reporting packets remain deferred.
+    pub personal_crises_resolved: i32,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -656,6 +808,175 @@ fn player_survival_ticks(
     intro_age(game_tick, player_id, player_intro_state)
         .unwrap_or_else(|| game_tick.0 - DAWN)
         .max(0)
+}
+
+// Provisional personal-goblin-crisis tuning. Pressure is derived from current
+// settlement facts, not accumulated per evaluation, so repeated evaluation is
+// naturally idempotent and global calendar days are irrelevant.
+const GOBLIN_PRESSURE_MAX: i32 = 100;
+const GOBLIN_DANGER_UNLOCKED_PRESSURE: i32 = 10;
+const GOBLIN_THREE_STRUCTURES_PRESSURE: i32 = 20;
+const GOBLIN_VILLAGER_PRESSURE: i32 = 15;
+const GOBLIN_EXPLORE_POI_PRESSURE: i32 = 10;
+const GOBLIN_CHOOSE_EXPANSION_PRESSURE: i32 = 15;
+const GOBLIN_GOLD_TIER_ONE: i32 = 25;
+const GOBLIN_GOLD_TIER_TWO: i32 = 50;
+const GOBLIN_GOLD_TIER_THREE: i32 = 100;
+const GOBLIN_GOLD_PRESSURE_PER_TIER: i32 = 5;
+const GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL: i32 = 2;
+const GOBLIN_SANCTUARY_PRESSURE_MAX: i32 = 10;
+const GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS: i32 = 60 * TICKS_PER_SEC;
+const GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS: i32 = 180 * TICKS_PER_SEC;
+const GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS: i32 = 360 * TICKS_PER_SEC;
+const GOBLIN_ONLINE_PRESSURE_PER_TIER: i32 = 5;
+
+const GOBLIN_SIGNS_PRESSURE: i32 = 20;
+const GOBLIN_PRESSURE_PHASE_PRESSURE: i32 = 45;
+const GOBLIN_PREPARING_PRESSURE: i32 = 70;
+const GOBLIN_ASSAULT_READY_PRESSURE: i32 = 90;
+const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
+const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
+const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
+
+pub(crate) const ASSAULT_READY_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
+pub(crate) const ASSAULT_MAX_ONLINE_WAIT_TICKS: i32 = 120 * TICKS_PER_SEC;
+const PERSONAL_ASSAULT_VISION: u32 = 14;
+pub(crate) const GOBLIN_ASSAULT_COMPOSITION: [&str; 3] =
+    ["Wolf Rider", "Wolf Rider", "Goblin Pillager"];
+
+fn is_assault_preferred_time(game_tick: i32) -> bool {
+    let ticks_in_day = game_tick.rem_euclid(GAME_TICKS_PER_DAY);
+    ticks_in_day >= DUSK || ticks_in_day < FIRST_LIGHT
+}
+
+fn assault_launch_allowed(online_ready_ticks: i32, game_tick: i32) -> bool {
+    online_ready_ticks >= ASSAULT_READY_GRACE_TICKS
+        && (is_assault_preferred_time(game_tick)
+            || online_ready_ticks >= ASSAULT_MAX_ONLINE_WAIT_TICKS)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GoblinPressureFacts {
+    danger_unlocked: bool,
+    completed_structures: usize,
+    living_villagers: usize,
+    stored_gold: i32,
+    sanctuary_level: i32,
+    explore_poi: bool,
+    choose_expansion: bool,
+    online_active_ticks: i32,
+}
+
+fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
+    if !facts.danger_unlocked {
+        return 0;
+    }
+
+    let mut pressure = GOBLIN_DANGER_UNLOCKED_PRESSURE;
+
+    if facts.completed_structures >= 3 {
+        pressure += GOBLIN_THREE_STRUCTURES_PRESSURE;
+    }
+    if facts.living_villagers > 0 {
+        pressure += GOBLIN_VILLAGER_PRESSURE;
+    }
+    if facts.explore_poi {
+        pressure += GOBLIN_EXPLORE_POI_PRESSURE;
+    }
+    if facts.choose_expansion {
+        pressure += GOBLIN_CHOOSE_EXPANSION_PRESSURE;
+    }
+
+    pressure += if facts.stored_gold >= GOBLIN_GOLD_TIER_THREE {
+        GOBLIN_GOLD_PRESSURE_PER_TIER * 3
+    } else if facts.stored_gold >= GOBLIN_GOLD_TIER_TWO {
+        GOBLIN_GOLD_PRESSURE_PER_TIER * 2
+    } else if facts.stored_gold >= GOBLIN_GOLD_TIER_ONE {
+        GOBLIN_GOLD_PRESSURE_PER_TIER
+    } else {
+        0
+    };
+
+    pressure += (facts.sanctuary_level.max(0) * GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL)
+        .min(GOBLIN_SANCTUARY_PRESSURE_MAX);
+
+    pressure += if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER * 3
+    } else if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER * 2
+    } else if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER
+    } else {
+        0
+    };
+
+    pressure.min(GOBLIN_PRESSURE_MAX)
+}
+
+fn next_goblin_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
+    match crisis.phase {
+        CrisisPhase::Dormant if crisis.pressure >= GOBLIN_SIGNS_PRESSURE => {
+            Some(CrisisPhase::Signs)
+        }
+        CrisisPhase::Signs
+            if crisis.pressure >= GOBLIN_PRESSURE_PHASE_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_SIGNS_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Pressure)
+        }
+        CrisisPhase::Pressure
+            if crisis.pressure >= GOBLIN_PREPARING_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_PRESSURE_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Preparing)
+        }
+        CrisisPhase::Preparing
+            if crisis.pressure >= GOBLIN_ASSAULT_READY_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_PREPARING_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::AssaultReady)
+        }
+        _ => None,
+    }
+}
+
+fn transition_goblin_crisis(
+    crisis: &mut SettlementCrisis,
+    game_tick: i32,
+) -> Option<(CrisisPhase, CrisisPhase)> {
+    let old_phase = crisis.phase;
+    let new_phase = next_goblin_crisis_phase(crisis)?;
+
+    crisis.phase = new_phase;
+    crisis.phase_started_tick = game_tick;
+    crisis.phase_online_ticks = 0;
+    if new_phase == CrisisPhase::Preparing {
+        crisis.warning_active = true;
+    }
+
+    Some((old_phase, new_phase))
+}
+
+fn advance_online_crisis_time(
+    crisis: &mut SettlementCrisis,
+    game_tick: i32,
+    count_online_time: bool,
+) -> i32 {
+    let elapsed = game_tick.saturating_sub(crisis.last_evaluated_tick).max(0);
+    // Keep the watermark monotonic. A transient tick rollback must not make
+    // already-credited time eligible to be counted again when time catches up.
+    crisis.last_evaluated_tick = crisis.last_evaluated_tick.max(game_tick);
+
+    if count_online_time {
+        crisis.online_active_ticks = crisis.online_active_ticks.saturating_add(elapsed);
+        crisis.phase_online_ticks = crisis.phase_online_ticks.saturating_add(elapsed);
+        if crisis.phase == CrisisPhase::AssaultActive {
+            crisis.assault_online_ticks = crisis.assault_online_ticks.saturating_add(elapsed);
+        }
+        elapsed
+    } else {
+        0
+    }
 }
 
 fn player_survival_day(
@@ -1408,6 +1729,9 @@ impl Plugin for GamePlugin {
         app.init_resource::<SanctuaryLoginChecks>();
         app.init_resource::<SurveyHistory>();
         app.init_resource::<InvestigatedPOIs>();
+        app.init_resource::<IntroEncounterState>();
+        app.init_resource::<SettlementCrisisState>();
+        app.init_resource::<NextCrisisAssaultId>();
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -1496,6 +1820,30 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 player_intro_state_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                personal_crisis_system
+                    .after(player_intro_state_system)
+                    .after(update_game_tick)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
+                personal_crisis_assault_system
+                    .after(personal_crisis_system)
+                    .after(sanctuary_zones_sync_system)
+                    .after(hero_dead_system)
+                    .after(resurrect_system)
+                    .after(true_death_system)
+                    .after(BigBrainSet::Actions)
+                    .before(map_event_system)
+                    .before(remove_dead_system)
+                    .before(despawn_wandering_npc_system)
+                    .before(perception_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
             )
             .add_systems(
                 Update,
@@ -2706,7 +3054,11 @@ fn move_event_completed_system(
             if let Some((monolith_id, monolith_pos)) = in_range_sanctuary {
                 // In-zone defensive bonus scales with how far the sanctuary is upgraded.
                 let sanctuary_amp = 1.0
-                    + sanctuary_zones.0.get(&monolith_id).map(|z| z.level).unwrap_or(0) as f32
+                    + sanctuary_zones
+                        .0
+                        .get(&monolith_id)
+                        .map(|z| z.level)
+                        .unwrap_or(0) as f32
                         * SANCTUARY_DEFENSE_PER_LEVEL;
                 // Check if coming from weak sanctuary
                 if effects.has(Effect::WeakSanctuary) {
@@ -7817,19 +8169,17 @@ fn use_item_system(
                             // closes minor wounds. Consumed when it did either;
                             // refusing to consume on a full-health, non-bleeding
                             // target keeps mis-clicks free.
-                            let stopped_bleeding = explore_cure_for_item(
-                                &item.name,
-                                &item.class,
-                                &item.subclass,
-                            ) == Some(Effect::Bleed)
-                                && clear_effect_with_item(
-                                    item_owner.player_id.0,
-                                    item_owner.id.0,
-                                    *item_owner.pos,
-                                    &mut item_owner.effects,
-                                    Effect::Bleed,
-                                    &clients,
-                                );
+                            let stopped_bleeding =
+                                explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                    == Some(Effect::Bleed)
+                                    && clear_effect_with_item(
+                                        item_owner.player_id.0,
+                                        item_owner.id.0,
+                                        *item_owner.pos,
+                                        &mut item_owner.effects,
+                                        Effect::Bleed,
+                                        &clients,
+                                    );
 
                             let missing_hp = item_owner.stats.base_hp - item_owner.stats.hp;
                             let healed = missing_hp.min(BANDAGE_HEAL_HP).max(0);
@@ -8700,11 +9050,7 @@ fn drink_eat_system(
                                         effects: Vec::new(),
                                     },
                                 };
-                                send_to_client(
-                                    ids.get_player(*obj_id).unwrap(),
-                                    packet,
-                                    &clients,
-                                );
+                                send_to_client(ids.get_player(*obj_id).unwrap(), packet, &clients);
                             }
                         }
                     }
@@ -10777,6 +11123,7 @@ fn rat_event_system(
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // only run this every 20 ticks (2 seconds)
     if game_tick.0 % 20 != 0 {
@@ -10833,8 +11180,9 @@ fn rat_event_system(
                         if path.len() < 20 {
                             let num_pests = rand::thread_rng().gen_range(2..=3);
                             for _ in 0..num_pests {
+                                let npc_id = ids.new_obj_id();
                                 Encounter::spawn_spoil_crisis(
-                                    ids.new_obj_id(),
+                                    npc_id,
                                     NPC_PLAYER_ID,
                                     spawn_pos,
                                     random_early_game_enemy_template().to_string(),
@@ -10844,6 +11192,7 @@ fn rat_event_system(
                                     &templates,
                                     *id,
                                 );
+                                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                             }
                             spawned = true;
                             break;
@@ -10866,6 +11215,1091 @@ fn rat_event_system(
     }
 }
 
+/// Evaluates the Checkpoint 2 personal goblin crisis. This system only derives
+/// state and advances ordered phases through `AssaultReady`; it deliberately
+/// has no Commands, combat spawning, client packets, rewards, or database I/O.
+fn personal_crisis_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    player_intro_state: Res<PlayerIntroState>,
+    objectives: Res<Objectives>,
+    mut settlement_crisis_state: ResMut<SettlementCrisisState>,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+            Option<&BoundMonolith>,
+        ),
+        With<SubclassHero>,
+    >,
+    structure_query: Query<(&PlayerId, &State), With<ClassStructure>>,
+    villager_query: Query<(&PlayerId, &State, Option<&StateDead>), With<SubclassVillager>>,
+    storage_query: Query<(&PlayerId, &State, &Inventory), (With<Storage>, With<ClassStructure>)>,
+    monolith_query: Query<(&Id, &Monolith)>,
+) {
+    let current_tick = game_tick.0;
+
+    // Aggregate settlement facts once per evaluation rather than rescanning
+    // the whole ECS separately for every player.
+    let mut completed_structures: HashMap<i32, usize> = HashMap::new();
+    for (player_id, state) in structure_query.iter() {
+        if player_id.is_human() && Structure::is_built(*state) {
+            *completed_structures.entry(player_id.0).or_default() += 1;
+        }
+    }
+
+    let mut living_villagers: HashMap<i32, usize> = HashMap::new();
+    for (player_id, state, state_dead) in villager_query.iter() {
+        if player_id.is_human() && state.is_alive() && state_dead.is_none() {
+            *living_villagers.entry(player_id.0).or_default() += 1;
+        }
+    }
+
+    let mut stored_gold: HashMap<i32, i32> = HashMap::new();
+    for (player_id, state, inventory) in storage_query.iter() {
+        if player_id.is_human() && Structure::is_built(*state) {
+            let total = stored_gold.entry(player_id.0).or_default();
+            *total = total.saturating_add(inventory.get_total_gold());
+        }
+    }
+
+    let monolith_levels: HashMap<i32, i32> = monolith_query
+        .iter()
+        .map(|(id, monolith)| (id.0, monolith.sanctuary_level))
+        .collect();
+
+    // Collapse duplicate hero rows conservatively. A player has a valid run if
+    // any current hero row is alive and has neither death marker.
+    let mut hero_runs: HashMap<i32, (bool, Option<i32>)> = HashMap::new();
+    for (player_id, state, state_dead, true_death, bound_monolith) in hero_query.iter() {
+        if !player_id.is_human() {
+            continue;
+        }
+
+        let valid = state.is_alive() && state_dead.is_none() && true_death.is_none();
+        let bound_id = bound_monolith.map(|bound| bound.id);
+        hero_runs
+            .entry(player_id.0)
+            .and_modify(|(existing_valid, existing_bound)| {
+                if valid {
+                    *existing_valid = true;
+                    *existing_bound = bound_id.or(*existing_bound);
+                }
+            })
+            .or_insert((valid, bound_id));
+    }
+
+    for (player_id, (valid_run, bound_monolith_id)) in hero_runs.iter() {
+        let Some(intro) = player_intro_state.get(player_id) else {
+            if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
+                advance_online_crisis_time(crisis, current_tick, false);
+            }
+            continue;
+        };
+
+        if !valid_run {
+            if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
+                advance_online_crisis_time(crisis, current_tick, false);
+            }
+            continue;
+        }
+
+        let online = clients.is_player_online(*player_id);
+        let crisis = match settlement_crisis_state.entry(*player_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(SettlementCrisis::new(current_tick));
+                info!(
+                    "personal_crisis_created player_id={} kind={:?} phase={:?} pressure=0 game_tick={} online={}",
+                    player_id,
+                    CrisisKind::Goblin,
+                    CrisisPhase::Dormant,
+                    current_tick,
+                    online
+                );
+                // Keep the freshly-created state observably Dormant for one
+                // evaluation even if a developed settlement already exists.
+                continue;
+            }
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
+
+        let count_online_time = intro.danger_unlocked && online;
+        advance_online_crisis_time(crisis, current_tick, count_online_time);
+
+        let objective = objectives.get(player_id);
+        crisis.pressure = calculate_goblin_pressure(&GoblinPressureFacts {
+            danger_unlocked: intro.danger_unlocked,
+            completed_structures: completed_structures.get(player_id).copied().unwrap_or(0),
+            living_villagers: living_villagers.get(player_id).copied().unwrap_or(0),
+            stored_gold: stored_gold.get(player_id).copied().unwrap_or(0),
+            sanctuary_level: bound_monolith_id
+                .and_then(|id| monolith_levels.get(&id).copied())
+                .unwrap_or(0),
+            explore_poi: objective.map(|value| value.explore_poi).unwrap_or(false),
+            choose_expansion: objective
+                .map(|value| value.choose_expansion)
+                .unwrap_or(false),
+            online_active_ticks: crisis.online_active_ticks,
+        });
+
+        if count_online_time {
+            if let Some((old_phase, new_phase)) = transition_goblin_crisis(crisis, current_tick) {
+                info!(
+                    "personal_crisis_transition player_id={} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
+                    player_id, old_phase, new_phase, crisis.pressure, current_tick
+                );
+            }
+        }
+    }
+
+    // A hero entity can be absent while the world continues. Catch the
+    // watermark up without crediting that interval, so a later recreation or
+    // ECS repair cannot backfill missing-hero time.
+    for (player_id, crisis) in settlement_crisis_state.iter_mut() {
+        if !hero_runs.contains_key(player_id) {
+            advance_online_crisis_time(crisis, current_tick, false);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssaultAnchorKind {
+    BoundMonolith,
+    PrimaryStructure,
+    BuiltStructure,
+    HeroFallback,
+}
+
+impl AssaultAnchorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            AssaultAnchorKind::BoundMonolith => "bound_monolith",
+            AssaultAnchorKind::PrimaryStructure => "primary_structure",
+            AssaultAnchorKind::BuiltStructure => "built_structure",
+            AssaultAnchorKind::HeroFallback => "hero_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssaultAnchor {
+    id: i32,
+    pos: Position,
+    kind: AssaultAnchorKind,
+    sanctuary_level: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultHeroInfo {
+    id: i32,
+    pos: Position,
+    bound_monolith_id: Option<i32>,
+    valid_run: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultStructureInfo {
+    id: i32,
+    owner_player_id: i32,
+    pos: Position,
+    subclass: Subclass,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultMonolithInfo {
+    pos: Position,
+    sanctuary_level: i32,
+}
+
+#[derive(Debug, Clone)]
+struct AssaultUnitSnapshot {
+    entity: Entity,
+    id: i32,
+    template: String,
+    attribution: CrisisAssaultUnit,
+    normally_dead: bool,
+}
+
+fn select_personal_assault_anchor(
+    player_id: i32,
+    hero: AssaultHeroInfo,
+    spawn_positions: &SpawnPositions,
+    structures: &[AssaultStructureInfo],
+    monoliths: &HashMap<i32, AssaultMonolithInfo>,
+) -> Option<AssaultAnchor> {
+    if let Some(bound_id) = hero.bound_monolith_id {
+        if let Some(monolith) = monoliths.get(&bound_id) {
+            return Some(AssaultAnchor {
+                id: bound_id,
+                pos: monolith.pos,
+                kind: AssaultAnchorKind::BoundMonolith,
+                sanctuary_level: Some(monolith.sanctuary_level),
+            });
+        }
+    }
+
+    let home = spawn_positions.get(&player_id).copied().unwrap_or(hero.pos);
+    let mut owned = structures
+        .iter()
+        .filter(|structure| structure.owner_player_id == player_id)
+        .copied()
+        .collect::<Vec<_>>();
+    owned.sort_by_key(|structure| {
+        let primary_priority = match structure.subclass {
+            Subclass::Campfire => 0,
+            Subclass::Storage => 1,
+            _ => 2,
+        };
+        (
+            primary_priority,
+            Map::dist(home, structure.pos),
+            structure.id,
+        )
+    });
+
+    if let Some(primary) = owned
+        .iter()
+        .find(|structure| matches!(structure.subclass, Subclass::Campfire | Subclass::Storage))
+    {
+        return Some(AssaultAnchor {
+            id: primary.id,
+            pos: primary.pos,
+            kind: AssaultAnchorKind::PrimaryStructure,
+            sanctuary_level: None,
+        });
+    }
+
+    if let Some(structure) = owned.first() {
+        return Some(AssaultAnchor {
+            id: structure.id,
+            pos: structure.pos,
+            kind: AssaultAnchorKind::BuiltStructure,
+            sanctuary_level: None,
+        });
+    }
+
+    // A real allocated run always has a SpawnPositions entry. Requiring that
+    // evidence prevents a partially constructed or stale hero row from turning
+    // into a settlement anchor while retaining current-position compatibility.
+    spawn_positions
+        .contains_key(&player_id)
+        .then_some(AssaultAnchor {
+            id: hero.id,
+            pos: hero.pos,
+            kind: AssaultAnchorKind::HeroFallback,
+            sanctuary_level: None,
+        })
+}
+
+fn personal_assault_spawn_positions(
+    owner_player_id: i32,
+    anchor: AssaultAnchor,
+    count: usize,
+    occupied: &HashSet<Position>,
+    structures: &[AssaultStructureInfo],
+    map: &Map,
+) -> Option<Vec<Position>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+
+    let (minimum_radius, maximum_radius) = match anchor.sanctuary_level {
+        Some(level) => {
+            let outside = sanctuary_weak_radius(level) as i32 + 1;
+            (outside, outside + 2)
+        }
+        None => (6, 8),
+    };
+
+    let mut candidates = Vec::new();
+    for radius in minimum_radius..=maximum_radius {
+        candidates.extend(Map::ring((anchor.pos.x, anchor.pos.y), radius));
+    }
+    candidates.shuffle(&mut rand::thread_rng());
+
+    let mut selected = Vec::with_capacity(count);
+    for (x, y) in candidates.into_iter().take(96) {
+        let pos = Position { x, y };
+        if !Map::is_valid_pos((x, y))
+            || !Map::is_passable(x, y, map)
+            || occupied.contains(&pos)
+            || selected.contains(&pos)
+        {
+            continue;
+        }
+
+        // Avoid putting a personal assault in the immediate footprint of a
+        // neighbouring settlement. Helpers can still engage after the spawn.
+        if structures.iter().any(|structure| {
+            structure.owner_player_id != owner_player_id && Map::dist(pos, structure.pos) < 3
+        }) {
+            continue;
+        }
+
+        if Map::find_path(
+            pos,
+            anchor.pos,
+            map,
+            NPC_PLAYER_ID,
+            Vec::new(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+        .is_none()
+        {
+            continue;
+        }
+
+        selected.push(pos);
+        if selected.len() == count {
+            return Some(selected);
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AssaultSpawnError {
+    EmptyComposition,
+    PositionCountMismatch,
+    MissingTemplate(String),
+}
+
+fn spawn_goblin_assault(
+    owner_player_id: i32,
+    assault_id: u64,
+    spawn_generation: u32,
+    unit_templates: &[String],
+    spawn_positions: &[Position],
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
+) -> Result<Vec<i32>, AssaultSpawnError> {
+    if unit_templates.is_empty() {
+        return Err(AssaultSpawnError::EmptyComposition);
+    }
+    if unit_templates.len() != spawn_positions.len() {
+        return Err(AssaultSpawnError::PositionCountMismatch);
+    }
+    for template in unit_templates {
+        if !templates
+            .obj_templates
+            .iter()
+            .any(|candidate| candidate.template == *template)
+        {
+            return Err(AssaultSpawnError::MissingTemplate(template.clone()));
+        }
+    }
+
+    // Template and position validation happens before the first deferred spawn,
+    // so this loop is an all-or-nothing logical operation in the current ECS.
+    let mut spawned_ids = Vec::with_capacity(unit_templates.len());
+    for (template, spawn_pos) in unit_templates.iter().zip(spawn_positions.iter()) {
+        let (entity, id, _, _) = Encounter::spawn_npc(
+            NPC_PLAYER_ID,
+            *spawn_pos,
+            template.clone(),
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+        commands.entity(entity).try_insert((
+            CrisisAssaultUnit {
+                owner_player_id,
+                assault_id,
+                spawn_generation,
+            },
+            Viewshed {
+                range: PERSONAL_ASSAULT_VISION,
+            },
+        ));
+        commands.trigger(NewObj { entity });
+        spawned_ids.push(id.0);
+    }
+
+    run_spawned_objs
+        .entry(owner_player_id)
+        .or_default()
+        .extend(spawned_ids.iter().copied());
+    Ok(spawned_ids)
+}
+
+fn clear_assault_target_references(
+    removed_ids: &HashSet<i32>,
+    commands: &mut Commands,
+    target_query: &Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
+) {
+    for (entity, target, visible_target, task_target) in target_query.iter() {
+        if target
+            .map(|target| removed_ids.contains(&target.id))
+            .unwrap_or(false)
+        {
+            commands.entity(entity).remove::<Target>();
+        }
+        if visible_target
+            .map(|target| removed_ids.contains(&target.target))
+            .unwrap_or(false)
+        {
+            commands
+                .entity(entity)
+                .try_insert(VisibleTarget::new(NO_TARGET));
+        }
+        if task_target
+            .map(|target| removed_ids.contains(&target.target))
+            .unwrap_or(false)
+        {
+            commands
+                .entity(entity)
+                .try_insert(TaskTarget::new(NO_TARGET));
+        }
+    }
+}
+
+fn controlled_cleanup_assault_generation(
+    owner_player_id: i32,
+    assault_id: u64,
+    spawn_generation: u32,
+    expected_ids: &[i32],
+    units: &[AssaultUnitSnapshot],
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &ResMut<EntityObjMap>,
+    map_events: &mut ResMut<MapEvents>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
+    target_query: &Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
+) -> usize {
+    let matching = units
+        .iter()
+        .filter(|unit| {
+            unit.attribution.owner_player_id == owner_player_id
+                && unit.attribution.assault_id == assault_id
+                && unit.attribution.spawn_generation == spawn_generation
+        })
+        .collect::<Vec<_>>();
+
+    let mut removed_ids = expected_ids.iter().copied().collect::<HashSet<_>>();
+    removed_ids.extend(matching.iter().map(|unit| unit.id));
+
+    // Cancel movement/attack actions before their source entity disappears.
+    clear_assault_target_references(&removed_ids, commands, target_query);
+    map_events.retain(|_, event| !removed_ids.contains(&event.obj_id));
+    if let Some(run_ids) = run_spawned_objs.get_mut(&owner_player_id) {
+        run_ids.retain(|id| !removed_ids.contains(id));
+    }
+    for id in &removed_ids {
+        ids.remove_obj(*id);
+    }
+
+    for unit in &matching {
+        if entity_map.get_entity(unit.id) == Some(unit.entity) {
+            commands.trigger(RemoveObj {
+                entity: unit.entity,
+            });
+        } else {
+            // An attributed orphan must not survive merely because a concurrent
+            // cleanup already removed its entity-map entry.
+            commands.entity(unit.entity).try_despawn();
+        }
+    }
+
+    matching.len()
+}
+
+fn record_personal_assault_resolution(
+    player_id: i32,
+    game_tick: i32,
+    crisis: &mut SettlementCrisis,
+    run_score_state: &mut RunScoreState,
+) -> bool {
+    if crisis.resolution_recorded || crisis.phase == CrisisPhase::Resolved {
+        return false;
+    }
+
+    crisis.resolution_recorded = true;
+    crisis.resolved_at_tick = Some(game_tick);
+    crisis.phase = CrisisPhase::Resolved;
+    crisis.phase_started_tick = game_tick;
+    crisis.phase_online_ticks = 0;
+    crisis.warning_active = false;
+    crisis.assault_unit_ids.clear();
+    crisis.assault_unit_templates.clear();
+    crisis.assault_reset_in_progress = false;
+    crisis.assault_reconnect_pending = false;
+    run_score_state
+        .entry(player_id)
+        .or_insert_with(|| PlayerRunScore {
+            start_tick: game_tick,
+            ..PlayerRunScore::default()
+        })
+        .personal_crises_resolved += 1;
+
+    info!(
+        "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} completion_count={}",
+        player_id,
+        crisis.phase,
+        crisis.assault_id,
+        crisis.assault_spawn_generation,
+        crisis.assault_retry_count,
+        game_tick,
+        run_score_state
+            .get(&player_id)
+            .map(|score| score.personal_crises_resolved)
+            .unwrap_or(0)
+    );
+    true
+}
+
+/// Owns the Checkpoint 3 transition from ready through launch, controlled
+/// reset/retry, and normal-combat resolution. Synchronous phase/reset writes
+/// happen before deferred entity commands, so cleanup can never look like a
+/// victory and a launch frame cannot be evaluated as an empty active wave.
+fn personal_crisis_assault_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    map: Res<Map>,
+    templates: Res<Templates>,
+    (
+        mut ids,
+        mut entity_map,
+        mut map_events,
+        mut crisis_state,
+        mut next_assault_id,
+        mut run_spawned_objs,
+        mut run_score_state,
+    ): (
+        ResMut<Ids>,
+        ResMut<EntityObjMap>,
+        ResMut<MapEvents>,
+        ResMut<SettlementCrisisState>,
+        ResMut<NextCrisisAssaultId>,
+        ResMut<RunSpawnedObjs>,
+        ResMut<RunScoreState>,
+    ),
+    spawn_positions: Res<SpawnPositions>,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+            Option<&BoundMonolith>,
+        ),
+        With<SubclassHero>,
+    >,
+    structure_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Subclass,
+            &State,
+            Option<&StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+    occupied_query: Query<&Position>,
+    assault_unit_query: Query<(
+        Entity,
+        &Id,
+        &Template,
+        &CrisisAssaultUnit,
+        &State,
+        Option<&StateDead>,
+    )>,
+    target_query: Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
+) {
+    let current_tick = game_tick.0;
+    let mut heroes = HashMap::new();
+    for (player_id, id, pos, state, state_dead, true_death, bound_monolith) in hero_query.iter() {
+        if !player_id.is_human() {
+            continue;
+        }
+        let candidate = AssaultHeroInfo {
+            id: id.0,
+            pos: *pos,
+            bound_monolith_id: bound_monolith.map(|bound| bound.id),
+            valid_run: state.is_alive() && state_dead.is_none() && true_death.is_none(),
+        };
+        heroes
+            .entry(player_id.0)
+            .and_modify(|existing: &mut AssaultHeroInfo| {
+                if candidate.valid_run && !existing.valid_run {
+                    *existing = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let structures = structure_query
+        .iter()
+        .filter_map(|(player_id, id, pos, subclass, state, dead)| {
+            (player_id.is_human() && Structure::is_built(*state) && dead.is_none()).then_some(
+                AssaultStructureInfo {
+                    id: id.0,
+                    owner_player_id: player_id.0,
+                    pos: *pos,
+                    subclass: *subclass,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let monoliths = monolith_query
+        .iter()
+        .filter_map(|(id, pos, monolith, state, dead)| {
+            (Structure::is_built(*state) && dead.is_none()).then_some((
+                id.0,
+                AssaultMonolithInfo {
+                    pos: *pos,
+                    sanctuary_level: monolith.sanctuary_level,
+                },
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let occupied = occupied_query.iter().copied().collect::<HashSet<_>>();
+    let unit_snapshots = assault_unit_query
+        .iter()
+        .map(
+            |(entity, id, template, attribution, state, dead)| AssaultUnitSnapshot {
+                entity,
+                id: id.0,
+                template: template.0.clone(),
+                attribution: *attribution,
+                // Normal combat writes State::Dead synchronously and queues
+                // StateDead. Observing either closes the same-update gap without
+                // treating controlled cleanup (which writes neither) as defeat.
+                normally_dead: *state == State::Dead || dead.is_some(),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let player_ids = crisis_state.keys().copied().collect::<Vec<_>>();
+    for player_id in player_ids {
+        let online = clients.is_player_online(player_id);
+        let hero = heroes.get(&player_id).copied();
+        let valid_run = hero.map(|value| value.valid_run).unwrap_or(false);
+        let Some(crisis) = crisis_state.get_mut(&player_id) else {
+            continue;
+        };
+
+        match crisis.phase {
+            CrisisPhase::AssaultReady => {
+                if crisis.assault_reset_in_progress {
+                    let matching_remain = crisis.assault_id.map_or(false, |assault_id| {
+                        unit_snapshots.iter().any(|unit| {
+                            unit.attribution.owner_player_id == player_id
+                                && unit.attribution.assault_id == assault_id
+                                && unit.attribution.spawn_generation
+                                    == crisis.assault_spawn_generation
+                        })
+                    });
+                    if matching_remain {
+                        if let Some(assault_id) = crisis.assault_id {
+                            controlled_cleanup_assault_generation(
+                                player_id,
+                                assault_id,
+                                crisis.assault_spawn_generation,
+                                &crisis.assault_unit_ids,
+                                &unit_snapshots,
+                                &mut commands,
+                                &mut ids,
+                                &entity_map,
+                                &mut map_events,
+                                &mut run_spawned_objs,
+                                &target_query,
+                            );
+                        }
+                        continue;
+                    }
+
+                    crisis.assault_reset_in_progress = false;
+                    crisis.phase_online_ticks = 0;
+                    if online && crisis.assault_reconnect_pending {
+                        info!(
+                            "personal_crisis_assault_reconnect_ready player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} online=true",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation,
+                            crisis.assault_retry_count,
+                            current_tick
+                        );
+                        crisis.assault_reconnect_pending = false;
+                    }
+                    // Never clear reset intent and launch in the same evaluation.
+                    continue;
+                }
+
+                if !online || !valid_run {
+                    continue;
+                }
+                if crisis.assault_reconnect_pending {
+                    info!(
+                        "personal_crisis_assault_reconnect_ready player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} online=true",
+                        player_id,
+                        crisis.phase,
+                        crisis.assault_id,
+                        crisis.assault_spawn_generation,
+                        crisis.assault_retry_count,
+                        current_tick
+                    );
+                    crisis.assault_reconnect_pending = false;
+                }
+                if !crisis.assault_grace_logged {
+                    info!(
+                        "personal_crisis_assault_grace_started player_id={} phase={:?} assault_id={:?} retry_count={} game_tick={} online=true grace_ticks={} max_wait_ticks={}",
+                        player_id,
+                        crisis.phase,
+                        crisis.assault_id,
+                        crisis.assault_retry_count,
+                        current_tick,
+                        ASSAULT_READY_GRACE_TICKS,
+                        ASSAULT_MAX_ONLINE_WAIT_TICKS
+                    );
+                    crisis.assault_grace_logged = true;
+                }
+                if !assault_launch_allowed(crisis.phase_online_ticks, current_tick) {
+                    continue;
+                }
+
+                // Every logical slot may already have been killed before an
+                // edge-case disconnect. Completion is still deferred until the
+                // owner is online and the reconnect grace has elapsed.
+                if crisis.assault_id.is_some() && crisis.assault_remaining_templates.is_empty() {
+                    record_personal_assault_resolution(
+                        player_id,
+                        current_tick,
+                        crisis,
+                        &mut run_score_state,
+                    );
+                    continue;
+                }
+
+                if unit_snapshots
+                    .iter()
+                    .any(|unit| unit.attribution.owner_player_id == player_id)
+                {
+                    if !crisis.assault_spawn_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_blocked player_id={} phase={:?} assault_id={:?} generation={} reason=prior_attributed_units game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                }
+
+                let Some(hero) = hero else {
+                    continue;
+                };
+                let Some(anchor) = select_personal_assault_anchor(
+                    player_id,
+                    hero,
+                    &spawn_positions,
+                    &structures,
+                    &monoliths,
+                ) else {
+                    if !crisis.assault_anchor_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_blocked player_id={} phase={:?} assault_id={:?} reason=no_settlement_anchor game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            current_tick
+                        );
+                        crisis.assault_anchor_warning_logged = true;
+                    }
+                    continue;
+                };
+                crisis.assault_anchor_warning_logged = false;
+
+                let unit_templates = if crisis.assault_id.is_some() {
+                    crisis.assault_remaining_templates.clone()
+                } else {
+                    GOBLIN_ASSAULT_COMPOSITION
+                        .iter()
+                        .map(|template| (*template).to_string())
+                        .collect::<Vec<_>>()
+                };
+                let Some(unit_positions) = personal_assault_spawn_positions(
+                    player_id,
+                    anchor,
+                    unit_templates.len(),
+                    &occupied,
+                    &structures,
+                    &map,
+                ) else {
+                    if !crisis.assault_spawn_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_failed player_id={} phase={:?} assault_id={:?} generation={} reason=no_valid_spawn anchor_kind={} anchor_id={} anchor=({}, {}) game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation.saturating_add(1),
+                            anchor.kind.as_str(),
+                            anchor.id,
+                            anchor.pos.x,
+                            anchor.pos.y,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                };
+
+                let assault_id = if let Some(assault_id) = crisis.assault_id {
+                    assault_id
+                } else {
+                    let Some(assault_id) = next_assault_id.allocate() else {
+                        if !crisis.assault_spawn_warning_logged {
+                            error!(
+                                "personal_crisis_assault_spawn_failed player_id={} phase={:?} reason=assault_id_exhausted game_tick={}",
+                                player_id,
+                                crisis.phase,
+                                current_tick
+                            );
+                            crisis.assault_spawn_warning_logged = true;
+                        }
+                        continue;
+                    };
+                    assault_id
+                };
+                let generation = crisis.assault_spawn_generation.saturating_add(1);
+                match spawn_goblin_assault(
+                    player_id,
+                    assault_id,
+                    generation,
+                    &unit_templates,
+                    &unit_positions,
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
+                    &mut run_spawned_objs,
+                ) {
+                    Ok(spawned_ids) => {
+                        if crisis.assault_id.is_none() {
+                            crisis.assault_remaining_templates = unit_templates.clone();
+                        }
+                        crisis.assault_id = Some(assault_id);
+                        crisis.assault_started_tick = Some(current_tick);
+                        crisis.assault_online_ticks = 0;
+                        crisis.assault_unit_ids = spawned_ids;
+                        crisis.assault_unit_templates = unit_templates.clone();
+                        crisis.assault_spawn_generation = generation;
+                        crisis.phase = CrisisPhase::AssaultActive;
+                        crisis.phase_started_tick = current_tick;
+                        crisis.phase_online_ticks = 0;
+                        crisis.assault_reset_in_progress = false;
+                        crisis.assault_reconnect_pending = false;
+                        crisis.assault_spawn_warning_logged = false;
+                        info!(
+                            "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} retry_count={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            crisis.assault_retry_count,
+                            current_tick,
+                            crisis.assault_unit_ids.len(),
+                            unit_templates,
+                            anchor.kind.as_str(),
+                            anchor.id,
+                            anchor.pos.x,
+                            anchor.pos.y,
+                            unit_positions
+                        );
+                    }
+                    Err(error) => {
+                        if !crisis.assault_spawn_warning_logged {
+                            warn!(
+                                "personal_crisis_assault_spawn_failed player_id={} phase={:?} assault_id={} generation={} error={:?} game_tick={}",
+                                player_id,
+                                crisis.phase,
+                                assault_id,
+                                generation,
+                                error,
+                                current_tick
+                            );
+                            crisis.assault_spawn_warning_logged = true;
+                        }
+                    }
+                }
+            }
+            CrisisPhase::AssaultActive => {
+                let Some(assault_id) = crisis.assault_id else {
+                    warn!(
+                        "personal_crisis_assault_reset player_id={} phase={:?} reason=missing_assault_id generation={} game_tick={}",
+                        player_id,
+                        crisis.phase,
+                        crisis.assault_spawn_generation,
+                        current_tick
+                    );
+                    crisis.phase = CrisisPhase::AssaultReady;
+                    crisis.phase_started_tick = current_tick;
+                    crisis.phase_online_ticks = 0;
+                    crisis.assault_retry_count = crisis.assault_retry_count.saturating_add(1);
+                    crisis.assault_reconnect_pending = true;
+                    crisis.assault_grace_logged = false;
+                    continue;
+                };
+                let generation = crisis.assault_spawn_generation;
+
+                // Record each normally-dead object once. Removing one matching
+                // template from the logical remainder makes reconnect retries
+                // preserve legitimate loot/XP while never respawning that slot.
+                for (id, template) in crisis
+                    .assault_unit_ids
+                    .clone()
+                    .into_iter()
+                    .zip(crisis.assault_unit_templates.clone())
+                {
+                    if crisis.assault_defeated_unit_ids.contains(&id) {
+                        continue;
+                    }
+                    let normally_dead = unit_snapshots.iter().any(|unit| {
+                        unit.id == id
+                            && unit.attribution.owner_player_id == player_id
+                            && unit.attribution.assault_id == assault_id
+                            && unit.attribution.spawn_generation == generation
+                            && unit.normally_dead
+                    });
+                    if normally_dead {
+                        crisis.assault_defeated_unit_ids.push(id);
+                        if let Some(index) = crisis
+                            .assault_remaining_templates
+                            .iter()
+                            .position(|remaining| remaining == &template)
+                        {
+                            crisis.assault_remaining_templates.remove(index);
+                        }
+                    }
+                }
+
+                let missing_expected_ids = crisis
+                    .assault_unit_ids
+                    .iter()
+                    .filter(|id| !crisis.assault_defeated_unit_ids.contains(id))
+                    .filter(|id| {
+                        !unit_snapshots.iter().any(|unit| {
+                            unit.id == **id
+                                && unit.attribution.owner_player_id == player_id
+                                && unit.attribution.assault_id == assault_id
+                                && unit.attribution.spawn_generation == generation
+                        })
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                let reset_reason = if !valid_run {
+                    Some("invalid_or_dead_owner_run")
+                } else if !online {
+                    Some("owner_disconnected")
+                } else if !missing_expected_ids.is_empty() {
+                    Some("expected_unit_missing_without_normal_death")
+                } else {
+                    None
+                };
+
+                if let Some(reason) = reset_reason {
+                    // Set reset intent and leave AssaultActive before issuing
+                    // any entity removal, making controlled cleanup non-victory.
+                    crisis.assault_reset_in_progress = true;
+                    crisis.phase = CrisisPhase::AssaultReady;
+                    crisis.phase_started_tick = current_tick;
+                    crisis.phase_online_ticks = 0;
+                    crisis.assault_retry_count = crisis.assault_retry_count.saturating_add(1);
+                    crisis.assault_reconnect_pending = true;
+                    crisis.assault_grace_logged = false;
+                    crisis.assault_anchor_warning_logged = false;
+                    crisis.assault_spawn_warning_logged = false;
+                    let expected_ids = crisis.assault_unit_ids.clone();
+                    let removed = controlled_cleanup_assault_generation(
+                        player_id,
+                        assault_id,
+                        generation,
+                        &expected_ids,
+                        &unit_snapshots,
+                        &mut commands,
+                        &mut ids,
+                        &entity_map,
+                        &mut map_events,
+                        &mut run_spawned_objs,
+                        &target_query,
+                    );
+                    crisis.assault_unit_ids.clear();
+                    crisis.assault_unit_templates.clear();
+                    info!(
+                        "personal_crisis_assault_reset player_id={} phase={:?} assault_id={} generation={} retry_count={} game_tick={} online={} reason={} removed_units={} remaining_templates={:?} missing_ids={:?}",
+                        player_id,
+                        crisis.phase,
+                        assault_id,
+                        generation,
+                        crisis.assault_retry_count,
+                        current_tick,
+                        online,
+                        reason,
+                        removed,
+                        crisis.assault_remaining_templates,
+                        missing_expected_ids
+                    );
+                    continue;
+                }
+
+                if crisis.assault_remaining_templates.is_empty() {
+                    clear_assault_target_references(
+                        &crisis
+                            .assault_unit_ids
+                            .iter()
+                            .copied()
+                            .collect::<HashSet<_>>(),
+                        &mut commands,
+                        &target_query,
+                    );
+                    record_personal_assault_resolution(
+                        player_id,
+                        current_tick,
+                        crisis,
+                        &mut run_score_state,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // Watches for the initial enemy kills and chains boar/crab into spider spawns
 fn initial_encounter_system(
     mut commands: Commands,
@@ -10876,24 +12310,47 @@ fn initial_encounter_system(
     mut game_events: ResMut<GameEvents>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
-    mut crisis_state: ResMut<CrisisState>,
+    mut intro_encounter_state: ResMut<IntroEncounterState>,
     objectives: Res<Objectives>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     dead_query: Query<&Id, With<StateDead>>,
+    hero_query: Query<
+        (&PlayerId, &State, Option<&StateDead>, Option<&TrueDeath>),
+        With<SubclassHero>,
+    >,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
     }
 
     let dead_ids: std::collections::HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
+    let live_player_ids: HashSet<i32> = hero_query
+        .iter()
+        .filter_map(|(player_id, state, state_dead, true_death)| {
+            (player_id.is_human()
+                && state.is_alive()
+                && state_dead.is_none()
+                && true_death.is_none())
+            .then_some(player_id.0)
+        })
+        .collect();
 
     for (player_id, entry) in initial_encounter_state.iter_mut() {
+        // True Death cleanup and encounter spawning can otherwise share an
+        // Update. Since spawns are deferred, a newly queued hostile would not
+        // be visible to that cleanup sweep and could survive at a recycled
+        // start location. Ordinary-dead and absent heroes also pause the chain.
+        if !live_player_ids.contains(player_id) {
+            continue;
+        }
+
         let Some(intro_entry) = player_intro_state.get_mut(player_id) else {
             continue;
         };
 
-        let crisis = crisis_state
+        let intro_progress = intro_encounter_state
             .entry(*player_id)
-            .or_insert_with(PlayerCrisis::default);
+            .or_insert_with(PlayerIntroEncounters::default);
         let all_opening_enemies_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
 
         if !intro_entry.shipwreck_chain_started && game_tick.0 >= entry.first_rat_spawn_tick {
@@ -10970,7 +12427,7 @@ fn initial_encounter_system(
         }
 
         // Phase 0: waiting for both opening enemies to die, then spawn boar/crab
-        if !crisis.initial_encounter {
+        if !intro_progress.initial_encounter {
             if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_dead {
                 let npc_id = ids.new_obj_id();
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
@@ -10985,7 +12442,8 @@ fn initial_encounter_system(
                 );
                 commands.trigger(NewObj { entity });
                 entry.phase1_npc_id = Some(npc_id);
-                crisis.initial_encounter = true;
+                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
+                intro_progress.initial_encounter = true;
                 info!(
                     "Initial Encounter: spawning {} after opening enemies killed for player {}",
                     entry.phase1_spawn, player_id
@@ -10995,10 +12453,10 @@ fn initial_encounter_system(
         }
 
         // Phase 1: waiting for the boar/crab to die → spawn spider
-        if !crisis.spider_encounter {
+        if !intro_progress.spider_encounter {
             if let Some(phase1_id) = entry.phase1_npc_id {
                 if game_tick.0 >= entry.spider_unlock_tick && dead_ids.contains(&phase1_id) {
-                    let (entity, _, _, _) = Encounter::spawn_npc(
+                    let (entity, spider_id, _, _) = Encounter::spawn_npc(
                         NPC_PLAYER_ID,
                         entry.spawn_pos,
                         "Spider".to_string(),
@@ -11008,7 +12466,11 @@ fn initial_encounter_system(
                         &templates,
                     );
                     commands.trigger(NewObj { entity });
-                    crisis.spider_encounter = true;
+                    run_spawned_objs
+                        .entry(*player_id)
+                        .or_default()
+                        .push(spider_id.0);
+                    intro_progress.spider_encounter = true;
                     info!(
                         "Initial Encounter: spawning Spider after {} killed for player {}",
                         entry.phase1_spawn, player_id
@@ -11031,6 +12493,7 @@ fn wolf_pack_system(
     spawn_positions: Res<SpawnPositions>,
     player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // Check every 10 ticks (1 second)
     if game_tick.0 % 10 != 0 {
@@ -11094,7 +12557,7 @@ fn wolf_pack_system(
                         // Spawn 2-3 wolves
                         let num_wolves = rand::thread_rng().gen_range(2..=3);
                         for _ in 0..num_wolves {
-                            Encounter::spawn_npc(
+                            let (_, npc_id, _, _) = Encounter::spawn_npc(
                                 NPC_PLAYER_ID,
                                 wolf_spawn,
                                 "Wolf".to_string(),
@@ -11103,6 +12566,10 @@ fn wolf_pack_system(
                                 &mut entity_map,
                                 &templates,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id.0);
                         }
                         spawned = true;
                         break;
@@ -11136,6 +12603,7 @@ fn goblin_raid_system(
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // Check every 30 ticks (3 seconds)
     if game_tick.0 % 30 != 0 {
@@ -11186,8 +12654,9 @@ fn goblin_raid_system(
                         if path.len() < 20 {
                             // Spawn 2 Wolf Riders that steal gold/weapons
                             for _ in 0..2 {
+                                let npc_id = ids.new_obj_id();
                                 Encounter::spawn_steal_crisis(
-                                    ids.new_obj_id(),
+                                    npc_id,
                                     NPC_PLAYER_ID,
                                     spawn_pos,
                                     "Wolf Rider".to_string(),
@@ -11197,6 +12666,7 @@ fn goblin_raid_system(
                                     &templates,
                                     *id,
                                 );
+                                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                             }
                             spawned = true;
                             break;
@@ -11267,8 +12737,9 @@ fn goblin_raid_system(
                 if let Some((path, _cost)) = path {
                     if path.len() < 20 {
                         for _ in 0..2 {
+                            let npc_id = ids.new_obj_id();
                             Encounter::spawn_steal_crisis(
-                                ids.new_obj_id(),
+                                npc_id,
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Wolf Rider".to_string(),
@@ -11278,6 +12749,10 @@ fn goblin_raid_system(
                                 &templates,
                                 target_id,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id);
                         }
                         spawned = true;
                         break;
@@ -11310,6 +12785,7 @@ fn undead_incursion_system(
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -11319,9 +12795,8 @@ fn undead_incursion_system(
         // Primary trigger at 3 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
-        if survival_ticks < UNDEAD_INCURSION_SURVIVAL_TICKS
-            && survival_ticks < UNDEAD_INCURSION_FALLBACK_TICKS
-        {
+        let trigger_tick = UNDEAD_INCURSION_SURVIVAL_TICKS.min(UNDEAD_INCURSION_FALLBACK_TICKS);
+        if survival_ticks < trigger_tick {
             continue;
         }
 
@@ -11354,7 +12829,7 @@ fn undead_incursion_system(
                     if path.len() < 20 {
                         // Spawn 3 Zombies + 1 Skeleton + 1 Necromancer
                         for _ in 0..3 {
-                            Encounter::spawn_npc(
+                            let (_, npc_id, _, _) = Encounter::spawn_npc(
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Zombie".to_string(),
@@ -11363,8 +12838,12 @@ fn undead_incursion_system(
                                 &mut entity_map,
                                 &templates,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id.0);
                         }
-                        Encounter::spawn_npc(
+                        let (_, skeleton_id, _, _) = Encounter::spawn_npc(
                             NPC_PLAYER_ID,
                             spawn_pos,
                             "Skeleton".to_string(),
@@ -11373,7 +12852,7 @@ fn undead_incursion_system(
                             &mut entity_map,
                             &templates,
                         );
-                        Encounter::spawn_necromancer(
+                        let (_, necromancer_id, _, _) = Encounter::spawn_necromancer(
                             NPC_PLAYER_ID,
                             spawn_pos,
                             spawn_pos,
@@ -11382,6 +12861,10 @@ fn undead_incursion_system(
                             &mut entity_map,
                             &templates,
                         );
+                        run_spawned_objs
+                            .entry(player_id.0)
+                            .or_default()
+                            .extend([skeleton_id.0, necromancer_id.0]);
                         spawned = true;
                         break;
                     }
@@ -11413,6 +12896,7 @@ fn goblin_pillager_system(
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -11425,9 +12909,8 @@ fn goblin_pillager_system(
         // Primary trigger at 5 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
-        if survival_ticks < GOBLIN_PILLAGER_SURVIVAL_TICKS
-            && survival_ticks < GOBLIN_PILLAGER_FALLBACK_TICKS
-        {
+        let trigger_tick = GOBLIN_PILLAGER_SURVIVAL_TICKS.min(GOBLIN_PILLAGER_FALLBACK_TICKS);
+        if survival_ticks < trigger_tick {
             continue;
         }
 
@@ -11465,8 +12948,9 @@ fn goblin_pillager_system(
                     if path.len() < 25 {
                         // Spawn 3 Goblin Pillagers that set structures on fire
                         for _ in 0..3 {
+                            let npc_id = ids.new_obj_id();
                             Encounter::spawn_torch_crisis(
-                                ids.new_obj_id(),
+                                npc_id,
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Goblin Pillager".to_string(),
@@ -11476,6 +12960,7 @@ fn goblin_pillager_system(
                                 &templates,
                                 *target_id,
                             );
+                            run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                         }
                         spawned = true;
                         break;
@@ -11503,11 +12988,6 @@ fn goblin_pillager_system(
 // at the sanctuary ring instead of attacking. 14 covers the spawn ring radius
 // plus the spread of a camp, so the horde actually descends on the settlement.
 const HORDE_HUNT_VISION: u32 = 14;
-
-// How far from a dead player's camp True Death sweeps NPC hostiles before the
-// start location is recycled. Kept tight: start locations sit as close as 9
-// tiles apart, so a wider sweep could delete enemies engaging a neighbour.
-const RUN_CLEANUP_RADIUS: u32 = 8;
 
 fn nightly_threat_system(
     mut commands: Commands,
@@ -14999,6 +16479,8 @@ fn true_death_system(
         mut start_locations,
         mut assigned_start_locations,
         mut run_spawned_objs,
+        mut intro_encounter_state,
+        mut settlement_crisis_state,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -15012,6 +16494,8 @@ fn true_death_system(
         ResMut<StartLocations>,
         ResMut<AssignedStartLocations>,
         ResMut<RunSpawnedObjs>,
+        ResMut<IntroEncounterState>,
+        ResMut<SettlementCrisisState>,
     ),
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
@@ -15036,9 +16520,21 @@ fn true_death_system(
     )>,
     villager_query: Query<(Entity, &PlayerId, &Id, Option<&StateDead>), With<SubclassVillager>>,
     cleanup_query: Query<
-        (Entity, &Id, &PlayerId, &Position),
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &Position,
+            Option<&CrisisAssaultUnit>,
+        ),
         (Without<SubclassHero>, Without<SubclassVillager>),
     >,
+    target_query: Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
 ) {
     for (entity, player_id, id, name, template, skills, true_death, state_dead, bound_monolith) in
         hero_query.iter_mut()
@@ -15198,7 +16694,7 @@ fn true_death_system(
 
             // Clean up crisis state and spawn position for this player
             crisis_state.remove(&player_id.0);
-            let camp_pos = spawn_positions.remove(&player_id.0);
+            spawn_positions.remove(&player_id.0);
             run_score_state.remove(&player_id.0);
             legendary_threat_state.remove(&player_id.0);
             // Also drop the scripted per-run state: a dead player's intro /
@@ -15208,6 +16704,23 @@ fn true_death_system(
             objectives.remove(&player_id.0);
             player_intro_state.remove(&player_id.0);
             initial_encounter_state.remove(&player_id.0);
+            intro_encounter_state.remove(&player_id.0);
+            if let Some(personal_crisis) = settlement_crisis_state.get(&player_id.0) {
+                if personal_crisis.assault_id.is_some() {
+                    info!(
+                        "personal_crisis_assault_true_death_cleanup player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} tracked_units={} reset_in_progress={}",
+                        player_id.0,
+                        personal_crisis.phase,
+                        personal_crisis.assault_id,
+                        personal_crisis.assault_spawn_generation,
+                        personal_crisis.assault_retry_count,
+                        game_tick.0,
+                        personal_crisis.assault_unit_ids.len(),
+                        personal_crisis.assault_reset_in_progress
+                    );
+                }
+            }
+            settlement_crisis_state.remove(&player_id.0);
 
             // Release this player's start location back to the pool so a new hero can
             // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
@@ -15233,24 +16746,37 @@ fn true_death_system(
                 }
             }
 
-            // Clean the start area before the location is recycled: the dead
-            // player's own objects (burrow, campfire, structures, corpses),
-            // this run's scripted spawns (shipwreck, POIs, intro NPCs), and
-            // hostiles that accumulated around the camp. Villagers are kept —
-            // they were just transferred to the merchant for re-hire.
+            // Clean only objects owned by or explicitly attributed to this run.
+            // Nearby unrelated world hostiles survive start-location recycling;
+            // villagers are kept because they were just transferred to the
+            // merchant for re-hire.
             let run_objs = run_spawned_objs.remove(&player_id.0).unwrap_or_default();
             let mut removed_obj_ids: Vec<i32> = Vec::new();
-            for (obj_entity, obj_id, obj_player_id, obj_pos) in cleanup_query.iter() {
+            for (obj_entity, obj_id, obj_player_id, _obj_pos, crisis_assault) in
+                cleanup_query.iter()
+            {
+                // Another player's explicitly attributed personal assault is
+                // never collateral cleanup.
+                if crisis_assault
+                    .map(|assault| assault.owner_player_id != player_id.0)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
                 let owned_by_dead_player = obj_player_id.0 == player_id.0;
                 let spawned_for_this_run = run_objs.contains(&obj_id.0);
-                let hostile_near_camp = obj_player_id.0 == NPC_PLAYER_ID
-                    && camp_pos
-                        .map(|camp| Map::dist(camp, *obj_pos) <= RUN_CLEANUP_RADIUS)
-                        .unwrap_or(false);
+                let attributed_to_dead_run = crisis_assault
+                    .map(|assault| assault.owner_player_id == player_id.0)
+                    .unwrap_or(false);
 
-                if owned_by_dead_player || spawned_for_this_run || hostile_near_camp {
+                if owned_by_dead_player || spawned_for_this_run || attributed_to_dead_run {
                     removed_obj_ids.push(obj_id.0);
-                    commands.trigger(RemoveObj { entity: obj_entity });
+                    ids.remove_obj(obj_id.0);
+                    if entity_map.get_entity(obj_id.0) == Some(obj_entity) {
+                        commands.trigger(RemoveObj { entity: obj_entity });
+                    } else {
+                        commands.entity(obj_entity).try_despawn();
+                    }
                 }
             }
 
@@ -15259,6 +16785,11 @@ fn true_death_system(
             // panics when its completion command runs.
             removed_obj_ids.push(id.0);
             map_events.retain(|_, map_event| !removed_obj_ids.contains(&map_event.obj_id));
+            clear_assault_target_references(
+                &removed_obj_ids.iter().copied().collect::<HashSet<_>>(),
+                &mut commands,
+                &target_query,
+            );
 
             // The next run bound to this monolith must get the same first-death
             // safety net: restore its Soulshards to the starting amount.

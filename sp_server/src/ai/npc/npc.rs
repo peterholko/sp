@@ -692,6 +692,54 @@ mod tests {
     }
 
     #[test]
+    fn personal_assault_target_scorer_stays_with_the_attributed_owner() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        app.world_mut()
+            .entity_mut(npc_entity)
+            .insert(CrisisAssaultUnit {
+                owner_player_id: 2,
+                assault_id: 11,
+                spawn_generation: 1,
+            });
+
+        // Another player's unit is closer, but explicit assault attribution is
+        // authoritative for the attacker's target selection.
+        for (id, player_id, x) in [(1, 1, 1), (2, 2, 3)] {
+            app.world_mut().spawn((
+                Id(id),
+                PlayerId(player_id),
+                Position { x, y: 0 },
+                State::None,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::from_str("soldier"),
+                empty_effects(),
+                test_stats(),
+            ));
+        }
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .unwrap()
+                .target,
+            2
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            NORMAL_SCORE / 100.0
+        );
+    }
+
+    #[test]
     fn animal_target_scorer_skips_wall_structure_targets() {
         let mut app = setup_target_scorer_app();
         let (npc_entity, scorer_entity) =
@@ -1334,6 +1382,7 @@ pub fn target_scorer_system(
             Option<&mut TaskTarget>,
             &Stats,
             &EventExecuting,
+            Option<&CrisisAssaultUnit>,
         ),
         With<SubclassNPC>,
     >,
@@ -1366,6 +1415,7 @@ pub fn target_scorer_system(
             npc_task_target,
             npc_stats,
             event_executing,
+            crisis_assault,
         )) = npc_query.get_mut(*actor)
         else {
             span.span().in_scope(|| {
@@ -1418,6 +1468,9 @@ pub fn target_scorer_system(
                     target_stats,
                 )| {
                     if !player::is_player(target_player.0)
+                        || crisis_assault
+                            .map(|assault| assault.owner_player_id != target_player.0)
+                            .unwrap_or(false)
                         || Obj::is_dead(target_state)
                         || target_class.0 != CLASS_STRUCTURE
                         || *target_subclass != Subclass::Wall
@@ -1476,6 +1529,15 @@ pub fn target_scorer_system(
             });
 
             if !player::is_player(target_player.0) {
+                continue;
+            }
+
+            // Personal-assault attackers pressure only their owning
+            // settlement. Nearby players remain free to attack and assist.
+            if crisis_assault
+                .map(|assault| assault.owner_player_id != target_player.0)
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -4212,6 +4274,7 @@ fn defense_hint_for(attack_type: &AttackType) -> String {
 #[derive(SystemParam)]
 pub struct TelegraphState<'w, 's> {
     clients: Res<'w, Clients>,
+    crisis_assault_units: Query<'w, 's, &'static CrisisAssaultUnit>,
     next_attacks: Local<'s, std::collections::HashMap<i32, AttackType>>,
 }
 
@@ -4236,6 +4299,17 @@ pub fn attack_target_system(
     for (Actor(actor), mut state, _chase_attack) in &mut query {
         match *state {
             ActionState::Requested => {
+                if let Ok(assault) = telegraph.crisis_assault_units.get(*actor) {
+                    // Presence is authoritative at the action boundary as well
+                    // as in the lifecycle system. This prevents an attack that
+                    // was already requested from landing on the first update
+                    // that observes the owner disconnected.
+                    if !telegraph.clients.is_player_online(assault.owner_player_id) {
+                        *state = ActionState::Failure;
+                        continue;
+                    }
+                }
+
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;

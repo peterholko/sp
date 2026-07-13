@@ -7,7 +7,7 @@ use crate::npc::{ScriptedCorpseHunt, VisibleTarget};
 use crate::recipe::Recipe;
 use crate::skill::WEAPONSMITHING;
 use crate::templates::{EffectTemplate, ResReq, SkillTemplate, SkillTemplates, Templates};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
 fn load_obj_templates() -> Vec<ObjTemplate> {
@@ -1124,7 +1124,10 @@ fn sleep_heal_scales_with_tiredness() {
 fn first_resurrection_uses_flat_affordable_cost() {
     // Flat and below the monolith's 10 starting shards, even with earned XP.
     assert_eq!(resurrection_attempt_cost(1, 0), FIRST_DEATH_SOULSHARD_COST);
-    assert_eq!(resurrection_attempt_cost(1, 5000), FIRST_DEATH_SOULSHARD_COST);
+    assert_eq!(
+        resurrection_attempt_cost(1, 5000),
+        FIRST_DEATH_SOULSHARD_COST
+    );
 }
 
 #[test]
@@ -2136,32 +2139,717 @@ fn personal_crisis_is_the_default_survival_director_mode() {
     );
 }
 
+fn test_client(id: Uuid, player_id: i32, sender: tokio::sync::mpsc::Sender<String>) -> Client {
+    Client {
+        id,
+        player_id,
+        sender,
+    }
+}
+
+#[test]
+fn client_presence_handles_multiple_connections_removals_and_stale_records() {
+    let player_id = 42;
+    let clients = Clients::default();
+    assert!(!clients.is_player_online(player_id));
+
+    let first_id = Uuid::from_u128(1);
+    let second_id = Uuid::from_u128(2);
+    let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
+    let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
+    clients
+        .lock()
+        .unwrap()
+        .insert(first_id, test_client(first_id, player_id, first_sender));
+    assert!(clients.is_player_online(player_id));
+
+    clients
+        .lock()
+        .unwrap()
+        .insert(second_id, test_client(second_id, player_id, second_sender));
+    clients.lock().unwrap().remove(&first_id);
+    assert!(
+        clients.is_player_online(player_id),
+        "one remaining valid client must keep the player online"
+    );
+
+    clients.lock().unwrap().remove(&second_id);
+    assert!(!clients.is_player_online(player_id));
+
+    let stale_id = Uuid::from_u128(3);
+    let (stale_sender, stale_receiver) = tokio::sync::mpsc::channel(1);
+    drop(stale_receiver);
+    clients
+        .lock()
+        .unwrap()
+        .insert(stale_id, test_client(stale_id, player_id, stale_sender));
+    assert!(
+        !clients.is_player_online(player_id),
+        "a closed sender left in the map is not an active connection"
+    );
+
+    let mismatched_key = Uuid::from_u128(4);
+    let mismatched_client_id = Uuid::from_u128(5);
+    let (mismatched_sender, _mismatched_receiver) = tokio::sync::mpsc::channel(1);
+    clients.lock().unwrap().insert(
+        mismatched_key,
+        test_client(mismatched_client_id, player_id, mismatched_sender),
+    );
+    assert!(
+        !clients.is_player_online(player_id),
+        "a malformed stale record is not a valid connection"
+    );
+}
+
+#[test]
+fn goblin_pressure_is_gated_deterministic_and_capped() {
+    let developed = GoblinPressureFacts {
+        danger_unlocked: true,
+        completed_structures: 3,
+        living_villagers: 1,
+        stored_gold: 100,
+        sanctuary_level: 5,
+        explore_poi: true,
+        choose_expansion: true,
+        online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
+    };
+
+    let first = calculate_goblin_pressure(&developed);
+    let second = calculate_goblin_pressure(&developed);
+    assert_eq!(first, second);
+    assert_eq!(first, GOBLIN_PRESSURE_MAX);
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            danger_unlocked: false,
+            ..developed
+        }),
+        0,
+        "settlement facts cannot bypass the introduction safety gate"
+    );
+}
+
+#[test]
+fn goblin_pressure_uses_named_fact_thresholds_without_double_counting() {
+    let base = GoblinPressureFacts {
+        danger_unlocked: true,
+        ..Default::default()
+    };
+    assert_eq!(calculate_goblin_pressure(&base), 10);
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            completed_structures: 3,
+            ..base
+        }),
+        30
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            living_villagers: 1,
+            explore_poi: true,
+            choose_expansion: true,
+            ..base
+        }),
+        50
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            stored_gold: 24,
+            ..base
+        }),
+        10
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            stored_gold: 25,
+            ..base
+        }),
+        15
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            stored_gold: 50,
+            sanctuary_level: 3,
+            online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS,
+            ..base
+        }),
+        36
+    );
+}
+
+#[test]
+fn online_crisis_time_is_idempotent_and_excludes_inactive_intervals() {
+    let mut crisis = SettlementCrisis::new(100);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 110, true), 10);
+    assert_eq!(crisis.online_active_ticks, 10);
+    assert_eq!(crisis.phase_online_ticks, 10);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 110, true), 0);
+    assert_eq!(crisis.online_active_ticks, 10);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 200, false), 0);
+    assert_eq!(crisis.online_active_ticks, 10);
+    assert_eq!(crisis.last_evaluated_tick, 200);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 215, true), 15);
+    assert_eq!(crisis.online_active_ticks, 25);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 205, true), 0);
+    assert_eq!(crisis.online_active_ticks, 25);
+    assert_eq!(crisis.last_evaluated_tick, 215);
+
+    assert_eq!(advance_online_crisis_time(&mut crisis, 215, true), 0);
+    assert_eq!(crisis.online_active_ticks, 25);
+    assert_eq!(advance_online_crisis_time(&mut crisis, 220, true), 5);
+    assert_eq!(crisis.online_active_ticks, 30);
+}
+
+#[test]
+fn goblin_phase_transitions_are_ordered_timed_and_stop_at_assault_ready() {
+    let mut crisis = SettlementCrisis::new(10);
+    crisis.pressure = GOBLIN_PRESSURE_MAX;
+    crisis.phase_online_ticks = i32::MAX;
+
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 20),
+        Some((CrisisPhase::Dormant, CrisisPhase::Signs))
+    );
+    assert_eq!(crisis.phase, CrisisPhase::Signs);
+    assert_eq!(crisis.phase_online_ticks, 0);
+    assert_eq!(crisis.phase_started_tick, 20);
+    assert!(
+        transition_goblin_crisis(&mut crisis, 20).is_none(),
+        "a developed settlement advances at most one phase per evaluation"
+    );
+
+    crisis.phase_online_ticks = GOBLIN_SIGNS_MIN_ONLINE_TICKS - 1;
+    assert!(transition_goblin_crisis(&mut crisis, 30).is_none());
+    crisis.phase_online_ticks = GOBLIN_SIGNS_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 40),
+        Some((CrisisPhase::Signs, CrisisPhase::Pressure))
+    );
+
+    crisis.phase_online_ticks = GOBLIN_PRESSURE_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 50),
+        Some((CrisisPhase::Pressure, CrisisPhase::Preparing))
+    );
+    assert!(crisis.warning_active);
+
+    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 60),
+        Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
+    );
+    assert!(crisis.warning_active);
+    assert!(transition_goblin_crisis(&mut crisis, 70).is_none());
+    assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+}
+
+#[test]
+fn goblin_phase_pressure_thresholds_are_enforced() {
+    let mut crisis = SettlementCrisis::new(0);
+    crisis.pressure = GOBLIN_SIGNS_PRESSURE - 1;
+    assert!(next_goblin_crisis_phase(&crisis).is_none());
+    crisis.pressure = GOBLIN_SIGNS_PRESSURE;
+    assert_eq!(next_goblin_crisis_phase(&crisis), Some(CrisisPhase::Signs));
+
+    crisis.phase = CrisisPhase::Signs;
+    crisis.phase_online_ticks = GOBLIN_SIGNS_MIN_ONLINE_TICKS;
+    crisis.pressure = GOBLIN_PRESSURE_PHASE_PRESSURE - 1;
+    assert!(next_goblin_crisis_phase(&crisis).is_none());
+    crisis.pressure = GOBLIN_PRESSURE_PHASE_PRESSURE;
+    assert_eq!(
+        next_goblin_crisis_phase(&crisis),
+        Some(CrisisPhase::Pressure)
+    );
+
+    crisis.phase = CrisisPhase::Pressure;
+    crisis.phase_online_ticks = GOBLIN_PRESSURE_MIN_ONLINE_TICKS;
+    crisis.pressure = GOBLIN_PREPARING_PRESSURE - 1;
+    assert!(next_goblin_crisis_phase(&crisis).is_none());
+    crisis.pressure = GOBLIN_PREPARING_PRESSURE;
+    assert_eq!(
+        next_goblin_crisis_phase(&crisis),
+        Some(CrisisPhase::Preparing)
+    );
+
+    crisis.phase = CrisisPhase::Preparing;
+    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    crisis.pressure = GOBLIN_ASSAULT_READY_PRESSURE - 1;
+    assert!(next_goblin_crisis_phase(&crisis).is_none());
+    crisis.pressure = GOBLIN_ASSAULT_READY_PRESSURE;
+    assert_eq!(
+        next_goblin_crisis_phase(&crisis),
+        Some(CrisisPhase::AssaultReady)
+    );
+}
+
+#[test]
+fn global_calendar_tick_does_not_change_goblin_phase_eligibility() {
+    let mut early_world = SettlementCrisis::new(0);
+    early_world.pressure = GOBLIN_SIGNS_PRESSURE;
+    let mut late_world = early_world.clone();
+
+    assert_eq!(
+        transition_goblin_crisis(&mut early_world, 100),
+        transition_goblin_crisis(&mut late_world, GAME_TICKS_PER_DAY * 100)
+    );
+    assert_eq!(early_world.phase, late_world.phase);
+    assert_eq!(early_world.pressure, late_world.pressure);
+}
+
+#[test]
+fn assault_launch_policy_requires_online_grace_prefers_darkness_and_has_a_daylight_fallback() {
+    let morning = MORNING;
+    let dusk = DUSK;
+    let night = NIGHT;
+
+    assert!(!assault_launch_allowed(ASSAULT_READY_GRACE_TICKS - 1, dusk));
+    assert!(!assault_launch_allowed(ASSAULT_READY_GRACE_TICKS, morning));
+    assert!(assault_launch_allowed(ASSAULT_READY_GRACE_TICKS, dusk));
+    assert!(assault_launch_allowed(ASSAULT_READY_GRACE_TICKS, night));
+    assert!(assault_launch_allowed(
+        ASSAULT_MAX_ONLINE_WAIT_TICKS,
+        morning
+    ));
+    assert!(is_assault_preferred_time(FIRST_LIGHT - 1));
+    assert!(!is_assault_preferred_time(FIRST_LIGHT));
+}
+
+#[test]
+fn assault_ids_are_monotonic_and_not_derived_from_the_game_tick() {
+    let mut ids = NextCrisisAssaultId::default();
+    let first = ids.allocate().unwrap();
+    let second = ids.allocate().unwrap();
+    assert_eq!(first, 1);
+    assert_eq!(second, 2);
+    assert_ne!(first, DUSK as u64);
+}
+
+#[test]
+fn personal_assault_anchor_priority_and_missing_anchor_policy_are_explicit() {
+    let player_id = 7;
+    let hero = AssaultHeroInfo {
+        id: 70,
+        pos: Position { x: 10, y: 10 },
+        bound_monolith_id: Some(90),
+        valid_run: true,
+    };
+    let spawn_positions = SpawnPositions(HashMap::from([(player_id, Position { x: 9, y: 9 })]));
+    let structures = vec![
+        AssaultStructureInfo {
+            id: 71,
+            owner_player_id: player_id,
+            pos: Position { x: 8, y: 8 },
+            subclass: Subclass::Storage,
+        },
+        AssaultStructureInfo {
+            id: 72,
+            owner_player_id: player_id,
+            pos: Position { x: 12, y: 12 },
+            subclass: Subclass::Campfire,
+        },
+        AssaultStructureInfo {
+            id: 73,
+            owner_player_id: player_id + 1,
+            pos: Position { x: 9, y: 9 },
+            subclass: Subclass::Campfire,
+        },
+    ];
+    let monoliths = HashMap::from([(
+        90,
+        AssaultMonolithInfo {
+            pos: Position { x: 7, y: 7 },
+            sanctuary_level: 3,
+        },
+    )]);
+
+    let bound =
+        select_personal_assault_anchor(player_id, hero, &spawn_positions, &structures, &monoliths)
+            .unwrap();
+    assert_eq!(bound.id, 90);
+    assert_eq!(bound.kind, AssaultAnchorKind::BoundMonolith);
+
+    let primary = select_personal_assault_anchor(
+        player_id,
+        hero,
+        &spawn_positions,
+        &structures,
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(primary.id, 72);
+    assert_eq!(primary.kind, AssaultAnchorKind::PrimaryStructure);
+
+    let fallback = select_personal_assault_anchor(
+        player_id,
+        AssaultHeroInfo {
+            bound_monolith_id: None,
+            ..hero
+        },
+        &spawn_positions,
+        &[],
+        &HashMap::new(),
+    )
+    .unwrap();
+    assert_eq!(fallback.id, hero.id);
+    assert_eq!(fallback.kind, AssaultAnchorKind::HeroFallback);
+
+    assert!(select_personal_assault_anchor(
+        player_id,
+        AssaultHeroInfo {
+            bound_monolith_id: None,
+            ..hero
+        },
+        &SpawnPositions::default(),
+        &[],
+        &HashMap::new(),
+    )
+    .is_none());
+}
+
+#[test]
+fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
+    let anchor = AssaultAnchor {
+        id: 1,
+        pos: Position { x: 25, y: 25 },
+        kind: AssaultAnchorKind::BuiltStructure,
+        sanctuary_level: None,
+    };
+    let land = flat_land_map();
+    let positions = personal_assault_spawn_positions(
+        1,
+        anchor,
+        GOBLIN_ASSAULT_COMPOSITION.len(),
+        &HashSet::new(),
+        &[],
+        &land,
+    )
+    .expect("flat land has valid assault positions");
+    assert_eq!(positions.len(), GOBLIN_ASSAULT_COMPOSITION.len());
+    assert_eq!(positions.iter().copied().collect::<HashSet<_>>().len(), 3);
+    assert!(positions
+        .iter()
+        .all(|pos| Map::is_passable(pos.x, pos.y, &land)));
+
+    let occupied = HashSet::from([positions[0]]);
+    let neighbour = AssaultStructureInfo {
+        id: 2,
+        owner_player_id: 2,
+        pos: positions[1],
+        subclass: Subclass::Storage,
+    };
+    let constrained = personal_assault_spawn_positions(
+        1,
+        anchor,
+        GOBLIN_ASSAULT_COMPOSITION.len(),
+        &occupied,
+        &[neighbour],
+        &land,
+    )
+    .expect("other valid ring tiles remain available");
+    assert!(constrained.iter().all(|pos| !occupied.contains(pos)));
+    assert!(constrained
+        .iter()
+        .all(|pos| Map::dist(*pos, neighbour.pos) >= 3));
+
+    let every_ring_tile = (6..=8)
+        .flat_map(|radius| Map::ring((anchor.pos.x, anchor.pos.y), radius))
+        .map(|(x, y)| Position { x, y })
+        .collect::<HashSet<_>>();
+    assert!(personal_assault_spawn_positions(
+        1,
+        anchor,
+        GOBLIN_ASSAULT_COMPOSITION.len(),
+        &every_ring_tile,
+        &[],
+        &land,
+    )
+    .is_none());
+
+    let mut ocean = flat_land_map();
+    for tile in &mut ocean.base {
+        tile.tile_type = TileType::Ocean;
+    }
+    assert!(personal_assault_spawn_positions(
+        1,
+        anchor,
+        GOBLIN_ASSAULT_COMPOSITION.len(),
+        &HashSet::new(),
+        &[],
+        &ocean,
+    )
+    .is_none());
+}
+
+#[test]
+fn first_personal_goblin_composition_uses_only_existing_small_elite_templates() {
+    assert_eq!(
+        GOBLIN_ASSAULT_COMPOSITION,
+        ["Wolf Rider", "Wolf Rider", "Goblin Pillager"]
+    );
+    let templates = load_obj_templates();
+    for name in GOBLIN_ASSAULT_COMPOSITION {
+        assert!(templates.iter().any(|template| template.template == name));
+    }
+    assert!(
+        !templates
+            .iter()
+            .any(|template| template.template == "Goblin"),
+        "the repository has no ordinary Goblin template"
+    );
+}
+
+fn personal_crisis_test_app() -> App {
+    let mut app = App::new();
+    app.add_systems(Update, personal_crisis_system);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(Clients::default());
+    app.insert_resource(PlayerIntroState::default());
+    app.insert_resource(Objectives::default());
+    app.insert_resource(SettlementCrisisState::default());
+    app
+}
+
+#[test]
+fn personal_crisis_initialization_and_timing_require_a_live_online_human_run() {
+    let player_id = 7;
+    let mut app = personal_crisis_test_app();
+    app.world_mut().resource_mut::<PlayerIntroState>().insert(
+        player_id,
+        PlayerIntroEntry {
+            start_tick: 0,
+            shipwreck_chain_started: true,
+            villager_spawned: true,
+            danger_unlocked: false,
+        },
+    );
+    let hero = app
+        .world_mut()
+        .spawn((PlayerId(player_id), State::None, SubclassHero))
+        .id();
+
+    // A hero can remain in the ECS while its owner has no connected client.
+    app.update();
+    let crisis = app
+        .world()
+        .resource::<SettlementCrisisState>()
+        .get(&player_id)
+        .expect("personal crisis should initialize");
+    assert_eq!(crisis.phase, CrisisPhase::Dormant);
+    assert_eq!(crisis.online_active_ticks, 0);
+
+    let client_id = Uuid::from_u128(7);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+
+    app.world_mut().resource_mut::<GameTick>().0 = 120;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        0,
+        "online time must not advance before danger is unlocked"
+    );
+
+    app.world_mut()
+        .resource_mut::<PlayerIntroState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .danger_unlocked = true;
+    app.world_mut().resource_mut::<GameTick>().0 = 130;
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        10,
+        "repeated evaluation of one GameTick must not double-count"
+    );
+
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&player_id).unwrap();
+        crisis.phase = CrisisPhase::Preparing;
+        crisis.warning_active = true;
+    }
+
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .remove(&client_id);
+    app.world_mut().resource_mut::<GameTick>().0 = 200;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        10
+    );
+    assert!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .warning_active,
+        "disconnect must not clear an active warning"
+    );
+
+    let (reconnect_sender, _reconnect_receiver) = tokio::sync::mpsc::channel(1);
+    app.world().resource::<Clients>().lock().unwrap().insert(
+        client_id,
+        test_client(client_id, player_id, reconnect_sender),
+    );
+    app.world_mut().resource_mut::<GameTick>().0 = 210;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        20,
+        "reconnect resumes from the new watermark, not the offline gap"
+    );
+    assert!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .warning_active,
+        "reconnect must retain the Preparing warning"
+    );
+
+    app.world_mut().entity_mut(hero).insert(StateDead {
+        dead_at: 210,
+        killer: "test".to_string(),
+    });
+    app.world_mut().resource_mut::<GameTick>().0 = 250;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        20,
+        "dead heroes do not accumulate crisis time"
+    );
+
+    app.world_mut().entity_mut(hero).remove::<StateDead>();
+    app.world_mut().resource_mut::<GameTick>().0 = 260;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        30
+    );
+
+    app.world_mut().entity_mut(hero).insert(State::Dead);
+    app.world_mut().resource_mut::<GameTick>().0 = 270;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        30,
+        "logical dead state also blocks crisis time"
+    );
+    app.world_mut().entity_mut(hero).insert(State::None);
+    app.world_mut().resource_mut::<GameTick>().0 = 280;
+    app.update();
+
+    app.world_mut()
+        .entity_mut(hero)
+        .insert(TrueDeath { true_death_at: 280 });
+    app.world_mut().resource_mut::<GameTick>().0 = 290;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        40,
+        "True Death never accumulates crisis time"
+    );
+    app.world_mut().entity_mut(hero).remove::<TrueDeath>();
+    app.world_mut().resource_mut::<GameTick>().0 = 300;
+    app.update();
+
+    app.world_mut().despawn(hero);
+    app.world_mut().resource_mut::<GameTick>().0 = 340;
+    app.update();
+    app.world_mut()
+        .spawn((PlayerId(player_id), State::None, SubclassHero));
+    app.world_mut().resource_mut::<GameTick>().0 = 350;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .online_active_ticks,
+        60,
+        "a missing-hero interval is not backfilled after recreation"
+    );
+}
+
+#[test]
+fn personal_crisis_does_not_initialize_for_npc_heroes() {
+    let mut app = personal_crisis_test_app();
+    app.world_mut()
+        .spawn((PlayerId(NPC_PLAYER_ID), State::None, SubclassHero));
+    app.update();
+    assert!(app.world().resource::<SettlementCrisisState>().is_empty());
+}
+
 #[test]
 fn crisis_tier_calculation_empty_state() {
     let crisis = PlayerCrisis::default();
-    let tier = calculate_crisis_tier(&crisis);
+    let tier = crisis_tier(&crisis);
     assert_eq!(tier, 0);
 }
 
 #[test]
 fn crisis_tier_calculation_all_tiers() {
     let mut crisis = PlayerCrisis::default();
-    assert_eq!(calculate_crisis_tier(&crisis), 0);
+    assert_eq!(crisis_tier(&crisis), 0);
 
     crisis.rat_spoilage = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 1);
+    assert_eq!(crisis_tier(&crisis), 1);
 
     crisis.wolf_pack = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 2);
+    assert_eq!(crisis_tier(&crisis), 2);
 
     crisis.goblin_raid = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 3);
+    assert_eq!(crisis_tier(&crisis), 3);
 
     crisis.undead_incursion = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 4);
+    assert_eq!(crisis_tier(&crisis), 4);
 
     crisis.goblin_pillager = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 5);
+    assert_eq!(crisis_tier(&crisis), 5);
 }
 
 #[test]
@@ -2169,19 +2857,18 @@ fn crisis_tier_skipped_tiers_reports_highest() {
     // If wolf_pack triggers but rat_spoilage didn't, tier should still be 2
     let mut crisis = PlayerCrisis::default();
     crisis.wolf_pack = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 2);
+    assert_eq!(crisis_tier(&crisis), 2);
 
     // Undead incursion without goblin raid
     crisis.undead_incursion = true;
-    assert_eq!(calculate_crisis_tier(&crisis), 4);
+    assert_eq!(crisis_tier(&crisis), 4);
 }
 
 #[test]
 fn crisis_bonus_xp_scales_with_tier() {
-    assert_eq!(0 * 1000, 0); // Tier 0: no bonus
-    assert_eq!(1 * 1000, 1000); // Tier 1: +1000
-    assert_eq!(3 * 1000, 3000); // Tier 3: +3000
-    assert_eq!(5 * 1000, 5000); // Tier 5: +5000
+    for (tier, expected_bonus) in [(0, 0), (1, 1000), (3, 3000), (5, 5000)] {
+        assert_eq!(tier * 1000, expected_bonus);
+    }
 }
 
 #[test]
@@ -2200,8 +2887,8 @@ fn crisis_state_tracks_per_player() {
         .or_insert_with(PlayerCrisis::default)
         .wolf_pack = true;
 
-    assert_eq!(calculate_crisis_tier(crisis_state.get(&1).unwrap()), 1);
-    assert_eq!(calculate_crisis_tier(crisis_state.get(&2).unwrap()), 2);
+    assert_eq!(crisis_tier(crisis_state.get(&1).unwrap()), 1);
+    assert_eq!(crisis_tier(crisis_state.get(&2).unwrap()), 2);
     assert!(crisis_state.get(&3).is_none());
 }
 
@@ -2779,25 +3466,4 @@ fn legendary_threat_packet_hides_location_until_revealed() {
     let revealed = legendary_threat_packets(1, &GameTick(DAWN + 100), &state);
     assert!(revealed[0].hideout_known);
     assert_eq!(revealed[0].hideout_location, Some("20,21".to_string()));
-}
-
-// Helper function matching the logic in true_death_system
-fn calculate_crisis_tier(crisis: &PlayerCrisis) -> i32 {
-    let mut tier = 0;
-    if crisis.rat_spoilage {
-        tier = 1;
-    }
-    if crisis.wolf_pack {
-        tier = 2;
-    }
-    if crisis.goblin_raid {
-        tier = 3;
-    }
-    if crisis.undead_incursion {
-        tier = 4;
-    }
-    if crisis.goblin_pillager {
-        tier = 5;
-    }
-    tier
 }

@@ -36,8 +36,8 @@ const DANGER_RADIUS: u32 = 3; // an enemy this close counts as a threat for retr
 const SLEEP_SAFE_RADIUS: u32 = 3; // no enemy within this -> clear to rest/eat
 const LOW_HP: f32 = 0.5; // retreat / heal below this HP fraction
 const CRITICAL_HP: f32 = 0.3; // emergency heal below this
-// Yield to the game's auto-consume just under its 75.0 trigger so the hero is
-// already idle when a need crosses the threshold.
+                              // Yield to the game's auto-consume just under its 75.0 trigger so the hero is
+                              // already idle when a need crosses the threshold.
 const CONSUME_AT: f32 = 70.0;
 // Proactively top needs up at every safe window, well before CONSUME_AT, so the
 // hero enters each enemy-pressure window with a big buffer. Sustained combat
@@ -63,7 +63,7 @@ const LOW_FIREWOOD: i32 = 4; // craft Firewood (1 Log -> 5) below this so cookin
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
-// Villager economy: hire from the travelling merchant up to the Prosperity goal.
+                                      // Villager economy: hire from the travelling merchant up to the Prosperity goal.
 const HIRE_WAGE: i32 = 25; // Gold Coins charged per hire (matches the server)
 const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
@@ -182,7 +182,10 @@ impl Bot {
                 .map(|i| i.quantity)
                 .sum();
             let hides = count_matching(&view.inventory, "Hide");
-            let has_tent = view.structures.iter().any(|s| s.subclass == "craft" && s.built);
+            let has_tent = view
+                .structures
+                .iter()
+                .any(|s| s.subclass == "craft" && s.built);
             let home = view.home().or(self.anchor).unwrap_or(hero.pos);
             let game_near = view
                 .resource_tiles
@@ -243,7 +246,16 @@ impl Bot {
                 "[vil] t={} villagers={} gold={} merchant={} hireable={} sanc_lvl={} shards={} corpses={}",
                 view.game_tick, view.villagers.len(), hgold, mstate, mhire, sanc, shards, corpses
             );
-            let _ = (idle, with_order, gathering, carried, sfood, plant_nodes, mpos, hdist);
+            let _ = (
+                idle,
+                with_order,
+                gathering,
+                carried,
+                sfood,
+                plant_nodes,
+                mpos,
+                hdist,
+            );
         }
 
         // The hero acts only while idle; a busy hero still lets us command a villager.
@@ -269,7 +281,13 @@ impl Bot {
         }
         self.phase = if !view.has_built("campfire") {
             Phase::Build
-        } else if view.structures.iter().filter(|s| s.subclass == "wall").count() < MAX_WALLS {
+        } else if view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "wall")
+            .count()
+            < MAX_WALLS
+        {
             Phase::Fortify
         } else {
             Phase::Survive
@@ -474,8 +492,7 @@ impl Bot {
         // moderately gated.
         let needs_ok =
             hero.hunger < CONSUME_AT && hero.thirst < CONSUME_AT && hero.tired < CONSUME_AT;
-        let needs_comfortable =
-            hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
+        let needs_comfortable = hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
 
         // 4c. Recruit the shipwreck villager EARLY — before building. It's the
         //     settlement's first farmer (and one-time), so getting it on day 1 is
@@ -597,7 +614,11 @@ impl Bot {
         // log supply (wood gathering) so building doesn't starve cooking.
 
         // Then ring the base with walls.
-        let wall_count = view.structures.iter().filter(|s| s.subclass == "wall").count();
+        let wall_count = view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "wall")
+            .count();
         if wall_count < MAX_WALLS && self.walls_attempted < MAX_WALLS {
             if let Some(site) = self.next_wall_site(view, home, map) {
                 // Only commit if logs are reachable (in hand or in a storage).
@@ -835,7 +856,10 @@ impl Bot {
     fn loot_soulshards(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         const LOOT_RADIUS: u32 = 6;
         // No point hoarding once the sanctuary is maxed.
-        if view.monolith.map_or(true, |m| m.level >= SANCTUARY_MAX_LEVEL) {
+        if view
+            .monolith
+            .map_or(true, |m| m.level >= SANCTUARY_MAX_LEVEL)
+        {
             return None;
         }
         let corpse = view
@@ -961,7 +985,11 @@ impl Bot {
                 .inventory
                 .iter()
                 .filter(|i| i.is_edible())
-                .max_by(|a, b| a.feed.partial_cmp(&b.feed).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.feed
+                        .partial_cmp(&b.feed)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|i| i.id)
             {
                 return Some(PlayerEvent::Use {
@@ -989,12 +1017,7 @@ impl Bot {
     // Cooked Meat at the campfire (more Feed), and when out of food hunt game
     // (raw meat) or pull from the Burrow / forage. Raw & cooked meat are both
     // `Food`, auto-eaten by the game when the hero is idle and hungry.
-    fn food_action(
-        &mut self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn food_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         // 1. Butcher a carcass (a "Felled X", class "Game Animal") into raw meat.
         if let Some(carcass) = view.inventory.iter().find(|i| i.class == "Game Animal") {
             return Some(PlayerEvent::Refine {
@@ -1187,12 +1210,7 @@ impl Bot {
     // Hunt a Game Animal: equip the Hunting weapon (the starting Sharpened Stick),
     // then gather a revealed game tile (prospect to reveal one — game spawns under
     // grassland/plains hexes near the base). Yields a carcass to butcher in (1).
-    fn hunt_action(
-        &mut self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn hunt_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let equipped_hunting = view.inventory.iter().any(|i| i.equipped && i.is_hunting);
         if !equipped_hunting {
             let id = view.inventory.iter().find(|i| i.is_hunting).map(|i| i.id)?;
@@ -1237,19 +1255,18 @@ impl Bot {
     // into the campfire, StructureCraft, then retrieve the cooked meat. Stateless —
     // each call inspects the campfire's inventory to pick the next step. Returns
     // None if there's no campfire / no firewood (then the raw meat is eaten raw).
-    fn cook_action(
-        &self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn cook_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let campfire = view
             .structures
             .iter()
             .find(|s| s.subclass == "campfire" && s.built)?;
 
         // Retrieve a finished Cooked Meat from the campfire.
-        if let Some(cooked) = campfire.inventory.iter().find(|i| i.subclass == "Cooked Meat") {
+        if let Some(cooked) = campfire
+            .inventory
+            .iter()
+            .find(|i| i.subclass == "Cooked Meat")
+        {
             if Map::is_adjacent_including_source(hero.pos, campfire.pos) {
                 return Some(PlayerEvent::ItemTransfer {
                     player_id: self.player_id,
@@ -1465,13 +1482,7 @@ impl Bot {
 }
 
 impl BuildJob {
-    fn new(
-        name: &str,
-        subclass: &str,
-        reqs: &[(&str, i32)],
-        site: Position,
-        tick: i32,
-    ) -> Self {
+    fn new(name: &str, subclass: &str, reqs: &[(&str, i32)], site: Position, tick: i32) -> Self {
         BuildJob {
             structure_name: name.to_string(),
             subclass: subclass.to_string(),
@@ -1513,7 +1524,11 @@ fn has_class(items: &[ItemView], class: &str) -> bool {
 }
 
 fn count_name(items: &[ItemView], name: &str) -> i32 {
-    items.iter().filter(|i| i.name == name).map(|i| i.quantity).sum()
+    items
+        .iter()
+        .filter(|i| i.name == name)
+        .map(|i| i.quantity)
+        .sum()
 }
 
 fn has_edible(items: &[ItemView]) -> bool {
@@ -1533,8 +1548,7 @@ fn count_matching(items: &[ItemView], req_type: &str) -> i32 {
 }
 
 fn has_all_reqs(items: &[ItemView], reqs: &[(&str, i32)]) -> bool {
-    reqs.iter()
-        .all(|(t, q)| count_matching(items, t) >= *q)
+    reqs.iter().all(|(t, q)| count_matching(items, t) >= *q)
 }
 
 // Find a still-missing requirement that some owned storage holds; return
@@ -1547,7 +1561,11 @@ fn storage_item_for_missing(
         if count_matching(&view.inventory, req_type) >= *need {
             continue;
         }
-        for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        for s in view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "storage" && s.built)
+        {
             if let Some(item) = s.inventory.iter().find(|i| i.matches_req(req_type)) {
                 return Some((s.pos, s.id, item.id));
             }
@@ -1558,8 +1576,16 @@ fn storage_item_for_missing(
 
 // A Food item sitting in an owned storage (e.g. the Burrow's berries) to pull.
 fn storage_food(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
-        if let Some(item) = s.inventory.iter().find(|i| i.class == "Food" && i.quantity > 0) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
+        if let Some(item) = s
+            .inventory
+            .iter()
+            .find(|i| i.class == "Food" && i.quantity > 0)
+        {
             return Some((s.pos, s.id, item.id));
         }
     }
@@ -1630,7 +1656,11 @@ fn campfire_meat_pending(view: &WorldView) -> i32 {
 // An actual Log stack (class "Log" strictly — Timber doesn't smelt into Firewood)
 // sitting in an owned storage. Returns (storage_pos, storage_id, item_id).
 fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
         if let Some(item) = s
             .inventory
             .iter()
@@ -1645,7 +1675,11 @@ fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
 // A Gold Coins stack sitting in an owned storage (the Burrow starts with 50) to
 // withdraw for hiring. Returns (storage_pos, storage_id, item_id).
 fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
         if let Some(item) = s
             .inventory
             .iter()
@@ -1659,7 +1693,11 @@ fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
 
 fn storage_with_req(view: &WorldView, reqs: &[(&str, i32)]) -> Option<i32> {
     for (req_type, _) in reqs {
-        for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        for s in view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "storage" && s.built)
+        {
             if s.inventory.iter().any(|i| i.matches_req(req_type)) {
                 return Some(s.id);
             }

@@ -2658,8 +2658,11 @@ async fn handle_connection(
                 if let Some(manager_msg) = manager_msg {
                     println!("Received message from manager: {:?}", manager_msg);
                     ws_sender.send(Message::Close(None)).await.map_err(|e| (client_id, e))?;
+                    let removed_client = clients.lock().unwrap().remove(&client_id);
                     let removed_stream = streams.0.lock().unwrap().remove(&client_id);
+                    println!("Removed client: {:?}", removed_client);
                     println!("Removed stream: {:?}", removed_stream);
+                    break;
                 }
             }
         }

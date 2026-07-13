@@ -220,15 +220,11 @@ fn print_summary(results: &[RunMetrics]) {
         .iter()
         .filter(|m| m.outcome.starts_with("Victory"))
         .count();
-    let deaths = results
-        .iter()
-        .filter(|m| m.outcome == "TrueDeath")
-        .count();
+    let deaths = results.iter().filter(|m| m.outcome == "TrueDeath").count();
     let panics = results.iter().filter(|m| m.outcome == "Panic").count();
 
-    let mean = |f: &dyn Fn(&RunMetrics) -> f64| -> f64 {
-        results.iter().map(|m| f(m)).sum::<f64>() / n
-    };
+    let mean =
+        |f: &dyn Fn(&RunMetrics) -> f64| -> f64 { results.iter().map(|m| f(m)).sum::<f64>() / n };
 
     let mut ticks: Vec<i32> = results.iter().map(|m| m.ticks).collect();
     ticks.sort_unstable();
@@ -239,16 +235,49 @@ fn print_summary(results: &[RunMetrics]) {
         ticks[idx]
     };
 
-    println!("\n========== Aggregate summary ({} runs) ==========", results.len());
-    println!("win rate            : {:.1}% ({wins}/{})", 100.0 * wins as f64 / n, results.len());
-    println!("true-death rate     : {:.1}% ({deaths}/{})", 100.0 * deaths as f64 / n, results.len());
-    println!("panic rate          : {:.1}% ({panics}/{})", 100.0 * panics as f64 / n, results.len());
-    println!("mean days survived  : {:.2}", mean(&|m| m.days_survived as f64));
-    println!("mean enemies killed : {:.2}", mean(&|m| m.enemies_killed as f64));
-    println!("mean deaths         : {:.2}", mean(&|m| m.num_deaths as f64));
-    println!("mean final skill xp : {:.1}", mean(&|m| m.final_skill_total as f64));
-    println!("mean inventory count: {:.1}", mean(&|m| m.final_inventory_count as f64));
-    println!("mean structures     : {:.2}", mean(&|m| m.structures_built as f64));
+    println!(
+        "\n========== Aggregate summary ({} runs) ==========",
+        results.len()
+    );
+    println!(
+        "win rate            : {:.1}% ({wins}/{})",
+        100.0 * wins as f64 / n,
+        results.len()
+    );
+    println!(
+        "true-death rate     : {:.1}% ({deaths}/{})",
+        100.0 * deaths as f64 / n,
+        results.len()
+    );
+    println!(
+        "panic rate          : {:.1}% ({panics}/{})",
+        100.0 * panics as f64 / n,
+        results.len()
+    );
+    println!(
+        "mean days survived  : {:.2}",
+        mean(&|m| m.days_survived as f64)
+    );
+    println!(
+        "mean enemies killed : {:.2}",
+        mean(&|m| m.enemies_killed as f64)
+    );
+    println!(
+        "mean deaths         : {:.2}",
+        mean(&|m| m.num_deaths as f64)
+    );
+    println!(
+        "mean final skill xp : {:.1}",
+        mean(&|m| m.final_skill_total as f64)
+    );
+    println!(
+        "mean inventory count: {:.1}",
+        mean(&|m| m.final_inventory_count as f64)
+    );
+    println!(
+        "mean structures     : {:.2}",
+        mean(&|m| m.structures_built as f64)
+    );
     println!("ticks p50 / p90     : {} / {}", pct(0.50), pct(0.90));
     println!("=================================================");
 }

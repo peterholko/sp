@@ -20,7 +20,7 @@ use crate::{
         SleepEventCompleted, VisibleEvent,
     },
     experiment::{self, Experiment, Experiments},
-    game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
+    game::{Clients, CrisisAssaultUnit, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
     item::{self, AttrKey, Inventory, Item, ItemLocation},
     map::{Map, MapPos, TileType},
@@ -150,12 +150,7 @@ const VILLAGER_WATER_RANGE: i32 = 15;
 // that either holds a revealed spring (stand on it, like the hero) or sits beside a
 // river (drink from the bank). Rivers are always visible, so this gives villagers a
 // reliable water source even before the hero has prospected a spring nearby.
-fn nearest_water(
-    pos: &Position,
-    resources: &Resources,
-    map: &Map,
-    range: i32,
-) -> Option<Position> {
+fn nearest_water(pos: &Position, resources: &Resources, map: &Map, range: i32) -> Option<Position> {
     for r in 0..=range {
         for (x, y) in Map::ring((pos.x, pos.y), r) {
             if !Map::is_valid_pos((x, y)) {
@@ -1324,8 +1319,10 @@ pub fn capacity_scorer_system(
         // larder after a reasonable trip instead of hoarding a full stack.
         let total_weight_food = inventory.get_total_weight_by_class(FOOD.to_string());
 
-        let resource_weight = total_weight_ore + total_weight_log + total_weight_food * FOOD_HAUL_WEIGHT;
-        let non_resource_weight = total_weight - total_weight_ore - total_weight_log - total_weight_food;
+        let resource_weight =
+            total_weight_ore + total_weight_log + total_weight_food * FOOD_HAUL_WEIGHT;
+        let non_resource_weight =
+            total_weight - total_weight_ore - total_weight_log - total_weight_food;
 
         let capacity = Obj::get_capacity(&villager_template.0, &templates.obj_templates);
 
@@ -2387,6 +2384,7 @@ pub fn process_order_system(
 pub fn fight_back_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    clients: Res<Clients>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
@@ -2394,6 +2392,7 @@ pub fn fight_back_system(
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     last_attacker_query: Query<&LastAttacker>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut combat_query: Query<CombatQuery>,
     mut action_query: Query<(&Actor, &mut ActionState, &FightBack, &ActionSpan)>,
@@ -2443,6 +2442,15 @@ pub fn fight_back_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if crisis_assault_query
+                    .get(attacker_entity)
+                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
+                {
+                    commands.entity(*actor).remove::<LastAttacker>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let Ok([mut villager, mut attacker]) =
                     combat_query.get_many_mut([*actor, attacker_entity])

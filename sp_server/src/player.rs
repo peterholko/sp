@@ -21,11 +21,12 @@ use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
 use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius, survey_status_for_tile,
-    Clients, DamageRecord, DebugObjs, GameTick, InitialEncounterState, LogLevelOverrides, Merchant,
-    Monolith, MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
+    is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
+    survey_status_for_tile, Clients, CrisisAssaultUnit, DamageRecord, DebugObjs, GameTick,
+    InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
+    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
     PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
-    SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
+    SettlementCrisisState, SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -800,9 +801,14 @@ fn new_player_system(
         ResMut<SpawnPositions>,
         ResMut<RunScoreState>,
     )>,
-    mut player_intro_state: ResMut<PlayerIntroState>,
-    mut initial_encounter_state: ResMut<InitialEncounterState>,
+    mut run_intro_state: (
+        ResMut<PlayerIntroState>,
+        ResMut<IntroEncounterState>,
+        ResMut<InitialEncounterState>,
+        ResMut<SettlementCrisisState>,
+    ),
     monoliths: Query<ObjQuery, With<Monolith>>,
+    crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -814,6 +820,23 @@ fn new_player_system(
                 class_name,
             } => {
                 events_to_remove.push(*event_id);
+                // SelectedClass is client-originated, so reject attempts to
+                // create a second run before True Death has released the
+                // current hero and start assignment. Besides duplicate heroes,
+                // accepting this here would let a player erase an active
+                // personal assault through the fresh-run orphan sweep below.
+                if start_location_res.1.contains_key(player_id)
+                    || ids.get_hero(*player_id).is_some()
+                {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "A run is already active for this player.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
                 let setup_result = {
                     let mut spawn_positions = player_setup_state.p1();
                     player_setup::new(
@@ -833,14 +856,48 @@ fn new_player_system(
                         &game_tick,
                         &monoliths,
                         &mut spawn_positions,
-                        &mut player_intro_state,
-                        &mut initial_encounter_state,
+                        &mut run_intro_state.0,
+                        &mut run_intro_state.1,
+                        &mut run_intro_state.2,
                         &mut start_location_res.2,
                     )
                 };
 
                 match setup_result {
                     Ok(_) => {
+                        // Successful hero recreation is a fresh run. Sweep any
+                        // attributed orphan left by an overlapping old cleanup
+                        // without touching another player's assault.
+                        let stale_units = crisis_assault_units
+                            .iter()
+                            .filter(|(_, _, assault)| assault.owner_player_id == *player_id)
+                            .map(|(entity, id, _)| (entity, id.0))
+                            .collect::<Vec<_>>();
+                        if !stale_units.is_empty() {
+                            let stale_ids = stale_units
+                                .iter()
+                                .map(|(_, id)| *id)
+                                .collect::<HashSet<_>>();
+                            map_events.retain(|_, event| !stale_ids.contains(&event.obj_id));
+                            if let Some(run_ids) = start_location_res.2.get_mut(player_id) {
+                                run_ids.retain(|id| !stale_ids.contains(id));
+                            }
+                            for (entity, id) in stale_units {
+                                ids.remove_obj(id);
+                                if entity_map.get_entity(id) == Some(entity) {
+                                    commands.trigger(RemoveObj { entity });
+                                } else {
+                                    // An overlapping cleanup may already have
+                                    // removed the map entry while leaving the
+                                    // attributed entity visible to this query.
+                                    commands.entity(entity).try_despawn();
+                                }
+                            }
+                        }
+                        // A recreated hero is a fresh run. The personal crisis
+                        // system will deterministically create a new Dormant
+                        // entry on the next eligible evaluation.
+                        run_intro_state.3.remove(player_id);
                         let event_type = GameEventType::Login {
                             player_id: *player_id,
                         };
@@ -1706,6 +1763,7 @@ fn attack_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_stats: ResMut<PlayerStats>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
     mut query_set: ParamSet<(Query<CombatQuery>, Query<ObjQuery>)>,
     mut last_player_attack: Local<HashMap<i32, i32>>,
 ) {
@@ -1721,6 +1779,13 @@ fn attack_system(
             } => {
                 events_to_remove.push(*event_id);
 
+                // A socket may close after its packet reached the broker. Drop
+                // queued combat input at the authoritative presence boundary so
+                // disconnect cannot earn XP or crisis progress.
+                if !clients.is_player_online(*player_id) {
+                    continue;
+                }
+
                 let Some(attacker_entity) = entity_map.get_entity(*source_id) else {
                     error!("Cannot find attacker entity from id: {:?}", source_id);
                     continue;
@@ -1730,6 +1795,13 @@ fn attack_system(
                     error!("Cannot find target entity from id: {:?}", target_id);
                     continue;
                 };
+
+                if crisis_assault_query
+                    .get(target_entity)
+                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
+                {
+                    continue;
+                }
 
                 let entities = [attacker_entity, target_entity];
 
@@ -1960,6 +2032,10 @@ fn attack_system(
             } => {
                 events_to_remove.push(*event_id);
 
+                if !clients.is_player_online(*player_id) {
+                    continue;
+                }
+
                 let Some(ability) = ability_def(ability_id) else {
                     let packet = ResponsePacket::Error {
                         errmsg: "Unknown ability.".to_string(),
@@ -2054,6 +2130,13 @@ fn attack_system(
                     error!("Cannot find ability target entity from id: {:?}", target_id);
                     continue;
                 };
+
+                if crisis_assault_query
+                    .get(target_entity)
+                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
+                {
+                    continue;
+                }
 
                 if ability.effect == AbilityEffect::Disengage {
                     let obj_query = query_set.p1();
@@ -2284,6 +2367,10 @@ fn attack_system(
             } => {
                 events_to_remove.push(*event_id);
 
+                if !clients.is_player_online(*player_id) {
+                    continue;
+                }
+
                 let Some(attacker_entity) = entity_map.get_entity(*source_id) else {
                     error!("Cannot find attacker entity from id: {:?}", source_id);
                     continue;
@@ -2293,6 +2380,13 @@ fn attack_system(
                     error!("Cannot find target entity from id: {:?}", target_id);
                     continue;
                 };
+
+                if crisis_assault_query
+                    .get(target_entity)
+                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
+                {
+                    continue;
+                }
 
                 let entities = [attacker_entity, target_entity];
 
@@ -2508,6 +2602,10 @@ fn attack_system(
                 defense,
             } => {
                 events_to_remove.push(*event_id);
+
+                if !clients.is_player_online(*player_id) {
+                    continue;
+                }
 
                 let Some(attacker_entity) = entity_map.get_entity(*source_id) else {
                     continue;
