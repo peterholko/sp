@@ -25,19 +25,26 @@ use crate::constants::{
     DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
 };
 use crate::database::DatabaseEvent;
+use crate::effect::Effects;
 use crate::game::{
-    Client, Clients, CrisisAssaultUnit, CrisisPhase, CrisisTelemetryState, DatabaseClient,
-    DatabaseManagers, GameTick, Merchant, MerchantSailState, Monolith, NetworkReceiver, Objectives,
-    PlayerIntroEncounters, PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory,
-    RunScoreState, SettlementCrisis, SettlementCrisisState, SurvivalDirectorMode, VictoryState,
+    BoundMonolith, Client, Clients, CrisisAssaultUnit, CrisisPhase, CrisisTelemetryState,
+    DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState, Monolith,
+    NetworkReceiver, Objectives, PlayerIntroEncounters, PlayerObjectives, PlayerRunScore,
+    PlayerStats, PlayerVictory, RunScoreState, SettlementCrisis, SettlementCrisisState,
+    SurvivalDirectorMode, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
 use crate::obj::{
-    ClassStructure, Id, Order, PlayerId, Position, State, StateDead, Stats, Subclass, SubclassHero,
-    SubclassNPC, SubclassVillager, Template, TrueDeath,
+    Class, ClassStructure, Id, LastCombatTick, LastDamageTick, Misc, Name, Order, PlayerId,
+    Position, State, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
+    Template, TrueDeath,
 };
 use crate::resource::Resources;
+use crate::safe_logout::{
+    record_player_combat_activity, CancelSafeLogout, PlayerPresenceRecord, PlayerWorldPresence,
+    PlayerWorldPresenceState, RequestSafeLogout, SafeLogoutCancelReason, SafeLogoutRejectionReason,
+};
 use crate::skill::Skills;
 use crate::{build_headless_app_with_director, AppState, PlayerEvent, ResponsePacket};
 
@@ -529,22 +536,28 @@ impl HeadlessGame {
                 None => return,
             }
         };
-        let mut nearest: Option<(Entity, u32)> = None;
+        let mut nearest: Option<(Entity, i32, u32)> = None;
         {
-            let mut q = world.query_filtered::<(Entity, &Position), With<Monolith>>();
-            for (e, p) in q.iter(world) {
+            let mut q = world.query_filtered::<(Entity, &Id, &Position), With<Monolith>>();
+            for (e, id, p) in q.iter(world) {
                 let d = Map::distance((hero_pos.x, hero_pos.y), (p.x, p.y));
-                if nearest.map_or(true, |(_, bd)| d < bd) {
-                    nearest = Some((e, d));
+                if nearest.map_or(true, |(_, _, best_distance)| d < best_distance) {
+                    nearest = Some((e, id.0, d));
                 }
             }
         }
-        if let Some((entity, _)) = nearest {
+        if let Some((entity, monolith_id, _)) = nearest {
             if let Some(mut pos) = world.get_mut::<Position>(entity) {
                 *pos = hero_pos;
             }
             if let Some(mut monolith) = world.get_mut::<Monolith>(entity) {
                 monolith.sanctuary_level = level;
+            }
+            let mut heroes = world.query_filtered::<&mut BoundMonolith, With<SubclassHero>>();
+            for mut bound in heroes.iter_mut(world) {
+                if bound.id == monolith_id {
+                    bound.pos = hero_pos;
+                }
             }
         }
     }
@@ -660,6 +673,253 @@ impl HeadlessGame {
         self.inject(PlayerEvent::Login {
             player_id: self.player_id,
         });
+    }
+
+    /// Enqueue the milestone's internal-only safe-logout request. This helper
+    /// deliberately does not pump the app; callers control the exact update on
+    /// which the authoritative server systems evaluate the request.
+    pub fn request_safe_logout(&mut self) {
+        self.app.world_mut().write_message(RequestSafeLogout {
+            player_id: self.player_id,
+        });
+    }
+
+    /// Enqueue an internal manual cancellation without advancing `GameTick`.
+    pub fn cancel_safe_logout(&mut self) {
+        self.app.world_mut().write_message(CancelSafeLogout {
+            player_id: self.player_id,
+        });
+    }
+
+    pub fn player_presence_record(&self) -> Option<PlayerPresenceRecord> {
+        self.app
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&self.player_id)
+            .cloned()
+    }
+
+    pub fn player_presence(&self) -> Option<PlayerWorldPresence> {
+        self.player_presence_record().map(|record| record.state)
+    }
+
+    pub fn safe_logout_start_tick(&self) -> Option<i32> {
+        self.player_presence_record()
+            .and_then(|record| record.safe_logout_requested_tick)
+    }
+
+    pub fn safe_logout_cancel_reason(&self) -> Option<SafeLogoutCancelReason> {
+        self.player_presence_record()
+            .and_then(|record| record.cancel_reason)
+    }
+
+    pub fn safe_logout_rejection_reason(&self) -> Option<SafeLogoutRejectionReason> {
+        self.player_presence_record()
+            .and_then(|record| record.rejection_reason)
+    }
+
+    /// Put the hero on the Monolith named by its authoritative `BoundMonolith`
+    /// component. This never falls back to the nearest arbitrary sanctuary and
+    /// does not advance the simulation.
+    pub fn place_hero_in_own_bound_sanctuary(&mut self) -> Position {
+        use crate::ids::EntityObjMap;
+
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let (hero_entity, bound_monolith_id) = {
+            let mut query =
+                world.query_filtered::<(Entity, &PlayerId, &BoundMonolith), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == player_id)
+                .map(|(entity, _, bound)| (entity, bound.id))
+                .expect("headless hero with a bound Monolith")
+        };
+        let monolith_entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(bound_monolith_id)
+            .expect("bound Monolith entity-map entry");
+        let monolith_pos = *world
+            .get::<Position>(monolith_entity)
+            .expect("bound Monolith position");
+        *world
+            .get_mut::<Position>(hero_entity)
+            .expect("headless hero position") = monolith_pos;
+        world
+            .get_mut::<BoundMonolith>(hero_entity)
+            .expect("headless hero bound Monolith")
+            .pos = monolith_pos;
+        monolith_pos
+    }
+
+    /// Move the authoritative hero position directly without pumping the app.
+    /// Focused tests use this to make cancellation ordering deterministic.
+    pub fn move_hero_for_test(&mut self, position: Position) {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let hero_entity = {
+            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        *world
+            .get_mut::<Position>(hero_entity)
+            .expect("headless hero position") = position;
+    }
+
+    /// Spawn a live hostile recognized by both production combat and the
+    /// safe-logout hostility query. The entity is server-authoritative and
+    /// registered in both object-id indexes, but has no behaviour tree so it
+    /// remains deterministic until the test moves, kills, or removes it.
+    pub fn spawn_safe_logout_test_hostile(&mut self, position: Position) -> i32 {
+        use crate::event::{EventExecuting, EventExecutingState};
+        use crate::ids::{EntityObjMap, Ids};
+        use crate::npc::VisibleTarget;
+
+        let hero_id = {
+            let world = self.app.world_mut();
+            let mut query = world.query_filtered::<(&Id, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == self.player_id)
+                .map(|(id, _)| id.0)
+                .expect("headless hero id")
+        };
+        let world = self.app.world_mut();
+        let obj_id = world.resource_mut::<Ids>().new_obj_id();
+        let entity = world
+            .spawn((
+                Id(obj_id),
+                PlayerId(crate::constants::NPC_PLAYER_ID),
+                position,
+                Name("Wolf".to_string()),
+                Template("Wolf".to_string()),
+                Class("Unit".to_string()),
+                Subclass::Npc,
+                SubclassNPC,
+                State::None,
+                Misc::default(),
+                Stats {
+                    hp: 20,
+                    stamina: Some(100),
+                    mana: None,
+                    base_hp: 20,
+                    base_stamina: Some(100),
+                    base_mana: None,
+                    base_def: 0,
+                    damage_range: Some(1),
+                    base_damage: Some(1),
+                    base_speed: Some(1),
+                    base_vision: Some(8),
+                },
+                Effects(std::collections::HashMap::new()),
+                Inventory {
+                    owner: obj_id,
+                    items: Vec::new(),
+                },
+                LastCombatTick::default(),
+                VisibleTarget::new(hero_id),
+            ))
+            .id();
+        world.entity_mut(entity).insert(EventExecuting {
+            event_type: String::new(),
+            state: EventExecutingState::None,
+        });
+        world
+            .resource_mut::<Ids>()
+            .new_obj(obj_id, crate::constants::NPC_PLAYER_ID);
+        world.resource_mut::<EntityObjMap>().new_obj(obj_id, entity);
+        obj_id
+    }
+
+    pub fn move_safe_logout_test_hostile(&mut self, obj_id: i32, position: Position) {
+        use crate::ids::EntityObjMap;
+
+        let world = self.app.world_mut();
+        let entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(obj_id)
+            .expect("safe-logout test hostile");
+        *world
+            .get_mut::<Position>(entity)
+            .expect("safe-logout test hostile position") = position;
+    }
+
+    pub fn kill_safe_logout_test_hostile(&mut self, obj_id: i32) {
+        use crate::ids::EntityObjMap;
+
+        let dead_at = self.game_tick();
+        let world = self.app.world_mut();
+        let entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(obj_id)
+            .expect("safe-logout test hostile");
+        world
+            .get_mut::<Stats>(entity)
+            .expect("safe-logout test hostile stats")
+            .hp = 0;
+        world.entity_mut(entity).insert((
+            State::Dead,
+            StateDead {
+                dead_at,
+                killer: "Headless safe-logout test".to_string(),
+            },
+        ));
+    }
+
+    pub fn remove_safe_logout_test_hostile(&mut self, obj_id: i32) {
+        use crate::ids::{EntityObjMap, Ids};
+
+        let world = self.app.world_mut();
+        if let Some(entity) = world.resource::<EntityObjMap>().get_entity(obj_id) {
+            let _ = world.despawn(entity);
+        }
+        world.resource_mut::<EntityObjMap>().remove_obj(obj_id);
+        world.resource_mut::<Ids>().remove_obj(obj_id);
+    }
+
+    /// Apply authoritative incoming HP loss without advancing the app. The
+    /// presence reconciler observes the decrease on the caller's next update.
+    pub fn damage_hero_for_test(&mut self, damage: i32) -> i32 {
+        let player_id = self.player_id;
+        let tick = self.game_tick();
+        let world = self.app.world_mut();
+        let hero_entity = {
+            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        let hp = {
+            let mut stats = world
+                .get_mut::<Stats>(hero_entity)
+                .expect("headless hero stats");
+            stats.hp = stats.hp.saturating_sub(damage.max(0));
+            stats.hp
+        };
+        world.entity_mut(hero_entity).insert(LastDamageTick(tick));
+        hp
+    }
+
+    /// Record the same aggregate activity used by successful server-authorized
+    /// combat commands. This helper does not tick or fabricate a client packet.
+    pub fn record_player_combat_for_test(&mut self) {
+        let tick = self.game_tick();
+        let player_id = self.player_id;
+        record_player_combat_activity(
+            player_id,
+            tick,
+            &mut self
+                .app
+                .world_mut()
+                .resource_mut::<PlayerWorldPresenceState>(),
+        );
     }
 
     pub fn crisis_telemetry(&self) -> HeadlessCrisisTelemetry {
@@ -1514,6 +1774,1177 @@ mod tests {
         }
 
         (villager_entity, villager_id)
+    }
+
+    fn safe_logout_fixture(name: &str) -> (HeadlessGame, Position) {
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", name);
+        let sanctuary = game.place_hero_in_own_bound_sanctuary();
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+        // Let the ordinary sanctuary sync and presence reconciliation observe
+        // the exact bound Monolith before the first request.
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        (game, sanctuary)
+    }
+
+    fn move_nearby_headless_hostiles_away(game: &mut HeadlessGame, hero_pos: Position) {
+        use crate::npc::VisibleTarget;
+        use crate::safe_logout::SAFE_LOGOUT_HOSTILE_RADIUS;
+
+        let far = far_map_position(game, hero_pos);
+        let world = game.app.world_mut();
+        let entities = {
+            let mut query = world.query_filtered::<(
+                Entity,
+                &PlayerId,
+                &Position,
+                &Subclass,
+                &State,
+                &Stats,
+                Option<&StateDead>,
+            ), (With<SubclassNPC>, With<VisibleTarget>)>();
+            query
+                .iter(world)
+                .filter(|(_, owner, pos, subclass, state, stats, dead)| {
+                    owner.is_npc()
+                        && **subclass == Subclass::Npc
+                        && state.is_alive()
+                        && dead.is_none()
+                        && stats.hp > 0
+                        && Map::distance((hero_pos.x, hero_pos.y), (pos.x, pos.y))
+                            <= SAFE_LOGOUT_HOSTILE_RADIUS
+                })
+                .map(|(entity, ..)| entity)
+                .collect::<Vec<_>>()
+        };
+        for entity in entities {
+            *world
+                .get_mut::<Position>(entity)
+                .expect("headless hostile position") = far;
+        }
+    }
+
+    fn begin_safe_logout(game: &mut HeadlessGame) -> i32 {
+        game.request_safe_logout();
+        game.tick(1);
+        let record = game.player_presence_record();
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending),
+            "safe-logout request was not accepted: {record:?}"
+        );
+        game.safe_logout_start_tick()
+            .expect("accepted safe-logout start tick")
+    }
+
+    fn move_one_tile(position: Position) -> Position {
+        Position {
+            x: if position.x < 49 {
+                position.x + 1
+            } else {
+                position.x - 1
+            },
+            y: position.y,
+        }
+    }
+
+    fn far_map_position(game: &HeadlessGame, position: Position) -> Position {
+        let map = game.map();
+        let candidates = [
+            Position { x: 0, y: 0 },
+            Position {
+                x: map.width - 1,
+                y: map.height - 1,
+            },
+            Position {
+                x: 0,
+                y: map.height - 1,
+            },
+            Position {
+                x: map.width - 1,
+                y: 0,
+            },
+        ];
+        candidates
+            .into_iter()
+            .max_by_key(|candidate| {
+                Map::distance((position.x, position.y), (candidate.x, candidate.y))
+            })
+            .expect("map corner")
+    }
+
+    fn expire_safe_logout_activity_cooldown(game: &mut HeadlessGame) {
+        game.app.world_mut().resource_mut::<GameTick>().0 +=
+            crate::safe_logout::SAFE_LOGOUT_COMBAT_COOLDOWN_TICKS + 1;
+    }
+
+    fn spawn_safe_logout_non_hostile_candidate(
+        game: &mut HeadlessGame,
+        owner_player_id: i32,
+        subclass: Subclass,
+        template: &str,
+        position: Position,
+    ) -> i32 {
+        use crate::ids::{EntityObjMap, Ids};
+        use crate::npc::VisibleTarget;
+
+        let hero_id = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&Id, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == game.player_id)
+                .map(|(id, _)| id.0)
+                .expect("headless hero id")
+        };
+        let world = game.app.world_mut();
+        let obj_id = world.resource_mut::<Ids>().new_obj_id();
+        let entity = world
+            .spawn((
+                Id(obj_id),
+                PlayerId(owner_player_id),
+                position,
+                Template(template.to_string()),
+                subclass,
+                SubclassNPC,
+                State::None,
+                Stats {
+                    hp: 20,
+                    stamina: None,
+                    mana: None,
+                    base_hp: 20,
+                    base_stamina: None,
+                    base_mana: None,
+                    base_def: 0,
+                    damage_range: Some(1),
+                    base_damage: Some(1),
+                    base_speed: Some(1),
+                    base_vision: Some(8),
+                },
+                VisibleTarget::new(hero_id),
+            ))
+            .id();
+        world.resource_mut::<Ids>().new_obj(obj_id, owner_player_id);
+        world.resource_mut::<EntityObjMap>().new_obj(obj_id, entity);
+        obj_id
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_presence_lifecycle_is_explicit_and_idempotent() {
+        let (mut game, _) = safe_logout_fixture("SafeLogoutPresenceBot");
+
+        // Requirements 1-6: only an explicit request can leave ordinary online
+        // presence; repeated connection edges remain idempotent.
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        assert_ne!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        let disconnected = game.player_presence_record();
+        game.disconnect_player();
+        game.tick(2);
+        assert_eq!(game.player_presence_record(), disconnected);
+
+        game.reconnect_player();
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        let online = game.player_presence_record();
+        game.reconnect_player();
+        game.tick(2);
+        assert_eq!(game.player_presence_record(), online);
+
+        // A socket gap that opens and closes between ECS updates is still
+        // observed at the authenticated Login boundary and cannot leave an
+        // old countdown running on the replacement connection.
+        let (mut gap_game, _) = safe_logout_fixture("SafeLogoutSocketGapBot");
+        begin_safe_logout(&mut gap_game);
+        gap_game.disconnect_player();
+        gap_game.reconnect_player_with_login();
+        gap_game.tick(3);
+        assert_eq!(
+            gap_game.player_presence(),
+            Some(PlayerWorldPresence::Online)
+        );
+        assert_eq!(
+            gap_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Disconnected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_sanctuary_eligibility_is_owned_and_fail_closed() {
+        use crate::ids::EntityObjMap;
+
+        let (mut game, own_sanctuary) = safe_logout_fixture("SafeLogoutSanctuaryBot");
+        let player_id = game.player_id;
+
+        // Requirement 7: the player's exact bound sanctuary qualifies.
+        begin_safe_logout(&mut game);
+        game.cancel_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Manual)
+        );
+
+        // Requirement 8: being elsewhere does not qualify.
+        let outside = far_map_position(&game, own_sanctuary);
+        game.move_hero_for_test(outside);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::OutsideOwnSanctuary)
+        );
+
+        // Requirement 9: another connected player's bound sanctuary is not a
+        // fallback for the owner under test.
+        let helper_id = spawn_connected_helper(&mut game, "ForeignSanctuaryBot");
+        let foreign_sanctuary = {
+            let world = game.app.world_mut();
+            let mut heroes =
+                world.query_filtered::<(&PlayerId, &BoundMonolith), With<SubclassHero>>();
+            let foreign_bound = heroes
+                .iter(world)
+                .find(|(owner, _)| owner.0 == helper_id)
+                .map(|(_, bound)| bound.id)
+                .expect("helper bound Monolith");
+            let entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(foreign_bound)
+                .expect("helper Monolith entity");
+            *world
+                .get::<Position>(entity)
+                .expect("helper Monolith position")
+        };
+        game.move_hero_for_test(foreign_sanctuary);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::OutsideOwnSanctuary)
+        );
+
+        game.move_hero_for_test(own_sanctuary);
+        let (hero_entity, own_monolith_entity) = {
+            let world = game.app.world_mut();
+            let mut heroes =
+                world.query_filtered::<(Entity, &PlayerId, &BoundMonolith), With<SubclassHero>>();
+            let (hero_entity, bound_id) = heroes
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == player_id)
+                .map(|(entity, _, bound)| (entity, bound.id))
+                .expect("owner hero binding");
+            let monolith_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(bound_id)
+                .expect("owner Monolith entity");
+            (hero_entity, monolith_entity)
+        };
+
+        // Requirement 10: a missing binding rejects without a nearest-zone
+        // fallback.
+        let binding = game
+            .app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .take::<BoundMonolith>()
+            .expect("owner binding");
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::MissingBoundMonolith)
+        );
+        game.app.world_mut().entity_mut(hero_entity).insert(binding);
+
+        // Requirement 11: removing the live Monolith also removes its synced
+        // zone; the stale entity/id is not accepted.
+        let monolith = game
+            .app
+            .world_mut()
+            .entity_mut(own_monolith_entity)
+            .take::<Monolith>()
+            .expect("owner Monolith component");
+        game.tick(1);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::MissingSanctuaryZone)
+        );
+        game.app
+            .world_mut()
+            .entity_mut(own_monolith_entity)
+            .insert(monolith);
+        game.tick(1);
+
+        // A stale bound position and a dead bound Monolith both fail closed.
+        game.app
+            .world_mut()
+            .get_mut::<BoundMonolith>(hero_entity)
+            .expect("owner binding")
+            .pos = move_one_tile(own_sanctuary);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::SanctuaryInvalid)
+        );
+        game.place_hero_in_own_bound_sanctuary();
+        *game
+            .app
+            .world_mut()
+            .get_mut::<State>(own_monolith_entity)
+            .expect("Monolith state") = State::Dead;
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::SanctuaryInvalid)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_dead_and_true_death_never_protect() {
+        // Requirements 12-13: ordinary death rejects, and the presence of a
+        // fresh True Death marker rejects immediately rather than waiting for
+        // the delayed final run cleanup.
+        let (mut dead_game, _) = safe_logout_fixture("SafeLogoutDeadBot");
+        let dead_entity = {
+            let world = dead_game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == dead_game.player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        let dead_at = dead_game.game_tick();
+        dead_game.app.world_mut().entity_mut(dead_entity).insert((
+            State::Dead,
+            StateDead {
+                dead_at,
+                killer: "Eligibility test".to_string(),
+            },
+        ));
+        dead_game
+            .app
+            .world_mut()
+            .get_mut::<Stats>(dead_entity)
+            .expect("hero stats")
+            .hp = 0;
+        dead_game.request_safe_logout();
+        dead_game.tick(1);
+        assert_eq!(
+            dead_game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::HeroDied)
+        );
+        assert_ne!(
+            dead_game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+
+        let (mut true_death_game, _) = safe_logout_fixture("SafeLogoutTrueDeathBot");
+        let true_death_entity = {
+            let world = true_death_game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == true_death_game.player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        let true_death_at = true_death_game.game_tick();
+        let state_dead = StateDead {
+            dead_at: true_death_at,
+            killer: "True Death eligibility test".to_string(),
+        };
+        true_death_game
+            .app
+            .world_mut()
+            .entity_mut(true_death_entity)
+            .insert((TrueDeath { true_death_at }, State::Dead, state_dead));
+        true_death_game.request_safe_logout();
+        true_death_game.tick(1);
+        assert_eq!(
+            true_death_game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::TrueDeath)
+        );
+        assert_ne!(
+            true_death_game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_activity_hostility_and_crisis_eligibility() {
+        use crate::ids::EntityObjMap;
+
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutEligibilityBot");
+
+        // Requirements 14-15: both authoritative outgoing combat and incoming
+        // damage impose the configured cooldown.
+        game.record_player_combat_for_test();
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::RecentCombat)
+        );
+        expire_safe_logout_activity_cooldown(&mut game);
+        game.damage_hero_for_test(1);
+        game.tick(1);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::RecentDamage)
+        );
+        expire_safe_logout_activity_cooldown(&mut game);
+
+        // Requirement 16: a live immediate threat blocks the request.
+        let hostile = game.spawn_safe_logout_test_hostile(sanctuary);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::HostileNearby)
+        );
+
+        // A still-live threat cannot disappear from eligibility merely because
+        // object-map cleanup raced ahead of deferred entity cleanup.
+        let hostile_entity = game
+            .app
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(hostile)
+            .expect("registered hostile");
+        game.app
+            .world_mut()
+            .resource_mut::<EntityObjMap>()
+            .remove_obj(hostile);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::HostileNearby)
+        );
+        game.app
+            .world_mut()
+            .resource_mut::<EntityObjMap>()
+            .new_obj(hostile, hostile_entity);
+
+        // Requirement 17: the same registered entity no longer blocks once it
+        // is a dead corpse.
+        game.kill_safe_logout_test_hostile(hostile);
+        begin_safe_logout(&mut game);
+        game.cancel_safe_logout();
+        game.tick(1);
+
+        // Requirements 18-19 and the cross-player friendly-unit rule: fixtures
+        // satisfy the hostile query's shape but are excluded by ownership or
+        // subclass, just like real villagers and merchants.
+        let player_id = game.player_id;
+        let villager = spawn_safe_logout_non_hostile_candidate(
+            &mut game,
+            player_id,
+            Subclass::Villager,
+            "Villager",
+            sanctuary,
+        );
+        let merchant = spawn_safe_logout_non_hostile_candidate(
+            &mut game,
+            crate::constants::MERCHANT_PLAYER_ID,
+            Subclass::Merchant,
+            "Merchant",
+            sanctuary,
+        );
+        let friendly_other = spawn_safe_logout_non_hostile_candidate(
+            &mut game,
+            player_id + 1,
+            Subclass::Npc,
+            "Wolf",
+            sanctuary,
+        );
+        begin_safe_logout(&mut game);
+        game.cancel_safe_logout();
+        game.tick(1);
+
+        // Requirement 21: every explicit pre-assault phase remains eligible;
+        // the safe-logout system must not accidentally narrow this list when
+        // crisis phases evolve.
+        for phase in [
+            CrisisPhase::Dormant,
+            CrisisPhase::Signs,
+            CrisisPhase::Pressure,
+            CrisisPhase::Preparing,
+            CrisisPhase::AssaultReady,
+        ] {
+            let current_tick = game.game_tick();
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&game.player_id).expect("personal crisis");
+            crisis.phase = phase;
+            crisis.phase_online_ticks = 0;
+            crisis.last_evaluated_tick = current_tick;
+            begin_safe_logout(&mut game);
+            game.cancel_safe_logout();
+            game.tick(1);
+        }
+
+        // Requirement 20: committed assault state always rejects.
+        game.app
+            .world_mut()
+            .resource_mut::<SettlementCrisisState>()
+            .get_mut(&game.player_id)
+            .expect("personal crisis")
+            .phase = CrisisPhase::AssaultActive;
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::AssaultActive)
+        );
+
+        for obj_id in [hostile, villager, merchant, friendly_other] {
+            game.remove_safe_logout_test_hostile(obj_id);
+        }
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_deterministic_move_cancel_then_exact_completion() {
+        use crate::safe_logout::SAFE_LOGOUT_COUNTDOWN_TICKS;
+
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutCountdownBot");
+
+        // Requirements 22-28 plus the first mandated deterministic scenario.
+        let first_start = begin_safe_logout(&mut game);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::AlreadyPending)
+        );
+        assert_eq!(game.safe_logout_start_tick(), Some(first_start));
+
+        game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS / 2) as u32);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending)
+        );
+        let evaluated_tick = game.game_tick();
+        game.app.world_mut().resource_mut::<GameTick>().0 = evaluated_tick - 1;
+        game.tick(1);
+        assert_eq!(game.game_tick(), evaluated_tick);
+        assert_eq!(game.safe_logout_start_tick(), Some(first_start));
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending),
+            "evaluating the same authoritative tick twice must not advance the countdown"
+        );
+        game.move_hero_for_test(move_one_tile(sanctuary));
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Moved)
+        );
+
+        game.place_hero_in_own_bound_sanctuary();
+        let second_start = begin_safe_logout(&mut game);
+        assert!(second_start > first_start);
+        game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS - 1) as u32);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending),
+            "countdown must not complete one tick early"
+        );
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        assert_eq!(game.safe_logout_start_tick(), None);
+
+        // Re-evaluation and a duplicate request cannot produce a second
+        // transition or restart pending state.
+        game.tick(2);
+        game.request_safe_logout();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::AlreadyProtected)
+        );
+
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected),
+            "a socket close after explicit completion preserves the completed handoff"
+        );
+        game.reconnect_player();
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_combat_damage_and_hostile_entry_cancel() {
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutCancelBot");
+
+        // Requirements 30-34: the aggregate server combat hook is shared by
+        // attacks, damaging abilities, and combos; incoming damage and a newly
+        // arrived hostile have their own cancellation reasons.
+        begin_safe_logout(&mut game);
+        game.record_player_combat_for_test();
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::EnteredCombat)
+        );
+
+        expire_safe_logout_activity_cooldown(&mut game);
+        begin_safe_logout(&mut game);
+        game.damage_hero_for_test(1);
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::TookDamage)
+        );
+
+        expire_safe_logout_activity_cooldown(&mut game);
+        let hostile = game.spawn_safe_logout_test_hostile(far_map_position(&game, sanctuary));
+        begin_safe_logout(&mut game);
+        game.move_safe_logout_test_hostile(hostile, sanctuary);
+        game.tick(1);
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::HostileNearby)
+        );
+        game.remove_safe_logout_test_hostile(hostile);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_production_incoming_damage_cancels() {
+        use big_brain::prelude::{ActionState, Actor};
+
+        use crate::common::AttackTarget;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
+
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutProductionDamageBot");
+        begin_safe_logout(&mut game);
+
+        let hostile_id = game.spawn_safe_logout_test_hostile(sanctuary);
+        let (hero_entity, hero_id, hp_before, hostile_entity) = {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &Id, &Stats), With<SubclassHero>>();
+            let (hero_entity, hero_id, hero_stats) =
+                heroes.iter(world).next().expect("headless hero");
+            let hostile_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hostile_id)
+                .expect("production damage attacker");
+            (hero_entity, hero_id.0, hero_stats.hp, hostile_entity)
+        };
+        {
+            let world = game.app.world_mut();
+            world
+                .get_mut::<Stats>(hostile_entity)
+                .expect("production damage attacker stats")
+                .base_damage = Some(30);
+            world
+                .get_mut::<VisibleTarget>(hostile_entity)
+                .expect("production damage attacker target")
+                .target = hero_id;
+            world.spawn((Actor(hostile_entity), ActionState::Requested, AttackTarget));
+        }
+
+        game.tick(1);
+
+        let hero_stats = game
+            .world()
+            .get::<Stats>(hero_entity)
+            .expect("headless hero stats after production attack");
+        assert!(
+            hero_stats.hp < hp_before,
+            "the production combat system must apply incoming damage"
+        );
+        assert!(game.world().get::<StateDead>(hero_entity).is_none());
+        assert!(
+            game.world().get::<LastDamageTick>(hero_entity).is_some(),
+            "the production damage writer must stamp the authoritative hero"
+        );
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::TookDamage),
+            "damage is evaluated before the same attacker's proximity"
+        );
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_real_attack_ability_and_combo_paths_cancel() {
+        use crate::combat::{AttackType, ComboTracker};
+        use crate::ids::EntityObjMap;
+        use crate::player::PlayerEvents;
+
+        fn hero_id(game: &mut HeadlessGame) -> i32 {
+            let player_id = game.player_id;
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(&Id, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(id, _)| id.0)
+                .expect("headless hero id")
+        }
+
+        fn run_event(
+            game: &mut HeadlessGame,
+            event_id: i32,
+            event: PlayerEvent,
+        ) -> SafeLogoutCancelReason {
+            game.app
+                .world_mut()
+                .resource_mut::<PlayerEvents>()
+                .insert(event_id, event);
+            game.tick(1);
+            game.safe_logout_cancel_reason()
+                .expect("accepted combat event should cancel safe logout")
+        }
+
+        // Requirement 30: a successfully accepted ordinary attack records
+        // authoritative activity before the PostUpdate completion check.
+        let (mut attack_game, sanctuary) = safe_logout_fixture("SafeLogoutRealAttackBot");
+        begin_safe_logout(&mut attack_game);
+        let attack_source = hero_id(&mut attack_game);
+        attack_game
+            .app
+            .world_mut()
+            .resource_mut::<PlayerEvents>()
+            .insert(
+                -29,
+                PlayerEvent::Attack {
+                    player_id: HEADLESS_PLAYER_ID,
+                    attack_type: "quick".to_string(),
+                    source_id: attack_source,
+                    target_id: i32::MAX,
+                },
+            );
+        attack_game.tick(1);
+        assert_eq!(
+            attack_game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending),
+            "a rejected target id is not authoritative combat activity"
+        );
+        assert_eq!(attack_game.safe_logout_cancel_reason(), None);
+
+        let attack_target = attack_game.spawn_safe_logout_test_hostile(sanctuary);
+        assert_eq!(
+            run_event(
+                &mut attack_game,
+                -30,
+                PlayerEvent::Attack {
+                    player_id: HEADLESS_PLAYER_ID,
+                    attack_type: "quick".to_string(),
+                    source_id: attack_source,
+                    target_id: attack_target,
+                },
+            ),
+            SafeLogoutCancelReason::EnteredCombat
+        );
+
+        // Requirement 31: a damaging class ability follows the same accepted
+        // server path; this uses the Warrior's adjacent Guard Bash.
+        let (mut ability_game, sanctuary) = safe_logout_fixture("SafeLogoutRealAbilityBot");
+        begin_safe_logout(&mut ability_game);
+        let ability_target = ability_game.spawn_safe_logout_test_hostile(sanctuary);
+        let ability_source = hero_id(&mut ability_game);
+        assert_eq!(
+            run_event(
+                &mut ability_game,
+                -31,
+                PlayerEvent::Ability {
+                    player_id: HEADLESS_PLAYER_ID,
+                    ability_id: "shield_bash".to_string(),
+                    source_id: ability_source,
+                    target_id: Some(ability_target),
+                },
+            ),
+            SafeLogoutCancelReason::EnteredCombat
+        );
+
+        // Requirement 32: a ready damaging combo must also cancel through the
+        // real combo event rather than a test-only activity shortcut.
+        let (mut combo_game, sanctuary) = safe_logout_fixture("SafeLogoutRealComboBot");
+        begin_safe_logout(&mut combo_game);
+        let combo_target = combo_game.spawn_safe_logout_test_hostile(sanctuary);
+        let combo_source = hero_id(&mut combo_game);
+        let combo_hero = combo_game
+            .app
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(combo_source)
+            .expect("headless hero entity");
+        combo_game
+            .app
+            .world_mut()
+            .entity_mut(combo_hero)
+            .insert(ComboTracker {
+                target_id: combo_target,
+                attacks: vec![AttackType::Quick, AttackType::Quick],
+            });
+        assert_eq!(
+            run_event(
+                &mut combo_game,
+                -32,
+                PlayerEvent::Combo {
+                    player_id: HEADLESS_PLAYER_ID,
+                    source_id: combo_source,
+                    target_id: combo_target,
+                    combo_type: "Hamstring".to_string(),
+                },
+            ),
+            SafeLogoutCancelReason::EnteredCombat
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_manual_disconnect_sanctuary_and_death_cancel_once() {
+        // Requirements 29, 35-44. Movement is covered by the deterministic
+        // scenario; these fixtures exercise the remaining state sources and
+        // verify cancellation has no economy/crisis side effects.
+        let (mut manual_game, _) = safe_logout_fixture("SafeLogoutManualBot");
+        let pressure_before = manual_game
+            .settlement_crisis()
+            .expect("personal crisis")
+            .pressure;
+        let rewards_before = manual_game.personal_crises_resolved();
+        begin_safe_logout(&mut manual_game);
+        manual_game.cancel_safe_logout();
+        manual_game.tick(1);
+        assert_eq!(
+            manual_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Manual)
+        );
+        let cancelled = manual_game.player_presence_record();
+        manual_game.cancel_safe_logout();
+        manual_game.tick(1);
+        assert_eq!(manual_game.player_presence_record(), cancelled);
+        assert_eq!(
+            manual_game
+                .settlement_crisis()
+                .expect("personal crisis")
+                .pressure,
+            pressure_before
+        );
+        assert_eq!(manual_game.personal_crises_resolved(), rewards_before);
+
+        let (mut disconnect_game, _) = safe_logout_fixture("SafeLogoutDisconnectBot");
+        begin_safe_logout(&mut disconnect_game);
+        disconnect_game.disconnect_player();
+        disconnect_game.tick(1);
+        assert_eq!(
+            disconnect_game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        assert_eq!(
+            disconnect_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Disconnected)
+        );
+
+        let (mut invalid_game, _) = safe_logout_fixture("SafeLogoutInvalidZoneBot");
+        let (hero_entity, monolith_entity) = {
+            use crate::ids::EntityObjMap;
+            let world = invalid_game.app.world_mut();
+            let mut heroes =
+                world.query_filtered::<(Entity, &PlayerId, &BoundMonolith), With<SubclassHero>>();
+            let (hero, monolith_id) = heroes
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == invalid_game.player_id)
+                .map(|(entity, _, bound)| (entity, bound.id))
+                .expect("headless binding");
+            let monolith = world
+                .resource::<EntityObjMap>()
+                .get_entity(monolith_id)
+                .expect("bound Monolith");
+            (hero, monolith)
+        };
+        begin_safe_logout(&mut invalid_game);
+        invalid_game
+            .app
+            .world_mut()
+            .get_mut::<BoundMonolith>(hero_entity)
+            .expect("binding")
+            .pos = move_one_tile(
+            *invalid_game
+                .app
+                .world()
+                .get::<Position>(monolith_entity)
+                .expect("Monolith position"),
+        );
+        invalid_game.tick(1);
+        assert_eq!(
+            invalid_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::SanctuaryInvalid)
+        );
+
+        let (mut left_game, sanctuary) = safe_logout_fixture("SafeLogoutLeftZoneBot");
+        let (left_hero, left_monolith) = {
+            use crate::ids::EntityObjMap;
+            let world = left_game.app.world_mut();
+            let mut heroes =
+                world.query_filtered::<(Entity, &PlayerId, &BoundMonolith), With<SubclassHero>>();
+            let (hero, bound_id) = heroes
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == left_game.player_id)
+                .map(|(entity, _, bound)| (entity, bound.id))
+                .expect("headless binding");
+            let monolith = world
+                .resource::<EntityObjMap>()
+                .get_entity(bound_id)
+                .expect("bound Monolith");
+            (hero, monolith)
+        };
+        begin_safe_logout(&mut left_game);
+        let far = far_map_position(&left_game, sanctuary);
+        *left_game
+            .app
+            .world_mut()
+            .get_mut::<Position>(left_monolith)
+            .expect("Monolith position") = far;
+        left_game
+            .app
+            .world_mut()
+            .get_mut::<BoundMonolith>(left_hero)
+            .expect("binding")
+            .pos = far;
+        left_game.tick(1);
+        assert_eq!(
+            left_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::LeftSanctuary)
+        );
+
+        let (mut dead_game, _) = safe_logout_fixture("SafeLogoutPendingDeathBot");
+        begin_safe_logout(&mut dead_game);
+        let dead_entity = {
+            let world = dead_game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == dead_game.player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        let dead_at = dead_game.game_tick();
+        dead_game.app.world_mut().entity_mut(dead_entity).insert((
+            State::Dead,
+            StateDead {
+                dead_at,
+                killer: "Cancellation test".to_string(),
+            },
+        ));
+        dead_game.tick(1);
+        assert_eq!(
+            dead_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::HeroDied)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_same_tick_danger_wins_over_completion() {
+        use crate::safe_logout::SAFE_LOGOUT_COUNTDOWN_TICKS;
+
+        // Requirements 45-47: arrange each danger on the exact update that
+        // would otherwise complete the absolute-tick countdown.
+        let (mut assault_game, _) = safe_logout_fixture("SafeLogoutRaceAssaultBot");
+        let preferred_tick = set_personal_assault_ready(&mut assault_game);
+        let pre_request_tick = preferred_tick - SAFE_LOGOUT_COUNTDOWN_TICKS - 1;
+        {
+            use crate::game::ASSAULT_READY_GRACE_TICKS;
+
+            let world = assault_game.app.world_mut();
+            world.resource_mut::<GameTick>().0 = pre_request_tick;
+            let mut crises = world.resource_mut::<SettlementCrisisState>();
+            let crisis = crises
+                .get_mut(&assault_game.player_id)
+                .expect("ready personal crisis");
+            crisis.phase_online_ticks = ASSAULT_READY_GRACE_TICKS - SAFE_LOGOUT_COUNTDOWN_TICKS - 1;
+            crisis.last_evaluated_tick = pre_request_tick;
+        }
+        let requested_tick = begin_safe_logout(&mut assault_game);
+        assert_eq!(requested_tick + SAFE_LOGOUT_COUNTDOWN_TICKS, preferred_tick);
+        assault_game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS - 1) as u32);
+        assert_eq!(
+            assault_game
+                .settlement_crisis()
+                .expect("ready personal crisis")
+                .phase,
+            CrisisPhase::AssaultReady
+        );
+        assert!(assault_game.crisis_assault_units().is_empty());
+        assault_game.tick(1);
+        assert_eq!(
+            assault_game
+                .settlement_crisis()
+                .expect("launched personal crisis")
+                .phase,
+            CrisisPhase::AssaultActive
+        );
+        assert!(!assault_game.crisis_assault_units().is_empty());
+        assert_eq!(
+            assault_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::AssaultStarted)
+        );
+
+        let (mut damage_game, _) = safe_logout_fixture("SafeLogoutRaceDamageBot");
+        begin_safe_logout(&mut damage_game);
+        damage_game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS - 1) as u32);
+        damage_game.damage_hero_for_test(1);
+        damage_game.tick(1);
+        assert_eq!(
+            damage_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::TookDamage)
+        );
+
+        let (mut death_game, _) = safe_logout_fixture("SafeLogoutRaceTrueDeathBot");
+        begin_safe_logout(&mut death_game);
+        death_game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS - 1) as u32);
+        let hero_entity = {
+            let world = death_game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == death_game.player_id)
+                .map(|(entity, _)| entity)
+                .expect("headless hero")
+        };
+        let true_death_at = death_game.game_tick() - 101;
+        let state_dead = StateDead {
+            dead_at: true_death_at,
+            killer: "True Death ordering test".to_string(),
+        };
+        death_game.app.world_mut().entity_mut(hero_entity).insert((
+            TrueDeath { true_death_at },
+            State::Dead,
+            state_dead,
+        ));
+        death_game.tick(1);
+        assert_ne!(
+            death_game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_fresh_run_and_cleanup_clear_stale_presence() {
+        use crate::safe_logout::remove_player_presence_for_run_cleanup;
+
+        // Requirements 48-49: new-run setup overwrites both stale pending and
+        // stale protected records before gameplay begins.
+        for stale_state in [
+            PlayerWorldPresence::SafeLogoutPending,
+            PlayerWorldPresence::OfflineProtected,
+        ] {
+            let mut game = HeadlessGame::new(20_000);
+            let mut stale = PlayerPresenceRecord::new(true);
+            stale.state = stale_state;
+            stale.safe_logout_requested_tick = Some(123);
+            stale.safe_logout_start_position = Some(Position { x: 1, y: 1 });
+            game.app
+                .world_mut()
+                .resource_mut::<PlayerWorldPresenceState>()
+                .players
+                .insert(HEADLESS_PLAYER_ID, stale);
+            game.spawn_hero("Warrior", "SafeLogoutFreshRunBot");
+            let fresh = game
+                .player_presence_record()
+                .expect("fresh run presence record");
+            assert_eq!(fresh.state, PlayerWorldPresence::Online);
+            assert_eq!(fresh.safe_logout_requested_tick, None);
+            assert_eq!(fresh.safe_logout_start_position, None);
+        }
+
+        // Requirements 50-51: cleanup is player-scoped and repeatable.
+        let (mut game, _) = safe_logout_fixture("SafeLogoutCleanupOwnerBot");
+        let helper_id = spawn_connected_helper(&mut game, "SafeLogoutCleanupNeighborBot");
+        let neighbor_before = game
+            .app
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&helper_id)
+            .cloned()
+            .expect("neighbor presence");
+        let tick = game.game_tick();
+        {
+            let mut presence = game
+                .app
+                .world_mut()
+                .resource_mut::<PlayerWorldPresenceState>();
+            remove_player_presence_for_run_cleanup(game.player_id, tick, &mut presence);
+            remove_player_presence_for_run_cleanup(game.player_id, tick, &mut presence);
+        }
+        let presence = game.app.world().resource::<PlayerWorldPresenceState>();
+        assert!(!presence.players.contains_key(&game.player_id));
+        assert_eq!(presence.players.get(&helper_id), Some(&neighbor_before));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint1_active_assault_cancels_then_disconnect_continues() {
+        let (mut game, _) = safe_logout_fixture("SafeLogoutAssaultContinuityBot");
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        game.app.world_mut().resource_mut::<GameTick>().0 = preferred_tick - 20;
+        begin_safe_logout(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::AssaultStarted)
+        );
+        let active = game.settlement_crisis().expect("active assault");
+        assert_eq!(active.phase, CrisisPhase::AssaultActive);
+        let assault_id = active.assault_id.expect("assault id");
+        let generation = active.assault_spawn_generation;
+        let unit_ids = game
+            .crisis_assault_units()
+            .into_iter()
+            .map(|unit| unit.obj_id)
+            .collect::<Vec<_>>();
+        assert!(!unit_ids.is_empty());
+
+        // Requirements 52-54 and the second mandated deterministic scenario:
+        // ordinary disconnect changes only presence; the committed assault,
+        // identity, generation, and live entities remain.
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        let disconnected = game.settlement_crisis().expect("offline assault");
+        assert_eq!(disconnected.phase, CrisisPhase::AssaultActive);
+        assert_eq!(disconnected.assault_id, Some(assault_id));
+        assert_eq!(disconnected.assault_spawn_generation, generation);
+        assert_eq!(
+            game.crisis_assault_units()
+                .into_iter()
+                .map(|unit| unit.obj_id)
+                .collect::<Vec<_>>(),
+            unit_ids
+        );
     }
 
     // One short capped game end-to-end. Must run with CWD = sp_server/ so the

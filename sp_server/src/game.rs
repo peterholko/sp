@@ -65,9 +65,9 @@ use crate::obj::{
     is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
     CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker,
-    LastCombatTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order, PlayerId, Position,
-    RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild,
-    StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
+    LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order, PlayerId,
+    Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered,
+    StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
     StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
     Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower,
     WorkEntry, WorkQueue, WorkStatus, WorkType,
@@ -76,6 +76,9 @@ use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
+use crate::safe_logout::{
+    remove_player_presence_for_run_cleanup, PlayerWorldPresenceState, SafeLogoutPlugin,
+};
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
 use crate::skill_defs::Skill;
 use crate::structure::{Plans, Structure, StructurePlugin};
@@ -91,15 +94,55 @@ use crate::{villager_util, AppState};
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
 
 impl Clients {
+    fn client_is_active(client_id: &Uuid, client: &Client, player_id: i32) -> bool {
+        *client_id == client.id
+            && client.player_id == player_id
+            && !client.sender.is_closed()
+    }
+
     /// Returns whether at least one active network client belongs to `player_id`.
     /// Hero entities persist across disconnects, so the client registry is the
     /// authoritative source of online presence for personal-crisis timing.
     pub fn is_player_online(&self, player_id: i32) -> bool {
         match self.0.lock() {
+            Ok(clients) => clients
+                .iter()
+                .any(|(client_id, client)| Self::client_is_active(client_id, client, player_id)),
+            Err(_) => false,
+        }
+    }
+
+    /// Snapshot the active connection identities for one player. Production
+    /// creates a fresh UUID for every socket, so retaining one of these IDs
+    /// proves that at least one request-time connection remained uninterrupted.
+    pub fn active_connection_ids(&self, player_id: i32) -> Vec<Uuid> {
+        match self.0.lock() {
+            Ok(clients) => {
+                let mut ids = clients
+                    .iter()
+                    .filter_map(|(client_id, client)| {
+                        Self::client_is_active(client_id, client, player_id)
+                            .then_some(*client_id)
+                    })
+                    .collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Return true only while at least one connection captured at request time
+    /// is still the player's active connection. A replacement connection does
+    /// not erase an intervening ordinary disconnect.
+    pub fn has_active_connection_from(&self, player_id: i32, request_ids: &[Uuid]) -> bool {
+        if request_ids.is_empty() {
+            return false;
+        }
+        match self.0.lock() {
             Ok(clients) => clients.iter().any(|(client_id, client)| {
-                *client_id == client.id
-                    && client.player_id == player_id
-                    && !client.sender.is_closed()
+                request_ids.contains(client_id)
+                    && Self::client_is_active(client_id, client, player_id)
             }),
             Err(_) => false,
         }
@@ -2148,7 +2191,8 @@ impl Plugin for GamePlugin {
             .add_plugins(WorldPlugin)
             .add_plugins(NPCPlugin)
             .add_plugins(VillagerPlugin)
-            .add_plugins(TaxCollectorPlugin);
+            .add_plugins(TaxCollectorPlugin)
+            .add_plugins(SafeLogoutPlugin);
         app.add_systems(OnEnter(AppState::Running), init_objs);
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
         app.init_resource::<SanctuaryExcursions>();
@@ -14862,7 +14906,14 @@ fn weather_effects_system(
     weather_areas: Res<WeatherAreas>,
     clients: Res<Clients>,
     mut hero_query: Query<
-        (&Id, &PlayerId, &Position, &mut Stats, Option<&Sheltered>),
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &Position,
+            &mut Stats,
+            Option<&Sheltered>,
+        ),
         With<SubclassHero>,
     >,
     campfire_query: Query<(&Position, &Campfire)>,
@@ -14883,7 +14934,7 @@ fn weather_effects_system(
     }
 
     // Process hero weather effects
-    for (id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
+    for (entity, id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
         let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
             continue;
         };
@@ -14900,7 +14951,13 @@ fn weather_effects_system(
                 Weather::Snow | Weather::IceStorm => 2,
                 _ => 1,
             };
+            let previous_hp = stats.hp;
             stats.hp = (stats.hp - cold_damage).max(0);
+            if stats.hp < previous_hp {
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
+            }
 
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 300 {
@@ -16773,6 +16830,7 @@ fn true_death_system(
         mut run_spawned_objs,
         mut intro_encounter_state,
         mut settlement_crisis_state,
+        mut player_world_presence_state,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -16788,6 +16846,7 @@ fn true_death_system(
         ResMut<RunSpawnedObjs>,
         ResMut<IntroEncounterState>,
         ResMut<SettlementCrisisState>,
+        ResMut<PlayerWorldPresenceState>,
     ),
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
@@ -17012,6 +17071,11 @@ fn true_death_system(
                 }
             }
             settlement_crisis_state.remove(&player_id.0);
+            remove_player_presence_for_run_cleanup(
+                player_id.0,
+                game_tick.0,
+                &mut player_world_presence_state,
+            );
 
             // Release this player's start location back to the pool so a new hero can
             // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
@@ -17995,6 +18059,9 @@ fn burning_system(
         for (entity, id, mut state, mut stats, effects) in burning_query.iter_mut() {
             if effects.has(Effect::Burning) {
                 stats.hp -= 1;
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
 
                 if stats.hp <= 0 {
                     commands.entity(entity).insert(StateDead {
@@ -18060,10 +18127,12 @@ fn skill_changed_system(query: Query<(&PlayerId, &Id, &mut Skills), Changed<Skil
 }
 
 fn effect_added_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
     templates: Res<Templates>,
     mut query: Query<(Entity, &PlayerId, &mut Stats, &EffectAdded), Added<EffectAdded>>,
 ) {
-    for (_entity, player_id, mut stats, effect_added) in query.iter_mut() {
+    for (entity, player_id, mut stats, effect_added) in query.iter_mut() {
         info!("Effect added: {:?}", player_id.0);
         let effect = effect_added.effect.clone();
 
@@ -18073,8 +18142,14 @@ fn effect_added_system(
             .expect("Effect missing from templates");
 
         if let Some(health_modifier) = effect_template.health {
+            let previous_hp = stats.hp;
             let modifier = 1.0 + health_modifier;
             stats.hp = (stats.hp as f32 * modifier) as i32;
+            if stats.hp < previous_hp {
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
+            }
         }
 
         if let Some(stamina_modifier) = effect_template.stamina {

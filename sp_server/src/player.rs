@@ -36,14 +36,18 @@ use crate::network::{
 use crate::obj::{
     is_combat_locked, ActiveTask, Assignment, Assignments, BaseAttrs, BuildProgressUpdate,
     BuildUpgradeState, Campfire, Class, ClassStructure, EndRepeatAction, HeroClass,
-    HeroClassProfile, Id, LastCombatTick, Misc, Name, NewObj, Obj, Order, Personality, PlayerId,
-    Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding,
-    StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager, Template, UpdateObj,
-    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    HeroClassProfile, Id, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, Order,
+    Personality, PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade,
+    State, StateBuilding, StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager,
+    Template, UpdateObj, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::Recipes;
 use crate::resource::{Resource, Resources};
+use crate::safe_logout::{
+    initialize_player_presence, mark_player_logged_in, record_player_combat_activity,
+    PlayerWorldPresenceState,
+};
 use crate::skill::{SkillData, Skills, MAX_RANK};
 use crate::skill_defs::Skill;
 use crate::structure::{self, Plans, Structure, WALL};
@@ -806,6 +810,7 @@ fn new_player_system(
         ResMut<IntroEncounterState>,
         ResMut<InitialEncounterState>,
         ResMut<SettlementCrisisState>,
+        ResMut<PlayerWorldPresenceState>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -898,6 +903,12 @@ fn new_player_system(
                         // system will deterministically create a new Dormant
                         // entry on the next eligible evaluation.
                         run_intro_state.3.remove(player_id);
+                        initialize_player_presence(
+                            *player_id,
+                            clients.is_player_online(*player_id),
+                            game_tick.0,
+                            &mut run_intro_state.4,
+                        );
                         let event_type = GameEventType::Login {
                             player_id: *player_id,
                         };
@@ -953,6 +964,7 @@ fn login_system(
     game_tick: ResMut<GameTick>,
     mut game_events: ResMut<GameEvents>,
     mut ids: ResMut<Ids>,
+    mut presence: ResMut<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -960,6 +972,10 @@ fn login_system(
         match event {
             PlayerEvent::Login { player_id } => {
                 events_to_remove.push(*event_id);
+
+                if clients.is_player_online(*player_id) {
+                    mark_player_logged_in(*player_id, game_tick.0, &mut presence);
+                }
 
                 let event_type = GameEventType::Login {
                     player_id: *player_id,
@@ -1670,6 +1686,9 @@ fn apply_ability_damage(
 ) -> i32 {
     let damage = damage.max(1);
     target.stats.hp -= damage;
+    commands
+        .entity(target.entity)
+        .try_insert(LastDamageTick(game_tick.0));
     actor.last_combat_tick.0 = game_tick.0;
     target.last_combat_tick.0 = game_tick.0;
 
@@ -1765,6 +1784,7 @@ fn attack_system(
     player_stats: ResMut<PlayerStats>,
     mut query_set: ParamSet<(Query<CombatQuery>, Query<ObjQuery>)>,
     mut last_player_attack: Local<HashMap<i32, i32>>,
+    mut presence: ResMut<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -1906,6 +1926,7 @@ fn attack_system(
                     attacker.stats.stamina = Some(attacker_stamina - attack_profile.stamina_cost);
                     attacker.last_combat_tick.0 = game_tick.0;
                     last_player_attack.insert(*player_id, game_tick.0);
+                    record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                     Combat::add_damage_event(
                         game_tick.0,
@@ -1974,6 +1995,7 @@ fn attack_system(
                 // Track player attack cooldown
                 attacker.last_combat_tick.0 = game_tick.0;
                 last_player_attack.insert(*player_id, game_tick.0);
+                record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {
@@ -2328,6 +2350,9 @@ fn attack_system(
                 }
 
                 last_player_attack.insert(*player_id, game_tick.0);
+                if ability_is_damaging(ability) {
+                    record_player_combat_activity(*player_id, game_tick.0, &mut presence);
+                }
                 send_to_client(
                     *player_id,
                     ability_response_packet(*source_id, ability, ability_cost),
@@ -2494,6 +2519,7 @@ fn attack_system(
 
                 // Track player attack cooldown
                 last_player_attack.insert(*player_id, game_tick.0);
+                record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {

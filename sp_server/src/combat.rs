@@ -14,8 +14,8 @@ use crate::map::Map;
 use crate::obj::Obj;
 use crate::obj::{
     is_peaceful_interruptible_state, CancelEvents, Class, HeroClass, Id, LastAttacker,
-    LastCombatTick, Misc, PlayerId, Position, State, StateChange, StateDead, Stats, Subclass,
-    Template,
+    LastCombatTick, LastDamageTick, Misc, PlayerId, Position, State, StateChange, StateDead, Stats,
+    Subclass, Template,
 };
 use crate::skill::{SkillUpdated, Skills};
 use crate::templates::{ComboTemplate, ObjTemplate, Templates};
@@ -403,7 +403,13 @@ impl Combat {
             * monolith_distance_defense_mod;
 
         // 26 Update Hp and check if target is dead
-        target.stats.hp -= final_damage as i32;
+        let dealt_damage = final_damage as i32;
+        target.stats.hp -= dealt_damage;
+        if dealt_damage > 0 {
+            commands
+                .entity(target.entity)
+                .try_insert(LastDamageTick(game_tick.0));
+        }
 
         // 27 Update stamina - reduce by 5 per attack
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
@@ -616,7 +622,13 @@ impl Combat {
             * monolith_distance_defense_mod;
 
         // 26 Update Hp and check if target is dead
-        target.stats.hp -= final_damage as i32;
+        let dealt_damage = final_damage as i32;
+        target.stats.hp -= dealt_damage;
+        if dealt_damage > 0 {
+            commands
+                .entity(target.entity)
+                .try_insert(LastDamageTick(game_tick.0));
+        }
 
         // 27 Update stamina - reduce by 5 per attack
         let attacker_stamina = attacker.stats.stamina.expect("Missing stamina stat");
@@ -713,6 +725,9 @@ impl Combat {
             Spell::ArcaneBolt => 12,
         };
         target.stats.hp -= damage;
+        commands
+            .entity(target.entity)
+            .try_insert(LastDamageTick(game_tick.0));
 
         if target.stats.hp <= 0 {
             *target.state = State::Dead;
