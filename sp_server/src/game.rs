@@ -1129,9 +1129,7 @@ fn crisis_phase_presentation(
     }
 }
 
-pub(crate) fn build_crisis_status(
-    crisis: Option<&SettlementCrisis>,
-) -> CrisisStatusSnapshot {
+pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisStatusSnapshot {
     let Some(crisis) = crisis else {
         return CrisisStatusSnapshot {
             version: CRISIS_STATUS_VERSION,
@@ -1182,8 +1180,7 @@ pub(crate) fn build_crisis_status(
     };
 
     let preparation_seconds_remaining = assault_ready.then(|| {
-        let remaining_ticks =
-            (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
+        let remaining_ticks = (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
         (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
     });
 
@@ -1255,9 +1252,7 @@ pub(crate) fn crisis_status_changed(
 
 fn crisis_transition_notice(phase: CrisisPhase) -> Option<&'static str> {
     match phase {
-        CrisisPhase::Preparing => {
-            Some("Goblin raiders are gathering. Prepare your settlement.")
-        }
+        CrisisPhase::Preparing => Some("Goblin raiders are gathering. Prepare your settlement."),
         CrisisPhase::AssaultReady => Some("A goblin raid is imminent."),
         CrisisPhase::AssaultActive => {
             Some("The goblin assault has begun. It will continue if you disconnect.")
@@ -1278,12 +1273,8 @@ fn crisis_status_delivery_system(
     let active_clients = match clients.lock() {
         Ok(clients) => clients
             .iter()
-            .filter(|(client_id, client)| {
-                **client_id == client.id && !client.sender.is_closed()
-            })
-            .map(|(client_id, client)| {
-                (*client_id, client.player_id, client.sender.clone())
-            })
+            .filter(|(client_id, client)| **client_id == client.id && !client.sender.is_closed())
+            .map(|(client_id, client)| (*client_id, client.player_id, client.sender.clone()))
             .collect::<Vec<_>>(),
         Err(_) => return,
     };
@@ -1292,9 +1283,9 @@ fn crisis_status_delivery_system(
         .map(|(client_id, player_id, _)| (*client_id, *player_id))
         .collect::<HashMap<_, _>>();
 
-    delivery.sent.retain(|client_id, sent| {
-        active_client_players.get(client_id) == Some(&sent.player_id)
-    });
+    delivery
+        .sent
+        .retain(|client_id, sent| active_client_players.get(client_id) == Some(&sent.player_id));
 
     // Track actual phase transitions independently of login snapshots. This
     // prevents a reconnect from replaying historical launch notices.
@@ -1370,8 +1361,7 @@ fn crisis_status_delivery_system(
                     },
                 );
                 if let Some(telemetry) = telemetry_state.get_mut(player_id) {
-                    telemetry.status_packets_sent =
-                        telemetry.status_packets_sent.saturating_add(1);
+                    telemetry.status_packets_sent = telemetry.status_packets_sent.saturating_add(1);
                     if new_connection {
                         telemetry.login_snapshots_sent =
                             telemetry.login_snapshots_sent.saturating_add(1);

@@ -1682,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn true_death_clears_intro_and_personal_crisis_before_a_fresh_run() {
+    fn checkpoint4_true_death_clears_status_before_a_fresh_run() {
         use crate::game::{
             CrisisKind, CrisisPhase, InitialEncounterState, IntroEncounterState,
             PlayerIntroEncounters, PlayerIntroState, SettlementCrisis, SettlementCrisisState,
@@ -1711,10 +1711,27 @@ mod tests {
                 },
             );
         }
-        game.app
-            .world_mut()
-            .resource_mut::<SettlementCrisisState>()
-            .insert(
+        {
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            crises.insert(
+                player_id,
+                SettlementCrisis {
+                    kind: CrisisKind::Goblin,
+                    phase: CrisisPhase::AssaultActive,
+                    pressure: 55,
+                    phase_started_tick: current_tick,
+                    online_active_ticks: 50,
+                    phase_online_ticks: 50,
+                    warning_active: true,
+                    last_evaluated_tick: current_tick,
+                    assault_id: Some(99),
+                    assault_started_tick: Some(current_tick),
+                    assault_unit_ids: vec![999_999],
+                    assault_spawn_generation: 1,
+                    ..SettlementCrisis::default()
+                },
+            );
+            crises.insert(
                 neighbor_id,
                 SettlementCrisis {
                     kind: CrisisKind::Goblin,
@@ -1728,6 +1745,21 @@ mod tests {
                     ..SettlementCrisis::default()
                 },
             );
+        }
+        game.tick(1);
+        let old_statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert_eq!(
+            old_statuses
+                .last()
+                .and_then(|status| status.phase.as_deref()),
+            Some("assault_active")
+        );
+        assert_eq!(
+            old_statuses
+                .last()
+                .and_then(|status| status.remaining_attackers),
+            Some(1)
+        );
 
         let hero = {
             let world = game.app.world_mut();
@@ -1750,6 +1782,12 @@ mod tests {
         ));
 
         game.tick(3);
+        let cleanup_statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert_eq!(cleanup_statuses.len(), 1);
+        assert!(!cleanup_statuses[0].exists);
+        assert!(cleanup_statuses[0].phase.is_none());
+        assert!(cleanup_statuses[0].pressure.is_none());
+        assert!(cleanup_statuses[0].remaining_attackers.is_none());
         assert!(game
             .world()
             .resource::<IntroEncounterState>()
@@ -1803,6 +1841,12 @@ mod tests {
         };
 
         game.spawn_hero("Warrior", "FreshRunBot");
+        let fresh_statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert_eq!(fresh_statuses.len(), 1);
+        assert!(fresh_statuses[0].exists);
+        assert_eq!(fresh_statuses[0].phase.as_deref(), Some("dormant"));
+        assert_eq!(fresh_statuses[0].pressure, Some(0));
+        assert_eq!(fresh_statuses[0].remaining_attackers, None);
         assert!(game.world().get_entity(stale_assault_entity).is_err());
         assert!(!game
             .world()
@@ -1996,6 +2040,212 @@ mod tests {
             final_crisis.pressure,
             automatic_dusk_hordes
         );
+    }
+
+    #[test]
+    fn checkpoint4_normal_packet_progression_and_runtime_telemetry_headless() {
+        use crate::constants::TICKS_PER_SEC;
+
+        let mut game = HeadlessGame::new(30_000);
+        game.spawn_hero("Warrior", "CrisisPacketProgressionBot");
+        prepare_full_crisis_progression_facts(&mut game);
+
+        game.tick(1);
+        for seconds in [60, 120, 180] {
+            game.app.world_mut().resource_mut::<GameTick>().0 =
+                game.game_tick() + seconds * TICKS_PER_SEC;
+            game.tick(1);
+        }
+
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultReady
+        );
+        let preferred_tick = next_preferred_assault_tick(game.game_tick());
+        {
+            use crate::game::ASSAULT_READY_GRACE_TICKS;
+
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&game.player_id).unwrap();
+            crisis.phase_online_ticks = 0;
+            crisis.last_evaluated_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+        }
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched_units = game.crisis_assault_units();
+        assert_eq!(launched_units.len(), 3);
+
+        for unit in launched_units {
+            kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
+        }
+        game.tick(2);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+
+        let statuses = crisis_statuses(game.take_crisis_status_packets());
+        let phases = crisis_phase_sequence(&statuses);
+        assert_eq!(
+            phases,
+            vec![
+                "dormant",
+                "signs",
+                "pressure",
+                "preparing",
+                "assault_ready",
+                "assault_active",
+                "resolved",
+            ]
+        );
+        let remaining = statuses
+            .iter()
+            .filter(|status| status.assault_active)
+            .filter_map(|status| status.remaining_attackers)
+            .collect::<Vec<_>>();
+        assert!(remaining.starts_with(&[3]));
+        assert!(remaining.windows(2).all(|counts| counts[1] <= counts[0]));
+        assert!(remaining.iter().any(|remaining| *remaining < 3));
+        assert_eq!(statuses.iter().filter(|status| status.resolved).count(), 1);
+
+        let telemetry = game.crisis_telemetry();
+        assert_eq!(telemetry.highest_phase, "resolved");
+        assert!(telemetry.signs_tick.is_some());
+        assert!(telemetry.pressure_tick.is_some());
+        assert!(telemetry.preparing_tick.is_some());
+        assert!(telemetry.assault_ready_tick.is_some());
+        assert!(telemetry.assault_active_tick.is_some());
+        assert!(telemetry.resolved_tick.is_some());
+        assert_eq!(telemetry.assaults_launched, 1);
+        assert_eq!(telemetry.assaults_resolved, 1);
+        assert_eq!(telemetry.units_remaining, 0);
+        assert_eq!(telemetry.status_packets_sent as usize, statuses.len());
+        assert_eq!(telemetry.login_snapshots_sent, 1);
+        assert_eq!(telemetry.duplicate_assaults, 0);
+
+        let metrics = game.metrics();
+        assert_eq!(metrics.crisis_highest_phase, "resolved");
+        assert_eq!(metrics.crisis_final_phase, "resolved");
+        assert_eq!(metrics.crisis_assaults_launched, 1);
+        assert_eq!(metrics.crisis_assaults_resolved, 1);
+        assert_eq!(metrics.personal_crisis_automatic_dusk_hordes, 0);
+        assert!(metrics.crisis_invariants_ok);
+
+        println!(
+            "checkpoint4_normal_packet_progression phases={phases:?} remaining_attackers={remaining:?} status_packets={} login_snapshots={} duplicate_assaults={}",
+            telemetry.status_packets_sent,
+            telemetry.login_snapshots_sent,
+            telemetry.duplicate_assaults,
+        );
+    }
+
+    #[test]
+    fn checkpoint4_active_disconnect_reconnect_sends_one_current_snapshot() {
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "CrisisReconnectPacketBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let _ = game.take_crisis_status_packets();
+
+        let units_before = game.crisis_assault_units();
+        game.disconnect_player();
+        game.tick(8);
+        let units_offline = game.crisis_assault_units();
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive
+        );
+        assert_eq!(
+            units_offline
+                .iter()
+                .map(|unit| unit.obj_id)
+                .collect::<Vec<_>>(),
+            units_before
+                .iter()
+                .map(|unit| unit.obj_id)
+                .collect::<Vec<_>>()
+        );
+
+        game.start_packet_capture();
+        game.reconnect_player_with_login();
+        game.tick(8);
+        let reconnect_packets = game.finish_packet_capture();
+        let repeated_launch_notice = reconnect_packets.iter().any(|packet| {
+            matches!(
+                packet,
+                ResponsePacket::Notice { noticemsg, .. }
+                    if noticemsg == "The goblin assault has begun. It will continue if you disconnect."
+            )
+        });
+        assert!(!repeated_launch_notice);
+
+        let statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert_eq!(statuses.len(), 1);
+        let status = &statuses[0];
+        assert_eq!(status.phase.as_deref(), Some("assault_active"));
+        assert!(status.assault_active);
+        assert!(status.continues_while_disconnected);
+        assert_eq!(
+            status.remaining_attackers,
+            Some(units_offline.iter().filter(|unit| !unit.dead).count() as i32)
+        );
+
+        let reconnected = game.settlement_crisis().unwrap();
+        let units_reconnected = game.crisis_assault_units();
+        assert_eq!(reconnected.assault_id, Some(assault_id));
+        assert_eq!(reconnected.assault_spawn_generation, generation);
+        assert_eq!(
+            units_reconnected
+                .iter()
+                .map(|unit| (unit.obj_id, unit.hp))
+                .collect::<Vec<_>>(),
+            units_offline
+                .iter()
+                .map(|unit| (unit.obj_id, unit.hp))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(game.crisis_telemetry().login_snapshots_sent, 2);
+    }
+
+    #[test]
+    fn checkpoint4_offline_resolution_reconnect_first_snapshot_is_resolved() {
+        let mut game = HeadlessGame::new(30_000);
+        game.spawn_hero("Warrior", "CrisisOfflineResolutionPacketBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let helper_player_id = spawn_connected_helper(&mut game, "CrisisResolutionHelper");
+        let unit_ids = game
+            .crisis_assault_units()
+            .iter()
+            .map(|unit| unit.obj_id)
+            .collect::<Vec<_>>();
+        let _ = game.take_crisis_status_packets();
+
+        game.disconnect_player();
+        game.tick(2);
+        for unit_id in unit_ids {
+            kill_assault_unit_through_normal_combat_as(&mut game, helper_player_id, unit_id);
+        }
+        game.tick(2);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert!(game.take_crisis_status_packets().is_empty());
+
+        game.reconnect_player_with_login();
+        game.tick(8);
+        let statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].phase.as_deref(), Some("resolved"));
+        assert!(statuses[0].resolved);
+        assert!(!statuses[0].assault_active);
+        assert_eq!(game.crisis_telemetry().assaults_resolved, 1);
     }
 
     #[test]

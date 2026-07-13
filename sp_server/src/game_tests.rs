@@ -2610,6 +2610,7 @@ fn personal_crisis_test_app() -> App {
     app.insert_resource(PlayerIntroState::default());
     app.insert_resource(Objectives::default());
     app.insert_resource(SettlementCrisisState::default());
+    app.insert_resource(CrisisTelemetryState::default());
     app
 }
 
@@ -3512,7 +3513,10 @@ fn checkpoint4_every_phase_has_a_stable_machine_value_and_severity() {
         assert_eq!(status.kind.as_deref(), Some("goblin"));
         assert_eq!(status.phase.as_deref(), Some(machine_phase));
         assert_eq!(status.severity.as_deref(), Some(severity));
-        assert!(status.title.as_deref().is_some_and(|title| !title.is_empty()));
+        assert!(status
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.is_empty()));
         assert!(status
             .summary
             .as_deref()
@@ -3538,10 +3542,7 @@ fn checkpoint4_status_mapping_is_read_only_and_uses_server_pressure_max() {
 
 #[test]
 fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
-    let preparing = build_crisis_status(Some(&checkpoint4_crisis(
-        CrisisPhase::Preparing,
-        80,
-    )));
+    let preparing = build_crisis_status(Some(&checkpoint4_crisis(CrisisPhase::Preparing, 80)));
     assert!(preparing.warning);
 
     let mut ready_crisis = checkpoint4_crisis(CrisisPhase::AssaultReady, 92);
@@ -3549,7 +3550,10 @@ fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
     let ready = build_crisis_status(Some(&ready_crisis));
     assert!(ready.assault_ready);
     assert_eq!(ready.preparation_seconds_remaining, Some(23));
-    assert_eq!(ready.preferred_launch_window.as_deref(), Some("dusk_or_night"));
+    assert_eq!(
+        ready.preferred_launch_window.as_deref(),
+        Some("dusk_or_night")
+    );
 
     let mut active_crisis = checkpoint4_crisis(CrisisPhase::AssaultActive, 96);
     active_crisis.assault_unit_ids = vec![11, 12, 13];
@@ -3560,10 +3564,7 @@ fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
     assert_eq!(active.total_attackers, Some(3));
     assert!(active.continues_while_disconnected);
 
-    let resolved = build_crisis_status(Some(&checkpoint4_crisis(
-        CrisisPhase::Resolved,
-        96,
-    )));
+    let resolved = build_crisis_status(Some(&checkpoint4_crisis(CrisisPhase::Resolved, 96)));
     assert!(resolved.resolved);
     assert!(!resolved.warning);
     assert!(!resolved.continues_while_disconnected);
@@ -3665,7 +3666,10 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
     assert!(receiver.try_recv().is_err());
 
     app.update();
-    assert!(receiver.try_recv().is_err(), "unchanged snapshot must dedupe");
+    assert!(
+        receiver.try_recv().is_err(),
+        "unchanged snapshot must dedupe"
+    );
 
     // A duplicate delayed Login for the same authenticated connection does not
     // force another identical packet.
@@ -3724,6 +3728,88 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
 }
 
 #[test]
+fn checkpoint4_major_transition_notices_emit_once() {
+    let player_id = 8;
+    let client_id = Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+    let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
+        client_id,
+        Client {
+            id: client_id,
+            player_id,
+            sender,
+        },
+    )]))));
+    let mut crisis_state = SettlementCrisisState::default();
+    crisis_state.insert(player_id, checkpoint4_crisis(CrisisPhase::Pressure, 70));
+    let mut login_sync = CrisisStatusLoginSync::default();
+    login_sync.insert(player_id);
+
+    let mut app = App::new();
+    app.insert_resource(clients);
+    app.insert_resource(SurvivalDirectorConfig::default());
+    app.insert_resource(crisis_state);
+    app.insert_resource(login_sync);
+    app.insert_resource(CrisisStatusDeliveryState::default());
+    app.insert_resource(CrisisTelemetryState::default());
+    app.add_systems(Update, crisis_status_delivery_system);
+
+    app.update();
+    let initial: ResponsePacket =
+        serde_json::from_str(&receiver.try_recv().expect("initial status")).unwrap();
+    assert!(matches!(initial, ResponsePacket::CrisisStatus { .. }));
+    assert!(receiver.try_recv().is_err());
+
+    let transitions = [
+        (
+            CrisisPhase::Preparing,
+            "Goblin raiders are gathering. Prepare your settlement.",
+        ),
+        (CrisisPhase::AssaultReady, "A goblin raid is imminent."),
+        (
+            CrisisPhase::AssaultActive,
+            "The goblin assault has begun. It will continue if you disconnect.",
+        ),
+        (
+            CrisisPhase::Resolved,
+            "The goblin assault has been defeated.",
+        ),
+    ];
+
+    for (phase, expected_notice) in transitions {
+        {
+            let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&player_id).unwrap();
+            crisis.phase = phase;
+            crisis.warning_active = matches!(
+                phase,
+                CrisisPhase::Preparing | CrisisPhase::AssaultReady | CrisisPhase::AssaultActive
+            );
+            if phase == CrisisPhase::AssaultActive {
+                crisis.assault_unit_ids = vec![101, 102, 103];
+            } else {
+                crisis.assault_unit_ids.clear();
+            }
+        }
+
+        app.update();
+        app.update();
+
+        let mut notices = Vec::new();
+        let mut statuses = 0;
+        while let Ok(raw) = receiver.try_recv() {
+            match serde_json::from_str::<ResponsePacket>(&raw).unwrap() {
+                ResponsePacket::Notice { noticemsg, .. } => notices.push(noticemsg),
+                ResponsePacket::CrisisStatus { .. } => statuses += 1,
+                packet => panic!("unexpected transition packet: {packet:?}"),
+            }
+        }
+        assert_eq!(notices, vec![expected_notice]);
+        assert_eq!(statuses, 1, "each transition sends one status snapshot");
+    }
+}
+
+#[test]
 fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
     let player_id = 9;
     let client_id = Uuid::new_v4();
@@ -3746,9 +3832,7 @@ fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
 
     let mut app = App::new();
     app.insert_resource(clients);
-    app.insert_resource(SurvivalDirectorConfig::new(
-        SurvivalDirectorMode::Legacy,
-    ));
+    app.insert_resource(SurvivalDirectorConfig::new(SurvivalDirectorMode::Legacy));
     app.insert_resource(state);
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());

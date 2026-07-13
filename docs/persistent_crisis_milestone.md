@@ -2,8 +2,322 @@
 
 ## Status
 
-Checkpoints 1, 2, and 3 are implemented. Checkpoint 3 is complete in the
-current runtime architecture; Checkpoint 4 remains deferred.
+All four checkpoints are implemented and validated. The persistent personal-
+crisis foundation is complete in the current runtime architecture. This does
+not complete safe logout, offline protection, regional crises, larger worlds,
+or the broader persistent-world redesign.
+
+## Current gameplay contract
+
+Global day/night controls environmental conditions.
+
+Personal settlement danger is controlled by the player's goblin crisis.
+
+Before the assault launches, crisis timing advances only while the player is
+online.
+
+Once the assault launches, it remains active in the persistent world and
+continues if the player disconnects.
+
+Personal-crisis attackers may affect only the owning player's settlement and
+associated units.
+
+Defeating all attributed attackers resolves the crisis exactly once.
+
+## Checkpoint 4 implementation record
+
+Checkpoint 4 adds only the crisis protocol, delivery synchronization, compact
+desktop Survival Thread presentation, runtime telemetry, runner reporting, and
+final validation. It does not change the Checkpoint 2 state machine, the
+Checkpoint 3 assault lifecycle, the director default, the map, the economy, or
+the committed `AssaultActive` disconnect rule.
+
+### Architecture findings
+
+* The server's authoritative phases remain `Dormant`, `Signs`, `Pressure`,
+  `Preparing`, `AssaultReady`, `AssaultActive`, and `Resolved`. Goblin pressure
+  remains clamped to `0..=100`, with transition thresholds 20, 45, 70, and 90.
+  The per-phase online minima remain 0, 600, 1,200, and 1,800 ticks at ten
+  ticks per second. The launch grace remains 300 online ticks, the maximum
+  online wait remains 1,200 ticks, and the preferred window remains dusk or
+  night.
+* `SettlementCrisisState` remains the gameplay source of truth. The status
+  builder reads it without mutating phase, pressure, warning, assault identity,
+  generation, timers, or unit bookkeeping. During `AssaultActive`, logical
+  remaining attackers are the current generation's tracked object IDs minus
+  IDs with authoritative normal-death evidence.
+* Outgoing packets use `ResponsePacket`'s existing internally tagged Serde
+  representation. A flattened, `skip_serializing_none` crisis snapshot gives a
+  stable top-level `packet: "crisis_status"` payload and omits absent optional
+  fields instead of sending `null`.
+* Authentication inserts a fresh connection UUID and `Client` before queuing
+  `PlayerEvent::Login`. The player message broker schedules the existing
+  delayed `GameEventType::Login`; `game_event_system` sends map/world state and
+  requests initial perception at that established synchronization point.
+  Crisis login synchronization is attached there rather than inventing a
+  second login path.
+* One player may briefly have more than one connection record during session
+  replacement. A player-only last-snapshot cache would therefore either miss a
+  reconnect or resend to the old connection. Delivery is cached per live
+  connection UUID and records its player ID and last successfully sent
+  snapshot.
+* `AssaultActive` remains the commitment point. The lifecycle continues to
+  evaluate matching attributed units while the owner is offline, and ordinary
+  combat by villagers or connected helpers may resolve the assault. Status
+  delivery observes this state but never launches, heals, despawns, rebuilds,
+  pauses, or resolves units.
+* True Death and successful new-run setup already remove the old run's crisis
+  state. The delivery system runs after True Death, crisis evaluation, assault
+  lifecycle, and the delayed login event, so the same authoritative mapping
+  emits a clear state or the new run's fresh state.
+* The desktop Survival Thread is component-local event-driven UI. It already
+  owns objective, threat, discovery, and compact expansion state; adding crisis
+  state there avoids an unrelated Redux or global-store redesign. The generic
+  threat-risk details were already intentionally hidden and remain hidden.
+* The headless harness uses the production gameplay plugins, a real `Clients`
+  map, production `PlayerEvent` input, and deterministic direct tick control.
+  It previously drained all outgoing packets, so Checkpoint 4 retains only the
+  sparse `crisis_status` stream by default and provides bounded opt-in capture
+  for short notice assertions.
+* Crisis state and phase telemetry remain runtime-only, matching the existing
+  prototype run architecture. No current coherent snapshot or database path
+  persists the complete introduction, start assignment, objectives, assault
+  identity, and per-run cleanup graph, so Checkpoint 4 deliberately adds no
+  partial database migration.
+
+### Files changed for Checkpoint 4
+
+* `sp_server/src/network.rs` — versioned response snapshot, flattened packet
+  variant, and serialization tests.
+* `sp_server/src/game.rs` — centralized presentation, meaningful-change policy,
+  per-connection delivery cache, delayed-login synchronization, transition
+  notices, phase/assault telemetry, and schedule ordering.
+* `sp_server/src/game_tests.rs` — presentation, throttling, delivery, reconnect,
+  clear-state, legacy-mode, and direct-system fixture coverage.
+* `sp_server/src/headless.rs` — sparse packet capture, production-faithful
+  reconnect helper, runtime metrics, and the four end-to-end scenarios.
+* `sp_server/src/bin/headless_runner.rs` — appended CSV/JSON fields and aggregate
+  crisis reporting.
+* `sp_frontend/sp_ts/src/sp/core/crisisStatus.ts` — typed display and compact-
+  expansion helpers.
+* `sp_frontend/sp_ts/src/sp/core/crisisStatus.test.ts` — 26 focused pure-helper
+  assertions.
+* `sp_frontend/sp_ts/src/sp/core/network.ts` — typed crisis response packet and
+  dispatcher integration.
+* `sp_frontend/sp_ts/src/sp/core/networkEvent.ts` — `CRISIS_STATUS` event name.
+* `sp_frontend/sp_ts/src/sp/desktop/ui/objectivesPanel.tsx` — compact crisis
+  card, lifecycle clearing, responsive collapsed priority, and accessibility.
+* `docs/persistent_crisis_milestone.md` — corrected final contract and this
+  implementation/validation record.
+
+`player.rs`, `event.rs`, `headless_bot.rs`, `global.ts`, Notice rendering,
+mobile UI, package configuration, the economy, database, map, deployment, and
+infrastructure were inspected or reused and did not require Checkpoint 4
+semantic changes.
+
+### Packet schema and presentation
+
+The wire payload is flat and versioned from one:
+
+| Field | Wire type | Meaning |
+| --- | --- | --- |
+| `packet` | `"crisis_status"` | Stable tagged-packet discriminator |
+| `version` | integer | Schema version, currently `1` |
+| `exists` | boolean | Whether this run has a personal crisis |
+| `kind` | optional string | Stable machine kind, currently `goblin` |
+| `phase` | optional string | Stable snake-case phase |
+| `pressure`, `pressure_max` | optional integer | Exact server pressure and server model maximum |
+| `title`, `summary`, `action_hint` | optional string | Centralized player-facing copy |
+| `severity` | optional string | `quiet`, `low`, `medium`, `high`, `crisis`, or `resolved` |
+| `warning` | boolean | Authoritative warning state |
+| `assault_ready`, `assault_active`, `resolved` | boolean | Direct display state |
+| `remaining_attackers`, `total_attackers` | optional integer | Logical current-generation counts while active |
+| `preparation_seconds_remaining` | optional integer | Ceil-rounded ready-grace countdown |
+| `preferred_launch_window` | optional string | `dusk_or_night` while ready |
+| `continues_while_disconnected` | boolean | True only for `AssaultActive` |
+
+No ECS entity ID, object ID, assault ID, generation, target, or cleanup flag is
+exposed. A no-crisis snapshot contains `version: 1`, `exists: false`, the false
+state booleans, and no optional crisis fields. TypeScript accepts unknown
+future fields and maps unknown future phase values to a neutral display.
+
+The single server presentation mapping is:
+
+| Phase | Title | Severity | Action emphasis |
+| --- | --- | --- | --- |
+| `dormant` | No Organized Threat | quiet | Continue establishing your camp |
+| `signs` | Goblin Signs | low | Build supplies and improve defenses |
+| `pressure` | Goblin Pressure | medium | Prepare weapons, healing, walls, and defenders |
+| `preparing` | Raiders Gathering | high | Finish repairs, equipment, and supplies |
+| `assault_ready` | Goblin Raid Imminent | crisis | Return and prepare for the assault |
+| `assault_active` | Settlement Under Attack | crisis | Defeat attackers; disconnect does not stop it |
+| `resolved` | Goblin Raid Defeated | resolved | Recover, repair, and rebuild |
+
+### Status delivery, deduplication, and warnings
+
+`CrisisStatusDeliveryState` stores the last successfully sent snapshot for each
+live connection UUID. Closed, replaced, or player-mismatched connection entries
+are purged. A channel-full or failed send is not cached and remains retryable.
+Every structural change sends immediately, including creation, clear state,
+phase, warning, ready/active/resolved flags, attacker counts, launch window, and
+copy. Pressure sends after a cumulative difference of at least five from the
+last successful packet. The ready countdown sends after a cumulative five-
+second difference. Phase transitions, login, reconnect, launch, and resolution
+therefore always carry exact current values without a per-tick stream.
+
+An independent observed-phase map is used only to identify actual transitions;
+it is updated even while the owner is offline. The existing Notice channel
+therefore emits exactly the following major notices to an online owner and does
+not reconstruct historical notices from a login snapshot:
+
+* Preparing: `Goblin raiders are gathering. Prepare your settlement.`
+* AssaultReady: `A goblin raid is imminent.`
+* AssaultActive: `The goblin assault has begun. It will continue if you disconnect.`
+* Resolved: `The goblin assault has been defeated.`
+
+Pressure updates do not create notices. The structured status packet remains
+authoritative.
+
+### Login, reconnect, cleanup, and legacy behavior
+
+The delayed Login event marks the player for synchronization. Each new live
+connection receives one exact current snapshot; duplicate Login events for an
+already cached connection do not resend it. Reconnect does not modify crisis
+state and does not invoke launch logic, replace the assault ID or generation,
+heal units, restore grace, or replay the launch notice. An active reconnect
+reports the existing remaining attackers and the disconnect-continuation flag.
+If villagers or a helper resolve the assault offline, the first reconnect
+snapshot is `resolved`.
+
+True Death removal sends `exists: false` to a still-live connection, and fresh
+run creation sends its new `dormant` state with zero pressure and no attacker
+counts. No old phase, pressure, assault identity, or unit count is copied into
+the new run. In legacy director mode the same protocol sends only a no-crisis
+clear snapshot; it does not present legacy automatic threats as a personal
+crisis. Legacy scheduling itself remains unchanged.
+
+### Client behavior
+
+The network dispatcher emits the complete typed packet through
+`NetworkEvent.CRISIS_STATUS`. The Survival Thread stores it locally, clears it
+on `exists: false`, True Death, class/new-run selection, first-login reset, and
+hero-ID replacement, and preserves same-hero phase history through an ordinary
+reconnect. It renders whenever an objective or crisis exists, so a crisis card
+survives completion of all objectives.
+
+The card displays server title, human phase, summary, action hint, clamped
+server-pressure value and bar, ready countdown, active remaining/total attacker
+count, resolution state, and the visible sentence `The assault continues while
+disconnected.` The compact collapsed header prioritizes imminent or active
+crisis state. `Preparing`, `AssaultReady`, and `AssaultActive` each auto-expand
+once on entry; a duplicate same-phase packet respects a player's later manual
+collapse.
+
+The wide and compact desktop layouts continue sharing the existing panel and
+pointer-event behavior. The card uses a labelled region, phase text in addition
+to static color, restrained phase-specific borders, phase-change `aria-live`,
+and an accessible labelled progress bar with a readable value. No flashing or
+continuous urgent animation is added. The generic verbose threat-risk list
+remains hidden.
+
+### Headless telemetry and runner schema
+
+The runtime telemetry records the highest phase; first ticks for Signs,
+Pressure, Preparing, AssaultReady, AssaultActive, and Resolved; assaults
+launched and resolved; duplicate launch attempts; successful status packets;
+and login snapshots. Final metrics add current phase, pressure, and logical
+units remaining. This is observation-only state and never drives gameplay.
+
+The runner preserves the original first 31 CSV/JSON fields in their original
+order and appends 17 fields: `crisis_highest_phase`, `crisis_final_phase`,
+`crisis_final_pressure`, six phase-entry ticks, assaults launched/resolved,
+units remaining, status packets, login snapshots, duplicate assaults,
+personal-mode automatic dusk hordes, and a crisis invariant result. The console
+adds launch/resolve rates, completion, duplicate and dusk-horde totals,
+invariant failures, highest-phase counts, and mean phase-entry ticks where a
+sample exists. Panic reporting remains present.
+
+### Tests and final validation
+
+Final server validation from `sp_server/`:
+
+* `cargo fmt --check` — passed after applying Rustfmt to the new Rust code.
+* `cargo check` — passed; its emitted output retained the existing unused
+  `net_error` macro warning.
+* `cargo check --bin headless_runner` — passed with the existing 74-warning
+  library set.
+* `cargo test checkpoint4 -- --nocapture` — passed 14 tests, with 312 filtered
+  out. The ordered functional scenario emitted phases `dormant`, `signs`,
+  `pressure`, `preparing`, `assault_ready`, `assault_active`, and `resolved`;
+  active remaining counts included 3, 2, and 1; ten status packets, one initial
+  login snapshot, and zero duplicate assaults were recorded. The four major
+  transition notices each emitted exactly once under duplicate evaluation.
+* `cargo test checkpoint2 -- --nocapture` — passed its focused headless test,
+  with 324 filtered out.
+* `cargo test checkpoint3 -- --nocapture` — passed all 21 focused tests, with
+  304 filtered out.
+* `cargo test` — passed all 326 library tests and all 6 day-system integration
+  tests; the one documentation test remains intentionally ignored.
+* `cargo clippy --all-targets --all-features` — passed with the existing lint
+  backlog: 1,332 library warnings and 1,345 library-test warnings, including
+  1,332 duplicates. The one new runner closure warning found on the first pass
+  was corrected before the final pass.
+* `cargo run --bin headless_runner -- 3 6000` — completed all three bounded
+  runs at tick 6,007 with `MaxTicks`; all reached Signs, none naturally reached
+  later phases, and launches, resolutions, duplicate assaults, personal-mode
+  automatic dusk hordes, and panics were all zero. Mean absolute Signs entry
+  tick was 6,611; later phase means were correctly reported as unavailable.
+  CSV and JSON each contained three rows and the same 48-field schema, with the
+  original first 31 columns unchanged.
+* `git diff --check` — passed as the final repository check.
+
+Final client validation from `sp_frontend/sp_ts/`:
+
+* The focused pure-helper TypeScript compile and Node execution passed all 26
+  assertions.
+* `npx tsc --noEmit --skipLibCheck` — passed.
+* `npx webpack --mode production --stats=errors-warnings` — both desktop and
+  mobile production bundles compiled. Each retained the three existing asset-
+  size, entrypoint-size, and code-splitting performance warnings; output sizes
+  were 3.34 MiB desktop and 2.41 MiB mobile.
+* Plain `npx tsc --noEmit` remains blocked by the pre-existing generated
+  `src/phaser.d.ts` and package Phaser declaration collision (`TS6200` and
+  `TS2432`) plus the generated file's missing `./matter` reference (`TS2688`).
+  Checkpoint 4 did not alter generated Phaser declarations or TypeScript
+  configuration; the skip-lib-check compile and production webpack builds are
+  the finite supported validations used here.
+
+Two intermediate server failures improved the final fixtures. The first new
+normal-progression headless test crossed the maximum-wait fallback during a
+manual tick jump; its deterministic ready watermark was corrected to exactly
+one grace interval before dusk. The first full `cargo test` then passed 323 of
+325 library tests and exposed two direct-system fixtures missing the new
+runtime telemetry resource; the shared fixture now initializes it, and the
+final full suite passed. The first Rustfmt check also reported formatting-only
+differences that were formatted before final validation.
+
+### Known limitations and deferred work
+
+* Crisis and telemetry state remain process-memory-only; there is no database
+  migration or coherent full run snapshot in this checkpoint.
+* The repository has no configured TypeScript component/DOM test harness. Pure
+  display/expansion helpers are tested and both production bundles compile, but
+  the card was not browser-automation tested.
+* The new card is in the requested desktop Survival Thread. The distinct mobile
+  objective UI remains unchanged.
+* The bounded runner sample did not naturally reach Pressure or an assault. It
+  validates telemetry shape and personal-mode invariants but supports no later-
+  phase pacing or balance conclusion; deterministic headless scenarios provide
+  the functional lifecycle validation.
+* Ordinary disconnect remains unsafe after `AssaultActive`: combat and world
+  damage continue. Missing tracked-unit recovery still requires a future
+  deterministic administrative policy.
+* Explicit safe logout, offline protection/production/shops, distress beacons,
+  assistance rewards, participant scaling, party/guild systems, regional
+  crises or strongholds, more crisis families, Fire Dragon redesign, a full
+  quest journal or leaderboard redesign, larger maps, 25-player worlds,
+  cross-world systems, database persistence redesign, and resource-system
+  simplification remain out of scope.
 
 ## Checkpoint 3 implementation record
 
@@ -85,12 +399,12 @@ larger maps, or cross-world systems.
   player who already had an assigned start or live hero. It now rejects that
   duplicate before setup so a queued or repeated class-selection event cannot
   erase or replace an active run's assault state.
-* `headless.rs` already provides real client presence, disconnect/reconnect,
+* `headless.rs` already provided real client presence, disconnect/reconnect,
   direct tick control, full plugin scheduling, and normal `PlayerEvent` input.
-  The deterministic scenario can inspect attributed unit identity, health,
-  position, and targets across disconnect/reconnect and can drive ordinary
-  owner, helper, and villager combat. Runner CSV/JSON metrics remain unchanged
-  for Checkpoint 4.
+  The Checkpoint 3 deterministic scenario can inspect attributed unit identity,
+  health, position, and targets across disconnect/reconnect and can drive
+  ordinary owner, helper, and villager combat. Checkpoint 4 subsequently
+  extended its packet capture and the runner's CSV/JSON metrics.
 
 ### Files changed for Checkpoint 3 and its corrective addendum
 
@@ -346,17 +660,17 @@ two overly broad snapshot assertions. The import, action construction, and
 assertions were corrected, then the applicable commands above were rerun to
 their recorded passing results.
 
-### Deferred Checkpoint 4 work and known limitations
+### Checkpoint 4 completion and remaining limitations
 
-Checkpoint 4 still owns the dedicated crisis-status packet, client UI,
-reconnect snapshot/UI state, final crisis telemetry, and any player-facing
-reward presentation. Headless runner CSV/JSON schemas are intentionally
-unchanged. Crisis persistence remains limited by the prototype's existing
-runtime-only per-run state. Spawn selection is intentionally randomized among
-bounded valid candidates, although all asserted invariants are deterministic.
-An ordinary disconnect provides no protection after `AssaultActive`: current
-combat and settlement damage continue, and no damage is rolled back. A missing
-tracked unit deliberately leaves the crisis unresolved and requires a future
+Checkpoint 4 subsequently added the dedicated crisis-status packet, reconnect
+snapshot/UI state, compact desktop client presentation, and runtime runner
+telemetry documented above. It did not add a player-facing material reward.
+Crisis persistence remains limited by the prototype's existing runtime-only
+per-run state. Spawn selection is intentionally randomized among bounded valid
+candidates, although all asserted invariants are deterministic. An ordinary
+disconnect provides no protection after `AssaultActive`: current combat and
+settlement damage continue, and no damage is rolled back. A missing tracked
+unit deliberately leaves the crisis unresolved and requires a future
 administrative or deterministic recovery path. Specialized theft/torch
 behaviours remain available to legacy systems but are not part of this personal
 wave. The ordinary personal-assault brain does not attack storage or monolith
@@ -686,8 +1000,8 @@ intentionally did not satisfy those later lifecycle items. Checkpoint 3
 subsequently added the warning grace/launch policy, assault identity and unit
 attribution, online-only launch, committed disconnect handling, cleanup, and
 idempotent resolution.
-Checkpoint 4 remains responsible for structured network status, reconnect
-delivery, client UI, and full headless crisis metrics.
+Checkpoint 4 subsequently added structured network status, reconnect delivery,
+the compact desktop client UI, and full runtime headless crisis metrics.
 
 ## Purpose
 

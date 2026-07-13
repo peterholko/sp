@@ -4273,8 +4273,7 @@ mod tests {
         status.title = Some("Settlement Under Attack".to_string());
         status.summary = Some("Goblin raiders are attacking your settlement.".to_string());
         status.action_hint = Some(
-            "Defeat the remaining attackers. This assault continues if you disconnect."
-                .to_string(),
+            "Defeat the remaining attackers. This assault continues if you disconnect.".to_string(),
         );
         status.severity = Some("crisis".to_string());
         status.warning = true;

@@ -319,8 +319,7 @@ fn print_summary(results: &[RunMetrics]) {
         .sum::<i32>();
     let invariant_failures = results.iter().filter(|m| !m.crisis_invariants_ok).count();
 
-    let mean =
-        |f: &dyn Fn(&RunMetrics) -> f64| -> f64 { results.iter().map(|m| f(m)).sum::<f64>() / n };
+    let mean = |f: &dyn Fn(&RunMetrics) -> f64| -> f64 { results.iter().map(f).sum::<f64>() / n };
 
     let mut ticks: Vec<i32> = results.iter().map(|m| m.ticks).collect();
     ticks.sort_unstable();
