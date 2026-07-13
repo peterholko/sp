@@ -1763,7 +1763,6 @@ fn attack_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_stats: ResMut<PlayerStats>,
-    crisis_assault_query: Query<&CrisisAssaultUnit>,
     mut query_set: ParamSet<(Query<CombatQuery>, Query<ObjQuery>)>,
     mut last_player_attack: Local<HashMap<i32, i32>>,
 ) {
@@ -1795,13 +1794,6 @@ fn attack_system(
                     error!("Cannot find target entity from id: {:?}", target_id);
                     continue;
                 };
-
-                if crisis_assault_query
-                    .get(target_entity)
-                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
-                {
-                    continue;
-                }
 
                 let entities = [attacker_entity, target_entity];
 
@@ -2131,13 +2123,6 @@ fn attack_system(
                     continue;
                 };
 
-                if crisis_assault_query
-                    .get(target_entity)
-                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
-                {
-                    continue;
-                }
-
                 if ability.effect == AbilityEffect::Disengage {
                     let obj_query = query_set.p1();
                     let (Ok(attacker), Ok(target)) =
@@ -2380,13 +2365,6 @@ fn attack_system(
                     error!("Cannot find target entity from id: {:?}", target_id);
                     continue;
                 };
-
-                if crisis_assault_query
-                    .get(target_entity)
-                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
-                {
-                    continue;
-                }
 
                 let entities = [attacker_entity, target_entity];
 

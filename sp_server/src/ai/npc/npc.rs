@@ -100,6 +100,15 @@ impl VisibleTarget {
     }
 }
 
+fn personal_assault_allows_target_owner(
+    assault: Option<&CrisisAssaultUnit>,
+    target_owner: Option<i32>,
+) -> bool {
+    assault
+        .map(|assault| target_owner == Some(assault.owner_player_id))
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,8 +119,8 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::constants::{
-        CLASS_CORPSE, CLASS_STRUCTURE, CLASS_UNIT, NORMAL_SCORE, NPC_PLAYER_ID, SUBCLASS_CORPSE,
-        SUBCLASS_NPC, TICKS_PER_SEC, URGENT_SCORE,
+        CLASS_CORPSE, CLASS_STRUCTURE, CLASS_UNIT, MONOLITH_PLAYER_ID, NORMAL_SCORE, NPC_PLAYER_ID,
+        SUBCLASS_CORPSE, SUBCLASS_NPC, TICKS_PER_SEC, URGENT_SCORE,
     };
     use crate::event::{EventExecuting, EventExecutingState};
     use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
@@ -692,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn personal_assault_target_scorer_stays_with_the_attributed_owner() {
+    fn checkpoint3_personal_assault_target_scorer_stays_with_the_attributed_owner() {
         let mut app = setup_target_scorer_app();
         let (npc_entity, scorer_entity) =
             spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
@@ -704,16 +713,39 @@ mod tests {
                 spawn_generation: 1,
             });
 
-        // Another player's unit is closer, but explicit assault attribution is
-        // authoritative for the attacker's target selection.
-        for (id, player_id, x) in [(1, 1, 1), (2, 2, 3)] {
+        // Another player's hero and villager are closer, but explicit assault
+        // attribution is authoritative for the attacker's target selection.
+        for (id, player_id, x, subclass) in [
+            (1, 1, 1, Subclass::Hero),
+            (3, 1, 2, Subclass::Villager),
+            (2, 2, 3, Subclass::Hero),
+        ] {
             app.world_mut().spawn((
                 Id(id),
                 PlayerId(player_id),
                 Position { x, y: 0 },
                 State::None,
                 Class(CLASS_UNIT.to_string()),
-                Subclass::from_str("soldier"),
+                subclass,
+                empty_effects(),
+                test_stats(),
+            ));
+        }
+
+        // Storage and sanctuary objects are never generic-combat targets. A
+        // cross-owner wall is also excluded from the attributed wall set.
+        for (id, player_id, x, subclass) in [
+            (4, 1, 4, Subclass::Wall),
+            (5, 1, 5, Subclass::Storage),
+            (6, MONOLITH_PLAYER_ID, 6, Subclass::Monolith),
+        ] {
+            app.world_mut().spawn((
+                Id(id),
+                PlayerId(player_id),
+                Position { x, y: 0 },
+                State::None,
+                Class(CLASS_STRUCTURE.to_string()),
+                subclass,
                 empty_effects(),
                 test_stats(),
             ));
@@ -737,6 +769,163 @@ mod tests {
                 .get(),
             NORMAL_SCORE / 100.0
         );
+    }
+
+    #[test]
+    fn checkpoint3_personal_assault_target_scorer_rejects_a_cross_owner_fortifier() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        app.world_mut()
+            .entity_mut(npc_entity)
+            .insert(CrisisAssaultUnit {
+                owner_player_id: 2,
+                assault_id: 11,
+                spawn_generation: 1,
+            });
+
+        let owner_hero = app
+            .world_mut()
+            .spawn((
+                Id(2),
+                PlayerId(2),
+                Position { x: 2, y: 0 },
+                State::None,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                fortified_effects(),
+                test_stats(),
+                Fortified { id: 9 },
+            ))
+            .id();
+        let foreign_wall = app
+            .world_mut()
+            .spawn((
+                Id(9),
+                PlayerId(1),
+                Position { x: 3, y: 0 },
+                State::None,
+                Class(CLASS_STRUCTURE.to_string()),
+                Subclass::Wall,
+                empty_effects(),
+                wall_stats(50),
+            ))
+            .id();
+        {
+            let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+            entity_map.new_obj(2, owner_hero);
+            entity_map.new_obj(9, foreign_wall);
+        }
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .unwrap()
+                .target,
+            NO_TARGET
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn checkpoint3_personal_assault_action_owner_check_rejects_cross_player_and_neutral_targets() {
+        let assault = CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 11,
+            spawn_generation: 1,
+        };
+
+        assert!(personal_assault_allows_target_owner(
+            Some(&assault),
+            Some(7)
+        ));
+        for (_kind, owner) in [
+            ("other hero", Some(8)),
+            ("other villager", Some(8)),
+            ("other wall", Some(8)),
+            ("other storage", Some(8)),
+            ("neutral sanctuary", Some(MONOLITH_PLAYER_ID)),
+            ("missing object", None),
+        ] {
+            assert!(!personal_assault_allows_target_owner(Some(&assault), owner));
+        }
+        assert!(personal_assault_allows_target_owner(None, Some(8)));
+    }
+
+    #[test]
+    fn checkpoint3_personal_assault_target_installation_rejects_every_foreign_target_kind() {
+        for (kind, owner, class, subclass) in [
+            ("hero", 8, CLASS_UNIT, Subclass::Hero),
+            ("villager", 8, CLASS_UNIT, Subclass::Villager),
+            ("wall", 8, CLASS_STRUCTURE, Subclass::Wall),
+            ("storage", 8, CLASS_STRUCTURE, Subclass::Storage),
+            ("structure", 8, CLASS_STRUCTURE, Subclass::Campfire),
+            (
+                "sanctuary",
+                MONOLITH_PLAYER_ID,
+                CLASS_STRUCTURE,
+                Subclass::Monolith,
+            ),
+        ] {
+            let mut app = App::new();
+            app.add_systems(Update, set_attack_target_system);
+            app.world_mut().insert_resource(GameTick(1));
+            app.world_mut().insert_resource(MapEvents::default());
+            let mut ids = Ids::default();
+            ids.new_obj(42, owner);
+            app.world_mut().insert_resource(ids);
+
+            let npc = app
+                .world_mut()
+                .spawn((
+                    Id(100),
+                    VisibleTarget::new(42),
+                    SubclassNPC,
+                    CrisisAssaultUnit {
+                        owner_player_id: 7,
+                        assault_id: 11,
+                        spawn_generation: 1,
+                    },
+                ))
+                .id();
+            app.world_mut()
+                .spawn((Id(42), PlayerId(owner), Class(class.to_string()), subclass));
+            let action = app
+                .world_mut()
+                .spawn((Actor(npc), ActionState::Requested, SetAttackTarget))
+                .id();
+
+            app.update();
+
+            assert_eq!(
+                *app.world().entity(action).get::<ActionState>().unwrap(),
+                ActionState::Failure,
+                "foreign {kind} must fail before target installation"
+            );
+            assert_eq!(
+                app.world()
+                    .entity(npc)
+                    .get::<VisibleTarget>()
+                    .unwrap()
+                    .target,
+                NO_TARGET,
+                "foreign {kind} must be cleared"
+            );
+            assert!(
+                app.world().entity(npc).get::<Target>().is_none(),
+                "foreign {kind} must never become an attack target"
+            );
+        }
     }
 
     #[test]
@@ -1468,9 +1657,10 @@ pub fn target_scorer_system(
                     target_stats,
                 )| {
                     if !player::is_player(target_player.0)
-                        || crisis_assault
-                            .map(|assault| assault.owner_player_id != target_player.0)
-                            .unwrap_or(false)
+                        || !personal_assault_allows_target_owner(
+                            crisis_assault,
+                            Some(target_player.0),
+                        )
                         || Obj::is_dead(target_state)
                         || target_class.0 != CLASS_STRUCTURE
                         || *target_subclass != Subclass::Wall
@@ -1534,10 +1724,7 @@ pub fn target_scorer_system(
 
             // Personal-assault attackers pressure only their owning
             // settlement. Nearby players remain free to attack and assist.
-            if crisis_assault
-                .map(|assault| assault.owner_player_id != target_player.0)
-                .unwrap_or(false)
-            {
+            if !personal_assault_allows_target_owner(crisis_assault, Some(target_player.0)) {
                 continue;
             }
 
@@ -1749,6 +1936,27 @@ pub fn target_scorer_system(
                 });
                 continue;
             };
+
+            let fortifier_owner = entity_map
+                .get_entity(fortifier.id)
+                .and_then(|entity| target_query.get(entity).ok())
+                .map(|(_, player_id, ..)| player_id.0);
+            if !personal_assault_allows_target_owner(crisis_assault, fortifier_owner) {
+                span.span().in_scope(|| {
+                    npc_warn!(
+                        *actor,
+                        obj_id,
+                        Some(npc_template_name.0.as_str()),
+                        "Rejecting personal-assault fortification id={} owner={:?} expected_owner={:?}",
+                        fortifier.id,
+                        fortifier_owner,
+                        crisis_assault.map(|assault| assault.owner_player_id)
+                    );
+                });
+                npc_visible_target.target = NO_TARGET;
+                score.set(0.0);
+                continue;
+            }
 
             npc_visible_target.target = fortifier.id;
             score.set(NORMAL_SCORE / 100.0);
@@ -2479,8 +2687,10 @@ pub fn wolf_blocked_hide_scorer_system(
 pub fn set_attack_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
     mut map_events: ResMut<MapEvents>,
-    visible_target_query: Query<(&VisibleTarget, &Id), With<SubclassNPC>>,
+    mut visible_target_query: Query<(&mut VisibleTarget, &Id), With<SubclassNPC>>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
     mut query: Query<(&Actor, &mut ActionState, &SetAttackTarget)>,
     mut alerted_npcs: Local<std::collections::HashSet<Entity>>,
 ) {
@@ -2495,9 +2705,30 @@ pub fn set_attack_target_system(
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting attack target...");
-                let Ok((visible_target, npc_id)) = visible_target_query.get(*actor) else {
+                let Ok((mut visible_target, npc_id)) = visible_target_query.get_mut(*actor) else {
                     continue;
                 };
+
+                let assault = crisis_assault_query.get(*actor).ok();
+                if !personal_assault_allows_target_owner(
+                    assault,
+                    ids.get_player(visible_target.target),
+                ) {
+                    npc_warn!(
+                        *actor,
+                        Some(npc_id.0),
+                        None,
+                        "Rejecting personal-assault target id={} owner={:?} expected_owner={:?}",
+                        visible_target.target,
+                        ids.get_player(visible_target.target),
+                        assault.map(|assault| assault.owner_player_id)
+                    );
+                    visible_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    alerted_npcs.remove(actor);
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 npc_info!(
                     *actor,
@@ -4299,17 +4530,6 @@ pub fn attack_target_system(
     for (Actor(actor), mut state, _chase_attack) in &mut query {
         match *state {
             ActionState::Requested => {
-                if let Ok(assault) = telegraph.crisis_assault_units.get(*actor) {
-                    // Presence is authoritative at the action boundary as well
-                    // as in the lifecycle system. This prevents an attack that
-                    // was already requested from landing on the first update
-                    // that observes the owner disconnected.
-                    if !telegraph.clients.is_player_online(assault.owner_player_id) {
-                        *state = ActionState::Failure;
-                        continue;
-                    }
-                }
-
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
@@ -4349,6 +4569,23 @@ pub fn attack_target_system(
                     continue;
                 };
 
+                let assault = telegraph.crisis_assault_units.get(*actor).ok();
+                if !personal_assault_allows_target_owner(assault, Some(target.player_id.0)) {
+                    npc_warn!(
+                        *actor,
+                        obj_id,
+                        npc_name,
+                        "Rejecting personal-assault action target id={} owner={} expected_owner={:?}",
+                        target.id.0,
+                        target.player_id.0,
+                        assault.map(|assault| assault.owner_player_id)
+                    );
+                    visible_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 let npc_template = templates
                     .obj_templates
                     .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
@@ -4377,6 +4614,24 @@ pub fn attack_target_system(
                 // Check if target is fortified
                 if target.effects.has(Effect::Fortified) {
                     if let Ok(fortification) = fortified_query.get(target.entity) {
+                        if !personal_assault_allows_target_owner(
+                            assault,
+                            ids.get_player(fortification.id),
+                        ) {
+                            npc_warn!(
+                                *actor,
+                                obj_id,
+                                npc_name,
+                                "Rejecting personal-assault fortification id={} owner={:?} expected_owner={:?}",
+                                fortification.id,
+                                ids.get_player(fortification.id),
+                                assault.map(|assault| assault.owner_player_id)
+                            );
+                            visible_target.target = NO_TARGET;
+                            commands.entity(*actor).try_remove::<Target>();
+                            *state = ActionState::Failure;
+                            continue;
+                        }
                         npc_debug!(
                             *actor,
                             obj_id,

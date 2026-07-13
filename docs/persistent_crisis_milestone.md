@@ -42,8 +42,9 @@ larger maps, or cross-world systems.
   first personal assault brain. Their scorers search all players' structures
   without owner filtering; the steal scorer also reads the NPC inventory while
   deciding whether a target has loot. More importantly, a Pillager torch event
-  creates indefinite `Burning` damage that continues after the attacker is
-  removed. Despawning that attacker on disconnect cannot roll the fire back.
+  creates indefinite `Burning` damage. The personal assault therefore retains
+  the ordinary owner-filtered combat brain and does not install theft or torch
+  scorers.
 * Normal combat sets `State::Dead`, adds `StateDead`, records `LastAttacker`,
   awards skill XP, and leaves the pre-generated inventory on the corpse.
   `run_score_kill_tracking_system` credits the actual killer. Dead NPCs remain
@@ -51,16 +52,26 @@ larger maps, or cross-world systems.
   attribution tracker can observe normal death before ordinary cleanup.
 * Incoming player combat is buffered in `PlayerEvents`, so a socket can close
   after an input packet is accepted but before `attack_system` consumes it.
-  Checkpoint 3 therefore enforces presence both for the attacking player and,
-  when the target is attributed, for the crisis owner. The same target-owner
-  boundary is applied to villager retaliation, and an already-requested
-  attributed NPC attack checks owner presence at its action boundary.
+  The source player's client presence remains mandatory for queued Attack,
+  Ability, Combo, and Block inputs. The crisis owner's presence is not a target
+  gate after commitment: a connected helper can attack an attributed unit and
+  the owner's villagers can defend while the owner is offline.
+* Personal-assault target ownership has two enforcement points. Scoring admits
+  only the owner's human units and blocking walls, and the requested action is
+  revalidated immediately before its target is installed or damage is applied.
+  Stale or forged cross-owner targets are cleared and fail safely. These gates
+  depend on attribution, not owner presence.
+  In the current ordinary combat scorer, structures other than blocking walls
+  are skipped. Monoliths use `MONOLITH_PLAYER_ID` rather than the owning human
+  player's ID, so personal-assault targeting rejects every monolith instead of
+  guessing sanctuary ownership and risking another player's sanctuary.
 * `RemoveObj` is the correct visible controlled-removal path and guards a
   duplicate observer invocation through `EntityObjMap`. It does not clear
-  `Ids`, pending `MapEvents`, or `RunSpawnedObjs`; Checkpoint 3 clears those
-  explicitly before triggering removal. Controlled cleanup never adds
-  `StateDead`, so it generates no loot, kill score, wildness reduction, or
-  crisis completion.
+  `Ids`, pending `MapEvents`, or `RunSpawnedObjs`; the retained True Death and
+  run-recycling paths clear those explicitly before triggering removal.
+  Controlled cleanup never adds `StateDead`, so it generates no loot, kill
+  score, wildness reduction, or crisis completion. Ordinary disconnect is not
+  a controlled-cleanup event.
 * True Death removes per-run state after its existing ten-second delay, drains
   `RunSpawnedObjs`, filters pending map events, and recycles the start location.
   Checkpoint 3 removes the historical radius-based hostile sweep: cleanup now
@@ -76,56 +87,58 @@ larger maps, or cross-world systems.
   erase or replace an active run's assault state.
 * `headless.rs` already provides real client presence, disconnect/reconnect,
   direct tick control, full plugin scheduling, and normal `PlayerEvent` input.
-  The deterministic bot already attacks nearby NPCs. Checkpoint 3 only adds an
-  attributed-unit view and resolution-count accessor; runner CSV/JSON metrics
-  remain unchanged for Checkpoint 4.
+  The deterministic scenario can inspect attributed unit identity, health,
+  position, and targets across disconnect/reconnect and can drive ordinary
+  owner, helper, and villager combat. Runner CSV/JSON metrics remain unchanged
+  for Checkpoint 4.
 
-### Files changed for Checkpoint 3
+### Files changed for Checkpoint 3 and its corrective addendum
 
 * `sp_server/src/game.rs` — assault data, monotonic ID resource, timing policy,
-  anchor/spawn selection, focused spawn and controlled-cleanup helpers, lifecycle
-  system, one-time run completion record, ordering, and isolated True Death
-  cleanup.
+  anchor/spawn selection, lifecycle system, one-time run completion record,
+  committed-offline continuation, conservative missing-unit recovery state,
+  ordering, and isolated True Death cleanup.
 * `sp_server/src/ai/npc/npc.rs` — a narrow target-scorer rule that makes an
   attributed personal-assault unit select only its owning player's human units
-  and blocking walls, plus an action-boundary owner-presence check. Ordinary
+  and owned blocking walls, plus action-boundary ownership revalidation for
+  requested and current targets and the focused target-owner tests. Ordinary
   and legacy NPC targeting is unchanged.
-* `sp_server/src/ai/villager/villager.rs` — villager retaliation drops an
-  attributed target when that target's crisis owner is offline; ordinary and
-  online-owner retaliation is unchanged.
-* `sp_server/src/ai/villager/villager_tests.rs` — supplies the action-test
-  presence resource and proves retaliation cannot progress an offline owner's
-  attributed assault.
+* `sp_server/src/ai/villager/villager.rs` — owner villagers retain ordinary
+  retaliation against attributed assault units while their owner is offline.
+* `sp_server/src/ai/villager/villager_tests.rs` — proves ordinary villager
+  defence continues for an offline owner.
 * `sp_server/src/player.rs` — successful hero recreation removes any attributed
   orphan from that same player's prior run; duplicate run creation is rejected;
-  queued Attack, Ability, Combo, and Block inputs require a live source client;
-  and damaging inputs against an attributed unit require its owner online.
-* `sp_server/src/game_tests.rs` — timing, ID, template, anchor, fail-closed
-  spawn, and target-owner tests.
+  and queued Attack, Ability, Combo, and Block inputs require a live source
+  client. A connected helper's target is not rejected merely because the
+  crisis owner is offline.
+* `sp_server/src/game_tests.rs` — timing, ID, template, anchor, and fail-closed
+  spawn tests.
 * `sp_server/src/headless.rs` — attributed-unit inspection, completion
   inspection, real-combat victory, offline timing, helper attribution,
-  disconnect/retry, missing-unit, legacy isolation, True Death, fresh-run, and
-  repeated-generation scenarios.
+  committed disconnect/reconnect continuation, offline resolution,
+  missing-unit recovery, legacy isolation, True Death, fresh-run, and repeated
+  disconnect/reconnect scenarios.
 * `docs/persistent_crisis_milestone.md` — this implementation record.
 
-No resource, recipe, item, crafting, refining, farming, fishing, trade, map,
-network-protocol, client, database-schema, deployment, or infrastructure file
-receives a Checkpoint 3 semantic change. `encounter.rs`, `combat.rs`, `obj.rs`,
-`event.rs`, and `player_setup.rs` were audited and their existing mechanisms
-were reused without Checkpoint 3 edits. `headless_bot.rs` and
-`bin/headless_runner.rs` have formatting-only changes from the required
-workspace formatting pass; their behaviour and schemas are unchanged. The
-working tree also retains the already-reviewed Checkpoint 2 changes in
-`network.rs` and `player_setup.rs`.
+The corrective addendum changes exactly `game.rs`, `ai/npc/npc.rs`,
+`ai/villager/villager.rs`, `ai/villager/villager_tests.rs`, `player.rs`,
+`headless.rs`, and this document. No resource, recipe, item, crafting,
+refining, farming, fishing, trade, map, network-protocol, client,
+database-schema, deployment, or infrastructure file receives a semantic
+change. `encounter.rs`, `combat.rs`, `obj.rs`, `event.rs`, and
+`player_setup.rs` were audited and their existing mechanisms were reused.
 
 ### Assault data model and identity
 
-`SettlementCrisis` now retains the Checkpoint 2 fields and adds the logical
-assault ID, latest generation start tick, online-active assault ticks, current
-generation object IDs and templates, logical templates still requiring normal
-defeat, normally defeated object IDs, successful spawn generation, retry count,
-one-time resolution guard and tick, reset intent, reconnect intent, and
-one-shot observability flags.
+`SettlementCrisis` retains the Checkpoint 2 fields plus the logical assault ID,
+start tick, active online-tick observation, tracked object IDs, normally
+defeated object IDs, successful spawn generation, one-time resolution guard and
+tick, a narrow `assault_recovery_required` corruption marker, and one-shot
+observability flags. The corrective addendum removes the rollback-only template
+copies, remaining-template list, retry counter, reset intent, reconnect intent,
+and controlled-generation cleanup field. No disconnect state or relaunch
+generation remains.
 
 Every major-assault NPC carries:
 
@@ -141,8 +154,8 @@ NPC faction ownership remains `NPC_PLAYER_ID`; the component, not the faction
 or killer, is authoritative for personal-crisis ownership. A dedicated
 `NextCrisisAssaultId` Bevy resource starts at one and advances with checked
 `u64` addition. It is monotonic for the server process and is never derived
-from `GameTick`. A retry preserves the logical ID and increments the generation
-only after a complete successful spawn.
+from `GameTick`. A generation is recorded only after the initial complete spawn
+succeeds; an active assault is never rebuilt as another generation.
 
 ### Launch timing policy
 
@@ -160,8 +173,9 @@ Before 300 online ticks the assault cannot launch. At or after 300 it launches
 during the preferred window. At 1,200 online ticks it may launch at any time,
 so a player is not forced to remain connected through a world day. Logging out
 before the first launch leaves `AssaultReady` and preserves already-earned
-preparation time. An active-assault rollback deliberately resets the ready
-timer and requires the full reconnect grace.
+preparation time. A successful transition to `AssaultActive` is the commitment
+point; the ready grace is never restarted because of an ordinary disconnect
+after that transition.
 
 ### Settlement anchor and spawn policy
 
@@ -193,47 +207,55 @@ size of the legacy rider raid and smaller than combining it with the later
 three-Pillager tier. The templates use `Encounter::spawn_npc`'s ordinary
 server-authoritative chase/combat brain, 14-tile vision, existing loot, normal
 walls and combat, and an owner-filtered target scorer. The owner, villagers,
-and nearby helpers can attack normally while the owner is online; helpers may
-receive ordinary kill credit, while component attribution keeps crisis progress
-with the settlement owner. Once the owner is offline, queued owner inputs,
-helper attacks, villager retaliation, and an attributed NPC's already-requested
-attack all fail closed until controlled cleanup. Specialized theft and torch
-actions are intentionally not used because their current cross-owner targeting
-and persistent fire conflict with the
-offline-safety invariant.
+and nearby connected helpers can attack normally whether or not the owner is
+online; helpers may receive ordinary kill credit, while component attribution
+keeps crisis progress with the settlement owner. Queued input from the
+disconnected owner still fails because its source client is absent. Specialized
+theft and torch actions remain excluded. The scorer and action boundary both
+prohibit cross-player hero, villager, sanctuary, storage, structure, and wall
+targets; no other settlement is a fallback. The ordinary scorer attacks owned
+human units and owned blocking walls; storage and neutral-ID monoliths are not
+selected as personal-assault targets.
 
-### Disconnect, retry, and anti-exploitation policy
+### Disconnect commitment and recovery policy
 
-An offline or invalid owner during `AssaultActive` synchronously changes the
-phase to `AssaultReady` and marks reset intent before issuing entity commands.
-The system records every current-generation object with synchronous
-`State::Dead` or `StateDead` evidence as a normally defeated logical slot,
-preserves only templates that were still undefeated, increments retry once,
-keeps pressure, warning, logical ID, completion guard, and history, purges
-source map events and bookkeeping, and triggers `RemoveObj` only for the exact
-owner/assault/generation. Repeated offline ticks cannot repeat the retry
-increment.
+`AssaultActive` is the commitment point. An ordinary disconnect does not change
+the phase, logical assault ID, spawn generation, tracked unit IDs, current hit
+points, current valid targets, warning state, pressure, or settlement damage.
+It does not remove attackers or pending combat events, increment a retry, reset
+the launch grace, respawn a template, heal a survivor, or start another
+generation. Ordinary NPC AI and structure damage continue, the owner's
+villagers continue normal defence, and connected helpers may continue normal
+combat. Only the disconnected owner's queued player actions fail their retained
+source-presence check.
 
-On reconnect, cleanup must first be observably complete. A full online grace
-then precedes a generation using only undefeated templates at full health. A
-normally killed and potentially looted slot is never respawned, preventing
-repeated disconnects from farming that slot's loot, XP, enemy score, or elite
-score. Existing settlement damage is not rolled back. An unexplained missing
-live object triggers the same safe retry rather than counting as a victory.
+Reconnect restores control of the existing hero and run. It observes the same
+active assault and surviving world entities, or `Resolved` if ordinary defence
+finished the wave while the owner was away. It does not replay the warning or
+grant another preparation window.
+
+True Death, run abandonment/recreation, start-location recycling, and explicit
+administrative cleanup remain controlled cleanup events. If a tracked active
+unit disappears without normal-death evidence or one of those controlled
+causes, the lifecycle logs it, leaves the crisis `AssaultActive` and unresolved,
+and sets `assault_recovery_required`. It does not infer victory or automatically
+reset the wave. A deterministic administrative recovery mechanism is deferred.
 
 ### Resolution and completion policy
 
 The tracker treats matching current-generation attribution as authoritative and
-stored IDs/templates as expected-object bookkeeping. Only matching objects with
+stored IDs as expected-object bookkeeping. Only matching objects with
 normal-combat `State::Dead` or `StateDead` evidence remove logical remaining
 slots. Controlled removal, True Death, legacy goblins, unrelated goblins,
 another owner's units, obsolete generations, and unexplained disappearance
 never count as defeat.
 
-When the logical remainder is empty while the owner has a valid online run, the
-system sets `resolution_recorded` before changing to `Resolved`, records the
-tick, clears the active warning and active-generation IDs/templates, emits one
-structured log, and increments `PlayerRunScore::personal_crises_resolved` once.
+When every tracked unit has normal-death evidence, the system sets
+`resolution_recorded` before changing to `Resolved`, records the tick, clears
+the active warning and active unit IDs, emits one structured log, and increments
+`PlayerRunScore::personal_crises_resolved` once. This applies while the owner is
+offline as well as online. The runtime run-score entry remains available after
+an ordinary socket disconnect, so no deferred score path is currently needed.
 No item, resource, currency, objective chain, pressure reduction, or tangible
 reward is added.
 Normal NPC loot remains on normally defeated corpses. A resolved crisis does
@@ -247,11 +269,12 @@ sanctuary synchronization, NPC action systems, resurrection/death handling, and
 True Death cleanup; it runs before map-event execution, ordinary dead/wandering
 removal, and perception. This makes True Death state deletion win over
 resolution, allows synchronous `State::Dead` or deferred `StateDead` evidence
-to be read before corpse removal, lets controlled cleanup purge actions queued
-earlier in the same update, and prevents a launched deferred generation from
-being inspected as empty in the launch evaluation. Source-presence,
-target-owner-presence, and attributed-NPC action checks close the damage window
-before that after-actions cleanup boundary.
+to be read before corpse removal, and prevents a launched deferred generation
+from being inspected as empty in the launch evaluation. Source-presence checks
+reject stale input from a disconnected player. Attribution-based ownership
+checks at NPC scoring, target installation, damage application, and fortified
+target redirection reject stale or cross-owner targets without freezing combat
+for an offline owner.
 
 True Death logs the logical assault, removes same-owner attributed units even
 if bookkeeping is incomplete, protects another owner's attributed units, and
@@ -274,17 +297,23 @@ Focused unit and full-schedule headless coverage now exercises:
 * real `PlayerEvent::Attack` partial and complete victory with ordinary corpse
   inventory retained;
 * helper `LastAttacker` score with owner-attributed crisis completion;
-* queued Attack, Ability-compatible target gating, Combo, Block, already-
-  requested NPC attack, connected-helper input, and villager retaliation at the
-  disconnect boundary;
-* controlled disconnect cleanup, no completion, one retry increment, full
-  reconnect grace, same logical ID, new generation, and defeated-slot
-  anti-farming;
-* unexpected disappearance as retry rather than victory;
+* queued Attack, Combo, and Block source-presence rejection for the disconnected
+  owner without freezing connected-helper input;
+* attributed NPC combat and owner-villager retaliation continuing while the
+  owner is offline;
+* owner association at target scoring, target installation, damage application,
+  and fortified redirection, including rejection of another player's hero,
+  villager, sanctuary, storage, structures, and walls;
+* disconnect preserving `AssaultActive`, logical ID, spawn generation, unit
+  IDs, survivor health, pressure, and launch state without despawn or relaunch;
+* partial offline kills remaining active, complete offline victory resolving
+  once, and reconnect observing the existing active or resolved state;
+* unexpected disappearance remaining unresolved with recovery required;
 * True Death from both `AssaultReady` and `AssaultActive`, disconnect overlap,
   protection of another owner's assault and nearby unrelated hostiles,
   missing-map orphan cleanup, idempotency, and clean fresh-run fields;
-* three consecutive reset/relaunch generations followed by one resolution;
+* three consecutive disconnect/reconnect cycles preserving one generation,
+  followed by one resolution;
 * PersonalCrisis nightly-horde isolation, legacy-mode isolation, the complete
   introduction, environmental visibility, and existing production regressions.
 
@@ -293,19 +322,29 @@ Final validation from `sp_server/`:
 * `cargo fmt --check` — passed.
 * `cargo check` — passed; the existing compiler warning set remains (74
   warnings in the library build).
-* `cargo test checkpoint3 -- --nocapture` — passed all 16 Checkpoint 3 tests.
+* `cargo test checkpoint3 -- --nocapture` — passed all 21 Checkpoint 3 tests
+  (292 filtered out).
 * `cargo test fight_back_system -- --nocapture` — passed all 4 focused
-  retaliation tests.
-* `cargo test` — passed 309 library tests and 6 day-system integration tests;
-  the single documentation test remains ignored.
+  retaliation tests (309 filtered out).
+* `cargo test` — passed all 313 library tests and all 6 integration tests; the
+  single documentation test remains intentionally ignored.
 * `cargo clippy --all-targets --all-features` — passed with the existing lint
-  backlog (1,333 library warnings, 1,345 library-test warnings including
-  duplicates, and 1 runner warning).
-* `cargo run --bin headless_runner -- 3 6000` — completed three bounded runs at
-  6,007 ticks each with no panic or True Death. Mean enemies killed was 5.33,
-  mean final HP was not aggregated by the runner (per-run HP: 69, 61, 55), and
-  mean structures built was 2.00.
+  backlog (1,332 library warnings, including 32 duplicates, and 1,345
+  library-test warnings, including 1,300 duplicates).
+* `cargo run --bin headless_runner -- 3 6000` — passed all 3 deterministic
+  6,000-tick runs with zero panics and zero True Deaths. Runs ended at tick
+  6,007 with 2.00 mean days survived, 5.67 mean enemies killed, 436.7 mean
+  final skill XP, 19.3 mean inventory count, and 2.00 mean structures.
 * `git diff --check` — passed from the repository root.
+
+Three intermediate validation failures were corrected before those final
+passes: the first `cargo fmt && cargo check` exposed a removed `Clients` import
+still required by another villager system; the first focused Checkpoint 3 run
+passed 16 of 17 tests and exposed a test action missing its required
+`ActionSpan`; and a strengthened focused run passed 19 of 21 tests and exposed
+two overly broad snapshot assertions. The import, action construction, and
+assertions were corrected, then the applicable commands above were rerun to
+their recorded passing results.
 
 ### Deferred Checkpoint 4 work and known limitations
 
@@ -315,14 +354,27 @@ reward presentation. Headless runner CSV/JSON schemas are intentionally
 unchanged. Crisis persistence remains limited by the prototype's existing
 runtime-only per-run state. Spawn selection is intentionally randomized among
 bounded valid candidates, although all asserted invariants are deterministic.
-Existing settlement damage before a disconnect is not rolled back. Specialized
-theft/torch behaviours remain available to legacy systems but are not part of
-this personal wave.
+An ordinary disconnect provides no protection after `AssaultActive`: current
+combat and settlement damage continue, and no damage is rolled back. A missing
+tracked unit deliberately leaves the crisis unresolved and requires a future
+administrative or deterministic recovery path. Specialized theft/torch
+behaviours remain available to legacy systems but are not part of this personal
+wave. The ordinary personal-assault brain does not attack storage or monolith
+objects; monolith ownership would need an explicit authoritative mapping before
+sanctuary targeting could be enabled safely. Explicit safe logout/offline
+protection is a separate deferred design.
+
+The repository-root `AGENTS.md` states the broader product invariant that
+personal irreversible danger must not progress while the owner is offline. The
+corrective Checkpoint 3 product decision is a deliberate, narrow exception for
+an assault that has already launched successfully: pre-launch timing remains
+online-only, but committed `AssaultActive` combat continues. This patch does not
+generalize that exception to other personal-crisis phases or systems.
 
 ## Checkpoint 1 implementation record
 
 Checkpoint 1 is limited to director separation. The goblin crisis state machine,
-online/offline crisis timing, assault suspension, crisis packets and UI, and
+online/offline crisis timing, the active-assault disconnect policy, crisis packets and UI, and
 headless crisis metrics remain deferred to later checkpoints.
 
 ### Architecture findings
@@ -443,7 +495,7 @@ remain registered in both modes.
 
 Checkpoint 2 adds only the server-authoritative personal-crisis state
 foundation. It does not spawn a goblin assault, create assault IDs or units,
-send crisis packets, change the client, suspend combat, grant crisis rewards, or
+send crisis packets, change the client, define committed combat, grant crisis rewards, or
 add Checkpoint 4 metrics.
 
 ### Current architecture findings
@@ -628,11 +680,12 @@ future work.
 ### Design conflicts and deferred Checkpoint 3 work
 
 The milestone's overall definition includes online-only assault launch,
-attributed units, suspension, resolution, and client status. The Checkpoint 2
-request explicitly stops at `AssaultReady`, so this implementation intentionally
-does not satisfy those later lifecycle items. Checkpoint 3 must add the warning
-grace/launch policy, assault identity and unit attribution, online-only launch,
-disconnect handling for live units, cleanup, idempotent resolution, and rewards.
+attributed units, committed continuation, resolution, and client status. The
+Checkpoint 2 request explicitly stops at `AssaultReady`, so that implementation
+intentionally did not satisfy those later lifecycle items. Checkpoint 3
+subsequently added the warning grace/launch policy, assault identity and unit
+attribution, online-only launch, committed disconnect handling, cleanup, and
+idempotent resolution.
 Checkpoint 4 remains responsible for structured network status, reconnect
 delivery, client UI, and full headless crisis metrics.
 
@@ -672,9 +725,14 @@ Each player:
 
 The game should provide a persistent-world feeling without requiring players to coordinate sessions or log in at specific real-world times.
 
-The guiding rule is:
+The Checkpoint 3 commitment rule is:
 
-> The world continues when the player leaves, but personal vulnerability must not continue toward irreversible defeat.
+> Before launch, personal-crisis timing and launch remain online-only. After a
+> successful transition to `AssaultActive`, the assault is committed and the
+> world continues even if the owner disconnects.
+
+Explicit safe logout/offline protection is deferred and is not implied by an
+ordinary network disconnect.
 
 ---
 
@@ -728,7 +786,8 @@ After this milestone:
 * The old automatic crisis ladder does not run in the default prototype mode.
 * A player-specific goblin crisis progresses through explicit phases.
 * Major crisis assaults begin only while the owning player is online.
-* Disconnecting cannot cause unattended irreversible settlement loss.
+* Once `AssaultActive`, ordinary disconnect does not pause, reset, despawn,
+  rebuild, or weaken the committed assault.
 * The current resource, crafting, refining, farming, fishing, trade, and villager systems remain intact.
 
 ---
@@ -908,12 +967,18 @@ The existing economy is feature-frozen but remains active and testable.
 ## Offline constraints
 
 * A major personal crisis assault must not begin unless the owner is online.
-* Offline crisis time must not advance toward an unavoidable assault.
-* Offline personal crises must not destroy the sanctuary.
-* Offline personal crises must not permanently end the settlement.
-* Offline personal crises must not kill the hero.
-* Offline personal crises must not kill important named villagers.
-* Do not implement a complex offline combat simulator.
+* Before launch, offline crisis time must not advance toward an unavoidable
+  assault.
+* After a successful launch, `AssaultActive` is committed and ordinary ECS
+  combat continues while the owner is offline, including attacks on the valid
+  owner-associated heroes, villagers, and blocking walls admitted by the
+  ordinary personal-assault brain. Storage and monolith targets remain
+  excluded as documented in the Checkpoint 3 implementation record.
+* Ordinary disconnect is not a safe-logout signal and grants no rollback,
+  healing, reset, despawn, or relaunch protection.
+* Do not implement a separate offline combat simulator; the loaded world uses
+  its existing server-authoritative NPC, villager, structure, and combat systems.
+* Explicit safe logout/offline protection remains deferred.
 
 ---
 
@@ -1176,6 +1241,11 @@ The initial assault must be:
 * Clearly attributed to the crisis
 * Safe against duplicate spawning
 * Safe against entity-despawn races
+* Committed after successful launch, including during ordinary owner disconnect
+* Able to continue normal NPC, structure, villager, helper, death, corpse, and
+  resolution behaviour while the owner is offline
+* Restricted to valid targets associated with the crisis owner at both target
+  selection and destructive-action boundaries
 
 The implementation should reuse existing enemy templates and behaviour where practical.
 
@@ -1269,6 +1339,7 @@ Conceptual component:
 struct CrisisAssaultUnit {
     owner_player_id: i32,
     assault_id: u64,
+    spawn_generation: u32,
 }
 ```
 
@@ -1278,8 +1349,7 @@ Attribution is required for:
 
 * Resolution
 * Cleanup
-* Disconnect handling
-* Reconnect handling
+* Identity preservation across disconnect and reconnect
 * True Death interaction
 * Duplicate prevention
 * Metrics
@@ -1291,34 +1361,35 @@ Use existing `RunSpawnedObjs` where appropriate, but do not overload it if a ded
 
 # 15. Disconnect during an active assault
 
-Logging out must not erase an assault for free.
+`AssaultActive` is the commitment point. The existing online-only phase timing,
+warning, grace, and launch authority remain unchanged before launch. Once a
+complete wave is spawned successfully and the phase becomes `AssaultActive`,
+ordinary network disconnect is a lifecycle no-op.
 
-It also must not allow unattended irreversible destruction.
+During an owner disconnect:
 
-Preferred policy:
+1. Keep `AssaultActive`, the same logical assault ID, the same spawn generation,
+   the tracked unit IDs, survivor health, valid targets, and existing settlement
+   damage.
+2. Continue ordinary NPC AI, structure damage, villager defence, connected-
+   helper combat, normal death, corpse/loot behaviour, and defeat tracking.
+3. Reject only queued player actions whose source client disconnected.
+4. Allow normal offline resolution exactly once when all required tracked units
+   have normal-death evidence.
+5. Never use disconnect to clean up map events or units, return to
+   `AssaultReady`, increment a retry, restart grace, rebuild a wave, heal a
+   survivor, replay the warning, or grant a special reward.
 
-1. The assault remains logically active.
-2. The assault enters a suspended state when the owner disconnects.
-3. Crisis attackers stop applying irreversible damage to:
+On reconnect the player regains control of the continuing world state. The
+assault remains active with its surviving entities and current health, or the
+player observes `Resolved` if defenders completed it while offline. Explicit
+safe logout/offline protection is deferred.
 
-   * The sanctuary
-   * Owner structures
-   * The hero
-   * Important named villagers
-4. The player receives a reconnect notice.
-5. The assault resumes after a short grace period when the player returns.
-6. Completion and rewards remain one-time.
-
-If safely suspending live ECS entities is impractical, use this fallback:
-
-1. Despawn only explicitly attributed assault units.
-2. Return the crisis to `AssaultReady`.
-3. Preserve pressure and warning state.
-4. Do not grant loot or completion rewards.
-5. Relaunch once after reconnect and grace.
-6. Prevent repeated disconnects from farming enemy drops or rewards.
-
-The selected policy must be documented in this file during implementation.
+True Death, run abandonment/recreation, start-location recycling, explicit
+administrative cleanup, and invalid/corrupted run recovery remain separate from
+ordinary disconnect. An unexplained missing tracked entity is logged and leaves
+the assault unresolved with recovery required; it is not silently defeated or
+automatically relaunched.
 
 ---
 
@@ -1350,7 +1421,6 @@ Send the status:
 * On phase transition
 * On meaningful pressure changes
 * On assault launch
-* On assault suspension or reset
 * On resolution
 
 The server remains authoritative.
@@ -1449,8 +1519,9 @@ Add deterministic coverage for:
 11. An online player can transition to `AssaultActive`.
 12. Repeated ticks do not duplicate the assault.
 13. Crisis NPCs are attributed.
-14. Disconnect follows the selected suspension or reset policy.
-15. Reconnect sends current status.
+14. Disconnect during `AssaultActive` preserves phase, assault ID, spawn
+    generation, unit identity, survivor health, AI, and one-time completion.
+15. Reconnect observes the continuing active state or the offline resolution.
 16. Defeating required assault units resolves the crisis exactly once.
 17. Existing gathering behaviour still works.
 18. Existing crafting and refining behaviour still works.
@@ -1490,8 +1561,7 @@ Add concise structured logging for:
 * Assault readiness
 * Assault launch
 * Assault ID
-* Disconnect suspension or reset
-* Reconnect resume
+* Missing-unit recovery requirement
 * Resolution
 
 Include where applicable:
@@ -1657,8 +1727,10 @@ This milestone is complete when:
 8. Progression uses player or settlement activity rather than only global day count.
 9. The player receives clear warnings.
 10. A major assault launches only while the owner is online.
-11. Disconnect cannot cause unattended irreversible settlement destruction.
-12. Reconnect preserves or safely restores crisis state.
+11. After launch, ordinary disconnect leaves the active assault committed and
+    normal world combat continues.
+12. Reconnect preserves the same assault identity, generation, surviving units,
+    current health, and world damage, or observes the already-resolved state.
 13. Crisis enemies are explicitly attributed.
 14. Duplicate assaults cannot spawn.
 15. Resolution occurs exactly once.

@@ -20,7 +20,7 @@ use crate::{
         SleepEventCompleted, VisibleEvent,
     },
     experiment::{self, Experiment, Experiments},
-    game::{Clients, CrisisAssaultUnit, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
+    game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
     item::{self, AttrKey, Inventory, Item, ItemLocation},
     map::{Map, MapPos, TileType},
@@ -2384,7 +2384,6 @@ pub fn process_order_system(
 pub fn fight_back_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
-    clients: Res<Clients>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
@@ -2392,7 +2391,6 @@ pub fn fight_back_system(
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     last_attacker_query: Query<&LastAttacker>,
-    crisis_assault_query: Query<&CrisisAssaultUnit>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut combat_query: Query<CombatQuery>,
     mut action_query: Query<(&Actor, &mut ActionState, &FightBack, &ActionSpan)>,
@@ -2442,15 +2440,6 @@ pub fn fight_back_system(
                     *state = ActionState::Failure;
                     continue;
                 };
-
-                if crisis_assault_query
-                    .get(attacker_entity)
-                    .is_ok_and(|assault| !clients.is_player_online(assault.owner_player_id))
-                {
-                    commands.entity(*actor).remove::<LastAttacker>();
-                    *state = ActionState::Failure;
-                    continue;
-                }
 
                 let Ok([mut villager, mut attacker]) =
                     combat_query.get_many_mut([*actor, attacker_entity])

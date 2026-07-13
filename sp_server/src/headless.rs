@@ -135,6 +135,10 @@ pub struct CrisisAssaultUnitView {
     pub owner_player_id: i32,
     pub assault_id: u64,
     pub spawn_generation: u32,
+    pub hp: i32,
+    pub base_hp: i32,
+    pub pos: Position,
+    pub visible_target: Option<i32>,
     pub dead: bool,
 }
 
@@ -555,17 +559,31 @@ impl HeadlessGame {
 
     pub fn crisis_assault_units(&mut self) -> Vec<CrisisAssaultUnitView> {
         let world = self.app.world_mut();
-        let mut query = world.query::<(&Id, &Template, &CrisisAssaultUnit, Option<&StateDead>)>();
+        let mut query = world.query::<(
+            &Id,
+            &Template,
+            &CrisisAssaultUnit,
+            &Stats,
+            &Position,
+            Option<&StateDead>,
+            Option<&crate::npc::VisibleTarget>,
+        )>();
         let mut units = query
             .iter(world)
-            .map(|(id, template, assault, dead)| CrisisAssaultUnitView {
-                obj_id: id.0,
-                template: template.0.clone(),
-                owner_player_id: assault.owner_player_id,
-                assault_id: assault.assault_id,
-                spawn_generation: assault.spawn_generation,
-                dead: dead.is_some(),
-            })
+            .map(
+                |(id, template, assault, stats, pos, dead, visible_target)| CrisisAssaultUnitView {
+                    obj_id: id.0,
+                    template: template.0.clone(),
+                    owner_player_id: assault.owner_player_id,
+                    assault_id: assault.assault_id,
+                    spawn_generation: assault.spawn_generation,
+                    hp: stats.hp,
+                    base_hp: stats.base_hp,
+                    pos: *pos,
+                    visible_target: visible_target.map(|target| target.target),
+                    dead: dead.is_some(),
+                },
+            )
             .collect::<Vec<_>>();
         units.sort_by_key(|unit| unit.obj_id);
         units
@@ -1091,37 +1109,29 @@ mod tests {
         );
     }
 
-    fn set_reconnect_ready_clock(game: &mut HeadlessGame) -> i32 {
-        use crate::game::ASSAULT_READY_GRACE_TICKS;
-
-        let preferred_tick = next_preferred_assault_tick(game.game_tick());
-        let ready_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
-        let world = game.app.world_mut();
-        world.resource_mut::<GameTick>().0 = ready_tick;
-        let mut crises = world.resource_mut::<SettlementCrisisState>();
-        let crisis = crises
-            .get_mut(&game.player_id)
-            .expect("retry crisis remains ready");
-        crisis.phase_online_ticks = 0;
-        crisis.last_evaluated_tick = ready_tick;
-        preferred_tick
-    }
-
     fn kill_assault_unit_through_normal_combat(
         game: &mut HeadlessGame,
+        target_id: i32,
+    ) -> Vec<(String, i32)> {
+        let attacker_player_id = game.player_id();
+        kill_assault_unit_through_normal_combat_as(game, attacker_player_id, target_id)
+    }
+
+    fn kill_assault_unit_through_normal_combat_as(
+        game: &mut HeadlessGame,
+        attacker_player_id: i32,
         target_id: i32,
     ) -> Vec<(String, i32)> {
         use crate::constants::ATTACK_COOLDOWN_TICKS;
         use crate::ids::EntityObjMap;
 
-        let owner_player_id = game.player_id();
         let (hero_entity, hero_id, hero_pos, target_entity, loot_before) = {
             let world = game.app.world_mut();
             let mut hero_query =
                 world.query_filtered::<(Entity, &Id, &PlayerId, &Position), With<SubclassHero>>();
             let (hero_entity, hero_id, hero_pos) = hero_query
                 .iter(world)
-                .find(|(_, _, owner, _)| owner.0 == owner_player_id)
+                .find(|(_, _, owner, _)| owner.0 == attacker_player_id)
                 .map(|(entity, id, _, pos)| (entity, id.0, *pos))
                 .expect("headless hero");
             let target_entity = world
@@ -1156,7 +1166,7 @@ mod tests {
         }
 
         game.inject(PlayerEvent::Attack {
-            player_id: game.player_id(),
+            player_id: attacker_player_id,
             attack_type: "quick".to_string(),
             source_id: hero_id,
             target_id,
@@ -1180,6 +1190,100 @@ mod tests {
             "normal combat leaves pre-generated ordinary loot on the corpse"
         );
         loot_before
+    }
+
+    fn spawn_connected_helper(game: &mut HeadlessGame, name: &str) -> i32 {
+        let helper_player_id = game.player_id() + 1;
+        let helper_client = Client {
+            id: Uuid::from_u128(helper_player_id as u128),
+            player_id: helper_player_id,
+            sender: game.packet_tx.clone(),
+        };
+        game.clients
+            .lock()
+            .unwrap()
+            .insert(helper_client.id, helper_client);
+        game.inject(PlayerEvent::NewPlayer {
+            player_id: helper_player_id,
+            hero_name: name.to_string(),
+            class_name: "Warrior".to_string(),
+        });
+        game.tick(8);
+        helper_player_id
+    }
+
+    fn spawn_armed_owner_villager(
+        game: &mut HeadlessGame,
+        owner_player_id: i32,
+        pos: Position,
+    ) -> (Entity, i32) {
+        use crate::event::{GameEvent, GameEventType, GameEvents};
+        use crate::ids::Ids;
+        use crate::templates::Templates;
+
+        let current_tick = game.game_tick();
+        {
+            let world = game.app.world_mut();
+            let event_id = world.resource_mut::<Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                event_id,
+                GameEvent {
+                    event_id,
+                    start_tick: current_tick,
+                    run_tick: current_tick,
+                    event_type: GameEventType::SpawnVillager {
+                        pos,
+                        player_id: owner_player_id,
+                    },
+                },
+            );
+        }
+        game.tick(3);
+
+        let (villager_entity, villager_id) = {
+            let world = game.app.world_mut();
+            let mut query =
+                world.query_filtered::<(Entity, &Id, &PlayerId), With<SubclassVillager>>();
+            query
+                .iter(world)
+                .find(|(_, _, owner)| owner.0 == owner_player_id)
+                .map(|(entity, id, _)| (entity, id.0))
+                .expect("owner villager")
+        };
+
+        {
+            let world = game.app.world_mut();
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut inventory = world
+                .get_mut::<Inventory>(villager_entity)
+                .expect("villager inventory");
+            inventory.new(
+                item_id,
+                "Copper Training Axe".to_string(),
+                1,
+                &item_templates,
+            );
+            let weapon = inventory
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .expect("villager test weapon");
+            weapon.equipped = true;
+            weapon.attrs.insert(AttrKey::Damage, AttrVal::Num(20.0));
+            drop(inventory);
+            *world
+                .get_mut::<Position>(villager_entity)
+                .expect("villager position") = pos;
+            let mut stats = world
+                .get_mut::<Stats>(villager_entity)
+                .expect("villager stats");
+            stats.hp = stats.hp.max(500);
+            stats.base_hp = stats.base_hp.max(500);
+            stats.base_def = 0;
+        }
+
+        (villager_entity, villager_id)
     }
 
     // One short capped game end-to-end. Must run with CWD = sp_server/ so the
@@ -1487,9 +1591,9 @@ mod tests {
         assert_eq!(fresh_crisis.online_active_ticks, 0);
         assert_eq!(fresh_crisis.assault_id, None);
         assert!(fresh_crisis.assault_unit_ids.is_empty());
-        assert!(fresh_crisis.assault_remaining_templates.is_empty());
+        assert!(fresh_crisis.assault_defeated_unit_ids.is_empty());
         assert_eq!(fresh_crisis.assault_spawn_generation, 0);
-        assert_eq!(fresh_crisis.assault_retry_count, 0);
+        assert!(!fresh_crisis.assault_recovery_required);
         assert!(!fresh_crisis.resolution_recorded);
     }
 
@@ -1701,6 +1805,21 @@ mod tests {
                 && unit.spawn_generation == 1
                 && !unit.dead
         }));
+        for unit in &units {
+            let entity = game
+                .world()
+                .resource::<crate::ids::EntityObjMap>()
+                .get_entity(unit.obj_id)
+                .expect("attributed assault entity");
+            assert!(game
+                .world()
+                .get::<crate::common::TaskTarget>(entity)
+                .is_none());
+            assert!(game
+                .world()
+                .get::<crate::npc::ItemsToSteal>(entity)
+                .is_none());
+        }
         let run_ids = game
             .world()
             .resource::<RunSpawnedObjs>()
@@ -1744,9 +1863,9 @@ mod tests {
         assert_eq!(
             game.settlement_crisis()
                 .unwrap()
-                .assault_remaining_templates
+                .assault_defeated_unit_ids
                 .len(),
-            GOBLIN_ASSAULT_COMPOSITION.len()
+            0
         );
 
         // Force two schedule evaluations to observe the exact same GameTick.
@@ -1959,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint3_disconnect_blocks_an_already_requested_npc_attack() {
+    fn checkpoint3_attributed_npc_attack_continues_after_owner_disconnect() {
         use big_brain::prelude::{ActionState, Actor};
 
         use crate::common::AttackTarget;
@@ -1972,6 +2091,14 @@ mod tests {
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let unit_ids = launched
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
         let unit_id = game.crisis_assault_units()[0].obj_id;
 
         let (hero_entity, hero_id, hero_pos, hp_before, unit_entity) = {
@@ -1992,26 +2119,140 @@ mod tests {
                 unit_entity,
             )
         };
-        {
+        let action_entity = {
             let world = game.app.world_mut();
             *world.get_mut::<Position>(unit_entity).unwrap() = hero_pos;
+            world.get_mut::<Stats>(unit_entity).unwrap().base_damage = Some(30);
             world.get_mut::<VisibleTarget>(unit_entity).unwrap().target = hero_id;
-            world.spawn((Actor(unit_entity), ActionState::Requested, AttackTarget));
-        }
+            world
+                .spawn((Actor(unit_entity), ActionState::Requested, AttackTarget))
+                .id()
+        };
 
         game.disconnect_player();
         game.tick(1);
 
-        assert_eq!(
-            game.world().get::<Stats>(hero_entity).unwrap().hp,
-            hp_before
+        assert!(
+            game.world().get::<Stats>(hero_entity).unwrap().hp < hp_before,
+            "attributed NPC combat must apply damage while its owner is offline"
         );
         assert!(game.world().get::<StateDead>(hero_entity).is_none());
         assert_eq!(
             game.settlement_crisis().unwrap().phase,
-            CrisisPhase::AssaultReady
+            CrisisPhase::AssaultActive
         );
-        assert!(game.crisis_assault_units().is_empty());
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_id,
+            Some(assault_id)
+        );
+        assert_eq!(
+            game.settlement_crisis().unwrap().assault_spawn_generation,
+            generation
+        );
+        assert_eq!(
+            game.crisis_assault_units()
+                .iter()
+                .map(|unit| unit.obj_id)
+                .collect::<HashSet<_>>(),
+            unit_ids
+        );
+        assert_eq!(
+            *game.world().get::<ActionState>(action_entity).unwrap(),
+            ActionState::Executing
+        );
+    }
+
+    #[test]
+    fn checkpoint3_stale_cross_owner_action_target_is_rejected_offline() {
+        use big_brain::prelude::{ActionState, Actor};
+
+        use crate::common::{AttackTarget, SetAttackTarget};
+        use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
+
+        let mut game = HeadlessGame::new(20_000);
+        let owner_player_id = game.spawn_hero("Warrior", "AssaultTargetOwnerBot");
+        game.set_sanctuary_at_base(3);
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let assault_id = game.settlement_crisis().unwrap().assault_id.unwrap();
+        let generation = game.settlement_crisis().unwrap().assault_spawn_generation;
+        let helper_player_id = spawn_connected_helper(&mut game, "AssaultForeignTargetBot");
+        let unit_id = game.crisis_assault_units()[0].obj_id;
+
+        let (unit_entity, helper_entity, helper_id, helper_pos, helper_hp) = {
+            let world = game.app.world_mut();
+            let unit_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(unit_id)
+                .unwrap();
+            let mut query = world
+                .query_filtered::<(Entity, &Id, &PlayerId, &Position, &Stats), With<SubclassHero>>(
+                );
+            let (helper_entity, helper_id, _, helper_pos, helper_stats) = query
+                .iter(world)
+                .find(|(_, _, owner, _, _)| owner.0 == helper_player_id)
+                .expect("foreign helper hero");
+            (
+                unit_entity,
+                helper_entity,
+                helper_id.0,
+                *helper_pos,
+                helper_stats.hp,
+            )
+        };
+
+        while (game.game_tick() + 1) % crate::constants::TICKS_PER_SEC == 0 {
+            game.tick(1);
+        }
+        let set_action = {
+            let world = game.app.world_mut();
+            *world.get_mut::<Position>(unit_entity).unwrap() = helper_pos;
+            world.get_mut::<VisibleTarget>(unit_entity).unwrap().target = helper_id;
+            world
+                .spawn((Actor(unit_entity), ActionState::Requested, SetAttackTarget))
+                .id()
+        };
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            *game.world().get::<ActionState>(set_action).unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            game.world()
+                .get::<VisibleTarget>(unit_entity)
+                .unwrap()
+                .target,
+            crate::constants::NO_TARGET
+        );
+
+        while (game.game_tick() + 1) % crate::constants::TICKS_PER_SEC == 0 {
+            game.tick(1);
+        }
+        let attack_action = {
+            let world = game.app.world_mut();
+            world.get_mut::<VisibleTarget>(unit_entity).unwrap().target = helper_id;
+            world
+                .spawn((Actor(unit_entity), ActionState::Requested, AttackTarget))
+                .id()
+        };
+        game.tick(1);
+
+        assert_eq!(
+            *game.world().get::<ActionState>(attack_action).unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            game.world().get::<Stats>(helper_entity).unwrap().hp,
+            helper_hp
+        );
+        let crisis = game.settlement_crisis().unwrap();
+        assert_eq!(crisis.phase, CrisisPhase::AssaultActive);
+        assert_eq!(crisis.assault_id, Some(assault_id));
+        assert_eq!(crisis.assault_spawn_generation, generation);
+        assert_eq!(owner_player_id, game.player_id());
     }
 
     #[test]
@@ -2025,6 +2266,14 @@ mod tests {
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let unit_ids = launched
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
         let target_id = game.crisis_assault_units()[0].obj_id;
         let score_before = game
             .world()
@@ -2068,13 +2317,22 @@ mod tests {
             .get(&player_id)
             .cloned()
             .unwrap_or_default();
-        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
-        assert_eq!(crisis.assault_retry_count, 1);
-        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert_eq!(crisis.phase, CrisisPhase::AssaultActive);
+        assert_eq!(crisis.assault_id, Some(assault_id));
+        assert_eq!(crisis.assault_spawn_generation, generation);
+        assert_eq!(
+            crisis
+                .assault_unit_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            unit_ids
+        );
         assert_eq!(score_after.enemies_killed, score_before.enemies_killed);
         assert_eq!(score_after.elites_killed, score_before.elites_killed);
         assert_eq!(game.personal_crises_resolved(), 0);
-        assert!(game.crisis_assault_units().is_empty());
+        assert!(game.world().get::<StateDead>(target_entity).is_none());
+        assert_eq!(game.crisis_assault_units().len(), 3);
     }
 
     #[test]
@@ -2089,6 +2347,14 @@ mod tests {
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let unit_ids = launched
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
         let target_id = game.crisis_assault_units()[0].obj_id;
         let score_before = game
             .world()
@@ -2141,82 +2407,59 @@ mod tests {
             .get(&player_id)
             .cloned()
             .unwrap_or_default();
-        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
-        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert_eq!(crisis.phase, CrisisPhase::AssaultActive);
+        assert_eq!(crisis.assault_id, Some(assault_id));
+        assert_eq!(crisis.assault_spawn_generation, generation);
+        assert_eq!(
+            crisis
+                .assault_unit_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            unit_ids
+        );
         assert!(!effects.has(Effect::Bracing));
         assert!(!effects.has(Effect::Dodging));
         assert!(!effects.has(Effect::Parrying));
         assert_eq!(score_after.enemies_killed, score_before.enemies_killed);
         assert_eq!(score_after.elites_killed, score_before.elites_killed);
         assert_eq!(game.personal_crises_resolved(), 0);
+        assert_eq!(game.crisis_assault_units().len(), 3);
     }
 
     #[test]
-    fn checkpoint3_connected_helper_cannot_progress_an_offline_owner_assault() {
-        use crate::constants::ATTACK_COOLDOWN_TICKS;
+    fn checkpoint3_connected_helper_resolves_offline_owner_assault_once() {
         use crate::game::CrisisPhase;
-        use crate::ids::EntityObjMap;
 
         let mut game = HeadlessGame::new(20_000);
         let owner_player_id = game.spawn_hero("Warrior", "AssaultOfflineOwnerBot");
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
-        let target_id = game.crisis_assault_units()[0].obj_id;
-        let helper_player_id = owner_player_id + 1;
-
-        let helper_client = Client {
-            id: Uuid::from_u128(helper_player_id as u128),
-            player_id: helper_player_id,
-            sender: game.packet_tx.clone(),
-        };
-        game.clients
-            .lock()
-            .unwrap()
-            .insert(helper_client.id, helper_client);
-        game.inject(PlayerEvent::NewPlayer {
-            player_id: helper_player_id,
-            hero_name: "AssaultOnlineHelperBot".to_string(),
-            class_name: "Warrior".to_string(),
-        });
-        game.tick(8);
-
-        let (helper_id, helper_entity, helper_pos, target_entity) = {
-            let world = game.app.world_mut();
-            let mut helper_query =
-                world.query_filtered::<(Entity, &Id, &PlayerId, &Position), With<SubclassHero>>();
-            let (helper_entity, helper_id, _, helper_pos) = helper_query
-                .iter(world)
-                .find(|(_, _, owner, _)| owner.0 == helper_player_id)
-                .expect("connected helper hero");
-            let target_entity = world
-                .resource::<EntityObjMap>()
-                .get_entity(target_id)
-                .expect("assault target");
-            (helper_id.0, helper_entity, *helper_pos, target_entity)
-        };
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let unit_ids = launched.assault_unit_ids.clone();
+        let helper_player_id = spawn_connected_helper(&mut game, "AssaultOnlineHelperBot");
         let helper_score_before = game
             .world()
             .resource::<RunScoreState>()
             .get(&helper_player_id)
             .cloned()
             .unwrap_or_default();
-        {
-            let world = game.app.world_mut();
-            *world.get_mut::<Position>(target_entity).unwrap() = helper_pos;
-            world.get_mut::<Stats>(target_entity).unwrap().hp = 0;
-            *world.get_mut::<State>(helper_entity).unwrap() = State::None;
-            world.get_mut::<Stats>(helper_entity).unwrap().stamina = Some(100);
-            world.resource_mut::<GameTick>().0 += ATTACK_COOLDOWN_TICKS + 1;
-        }
-        game.inject(PlayerEvent::Attack {
-            player_id: helper_player_id,
-            attack_type: "quick".to_string(),
-            source_id: helper_id,
-            target_id,
-        });
         game.disconnect_player();
-        game.tick(2);
+
+        kill_assault_unit_through_normal_combat_as(&mut game, helper_player_id, unit_ids[0]);
+        let partial = game.settlement_crisis().unwrap();
+        assert_eq!(partial.phase, CrisisPhase::AssaultActive);
+        assert_eq!(partial.assault_id, Some(assault_id));
+        assert_eq!(partial.assault_spawn_generation, generation);
+        assert_eq!(partial.assault_defeated_unit_ids.len(), 1);
+        assert_eq!(game.personal_crises_resolved(), 0);
+
+        for unit_id in unit_ids.iter().skip(1) {
+            kill_assault_unit_through_normal_combat_as(&mut game, helper_player_id, *unit_id);
+        }
 
         let helper_score_after = game
             .world()
@@ -2225,18 +2468,39 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         let crisis = game.settlement_crisis().unwrap();
-        assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
-        assert_eq!(crisis.assault_remaining_templates.len(), 3);
+        assert_eq!(crisis.phase, CrisisPhase::Resolved);
+        assert_eq!(crisis.assault_id, Some(assault_id));
+        assert_eq!(crisis.assault_spawn_generation, generation);
         assert_eq!(
             helper_score_after.enemies_killed,
-            helper_score_before.enemies_killed
+            helper_score_before.enemies_killed + unit_ids.len() as i32
         );
         assert_eq!(
             helper_score_after.elites_killed,
-            helper_score_before.elites_killed
+            helper_score_before.elites_killed + unit_ids.len() as i32
         );
-        assert_eq!(game.personal_crises_resolved(), 0);
-        assert!(game.crisis_assault_units().is_empty());
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            helper_score_after.personal_crises_resolved, 0,
+            "crisis completion remains with the attributed owner"
+        );
+
+        game.tick(20);
+        assert_eq!(game.personal_crises_resolved(), 1);
+        game.reconnect_player();
+        game.tick(3);
+        let reconnected = game.settlement_crisis().unwrap();
+        assert_eq!(reconnected.phase, CrisisPhase::Resolved);
+        assert_eq!(reconnected.assault_id, Some(assault_id));
+        assert_eq!(reconnected.assault_spawn_generation, generation);
+        assert_eq!(game.personal_crises_resolved(), 1);
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&owner_player_id)
+                .map(|score| score.personal_crises_resolved),
+            Some(1)
+        );
     }
 
     #[test]
@@ -2370,9 +2634,9 @@ mod tests {
         assert_eq!(
             game.settlement_crisis()
                 .unwrap()
-                .assault_remaining_templates
+                .assault_defeated_unit_ids
                 .len(),
-            2
+            1
         );
         assert_eq!(game.personal_crises_resolved(), 0);
         assert_eq!(
@@ -2405,7 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint3_missing_live_unit_resets_instead_of_resolving() {
+    fn checkpoint3_missing_live_unit_stays_committed_and_requires_recovery() {
         use crate::game::CrisisPhase;
         use crate::ids::{EntityObjMap, Ids};
 
@@ -2414,8 +2678,16 @@ mod tests {
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
         let units = game.crisis_assault_units();
         let missing_id = units[0].obj_id;
+        let surviving_ids = units
+            .iter()
+            .skip(1)
+            .map(|unit| unit.obj_id)
+            .collect::<HashSet<_>>();
         let missing_entity = game
             .world()
             .resource::<EntityObjMap>()
@@ -2429,170 +2701,329 @@ mod tests {
         }
         game.tick(1);
 
-        let reset = game.settlement_crisis().unwrap();
-        assert_eq!(reset.phase, CrisisPhase::AssaultReady);
-        assert_eq!(reset.assault_retry_count, 1);
-        assert!(!reset.resolution_recorded);
+        let committed = game.settlement_crisis().unwrap();
+        assert_eq!(committed.phase, CrisisPhase::AssaultActive);
+        assert_eq!(committed.assault_id, Some(assault_id));
+        assert_eq!(committed.assault_spawn_generation, generation);
+        assert!(committed.assault_recovery_required);
+        assert!(committed.assault_defeated_unit_ids.is_empty());
+        assert!(!committed.resolution_recorded);
         assert_eq!(game.personal_crises_resolved(), 0);
-        assert!(game.crisis_assault_units().is_empty());
+        assert_eq!(
+            game.crisis_assault_units()
+                .iter()
+                .map(|unit| unit.obj_id)
+                .collect::<HashSet<_>>(),
+            surviving_ids
+        );
     }
 
     #[test]
-    fn checkpoint3_disconnect_retry_headless_preserves_defeated_slots() {
+    fn checkpoint3_disconnect_continuation_headless() {
+        use big_brain::actions::spawn_action;
+        use big_brain::prelude::{ActionState, Actor};
+
+        use crate::common::AttackTarget;
         use crate::game::CrisisPhase;
-        use crate::ids::{EntityObjMap, Ids};
-        use crate::player_setup::RunSpawnedObjs;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
+        use crate::obj::LastAttacker;
+        use crate::villager::FightBack;
 
         let mut game = HeadlessGame::new(30_000);
-        let player_id = game.spawn_hero("Warrior", "AssaultRetryBot");
+        let player_id = game.spawn_hero("Warrior", "AssaultContinuationBot");
         game.set_sanctuary_at_base(3);
-        let run_ids_before = game
-            .world()
-            .resource::<RunSpawnedObjs>()
-            .get(&player_id)
-            .cloned()
-            .unwrap_or_default();
-        let score_before = game
-            .world()
-            .resource::<RunScoreState>()
-            .get(&player_id)
-            .cloned()
-            .unwrap_or_default();
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
 
-        let first = game.settlement_crisis().unwrap();
-        let assault_id = first.assault_id.unwrap();
-        let old_units = game.crisis_assault_units();
-        let old_ids = old_units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
-        let defeated_template = old_units[0].template.clone();
-        kill_assault_unit_through_normal_combat(&mut game, old_units[0].obj_id);
-        assert_eq!(
-            game.settlement_crisis()
-                .unwrap()
-                .assault_remaining_templates
-                .len(),
-            2
-        );
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let assault_started_tick = launched.assault_started_tick;
+        let phase_started_tick = launched.phase_started_tick;
+        let units = game.crisis_assault_units();
+        let unit_ids_before = units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
+        let sentinel_id = units[0].obj_id;
+        let npc_action_id = units[1].obj_id;
+        let helper_target_id = units[2].obj_id;
+        let helper_player_id = spawn_connected_helper(&mut game, "AssaultContinuationHelper");
 
-        let hero_entity = {
+        let foreign_structure_health_before = {
             let world = game.app.world_mut();
-            let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
-            query.iter(world).next().unwrap()
+            let mut query =
+                world.query_filtered::<(&Id, &PlayerId, &Stats), With<ClassStructure>>();
+            let mut structures = query
+                .iter(world)
+                .filter(|(_, owner, _)| owner.0 == helper_player_id)
+                .map(|(id, _, stats)| (id.0, stats.hp))
+                .collect::<Vec<_>>();
+            structures.sort_by_key(|(id, _)| *id);
+            assert!(!structures.is_empty(), "helper run should own structures");
+            structures
         };
-        game.app
-            .world_mut()
-            .entity_mut(hero_entity)
-            .insert(crate::common::Target {
-                id: old_units[1].obj_id,
+
+        let action_tick = game.game_tick();
+        let (
+            villager_entity,
+            villager_id,
+            npc_entity,
+            sentinel_damaged_hp,
+            villager_hp_before,
+            npc_hp_before,
+        ) = {
+            let npc_pos = units[1].pos;
+            let (villager_entity, villager_id) =
+                spawn_armed_owner_villager(&mut game, player_id, npc_pos);
+            let world = game.app.world_mut();
+            let entity_map = world.resource::<EntityObjMap>();
+            let sentinel_entity = entity_map.get_entity(sentinel_id).unwrap();
+            let npc_entity = entity_map.get_entity(npc_action_id).unwrap();
+            let sentinel_base_hp = world.get::<Stats>(sentinel_entity).unwrap().base_hp;
+            let sentinel_damaged_hp = sentinel_base_hp - 7;
+            world.get_mut::<Stats>(sentinel_entity).unwrap().hp = sentinel_damaged_hp;
+            *world.get_mut::<Position>(sentinel_entity).unwrap() = Position { x: 49, y: 49 };
+            world
+                .get_mut::<VisibleTarget>(sentinel_entity)
+                .unwrap()
+                .target = crate::constants::NO_TARGET;
+            *world.get_mut::<Position>(npc_entity).unwrap() = npc_pos;
+            world.get_mut::<Stats>(npc_entity).unwrap().base_damage = Some(30);
+            world.get_mut::<VisibleTarget>(npc_entity).unwrap().target = villager_id;
+            world.entity_mut(villager_entity).insert(LastAttacker {
+                id: npc_action_id,
+                tick: action_tick,
             });
+            let villager_hp_before = world.get::<Stats>(villager_entity).unwrap().hp;
+            let npc_hp_before = world.get::<Stats>(npc_entity).unwrap().hp;
+            (
+                villager_entity,
+                villager_id,
+                npc_entity,
+                sentinel_damaged_hp,
+                villager_hp_before,
+                npc_hp_before,
+            )
+        };
+
+        let (npc_action, villager_action) = {
+            let world = game.app.world_mut();
+            let npc_action = world
+                .spawn((Actor(npc_entity), ActionState::Requested, AttackTarget))
+                .id();
+            let villager_action = {
+                let mut commands = world.commands();
+                spawn_action(&FightBack, &mut commands, villager_entity)
+            };
+            world.flush();
+            *world
+                .entity_mut(villager_action)
+                .get_mut::<ActionState>()
+                .unwrap() = ActionState::Requested;
+            (npc_action, villager_action)
+        };
+
+        let units_before = game.crisis_assault_units();
+        let unit_health_before = units_before
+            .iter()
+            .map(|unit| (unit.obj_id, unit.hp))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            units_before
+                .iter()
+                .find(|unit| unit.obj_id == sentinel_id)
+                .unwrap()
+                .hp,
+            sentinel_damaged_hp
+        );
+        let crisis_before_disconnect = game.settlement_crisis().unwrap();
+        let pressure = crisis_before_disconnect.pressure;
+        let warning_active = crisis_before_disconnect.warning_active;
 
         game.disconnect_player();
         game.tick(1);
-        let reset = game.settlement_crisis().expect("ready after disconnect");
-        assert_eq!(reset.phase, CrisisPhase::AssaultReady);
-        assert_eq!(reset.assault_retry_count, 1);
-        assert!(reset.warning_active);
-        assert!(!reset.resolution_recorded);
-        assert_eq!(game.personal_crises_resolved(), 0);
-        assert!(game.crisis_assault_units().is_empty());
-        assert!(game
-            .world()
-            .get::<crate::common::Target>(hero_entity)
-            .is_none());
-        assert!(old_ids.iter().all(|id| game
-            .world()
-            .resource::<EntityObjMap>()
-            .get_entity(*id)
-            .is_none()));
-        assert!(old_ids.iter().all(|id| !game
-            .world()
-            .resource::<Ids>()
-            .obj_player_map
-            .contains_key(id)));
-        let run_ids_after_reset = game
-            .world()
-            .resource::<RunSpawnedObjs>()
-            .get(&player_id)
-            .cloned()
-            .unwrap_or_default();
-        assert!(run_ids_before
-            .iter()
-            .all(|id| run_ids_after_reset.contains(id)));
-        assert!(old_ids.iter().all(|id| !run_ids_after_reset.contains(id)));
+        assert_eq!(
+            *game.world().get::<ActionState>(npc_action).unwrap(),
+            ActionState::Executing,
+            "attributed NPC AI must continue while its owner is offline"
+        );
+        assert_eq!(
+            *game.world().get::<ActionState>(villager_action).unwrap(),
+            ActionState::Executing,
+            "owner villager AI must continue defending while its owner is offline"
+        );
+        assert!(
+            game.world().get::<Stats>(villager_entity).unwrap().hp < villager_hp_before,
+            "the attributed NPC must damage a valid owner villager while offline"
+        );
+        assert!(
+            game.world().get::<Stats>(npc_entity).unwrap().hp < npc_hp_before,
+            "the owner villager must damage an attributed attacker while offline"
+        );
+        assert_eq!(
+            game.world()
+                .get::<VisibleTarget>(npc_entity)
+                .unwrap()
+                .target,
+            villager_id,
+            "a still-valid owner-associated target should remain selected"
+        );
+        game.tick(19);
 
-        game.tick(5);
-        assert_eq!(game.settlement_crisis().unwrap().assault_retry_count, 1);
-        assert!(game.crisis_assault_units().is_empty());
+        kill_assault_unit_through_normal_combat_as(&mut game, helper_player_id, helper_target_id);
+        let offline = game.settlement_crisis().unwrap();
+        assert_eq!(offline.phase, CrisisPhase::AssaultActive);
+        assert_eq!(offline.assault_id, Some(assault_id));
+        assert_eq!(offline.assault_spawn_generation, generation);
+        assert_eq!(offline.assault_started_tick, assault_started_tick);
+        assert_eq!(offline.phase_started_tick, phase_started_tick);
+        assert_eq!(offline.pressure, pressure);
+        assert_eq!(offline.warning_active, warning_active);
+        assert_eq!(offline.assault_defeated_unit_ids.len(), 1);
+        assert!(!offline.assault_recovery_required);
+        assert_eq!(game.personal_crises_resolved(), 0);
+
+        let units_offline = game.crisis_assault_units();
+        let unit_ids_offline = units_offline
+            .iter()
+            .map(|unit| unit.obj_id)
+            .collect::<Vec<_>>();
+        let unit_health_offline = units_offline
+            .iter()
+            .map(|unit| (unit.obj_id, unit.hp))
+            .collect::<Vec<_>>();
+        assert_eq!(unit_ids_offline, unit_ids_before);
+        for unit in units_offline.iter().filter(|unit| !unit.dead) {
+            let hp_before = unit_health_before
+                .iter()
+                .find(|(id, _)| *id == unit.obj_id)
+                .unwrap()
+                .1;
+            assert!(unit.hp <= hp_before, "disconnect must never heal attackers");
+        }
+        assert_eq!(
+            units_offline
+                .iter()
+                .find(|unit| unit.obj_id == sentinel_id)
+                .unwrap()
+                .hp,
+            sentinel_damaged_hp,
+            "the isolated damaged attacker must retain its health"
+        );
+
+        let foreign_target_ids = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<(&Id, &PlayerId)>();
+            query
+                .iter(world)
+                .filter(|(_, owner)| owner.0 == helper_player_id)
+                .map(|(id, _)| id.0)
+                .collect::<HashSet<_>>()
+        };
+        assert!(units_offline.iter().all(|unit| unit
+            .visible_target
+            .map(|target| !foreign_target_ids.contains(&target))
+            .unwrap_or(true)));
+
+        let foreign_structure_health_offline = {
+            let world = game.app.world_mut();
+            let mut query =
+                world.query_filtered::<(&Id, &PlayerId, &Stats), With<ClassStructure>>();
+            let mut structures = query
+                .iter(world)
+                .filter(|(_, owner, _)| owner.0 == helper_player_id)
+                .map(|(id, _, stats)| (id.0, stats.hp))
+                .collect::<Vec<_>>();
+            structures.sort_by_key(|(id, _)| *id);
+            structures
+        };
+        assert_eq!(
+            foreign_structure_health_offline,
+            foreign_structure_health_before
+        );
 
         game.reconnect_player();
-        let retry_preferred_tick = set_reconnect_ready_clock(&mut game);
-        advance_ready_clock_to_launch(&mut game, retry_preferred_tick);
-        let relaunched = game.settlement_crisis().expect("retried assault");
-        assert_eq!(relaunched.phase, CrisisPhase::AssaultActive);
-        assert_eq!(relaunched.assault_id, Some(assault_id));
-        assert_eq!(relaunched.assault_spawn_generation, 2);
-        assert_eq!(relaunched.assault_retry_count, 1);
-        let retry_units = game.crisis_assault_units();
-        assert_eq!(retry_units.len(), 2);
-        assert!(retry_units.iter().all(|unit| {
-            unit.assault_id == assault_id
-                && unit.spawn_generation == 2
-                && !old_ids.contains(&unit.obj_id)
-        }));
-        let mut expected_retry_templates = old_units
+        let reconnected = game.settlement_crisis().unwrap();
+        let units_reconnected = game.crisis_assault_units();
+        let unit_ids_reconnected = units_reconnected
             .iter()
-            .map(|unit| unit.template.clone())
+            .map(|unit| unit.obj_id)
             .collect::<Vec<_>>();
-        let removed_index = expected_retry_templates
+        let unit_health_reconnected = units_reconnected
             .iter()
-            .position(|template| template == &defeated_template)
-            .unwrap();
-        expected_retry_templates.remove(removed_index);
-        let mut actual_retry_templates = retry_units
-            .iter()
-            .map(|unit| unit.template.clone())
+            .map(|unit| (unit.obj_id, unit.hp))
             .collect::<Vec<_>>();
-        expected_retry_templates.sort();
-        actual_retry_templates.sort();
-        assert_eq!(actual_retry_templates, expected_retry_templates);
+        assert_eq!(reconnected.phase, CrisisPhase::AssaultActive);
+        assert_eq!(reconnected.assault_id, Some(assault_id));
+        assert_eq!(reconnected.assault_spawn_generation, generation);
+        assert_eq!(reconnected.assault_started_tick, assault_started_tick);
+        assert_eq!(reconnected.phase_started_tick, phase_started_tick);
+        assert_eq!(unit_ids_reconnected, unit_ids_offline);
+        assert_eq!(unit_health_reconnected, unit_health_offline);
 
-        for unit in retry_units {
+        game.tick(1);
+        let after_reconnect_update = game.settlement_crisis().unwrap();
+        let units_after_reconnect_update = game.crisis_assault_units();
+        assert_eq!(after_reconnect_update.phase, CrisisPhase::AssaultActive);
+        assert_eq!(after_reconnect_update.assault_id, Some(assault_id));
+        assert_eq!(after_reconnect_update.assault_spawn_generation, generation);
+        assert_eq!(
+            after_reconnect_update.assault_started_tick,
+            assault_started_tick
+        );
+        assert_eq!(
+            after_reconnect_update.phase_started_tick,
+            phase_started_tick
+        );
+        assert_eq!(after_reconnect_update.pressure, pressure);
+        assert_eq!(after_reconnect_update.warning_active, warning_active);
+        assert_eq!(
+            units_after_reconnect_update
+                .iter()
+                .map(|unit| unit.obj_id)
+                .collect::<Vec<_>>(),
+            unit_ids_reconnected
+        );
+        for unit in units_after_reconnect_update
+            .iter()
+            .filter(|unit| !unit.dead)
+        {
+            let hp_at_reconnect = unit_health_reconnected
+                .iter()
+                .find(|(id, _)| *id == unit.obj_id)
+                .unwrap()
+                .1;
+            assert!(
+                unit.hp <= hp_at_reconnect,
+                "the first reconnected update must not heal a surviving attacker"
+            );
+        }
+
+        for unit in units_after_reconnect_update
+            .iter()
+            .filter(|unit| !unit.dead)
+        {
             kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
         }
-        game.tick(1);
+        game.tick(2);
         assert_eq!(
             game.settlement_crisis().unwrap().phase,
             CrisisPhase::Resolved
         );
         assert_eq!(game.personal_crises_resolved(), 1);
-        let score_after = game
-            .world()
-            .resource::<RunScoreState>()
-            .get(&player_id)
-            .cloned()
-            .unwrap_or_default();
-        assert_eq!(score_after.enemies_killed - score_before.enemies_killed, 3);
-        assert_eq!(score_after.elites_killed - score_before.elites_killed, 3);
-
-        game.disconnect_player();
-        game.tick(3);
-        game.reconnect_player();
-        game.tick(3);
+        game.tick(20);
         assert_eq!(game.personal_crises_resolved(), 1);
-        assert_eq!(
-            game.settlement_crisis().unwrap().assault_spawn_generation,
-            2
-        );
 
         println!(
-            "checkpoint3_disconnect_retry assault_id={} retry_count={} units_before_disconnect={} units_after_cleanup=0 new_generation={} retry_units={} completions_before=0 completions_after={} duplicated_completion=false",
-            assault_id,
-            game.settlement_crisis().unwrap().assault_retry_count,
-            old_units.len(),
-            game.settlement_crisis().unwrap().assault_spawn_generation,
-            actual_retry_templates.len(),
-            game.personal_crises_resolved()
+            "checkpoint3_disconnect_continuation assault_id_before={assault_id} assault_id_while_offline={} assault_id_after_reconnect={} generation_before={generation} generation_while_offline={} generation_after_reconnect={} unit_ids_before={unit_ids_before:?} unit_ids_while_offline={unit_ids_offline:?} unit_ids_after_reconnect={unit_ids_reconnected:?} unit_health_before={unit_health_before:?} unit_health_while_offline={unit_health_offline:?} unit_health_after_reconnect={unit_health_reconnected:?} phase_before={:?} phase_while_offline={:?} phase_after_reconnect={:?} phase_final={:?} resolution_count={} other_player_structures_targeted=false",
+            offline.assault_id.unwrap(),
+            reconnected.assault_id.unwrap(),
+            offline.assault_spawn_generation,
+            reconnected.assault_spawn_generation,
+            launched.phase,
+            offline.phase,
+            reconnected.phase,
+            game.settlement_crisis().unwrap().phase,
+            game.personal_crises_resolved(),
         );
     }
 
@@ -2645,18 +3076,33 @@ mod tests {
             entity
         };
 
-        let (other_entity, other_id, unrelated_entity, unrelated_id) = {
+        let (other_entity, other_id, other_crisis, unrelated_entity, unrelated_id) = {
             let world = game.app.world_mut();
             let other_id = world.resource_mut::<Ids>().new_obj_id();
+            let other_assault_id = own_assault_id + 1;
             let entity = world
                 .spawn((
                     Id(other_id),
                     PlayerId(crate::constants::NPC_PLAYER_ID),
                     Position { x: 0, y: 0 },
                     Template("Wolf Rider".to_string()),
+                    State::None,
+                    Stats {
+                        hp: 75,
+                        stamina: None,
+                        mana: None,
+                        base_hp: 75,
+                        base_stamina: None,
+                        base_mana: None,
+                        base_def: 5,
+                        damage_range: Some(1),
+                        base_damage: Some(6),
+                        base_speed: Some(1),
+                        base_vision: Some(4),
+                    },
                     CrisisAssaultUnit {
                         owner_player_id: player_id + 1,
-                        assault_id: own_assault_id + 1,
+                        assault_id: other_assault_id,
                         spawn_generation: 1,
                     },
                 ))
@@ -2667,6 +3113,19 @@ mod tests {
             world
                 .resource_mut::<EntityObjMap>()
                 .new_obj(other_id, entity);
+            let other_crisis = SettlementCrisis {
+                phase: crate::game::CrisisPhase::AssaultActive,
+                pressure: 100,
+                warning_active: true,
+                assault_id: Some(other_assault_id),
+                assault_started_tick: Some(world.resource::<GameTick>().0),
+                assault_unit_ids: vec![other_id],
+                assault_spawn_generation: 1,
+                ..SettlementCrisis::default()
+            };
+            world
+                .resource_mut::<SettlementCrisisState>()
+                .insert(player_id + 1, other_crisis.clone());
 
             // An un-attributed world hostile next to the recycled start is not
             // owned by this run and must not be removed as collateral cleanup.
@@ -2685,7 +3144,13 @@ mod tests {
             world
                 .resource_mut::<EntityObjMap>()
                 .new_obj(unrelated_id, unrelated_entity);
-            (entity, other_id, unrelated_entity, unrelated_id)
+            (
+                entity,
+                other_id,
+                other_crisis,
+                unrelated_entity,
+                unrelated_id,
+            )
         };
 
         let current_tick = game.game_tick();
@@ -2719,6 +3184,40 @@ mod tests {
             "True Death must despawn an attributed orphan even without its entity-map entry"
         );
         assert!(game.world().get_entity(other_entity).is_ok());
+        let other_after_cleanup = game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&(player_id + 1))
+            .cloned()
+            .expect("another player's active crisis");
+        assert_eq!(other_after_cleanup.phase, other_crisis.phase);
+        assert_eq!(other_after_cleanup.pressure, other_crisis.pressure);
+        assert_eq!(
+            other_after_cleanup.warning_active,
+            other_crisis.warning_active
+        );
+        assert_eq!(other_after_cleanup.assault_id, other_crisis.assault_id);
+        assert_eq!(
+            other_after_cleanup.assault_spawn_generation,
+            other_crisis.assault_spawn_generation
+        );
+        assert_eq!(
+            other_after_cleanup.assault_unit_ids,
+            other_crisis.assault_unit_ids
+        );
+        assert_eq!(
+            other_after_cleanup.assault_defeated_unit_ids,
+            other_crisis.assault_defeated_unit_ids
+        );
+        assert_eq!(
+            other_after_cleanup.resolution_recorded,
+            other_crisis.resolution_recorded
+        );
+        assert_eq!(
+            other_after_cleanup.assault_recovery_required,
+            other_crisis.assault_recovery_required
+        );
+        assert_eq!(game.world().get::<Stats>(other_entity).unwrap().hp, 75);
         assert_eq!(
             game.world()
                 .get::<CrisisAssaultUnit>(other_entity)
@@ -2779,29 +3278,71 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint3_repeated_disconnect_relaunch_sample_has_no_duplicates() {
+    fn checkpoint3_repeated_disconnect_reconnect_preserves_one_generation() {
         use crate::game::CrisisPhase;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
 
         let mut game = HeadlessGame::new(40_000);
         game.spawn_hero("Warrior", "AssaultRepeatBot");
         game.set_sanctuary_at_base(3);
         let preferred_tick = set_personal_assault_ready(&mut game);
         advance_ready_clock_to_launch(&mut game, preferred_tick);
-        let assault_id = game.settlement_crisis().unwrap().assault_id.unwrap();
+        let launched = game.settlement_crisis().unwrap();
+        let assault_id = launched.assault_id.unwrap();
+        let generation = launched.assault_spawn_generation;
+        let phase_started_tick = launched.phase_started_tick;
+        let assault_started_tick = launched.assault_started_tick;
+        let units = game.crisis_assault_units();
+        let unit_ids = units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
+        let sentinel_id = unit_ids[0];
+        {
+            let world = game.app.world_mut();
+            let sentinel = world
+                .resource::<EntityObjMap>()
+                .get_entity(sentinel_id)
+                .unwrap();
+            let base_hp = world.get::<Stats>(sentinel).unwrap().base_hp;
+            world.get_mut::<Stats>(sentinel).unwrap().hp = base_hp - 5;
+            *world.get_mut::<Position>(sentinel).unwrap() = Position { x: 49, y: 49 };
+            world.get_mut::<VisibleTarget>(sentinel).unwrap().target = crate::constants::NO_TARGET;
+        }
 
-        for retry in 1..=3 {
+        for _ in 0..3 {
             game.disconnect_player();
             game.tick(2);
-            assert!(game.crisis_assault_units().is_empty());
-            assert_eq!(game.settlement_crisis().unwrap().assault_retry_count, retry);
+            let offline = game.settlement_crisis().unwrap();
+            let units_offline = game.crisis_assault_units();
+            assert_eq!(offline.phase, CrisisPhase::AssaultActive);
+            assert_eq!(offline.assault_id, Some(assault_id));
+            assert_eq!(offline.assault_spawn_generation, generation);
+            assert_eq!(offline.phase_started_tick, phase_started_tick);
+            assert_eq!(offline.assault_started_tick, assault_started_tick);
+            assert_eq!(
+                units_offline
+                    .iter()
+                    .map(|unit| unit.obj_id)
+                    .collect::<Vec<_>>(),
+                unit_ids
+            );
+            let health_offline = units_offline
+                .iter()
+                .map(|unit| (unit.obj_id, unit.hp))
+                .collect::<Vec<_>>();
 
             game.reconnect_player();
-            let preferred_tick = set_reconnect_ready_clock(&mut game);
-            advance_ready_clock_to_launch(&mut game, preferred_tick);
-            let crisis = game.settlement_crisis().unwrap();
-            assert_eq!(crisis.assault_id, Some(assault_id));
-            assert_eq!(crisis.assault_spawn_generation, retry + 1);
-            assert_eq!(game.crisis_assault_units().len(), 3);
+            let reconnected = game.settlement_crisis().unwrap();
+            let units_reconnected = game.crisis_assault_units();
+            assert_eq!(reconnected.phase, CrisisPhase::AssaultActive);
+            assert_eq!(reconnected.assault_id, Some(assault_id));
+            assert_eq!(reconnected.assault_spawn_generation, generation);
+            assert_eq!(
+                units_reconnected
+                    .iter()
+                    .map(|unit| (unit.obj_id, unit.hp))
+                    .collect::<Vec<_>>(),
+                health_offline
+            );
         }
 
         let final_units = game.crisis_assault_units();
@@ -2816,12 +3357,13 @@ mod tests {
         assert_eq!(game.personal_crises_resolved(), 1);
         assert_eq!(
             game.settlement_crisis().unwrap().assault_spawn_generation,
-            4
+            generation
         );
 
         println!(
-            "checkpoint3_repeated_safety assault_id={} retries=3 final_generation=4 stale_units=0 completion_count={} duplicate_assault=false panic=false",
+            "checkpoint3_repeated_safety assault_id={} disconnects=3 final_generation={} stale_units=0 completion_count={} duplicate_assault=false panic=false",
             assault_id,
+            generation,
             game.personal_crises_resolved()
         );
     }

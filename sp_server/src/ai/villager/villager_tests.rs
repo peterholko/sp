@@ -1684,14 +1684,14 @@ fn fight_back_system_attacks_adjacent_last_attacker_when_armed() {
 }
 
 #[test]
-fn fight_back_system_does_not_progress_an_offline_owner_assault() {
+fn fight_back_system_defends_against_an_offline_owner_assault() {
     let mut app = setup_action_test_app!(fight_back_system);
     app.world_mut().insert_resource(open_test_map());
     app.world_mut().insert_resource(minimal_combat_templates());
 
     let villager = ActionTestVillagerBuilder::new()
         .with_id(1)
-        .with_player_id(2)
+        .with_player_id(1)
         .with_position(Position { x: 5, y: 5 })
         .with_equipped_weapon()
         .spawn(app.world_mut());
@@ -1728,11 +1728,11 @@ fn fight_back_system_does_not_progress_an_offline_owner_assault() {
     let action = spawn_action_as_requested(&mut app, &FightBack, villager);
     app.update();
 
-    assert_eq!(app.world().entity(attacker).get::<Stats>().unwrap().hp, 30);
+    assert!(app.world().entity(attacker).get::<Stats>().unwrap().hp < 30);
     assert!(app.world().entity(villager).get::<LastAttacker>().is_none());
     assert_eq!(
         *app.world().entity(action).get::<ActionState>().unwrap(),
-        ActionState::Failure
+        ActionState::Executing
     );
 }
 

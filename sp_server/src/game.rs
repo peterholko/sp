@@ -422,15 +422,11 @@ pub struct SettlementCrisis {
     pub assault_started_tick: Option<i32>,
     pub assault_online_ticks: i32,
     pub assault_unit_ids: Vec<i32>,
-    pub assault_unit_templates: Vec<String>,
-    pub assault_remaining_templates: Vec<String>,
     pub assault_defeated_unit_ids: Vec<i32>,
     pub assault_spawn_generation: u32,
-    pub assault_retry_count: u32,
     pub resolution_recorded: bool,
     pub resolved_at_tick: Option<i32>,
-    pub assault_reset_in_progress: bool,
-    pub assault_reconnect_pending: bool,
+    pub assault_recovery_required: bool,
     pub assault_grace_logged: bool,
     pub assault_anchor_warning_logged: bool,
     pub assault_spawn_warning_logged: bool,
@@ -451,15 +447,11 @@ impl SettlementCrisis {
             assault_started_tick: None,
             assault_online_ticks: 0,
             assault_unit_ids: Vec::new(),
-            assault_unit_templates: Vec::new(),
-            assault_remaining_templates: Vec::new(),
             assault_defeated_unit_ids: Vec::new(),
             assault_spawn_generation: 0,
-            assault_retry_count: 0,
             resolution_recorded: false,
             resolved_at_tick: None,
-            assault_reset_in_progress: false,
-            assault_reconnect_pending: false,
+            assault_recovery_required: false,
             assault_grace_logged: false,
             assault_anchor_warning_logged: false,
             assault_spawn_warning_logged: false,
@@ -11415,9 +11407,7 @@ struct AssaultMonolithInfo {
 
 #[derive(Debug, Clone)]
 struct AssaultUnitSnapshot {
-    entity: Entity,
     id: i32,
-    template: String,
     attribution: CrisisAssaultUnit,
     normally_dead: bool,
 }
@@ -11648,7 +11638,7 @@ fn clear_assault_target_references(
             .map(|target| removed_ids.contains(&target.id))
             .unwrap_or(false)
         {
-            commands.entity(entity).remove::<Target>();
+            commands.entity(entity).try_remove::<Target>();
         }
         if visible_target
             .map(|target| removed_ids.contains(&target.target))
@@ -11669,61 +11659,6 @@ fn clear_assault_target_references(
     }
 }
 
-fn controlled_cleanup_assault_generation(
-    owner_player_id: i32,
-    assault_id: u64,
-    spawn_generation: u32,
-    expected_ids: &[i32],
-    units: &[AssaultUnitSnapshot],
-    commands: &mut Commands,
-    ids: &mut ResMut<Ids>,
-    entity_map: &ResMut<EntityObjMap>,
-    map_events: &mut ResMut<MapEvents>,
-    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
-    target_query: &Query<(
-        Entity,
-        Option<&Target>,
-        Option<&VisibleTarget>,
-        Option<&TaskTarget>,
-    )>,
-) -> usize {
-    let matching = units
-        .iter()
-        .filter(|unit| {
-            unit.attribution.owner_player_id == owner_player_id
-                && unit.attribution.assault_id == assault_id
-                && unit.attribution.spawn_generation == spawn_generation
-        })
-        .collect::<Vec<_>>();
-
-    let mut removed_ids = expected_ids.iter().copied().collect::<HashSet<_>>();
-    removed_ids.extend(matching.iter().map(|unit| unit.id));
-
-    // Cancel movement/attack actions before their source entity disappears.
-    clear_assault_target_references(&removed_ids, commands, target_query);
-    map_events.retain(|_, event| !removed_ids.contains(&event.obj_id));
-    if let Some(run_ids) = run_spawned_objs.get_mut(&owner_player_id) {
-        run_ids.retain(|id| !removed_ids.contains(id));
-    }
-    for id in &removed_ids {
-        ids.remove_obj(*id);
-    }
-
-    for unit in &matching {
-        if entity_map.get_entity(unit.id) == Some(unit.entity) {
-            commands.trigger(RemoveObj {
-                entity: unit.entity,
-            });
-        } else {
-            // An attributed orphan must not survive merely because a concurrent
-            // cleanup already removed its entity-map entry.
-            commands.entity(unit.entity).try_despawn();
-        }
-    }
-
-    matching.len()
-}
-
 fn record_personal_assault_resolution(
     player_id: i32,
     game_tick: i32,
@@ -11741,9 +11676,7 @@ fn record_personal_assault_resolution(
     crisis.phase_online_ticks = 0;
     crisis.warning_active = false;
     crisis.assault_unit_ids.clear();
-    crisis.assault_unit_templates.clear();
-    crisis.assault_reset_in_progress = false;
-    crisis.assault_reconnect_pending = false;
+    crisis.assault_recovery_required = false;
     run_score_state
         .entry(player_id)
         .or_insert_with(|| PlayerRunScore {
@@ -11753,12 +11686,11 @@ fn record_personal_assault_resolution(
         .personal_crises_resolved += 1;
 
     info!(
-        "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} completion_count={}",
+        "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} game_tick={} completion_count={}",
         player_id,
         crisis.phase,
         crisis.assault_id,
         crisis.assault_spawn_generation,
-        crisis.assault_retry_count,
         game_tick,
         run_score_state
             .get(&player_id)
@@ -11768,10 +11700,9 @@ fn record_personal_assault_resolution(
     true
 }
 
-/// Owns the Checkpoint 3 transition from ready through launch, controlled
-/// reset/retry, and normal-combat resolution. Synchronous phase/reset writes
-/// happen before deferred entity commands, so cleanup can never look like a
-/// victory and a launch frame cannot be evaluated as an empty active wave.
+/// Owns the Checkpoint 3 transition from ready through committed launch and
+/// normal-combat resolution. A successful launch is the commitment point: an
+/// ordinary disconnect cannot remove, reset, or rebuild the active assault.
 fn personal_crisis_assault_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -11781,7 +11712,6 @@ fn personal_crisis_assault_system(
     (
         mut ids,
         mut entity_map,
-        mut map_events,
         mut crisis_state,
         mut next_assault_id,
         mut run_spawned_objs,
@@ -11789,7 +11719,6 @@ fn personal_crisis_assault_system(
     ): (
         ResMut<Ids>,
         ResMut<EntityObjMap>,
-        ResMut<MapEvents>,
         ResMut<SettlementCrisisState>,
         ResMut<NextCrisisAssaultId>,
         ResMut<RunSpawnedObjs>,
@@ -11821,14 +11750,7 @@ fn personal_crisis_assault_system(
     >,
     monolith_query: Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
     occupied_query: Query<&Position>,
-    assault_unit_query: Query<(
-        Entity,
-        &Id,
-        &Template,
-        &CrisisAssaultUnit,
-        &State,
-        Option<&StateDead>,
-    )>,
+    assault_unit_query: Query<(&Id, &CrisisAssaultUnit, &State, Option<&StateDead>)>,
     target_query: Query<(
         Entity,
         Option<&Target>,
@@ -11886,18 +11808,14 @@ fn personal_crisis_assault_system(
     let occupied = occupied_query.iter().copied().collect::<HashSet<_>>();
     let unit_snapshots = assault_unit_query
         .iter()
-        .map(
-            |(entity, id, template, attribution, state, dead)| AssaultUnitSnapshot {
-                entity,
-                id: id.0,
-                template: template.0.clone(),
-                attribution: *attribution,
-                // Normal combat writes State::Dead synchronously and queues
-                // StateDead. Observing either closes the same-update gap without
-                // treating controlled cleanup (which writes neither) as defeat.
-                normally_dead: *state == State::Dead || dead.is_some(),
-            },
-        )
+        .map(|(id, attribution, state, dead)| AssaultUnitSnapshot {
+            id: id.0,
+            attribution: *attribution,
+            // Normal combat writes State::Dead synchronously and queues
+            // StateDead. Observing either closes the same-update gap without
+            // treating controlled cleanup (which writes neither) as defeat.
+            normally_dead: *state == State::Dead || dead.is_some(),
+        })
         .collect::<Vec<_>>();
 
     let player_ids = crisis_state.keys().copied().collect::<Vec<_>>();
@@ -11911,74 +11829,36 @@ fn personal_crisis_assault_system(
 
         match crisis.phase {
             CrisisPhase::AssaultReady => {
-                if crisis.assault_reset_in_progress {
-                    let matching_remain = crisis.assault_id.map_or(false, |assault_id| {
-                        unit_snapshots.iter().any(|unit| {
-                            unit.attribution.owner_player_id == player_id
-                                && unit.attribution.assault_id == assault_id
-                                && unit.attribution.spawn_generation
-                                    == crisis.assault_spawn_generation
-                        })
-                    });
-                    if matching_remain {
-                        if let Some(assault_id) = crisis.assault_id {
-                            controlled_cleanup_assault_generation(
-                                player_id,
-                                assault_id,
-                                crisis.assault_spawn_generation,
-                                &crisis.assault_unit_ids,
-                                &unit_snapshots,
-                                &mut commands,
-                                &mut ids,
-                                &entity_map,
-                                &mut map_events,
-                                &mut run_spawned_objs,
-                                &target_query,
-                            );
-                        }
-                        continue;
-                    }
-
-                    crisis.assault_reset_in_progress = false;
-                    crisis.phase_online_ticks = 0;
-                    if online && crisis.assault_reconnect_pending {
-                        info!(
-                            "personal_crisis_assault_reconnect_ready player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} online=true",
+                // Ready state never reuses a prior logical assault. Once an ID
+                // is committed the crisis must already be AssaultActive (or
+                // Resolved); anything else requires explicit recovery rather
+                // than an automatic second wave. Detect this before presence,
+                // anchor, or stale-unit gates so corruption cannot hide behind
+                // an ordinary disconnect or another pre-launch prerequisite.
+                if crisis.assault_id.is_some() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={:?} generation={} reason=ready_with_committed_assault game_tick={}",
                             player_id,
                             crisis.phase,
                             crisis.assault_id,
                             crisis.assault_spawn_generation,
-                            crisis.assault_retry_count,
                             current_tick
                         );
-                        crisis.assault_reconnect_pending = false;
                     }
-                    // Never clear reset intent and launch in the same evaluation.
+                    crisis.assault_recovery_required = true;
                     continue;
                 }
 
                 if !online || !valid_run {
                     continue;
                 }
-                if crisis.assault_reconnect_pending {
-                    info!(
-                        "personal_crisis_assault_reconnect_ready player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} online=true",
-                        player_id,
-                        crisis.phase,
-                        crisis.assault_id,
-                        crisis.assault_spawn_generation,
-                        crisis.assault_retry_count,
-                        current_tick
-                    );
-                    crisis.assault_reconnect_pending = false;
-                }
                 if !crisis.assault_grace_logged {
                     info!(
-                        "personal_crisis_assault_grace_started player_id={} phase={:?} assault_id={:?} retry_count={} game_tick={} online=true grace_ticks={} max_wait_ticks={}",
+                        "personal_crisis_assault_grace_started player_id={} phase={:?} assault_id={:?} game_tick={} online=true grace_ticks={} max_wait_ticks={}",
                         player_id,
                         crisis.phase,
                         crisis.assault_id,
-                        crisis.assault_retry_count,
                         current_tick,
                         ASSAULT_READY_GRACE_TICKS,
                         ASSAULT_MAX_ONLINE_WAIT_TICKS
@@ -11986,19 +11866,6 @@ fn personal_crisis_assault_system(
                     crisis.assault_grace_logged = true;
                 }
                 if !assault_launch_allowed(crisis.phase_online_ticks, current_tick) {
-                    continue;
-                }
-
-                // Every logical slot may already have been killed before an
-                // edge-case disconnect. Completion is still deferred until the
-                // owner is online and the reconnect grace has elapsed.
-                if crisis.assault_id.is_some() && crisis.assault_remaining_templates.is_empty() {
-                    record_personal_assault_resolution(
-                        player_id,
-                        current_tick,
-                        crisis,
-                        &mut run_score_state,
-                    );
                     continue;
                 }
 
@@ -12044,14 +11911,10 @@ fn personal_crisis_assault_system(
                 };
                 crisis.assault_anchor_warning_logged = false;
 
-                let unit_templates = if crisis.assault_id.is_some() {
-                    crisis.assault_remaining_templates.clone()
-                } else {
-                    GOBLIN_ASSAULT_COMPOSITION
-                        .iter()
-                        .map(|template| (*template).to_string())
-                        .collect::<Vec<_>>()
-                };
+                let unit_templates = GOBLIN_ASSAULT_COMPOSITION
+                    .iter()
+                    .map(|template| (*template).to_string())
+                    .collect::<Vec<_>>();
                 let Some(unit_positions) = personal_assault_spawn_positions(
                     player_id,
                     anchor,
@@ -12078,22 +11941,17 @@ fn personal_crisis_assault_system(
                     continue;
                 };
 
-                let assault_id = if let Some(assault_id) = crisis.assault_id {
-                    assault_id
-                } else {
-                    let Some(assault_id) = next_assault_id.allocate() else {
-                        if !crisis.assault_spawn_warning_logged {
-                            error!(
-                                "personal_crisis_assault_spawn_failed player_id={} phase={:?} reason=assault_id_exhausted game_tick={}",
-                                player_id,
-                                crisis.phase,
-                                current_tick
-                            );
-                            crisis.assault_spawn_warning_logged = true;
-                        }
-                        continue;
-                    };
-                    assault_id
+                let Some(assault_id) = next_assault_id.allocate() else {
+                    if !crisis.assault_spawn_warning_logged {
+                        error!(
+                            "personal_crisis_assault_spawn_failed player_id={} phase={:?} reason=assault_id_exhausted game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
                 };
                 let generation = crisis.assault_spawn_generation.saturating_add(1);
                 match spawn_goblin_assault(
@@ -12109,28 +11967,23 @@ fn personal_crisis_assault_system(
                     &mut run_spawned_objs,
                 ) {
                     Ok(spawned_ids) => {
-                        if crisis.assault_id.is_none() {
-                            crisis.assault_remaining_templates = unit_templates.clone();
-                        }
                         crisis.assault_id = Some(assault_id);
                         crisis.assault_started_tick = Some(current_tick);
                         crisis.assault_online_ticks = 0;
                         crisis.assault_unit_ids = spawned_ids;
-                        crisis.assault_unit_templates = unit_templates.clone();
+                        crisis.assault_defeated_unit_ids.clear();
                         crisis.assault_spawn_generation = generation;
                         crisis.phase = CrisisPhase::AssaultActive;
                         crisis.phase_started_tick = current_tick;
                         crisis.phase_online_ticks = 0;
-                        crisis.assault_reset_in_progress = false;
-                        crisis.assault_reconnect_pending = false;
+                        crisis.assault_recovery_required = false;
                         crisis.assault_spawn_warning_logged = false;
                         info!(
-                            "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} retry_count={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
+                            "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
                             player_id,
                             crisis.phase,
                             assault_id,
                             generation,
-                            crisis.assault_retry_count,
                             current_tick,
                             crisis.assault_unit_ids.len(),
                             unit_templates,
@@ -12159,32 +12012,42 @@ fn personal_crisis_assault_system(
             }
             CrisisPhase::AssaultActive => {
                 let Some(assault_id) = crisis.assault_id else {
-                    warn!(
-                        "personal_crisis_assault_reset player_id={} phase={:?} reason=missing_assault_id generation={} game_tick={}",
-                        player_id,
-                        crisis.phase,
-                        crisis.assault_spawn_generation,
-                        current_tick
-                    );
-                    crisis.phase = CrisisPhase::AssaultReady;
-                    crisis.phase_started_tick = current_tick;
-                    crisis.phase_online_ticks = 0;
-                    crisis.assault_retry_count = crisis.assault_retry_count.saturating_add(1);
-                    crisis.assault_reconnect_pending = true;
-                    crisis.assault_grace_logged = false;
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id=None generation={} reason=missing_assault_id game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_spawn_generation,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
                     continue;
                 };
                 let generation = crisis.assault_spawn_generation;
 
-                // Record each normally-dead object once. Removing one matching
-                // template from the logical remainder makes reconnect retries
-                // preserve legitimate loot/XP while never respawning that slot.
-                for (id, template) in crisis
-                    .assault_unit_ids
-                    .clone()
-                    .into_iter()
-                    .zip(crisis.assault_unit_templates.clone())
-                {
+                if crisis.assault_unit_ids.is_empty() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={} generation={} reason=no_tracked_units game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+
+                // Record each normally-dead attributed object once. Ordinary
+                // disconnect and controlled despawn are not death evidence.
+                for id in crisis.assault_unit_ids.clone() {
                     if crisis.assault_defeated_unit_ids.contains(&id) {
                         continue;
                     }
@@ -12197,13 +12060,6 @@ fn personal_crisis_assault_system(
                     });
                     if normally_dead {
                         crisis.assault_defeated_unit_ids.push(id);
-                        if let Some(index) = crisis
-                            .assault_remaining_templates
-                            .iter()
-                            .position(|remaining| remaining == &template)
-                        {
-                            crisis.assault_remaining_templates.remove(index);
-                        }
                     }
                 }
 
@@ -12222,62 +12078,30 @@ fn personal_crisis_assault_system(
                     .copied()
                     .collect::<Vec<_>>();
 
-                let reset_reason = if !valid_run {
-                    Some("invalid_or_dead_owner_run")
-                } else if !online {
-                    Some("owner_disconnected")
-                } else if !missing_expected_ids.is_empty() {
-                    Some("expected_unit_missing_without_normal_death")
-                } else {
-                    None
-                };
-
-                if let Some(reason) = reset_reason {
-                    // Set reset intent and leave AssaultActive before issuing
-                    // any entity removal, making controlled cleanup non-victory.
-                    crisis.assault_reset_in_progress = true;
-                    crisis.phase = CrisisPhase::AssaultReady;
-                    crisis.phase_started_tick = current_tick;
-                    crisis.phase_online_ticks = 0;
-                    crisis.assault_retry_count = crisis.assault_retry_count.saturating_add(1);
-                    crisis.assault_reconnect_pending = true;
-                    crisis.assault_grace_logged = false;
-                    crisis.assault_anchor_warning_logged = false;
-                    crisis.assault_spawn_warning_logged = false;
-                    let expected_ids = crisis.assault_unit_ids.clone();
-                    let removed = controlled_cleanup_assault_generation(
-                        player_id,
-                        assault_id,
-                        generation,
-                        &expected_ids,
-                        &unit_snapshots,
-                        &mut commands,
-                        &mut ids,
-                        &entity_map,
-                        &mut map_events,
-                        &mut run_spawned_objs,
-                        &target_query,
-                    );
-                    crisis.assault_unit_ids.clear();
-                    crisis.assault_unit_templates.clear();
-                    info!(
-                        "personal_crisis_assault_reset player_id={} phase={:?} assault_id={} generation={} retry_count={} game_tick={} online={} reason={} removed_units={} remaining_templates={:?} missing_ids={:?}",
-                        player_id,
-                        crisis.phase,
-                        assault_id,
-                        generation,
-                        crisis.assault_retry_count,
-                        current_tick,
-                        online,
-                        reason,
-                        removed,
-                        crisis.assault_remaining_templates,
-                        missing_expected_ids
-                    );
+                if !missing_expected_ids.is_empty() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={} generation={} reason=expected_unit_missing_without_normal_death missing_ids={:?} game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            missing_expected_ids,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
                     continue;
                 }
+                crisis.assault_recovery_required = false;
 
-                if crisis.assault_remaining_templates.is_empty() {
+                if crisis
+                    .assault_unit_ids
+                    .iter()
+                    .all(|id| crisis.assault_defeated_unit_ids.contains(id))
+                {
                     clear_assault_target_references(
                         &crisis
                             .assault_unit_ids
@@ -16708,15 +16532,14 @@ fn true_death_system(
             if let Some(personal_crisis) = settlement_crisis_state.get(&player_id.0) {
                 if personal_crisis.assault_id.is_some() {
                     info!(
-                        "personal_crisis_assault_true_death_cleanup player_id={} phase={:?} assault_id={:?} generation={} retry_count={} game_tick={} tracked_units={} reset_in_progress={}",
+                        "personal_crisis_assault_true_death_cleanup player_id={} phase={:?} assault_id={:?} generation={} game_tick={} tracked_units={} recovery_required={}",
                         player_id.0,
                         personal_crisis.phase,
                         personal_crisis.assault_id,
                         personal_crisis.assault_spawn_generation,
-                        personal_crisis.assault_retry_count,
                         game_tick.0,
                         personal_crisis.assault_unit_ids.len(),
-                        personal_crisis.assault_reset_in_progress
+                        personal_crisis.assault_recovery_required
                     );
                 }
             }
