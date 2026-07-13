@@ -56,7 +56,8 @@ use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, SOULSHARD};
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
-    self, send_to_client, send_to_database, BroadcastEvents, ObjAttr, RefiningItem,
+    self, send_to_client, send_to_database, BroadcastEvents, CrisisStatusSnapshot, ObjAttr,
+    RefiningItem,
 };
 use crate::network::{ResponsePacket, StatsData};
 use crate::npc::{NPCPlugin, VisibleTarget};
@@ -468,6 +469,99 @@ impl Default for SettlementCrisis {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct SettlementCrisisState(pub HashMap<i32, SettlementCrisis>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrisisTelemetry {
+    pub highest_phase: CrisisPhase,
+    pub dormant_tick: Option<i32>,
+    pub signs_tick: Option<i32>,
+    pub pressure_tick: Option<i32>,
+    pub preparing_tick: Option<i32>,
+    pub assault_ready_tick: Option<i32>,
+    pub assault_active_tick: Option<i32>,
+    pub resolved_tick: Option<i32>,
+    pub assaults_launched: i32,
+    pub assaults_resolved: i32,
+    pub duplicate_assaults: i32,
+    pub status_packets_sent: i32,
+    pub login_snapshots_sent: i32,
+}
+
+impl Default for CrisisTelemetry {
+    fn default() -> Self {
+        Self {
+            highest_phase: CrisisPhase::Dormant,
+            dormant_tick: None,
+            signs_tick: None,
+            pressure_tick: None,
+            preparing_tick: None,
+            assault_ready_tick: None,
+            assault_active_tick: None,
+            resolved_tick: None,
+            assaults_launched: 0,
+            assaults_resolved: 0,
+            duplicate_assaults: 0,
+            status_packets_sent: 0,
+            login_snapshots_sent: 0,
+        }
+    }
+}
+
+impl CrisisTelemetry {
+    fn new(created_tick: i32) -> Self {
+        Self {
+            dormant_tick: Some(created_tick),
+            ..Self::default()
+        }
+    }
+
+    fn observe_phase(&mut self, phase: CrisisPhase, tick: i32) {
+        self.highest_phase = self.highest_phase.max(phase);
+        let phase_tick = match phase {
+            CrisisPhase::Dormant => &mut self.dormant_tick,
+            CrisisPhase::Signs => &mut self.signs_tick,
+            CrisisPhase::Pressure => &mut self.pressure_tick,
+            CrisisPhase::Preparing => &mut self.preparing_tick,
+            CrisisPhase::AssaultReady => &mut self.assault_ready_tick,
+            CrisisPhase::AssaultActive => &mut self.assault_active_tick,
+            CrisisPhase::Resolved => &mut self.resolved_tick,
+        };
+        if phase_tick.is_none() {
+            *phase_tick = Some(tick);
+        }
+    }
+
+    fn record_launch(&mut self, tick: i32) {
+        if self.assaults_launched > 0 {
+            self.duplicate_assaults = self.duplicate_assaults.saturating_add(1);
+        }
+        self.assaults_launched = self.assaults_launched.saturating_add(1);
+        self.observe_phase(CrisisPhase::AssaultActive, tick);
+    }
+
+    fn record_resolution(&mut self, tick: i32) {
+        self.assaults_resolved = self.assaults_resolved.saturating_add(1);
+        self.observe_phase(CrisisPhase::Resolved, tick);
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct CrisisTelemetryState(pub HashMap<i32, CrisisTelemetry>);
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct CrisisStatusLoginSync(pub HashSet<i32>);
+
+#[derive(Debug, Clone)]
+struct SentCrisisStatus {
+    player_id: i32,
+    status: CrisisStatusSnapshot,
+}
+
+#[derive(Resource, Debug, Default)]
+struct CrisisStatusDeliveryState {
+    sent: HashMap<Uuid, SentCrisisStatus>,
+    observed_phases: HashMap<i32, CrisisPhase>,
+}
+
 /// Explicit ownership for a personal-crisis combatant. NPC faction ownership
 /// remains `NPC_PLAYER_ID`; this component is the authoritative link to the
 /// settlement owner and logical assault.
@@ -830,6 +924,9 @@ const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
 const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
 const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
 
+const CRISIS_STATUS_VERSION: u32 = 1;
+const CRISIS_STATUS_PRESSURE_DELTA: i32 = 5;
+const CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS: i32 = 5;
 pub(crate) const ASSAULT_READY_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
 pub(crate) const ASSAULT_MAX_ONLINE_WAIT_TICKS: i32 = 120 * TICKS_PER_SEC;
 const PERSONAL_ASSAULT_VISION: u32 = 14;
@@ -968,6 +1065,352 @@ fn advance_online_crisis_time(
         elapsed
     } else {
         0
+    }
+}
+
+fn crisis_phase_name(phase: CrisisPhase) -> &'static str {
+    match phase {
+        CrisisPhase::Dormant => "dormant",
+        CrisisPhase::Signs => "signs",
+        CrisisPhase::Pressure => "pressure",
+        CrisisPhase::Preparing => "preparing",
+        CrisisPhase::AssaultReady => "assault_ready",
+        CrisisPhase::AssaultActive => "assault_active",
+        CrisisPhase::Resolved => "resolved",
+    }
+}
+
+fn crisis_phase_presentation(
+    phase: CrisisPhase,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match phase {
+        CrisisPhase::Dormant => (
+            "No Organized Threat",
+            "Your settlement has not yet attracted organized goblin attention.",
+            "Continue establishing your camp.",
+            "quiet",
+        ),
+        CrisisPhase::Signs => (
+            "Goblin Signs",
+            "Tracks and distant movement suggest goblins are watching the settlement.",
+            "Build supplies and improve your defenses.",
+            "low",
+        ),
+        CrisisPhase::Pressure => (
+            "Goblin Pressure",
+            "Goblin raiders are testing the settlement and watching its growth.",
+            "Prepare weapons, healing supplies, walls, and defenders.",
+            "medium",
+        ),
+        CrisisPhase::Preparing => (
+            "Raiders Gathering",
+            "A major goblin raid is being organized against your settlement.",
+            "Finish repairs, equip your defenders, and stock essential supplies.",
+            "high",
+        ),
+        CrisisPhase::AssaultReady => (
+            "Goblin Raid Imminent",
+            "The raiders are ready and may attack during darkness or when the preparation window expires.",
+            "Return to your settlement and prepare for the assault.",
+            "crisis",
+        ),
+        CrisisPhase::AssaultActive => (
+            "Settlement Under Attack",
+            "Goblin raiders are attacking your settlement.",
+            "Defeat the remaining attackers. This assault continues if you disconnect.",
+            "crisis",
+        ),
+        CrisisPhase::Resolved => (
+            "Goblin Raid Defeated",
+            "The organized goblin assault has been defeated.",
+            "Recover, repair, and rebuild.",
+            "resolved",
+        ),
+    }
+}
+
+pub(crate) fn build_crisis_status(
+    crisis: Option<&SettlementCrisis>,
+) -> CrisisStatusSnapshot {
+    let Some(crisis) = crisis else {
+        return CrisisStatusSnapshot {
+            version: CRISIS_STATUS_VERSION,
+            exists: false,
+            kind: None,
+            phase: None,
+            pressure: None,
+            pressure_max: None,
+            title: None,
+            summary: None,
+            action_hint: None,
+            severity: None,
+            warning: false,
+            assault_ready: false,
+            assault_active: false,
+            resolved: false,
+            remaining_attackers: None,
+            total_attackers: None,
+            preparation_seconds_remaining: None,
+            preferred_launch_window: None,
+            continues_while_disconnected: false,
+        };
+    };
+
+    let (title, summary, action_hint, severity) = crisis_phase_presentation(crisis.phase);
+    let assault_ready = crisis.phase == CrisisPhase::AssaultReady;
+    let assault_active = crisis.phase == CrisisPhase::AssaultActive;
+    let resolved = crisis.phase == CrisisPhase::Resolved;
+
+    let (remaining_attackers, total_attackers) = if assault_active {
+        let defeated = crisis
+            .assault_defeated_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        (
+            Some(
+                crisis
+                    .assault_unit_ids
+                    .iter()
+                    .filter(|id| !defeated.contains(id))
+                    .count() as i32,
+            ),
+            Some(crisis.assault_unit_ids.len() as i32),
+        )
+    } else {
+        (None, None)
+    };
+
+    let preparation_seconds_remaining = assault_ready.then(|| {
+        let remaining_ticks =
+            (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
+        (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
+    });
+
+    CrisisStatusSnapshot {
+        version: CRISIS_STATUS_VERSION,
+        exists: true,
+        kind: Some(match crisis.kind {
+            CrisisKind::Goblin => "goblin".to_string(),
+        }),
+        phase: Some(crisis_phase_name(crisis.phase).to_string()),
+        pressure: Some(crisis.pressure),
+        pressure_max: Some(GOBLIN_PRESSURE_MAX),
+        title: Some(title.to_string()),
+        summary: Some(summary.to_string()),
+        action_hint: Some(action_hint.to_string()),
+        severity: Some(severity.to_string()),
+        warning: crisis.warning_active,
+        assault_ready,
+        assault_active,
+        resolved,
+        remaining_attackers,
+        total_attackers,
+        preparation_seconds_remaining,
+        preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
+        continues_while_disconnected: assault_active,
+    }
+}
+
+pub(crate) fn crisis_status_changed(
+    previous: &CrisisStatusSnapshot,
+    current: &CrisisStatusSnapshot,
+) -> bool {
+    if previous == current {
+        return false;
+    }
+
+    // Pressure and the ready countdown are rate-limited display values. All
+    // other snapshot changes (phase, warning, launch, roster, resolution, copy,
+    // or clear state) are authoritative and send immediately.
+    let mut structural = current.clone();
+    structural.pressure = previous.pressure;
+    structural.preparation_seconds_remaining = previous.preparation_seconds_remaining;
+    if structural != *previous {
+        return true;
+    }
+
+    let pressure_changed = match (previous.pressure, current.pressure) {
+        (Some(previous), Some(current)) => {
+            current.abs_diff(previous) >= CRISIS_STATUS_PRESSURE_DELTA as u32
+        }
+        (None, None) => false,
+        _ => true,
+    };
+    if pressure_changed {
+        return true;
+    }
+
+    match (
+        previous.preparation_seconds_remaining,
+        current.preparation_seconds_remaining,
+    ) {
+        (Some(previous), Some(current)) => {
+            current.abs_diff(previous) >= CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS as u32
+        }
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn crisis_transition_notice(phase: CrisisPhase) -> Option<&'static str> {
+    match phase {
+        CrisisPhase::Preparing => {
+            Some("Goblin raiders are gathering. Prepare your settlement.")
+        }
+        CrisisPhase::AssaultReady => Some("A goblin raid is imminent."),
+        CrisisPhase::AssaultActive => {
+            Some("The goblin assault has begun. It will continue if you disconnect.")
+        }
+        CrisisPhase::Resolved => Some("The goblin assault has been defeated."),
+        _ => None,
+    }
+}
+
+fn crisis_status_delivery_system(
+    clients: Res<Clients>,
+    director: Res<SurvivalDirectorConfig>,
+    crisis_state: Res<SettlementCrisisState>,
+    mut login_sync: ResMut<CrisisStatusLoginSync>,
+    mut delivery: ResMut<CrisisStatusDeliveryState>,
+    mut telemetry_state: ResMut<CrisisTelemetryState>,
+) {
+    let active_clients = match clients.lock() {
+        Ok(clients) => clients
+            .iter()
+            .filter(|(client_id, client)| {
+                **client_id == client.id && !client.sender.is_closed()
+            })
+            .map(|(client_id, client)| {
+                (*client_id, client.player_id, client.sender.clone())
+            })
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let active_client_players = active_clients
+        .iter()
+        .map(|(client_id, player_id, _)| (*client_id, *player_id))
+        .collect::<HashMap<_, _>>();
+
+    delivery.sent.retain(|client_id, sent| {
+        active_client_players.get(client_id) == Some(&sent.player_id)
+    });
+
+    // Track actual phase transitions independently of login snapshots. This
+    // prevents a reconnect from replaying historical launch notices.
+    if director.mode == SurvivalDirectorMode::PersonalCrisis {
+        let current_players = crisis_state.keys().copied().collect::<HashSet<_>>();
+        delivery
+            .observed_phases
+            .retain(|player_id, _| current_players.contains(player_id));
+
+        for (player_id, crisis) in crisis_state.iter() {
+            match delivery.observed_phases.insert(*player_id, crisis.phase) {
+                Some(previous) if previous != crisis.phase => {
+                    if clients.is_player_online(*player_id) {
+                        if let Some(message) = crisis_transition_notice(crisis.phase) {
+                            send_to_client(
+                                *player_id,
+                                ResponsePacket::Notice {
+                                    noticemsg: message.to_string(),
+                                    expiry: None,
+                                },
+                                &clients,
+                            );
+                            info!(
+                                "personal_crisis_notice_delivered player_id={} old_phase={:?} new_phase={:?}",
+                                player_id, previous, crisis.phase
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        delivery.observed_phases.clear();
+    }
+
+    for (client_id, player_id, sender) in &active_clients {
+        let status = if director.mode == SurvivalDirectorMode::PersonalCrisis {
+            build_crisis_status(crisis_state.get(player_id))
+        } else {
+            build_crisis_status(None)
+        };
+        let previous = delivery.sent.get(client_id);
+        let new_connection = previous.is_none();
+        let should_send = if new_connection {
+            login_sync.contains(player_id)
+        } else {
+            previous.is_some_and(|previous| crisis_status_changed(&previous.status, &status))
+        };
+
+        if !should_send {
+            continue;
+        }
+
+        let packet = ResponsePacket::CrisisStatus {
+            status: status.clone(),
+        };
+        let Ok(serialized) = serde_json::to_string(&packet) else {
+            error!(
+                "personal_crisis_status_serialization_failed player_id={} client_id={}",
+                player_id, client_id
+            );
+            continue;
+        };
+
+        match sender.try_send(serialized) {
+            Ok(()) => {
+                delivery.sent.insert(
+                    *client_id,
+                    SentCrisisStatus {
+                        player_id: *player_id,
+                        status: status.clone(),
+                    },
+                );
+                if let Some(telemetry) = telemetry_state.get_mut(player_id) {
+                    telemetry.status_packets_sent =
+                        telemetry.status_packets_sent.saturating_add(1);
+                    if new_connection {
+                        telemetry.login_snapshots_sent =
+                            telemetry.login_snapshots_sent.saturating_add(1);
+                    }
+                }
+                info!(
+                    "personal_crisis_status_sent player_id={} client_id={} phase={} exists={} reason={}",
+                    player_id,
+                    client_id,
+                    status.phase.as_deref().unwrap_or("none"),
+                    status.exists,
+                    if new_connection { "login" } else { "changed" }
+                );
+            }
+            Err(error) => {
+                debug!(
+                    "personal_crisis_status_send_deferred player_id={} client_id={} error={:?}",
+                    player_id, client_id, error
+                );
+            }
+        }
+    }
+
+    // A login request is satisfied only after every active connection for that
+    // player has a cached authoritative snapshot. Duplicate Login events on an
+    // already-synchronized connection therefore do not emit duplicates.
+    let pending_players = login_sync.iter().copied().collect::<Vec<_>>();
+    for player_id in pending_players {
+        let player_clients = active_client_players
+            .iter()
+            .filter_map(|(client_id, owner)| (*owner == player_id).then_some(*client_id))
+            .collect::<Vec<_>>();
+        if player_clients.is_empty()
+            || player_clients
+                .iter()
+                .all(|client_id| delivery.sent.contains_key(client_id))
+        {
+            login_sync.remove(&player_id);
+        }
     }
 }
 
@@ -1317,6 +1760,7 @@ pub struct GameEventExtras<'w, 's> {
     pub initial_encounter_state: Res<'w, InitialEncounterState>,
     pub plans: ResMut<'w, Plans>,
     pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
+    pub crisis_status_login_sync: ResMut<'w, CrisisStatusLoginSync>,
     // Used to give a spawned villager its player's start-location team color.
     pub assigned_start_locations: Res<'w, AssignedStartLocations>,
 }
@@ -1724,6 +2168,9 @@ impl Plugin for GamePlugin {
         app.init_resource::<IntroEncounterState>();
         app.init_resource::<SettlementCrisisState>();
         app.init_resource::<NextCrisisAssaultId>();
+        app.init_resource::<CrisisTelemetryState>();
+        app.init_resource::<CrisisStatusLoginSync>();
+        app.init_resource::<CrisisStatusDeliveryState>();
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -1978,6 +2425,15 @@ impl Plugin for GamePlugin {
                 Update,
                 sanctuary_login_system
                     .after(game_event_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                crisis_status_delivery_system
+                    .after(game_event_system)
+                    .after(personal_crisis_system)
+                    .after(personal_crisis_assault_system)
+                    .after(true_death_system)
                     .run_if(in_state(AppState::Running)),
             )
             /* .add_systems(
@@ -10451,6 +10907,11 @@ fn game_event_system(
                     debug!("Processing Login: {:?}", player_id);
                     events_to_remove.push(*event_id);
 
+                    // Crisis status uses this established delayed login point
+                    // so the first snapshot follows the Login packet and is
+                    // deduplicated per authenticated connection.
+                    extras.crisis_status_login_sync.insert(*player_id);
+
                     // Re-send the hero's current sanctuary state to the client, which
                     // otherwise only learns it from movement transitions. Held a few
                     // ticks so it lands after the login perception that sets the hero id.
@@ -11216,6 +11677,7 @@ fn personal_crisis_system(
     player_intro_state: Res<PlayerIntroState>,
     objectives: Res<Objectives>,
     mut settlement_crisis_state: ResMut<SettlementCrisisState>,
+    mut crisis_telemetry_state: ResMut<CrisisTelemetryState>,
     hero_query: Query<
         (
             &PlayerId,
@@ -11302,6 +11764,7 @@ fn personal_crisis_system(
         let crisis = match settlement_crisis_state.entry(*player_id) {
             Entry::Vacant(entry) => {
                 entry.insert(SettlementCrisis::new(current_tick));
+                crisis_telemetry_state.insert(*player_id, CrisisTelemetry::new(current_tick));
                 info!(
                     "personal_crisis_created player_id={} kind={:?} phase={:?} pressure=0 game_tick={} online={}",
                     player_id,
@@ -11338,6 +11801,10 @@ fn personal_crisis_system(
 
         if count_online_time {
             if let Some((old_phase, new_phase)) = transition_goblin_crisis(crisis, current_tick) {
+                crisis_telemetry_state
+                    .entry(*player_id)
+                    .or_insert_with(|| CrisisTelemetry::new(crisis.phase_started_tick))
+                    .observe_phase(new_phase, current_tick);
                 info!(
                     "personal_crisis_transition player_id={} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
                     player_id, old_phase, new_phase, crisis.pressure, current_tick
@@ -11716,6 +12183,7 @@ fn personal_crisis_assault_system(
         mut next_assault_id,
         mut run_spawned_objs,
         mut run_score_state,
+        mut crisis_telemetry_state,
     ): (
         ResMut<Ids>,
         ResMut<EntityObjMap>,
@@ -11723,6 +12191,7 @@ fn personal_crisis_assault_system(
         ResMut<NextCrisisAssaultId>,
         ResMut<RunSpawnedObjs>,
         ResMut<RunScoreState>,
+        ResMut<CrisisTelemetryState>,
     ),
     spawn_positions: Res<SpawnPositions>,
     hero_query: Query<
@@ -11978,6 +12447,10 @@ fn personal_crisis_assault_system(
                         crisis.phase_online_ticks = 0;
                         crisis.assault_recovery_required = false;
                         crisis.assault_spawn_warning_logged = false;
+                        crisis_telemetry_state
+                            .entry(player_id)
+                            .or_default()
+                            .record_launch(current_tick);
                         info!(
                             "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
                             player_id,
@@ -12111,12 +12584,17 @@ fn personal_crisis_assault_system(
                         &mut commands,
                         &target_query,
                     );
-                    record_personal_assault_resolution(
+                    if record_personal_assault_resolution(
                         player_id,
                         current_tick,
                         crisis,
                         &mut run_score_state,
-                    );
+                    ) {
+                        crisis_telemetry_state
+                            .entry(player_id)
+                            .or_default()
+                            .record_resolution(current_tick);
+                    }
                 }
             }
             _ => {}

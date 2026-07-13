@@ -3467,3 +3467,301 @@ fn legendary_threat_packet_hides_location_until_revealed() {
     assert!(revealed[0].hideout_known);
     assert_eq!(revealed[0].hideout_location, Some("20,21".to_string()));
 }
+
+fn checkpoint4_crisis(phase: CrisisPhase, pressure: i32) -> SettlementCrisis {
+    let mut crisis = SettlementCrisis::new(100);
+    crisis.phase = phase;
+    crisis.pressure = pressure;
+    crisis.warning_active = matches!(
+        phase,
+        CrisisPhase::Preparing | CrisisPhase::AssaultReady | CrisisPhase::AssaultActive
+    );
+    crisis
+}
+
+#[test]
+fn checkpoint4_no_crisis_builds_an_explicit_clear_snapshot() {
+    let status = build_crisis_status(None);
+
+    assert_eq!(status.version, 1);
+    assert!(!status.exists);
+    assert_eq!(status.kind, None);
+    assert_eq!(status.phase, None);
+    assert_eq!(status.pressure, None);
+    assert_eq!(status.pressure_max, None);
+    assert!(!status.warning);
+    assert!(!status.assault_active);
+    assert!(!status.continues_while_disconnected);
+}
+
+#[test]
+fn checkpoint4_every_phase_has_a_stable_machine_value_and_severity() {
+    for (phase, machine_phase, severity) in [
+        (CrisisPhase::Dormant, "dormant", "quiet"),
+        (CrisisPhase::Signs, "signs", "low"),
+        (CrisisPhase::Pressure, "pressure", "medium"),
+        (CrisisPhase::Preparing, "preparing", "high"),
+        (CrisisPhase::AssaultReady, "assault_ready", "crisis"),
+        (CrisisPhase::AssaultActive, "assault_active", "crisis"),
+        (CrisisPhase::Resolved, "resolved", "resolved"),
+    ] {
+        let crisis = checkpoint4_crisis(phase, 73);
+        let status = build_crisis_status(Some(&crisis));
+
+        assert!(status.exists);
+        assert_eq!(status.kind.as_deref(), Some("goblin"));
+        assert_eq!(status.phase.as_deref(), Some(machine_phase));
+        assert_eq!(status.severity.as_deref(), Some(severity));
+        assert!(status.title.as_deref().is_some_and(|title| !title.is_empty()));
+        assert!(status
+            .summary
+            .as_deref()
+            .is_some_and(|summary| !summary.is_empty()));
+        assert!(status
+            .action_hint
+            .as_deref()
+            .is_some_and(|hint| !hint.is_empty()));
+    }
+}
+
+#[test]
+fn checkpoint4_status_mapping_is_read_only_and_uses_server_pressure_max() {
+    let crisis = checkpoint4_crisis(CrisisPhase::Pressure, 67);
+    let before = crisis.clone();
+
+    let status = build_crisis_status(Some(&crisis));
+
+    assert_eq!(crisis, before);
+    assert_eq!(status.pressure, Some(67));
+    assert_eq!(status.pressure_max, Some(GOBLIN_PRESSURE_MAX));
+}
+
+#[test]
+fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
+    let preparing = build_crisis_status(Some(&checkpoint4_crisis(
+        CrisisPhase::Preparing,
+        80,
+    )));
+    assert!(preparing.warning);
+
+    let mut ready_crisis = checkpoint4_crisis(CrisisPhase::AssaultReady, 92);
+    ready_crisis.phase_online_ticks = 70;
+    let ready = build_crisis_status(Some(&ready_crisis));
+    assert!(ready.assault_ready);
+    assert_eq!(ready.preparation_seconds_remaining, Some(23));
+    assert_eq!(ready.preferred_launch_window.as_deref(), Some("dusk_or_night"));
+
+    let mut active_crisis = checkpoint4_crisis(CrisisPhase::AssaultActive, 96);
+    active_crisis.assault_unit_ids = vec![11, 12, 13];
+    active_crisis.assault_defeated_unit_ids = vec![11];
+    let active = build_crisis_status(Some(&active_crisis));
+    assert!(active.assault_active);
+    assert_eq!(active.remaining_attackers, Some(2));
+    assert_eq!(active.total_attackers, Some(3));
+    assert!(active.continues_while_disconnected);
+
+    let resolved = build_crisis_status(Some(&checkpoint4_crisis(
+        CrisisPhase::Resolved,
+        96,
+    )));
+    assert!(resolved.resolved);
+    assert!(!resolved.warning);
+    assert!(!resolved.continues_while_disconnected);
+    assert_eq!(resolved.remaining_attackers, None);
+}
+
+#[test]
+fn checkpoint4_status_change_policy_throttles_only_pressure_and_countdown() {
+    let mut crisis = checkpoint4_crisis(CrisisPhase::Pressure, 50);
+    let baseline = build_crisis_status(Some(&crisis));
+    assert!(!crisis_status_changed(&baseline, &baseline));
+
+    crisis.pressure = 54;
+    assert!(!crisis_status_changed(
+        &baseline,
+        &build_crisis_status(Some(&crisis))
+    ));
+    crisis.pressure = 55;
+    assert!(crisis_status_changed(
+        &baseline,
+        &build_crisis_status(Some(&crisis))
+    ));
+
+    let mut transitioned = crisis.clone();
+    transitioned.phase = CrisisPhase::Preparing;
+    transitioned.warning_active = true;
+    assert!(crisis_status_changed(
+        &baseline,
+        &build_crisis_status(Some(&transitioned))
+    ));
+
+    let mut ready = checkpoint4_crisis(CrisisPhase::AssaultReady, 90);
+    ready.phase_online_ticks = 0;
+    let countdown = build_crisis_status(Some(&ready));
+    ready.phase_online_ticks = 40;
+    assert!(!crisis_status_changed(
+        &countdown,
+        &build_crisis_status(Some(&ready))
+    ));
+    ready.phase_online_ticks = 50;
+    assert!(crisis_status_changed(
+        &countdown,
+        &build_crisis_status(Some(&ready))
+    ));
+
+    let mut active = checkpoint4_crisis(CrisisPhase::AssaultActive, 90);
+    active.assault_unit_ids = vec![1, 2, 3];
+    let all_alive = build_crisis_status(Some(&active));
+    active.assault_defeated_unit_ids.push(1);
+    assert!(crisis_status_changed(
+        &all_alive,
+        &build_crisis_status(Some(&active))
+    ));
+
+    assert!(crisis_status_changed(&baseline, &build_crisis_status(None)));
+}
+
+#[test]
+fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
+    let player_id = 7;
+    let client_id = Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+    let mut client_map = HashMap::new();
+    client_map.insert(
+        client_id,
+        Client {
+            id: client_id,
+            player_id,
+            sender,
+        },
+    );
+
+    let mut crisis_state = SettlementCrisisState::default();
+    crisis_state.insert(player_id, checkpoint4_crisis(CrisisPhase::Dormant, 10));
+    let mut login_sync = CrisisStatusLoginSync::default();
+    login_sync.insert(player_id);
+    let mut telemetry_state = CrisisTelemetryState::default();
+    telemetry_state.insert(player_id, CrisisTelemetry::new(100));
+
+    let clients = Clients(Arc::new(Mutex::new(client_map)));
+    let mut app = App::new();
+    app.insert_resource(clients.clone());
+    app.insert_resource(SurvivalDirectorConfig::default());
+    app.insert_resource(crisis_state);
+    app.insert_resource(login_sync);
+    app.insert_resource(CrisisStatusDeliveryState::default());
+    app.insert_resource(telemetry_state);
+    app.add_systems(Update, crisis_status_delivery_system);
+
+    app.update();
+    let first = receiver.try_recv().expect("login snapshot");
+    let first: ResponsePacket = serde_json::from_str(&first).unwrap();
+    assert!(matches!(
+        first,
+        ResponsePacket::CrisisStatus {
+            status: CrisisStatusSnapshot { exists: true, .. }
+        }
+    ));
+    assert!(receiver.try_recv().is_err());
+
+    app.update();
+    assert!(receiver.try_recv().is_err(), "unchanged snapshot must dedupe");
+
+    // A duplicate delayed Login for the same authenticated connection does not
+    // force another identical packet.
+    app.world_mut()
+        .resource_mut::<CrisisStatusLoginSync>()
+        .insert(player_id);
+    app.update();
+    assert!(receiver.try_recv().is_err());
+
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .pressure = 15;
+    app.update();
+    assert!(receiver.try_recv().is_ok(), "meaningful pressure sends");
+
+    // Removing the per-run state sends a clear snapshot on the existing
+    // connection, as required by True Death and fresh-run cleanup.
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .remove(&player_id);
+    app.update();
+    let clear = receiver.try_recv().expect("clear snapshot");
+    let clear: ResponsePacket = serde_json::from_str(&clear).unwrap();
+    assert!(matches!(
+        clear,
+        ResponsePacket::CrisisStatus {
+            status: CrisisStatusSnapshot { exists: false, .. }
+        }
+    ));
+
+    // A real offline update purges the connection cache. Reusing the same UUID
+    // in this deterministic test therefore still receives one reconnect sync.
+    clients.lock().unwrap().remove(&client_id);
+    app.update();
+    let (reconnect_sender, mut reconnect_receiver) = tokio::sync::mpsc::channel(4);
+    clients.lock().unwrap().insert(
+        client_id,
+        Client {
+            id: client_id,
+            player_id,
+            sender: reconnect_sender,
+        },
+    );
+    app.world_mut()
+        .resource_mut::<CrisisStatusLoginSync>()
+        .insert(player_id);
+    app.update();
+    assert!(reconnect_receiver.try_recv().is_ok());
+
+    let telemetry = app.world().resource::<CrisisTelemetryState>();
+    let telemetry = telemetry.get(&player_id).unwrap();
+    assert_eq!(telemetry.status_packets_sent, 4);
+    assert_eq!(telemetry.login_snapshots_sent, 2);
+}
+
+#[test]
+fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
+    let player_id = 9;
+    let client_id = Uuid::new_v4();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
+        client_id,
+        Client {
+            id: client_id,
+            player_id,
+            sender,
+        },
+    )]))));
+    let mut state = SettlementCrisisState::default();
+    state.insert(
+        player_id,
+        checkpoint4_crisis(CrisisPhase::AssaultActive, 100),
+    );
+    let mut login_sync = CrisisStatusLoginSync::default();
+    login_sync.insert(player_id);
+
+    let mut app = App::new();
+    app.insert_resource(clients);
+    app.insert_resource(SurvivalDirectorConfig::new(
+        SurvivalDirectorMode::Legacy,
+    ));
+    app.insert_resource(state);
+    app.insert_resource(login_sync);
+    app.insert_resource(CrisisStatusDeliveryState::default());
+    app.insert_resource(CrisisTelemetryState::default());
+    app.add_systems(Update, crisis_status_delivery_system);
+    app.update();
+
+    let packet = receiver.try_recv().expect("legacy clear snapshot");
+    let packet: ResponsePacket = serde_json::from_str(&packet).unwrap();
+    assert!(matches!(
+        packet,
+        ResponsePacket::CrisisStatus {
+            status: CrisisStatusSnapshot { exists: false, .. }
+        }
+    ));
+}

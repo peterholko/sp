@@ -333,6 +333,33 @@ pub struct StructureList {
     pub result: Vec<Structure>,
 }
 
+/// Versioned, player-facing personal-crisis state. Gameplay systems remain
+/// authoritative; this snapshot deliberately excludes ECS/object IDs,
+/// generation bookkeeping, and cleanup/debug state.
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CrisisStatusSnapshot {
+    pub version: u32,
+    pub exists: bool,
+    pub kind: Option<String>,
+    pub phase: Option<String>,
+    pub pressure: Option<i32>,
+    pub pressure_max: Option<i32>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub action_hint: Option<String>,
+    pub severity: Option<String>,
+    pub warning: bool,
+    pub assault_ready: bool,
+    pub assault_active: bool,
+    pub resolved: bool,
+    pub remaining_attackers: Option<i32>,
+    pub total_attackers: Option<i32>,
+    pub preparation_seconds_remaining: Option<i32>,
+    pub preferred_launch_window: Option<String>,
+    pub continues_while_disconnected: bool,
+}
+
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "packet")]
@@ -988,6 +1015,11 @@ pub enum ResponsePacket {
         version: i32,
         current_id: String,
         objectives: Vec<ObjectiveProgress>,
+    },
+    #[serde(rename = "crisis_status")]
+    CrisisStatus {
+        #[serde(flatten)]
+        status: CrisisStatusSnapshot,
     },
     #[serde(rename = "threat_state")]
     ThreatState {
@@ -4200,9 +4232,81 @@ fn handle_get_log_levels(
 mod tests {
     use super::*;
 
+    fn no_crisis_status() -> CrisisStatusSnapshot {
+        CrisisStatusSnapshot {
+            version: 1,
+            exists: false,
+            kind: None,
+            phase: None,
+            pressure: None,
+            pressure_max: None,
+            title: None,
+            summary: None,
+            action_hint: None,
+            severity: None,
+            warning: false,
+            assault_ready: false,
+            assault_active: false,
+            resolved: false,
+            remaining_attackers: None,
+            total_attackers: None,
+            preparation_seconds_remaining: None,
+            preferred_launch_window: None,
+            continues_while_disconnected: false,
+        }
+    }
+
     #[test]
     fn test_is_inappropriate() {
         let hero_name = "Fuck";
         assert!(hero_name.is_inappropriate());
+    }
+
+    #[test]
+    fn checkpoint4_crisis_status_uses_stable_tag_and_flat_payload() {
+        let mut status = no_crisis_status();
+        status.exists = true;
+        status.kind = Some("goblin".to_string());
+        status.phase = Some("assault_active".to_string());
+        status.pressure = Some(91);
+        status.pressure_max = Some(100);
+        status.title = Some("Settlement Under Attack".to_string());
+        status.summary = Some("Goblin raiders are attacking your settlement.".to_string());
+        status.action_hint = Some(
+            "Defeat the remaining attackers. This assault continues if you disconnect."
+                .to_string(),
+        );
+        status.severity = Some("crisis".to_string());
+        status.warning = true;
+        status.assault_active = true;
+        status.remaining_attackers = Some(2);
+        status.total_attackers = Some(3);
+        status.continues_while_disconnected = true;
+
+        let value = serde_json::to_value(ResponsePacket::CrisisStatus { status }).unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["phase"], "assault_active");
+        assert_eq!(value["remaining_attackers"], 2);
+        assert_eq!(value["continues_while_disconnected"], true);
+        assert!(value.get("status").is_none(), "payload must remain flat");
+    }
+
+    #[test]
+    fn checkpoint4_no_crisis_status_serializes_as_a_clear_state() {
+        let value = serde_json::to_value(ResponsePacket::CrisisStatus {
+            status: no_crisis_status(),
+        })
+        .unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["exists"], false);
+        assert_eq!(value["warning"], false);
+        assert!(value.get("kind").is_none());
+        assert!(value.get("phase").is_none());
+        assert!(value.get("pressure").is_none());
+        assert!(value.get("remaining_attackers").is_none());
     }
 }

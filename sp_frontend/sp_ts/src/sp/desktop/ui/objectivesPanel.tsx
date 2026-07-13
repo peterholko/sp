@@ -2,6 +2,16 @@ import * as React from "react";
 import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
 import { isDesktop, isWideScreen } from "../../core/config";
+import {
+  CrisisStatusPacket,
+  CrisisStatusView,
+  CrisisTone,
+  CrisisUiState,
+  clearCrisisStatus,
+  crisisStatusView,
+  receiveCrisisStatus,
+  shouldRenderSurvivalThread,
+} from "../../core/crisisStatus";
 
 const COMPACT_DESKTOP_MAX_WIDTH = 1280;
 const DESKTOP_THREAD_BOTTOM = '145px';
@@ -40,7 +50,7 @@ interface LegendaryThreat {
   captains_defeated: number;
 }
 
-interface ObjectivesState {
+interface ObjectivesState extends CrisisUiState {
   build_campfire: boolean;
   build_3_structures: boolean;
   recruit_villager: boolean;
@@ -50,7 +60,6 @@ interface ObjectivesState {
   threatState: any;
   discoveryEvent: any;
   viewportWidth: number;
-  compactExpanded: boolean;
 }
 
 const severityRank = {
@@ -61,7 +70,19 @@ const severityRank = {
   quiet: 1,
 };
 
+const crisisToneColor: Record<CrisisTone, string> = {
+  neutral: '#9aa0a6',
+  low: '#a7c59a',
+  warning: '#e2bd67',
+  high: '#e49a52',
+  imminent: '#e66d4e',
+  urgent: '#e05252',
+  resolved: '#78b978',
+};
+
 export default class ObjectivesPanel extends React.Component<{}, ObjectivesState> {
+  private observedHeroId: string | null = null;
+
   constructor(props) {
     super(props);
     this.state = {
@@ -73,6 +94,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       objectiveState: null,
       threatState: null,
       discoveryEvent: null,
+      crisisStatus: null,
+      previousCrisisPhase: null,
       viewportWidth: typeof window === 'undefined' ? 0 : window.innerWidth,
       // QW1: start the Survival Thread expanded so the tutorial guidance is
       // visible by default on compact desktops; the player can still collapse it.
@@ -88,6 +111,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.on(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+    Global.gameEmitter.on(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
+    Global.gameEmitter.on(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
+    Global.gameEmitter.on(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
 
     if (typeof window !== 'undefined') {
       window.addEventListener('resize', this.handleResize);
@@ -99,6 +127,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.off(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+    Global.gameEmitter.off(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
+    Global.gameEmitter.off(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
+    Global.gameEmitter.off(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
+    Global.gameEmitter.off(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
 
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.handleResize);
@@ -137,6 +170,28 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
   handleDiscoveryEvent(message) {
     this.setState({ discoveryEvent: message });
+  }
+
+  handleCrisisStatus(message: CrisisStatusPacket) {
+    this.setState((state) => receiveCrisisStatus(state, message));
+  }
+
+  handleRunReset() {
+    this.observedHeroId = null;
+    this.setState((state) => clearCrisisStatus(state));
+  }
+
+  handleHeroInit(heroId) {
+    const nextHeroId = String(heroId);
+
+    // A reconnect reuses the same hero id and should not replay urgent
+    // auto-expansion. A recreated run receives a different hero id and clears
+    // any locally retained snapshot while the authoritative packet is resent.
+    if (this.observedHeroId !== null && this.observedHeroId !== nextHeroId) {
+      this.setState((state) => clearCrisisStatus(state));
+    }
+
+    this.observedHeroId = nextHeroId;
   }
 
   legacyObjectives(): ObjectiveProgress[] {
@@ -234,17 +289,145 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     );
   }
 
+  renderCrisisCard(
+    crisis: CrisisStatusView,
+    bodyStyle: React.CSSProperties,
+    labelStyle: React.CSSProperties,
+  ) {
+    const accent = crisisToneColor[crisis.tone];
+    const cardStyle: React.CSSProperties = {
+      border: `1px solid ${accent}`,
+      borderLeft: `3px solid ${accent}`,
+      borderRadius: '3px',
+      background: 'rgba(255,255,255,0.035)',
+      padding: '7px 8px',
+      marginBottom: '8px',
+    };
+    const headerStyle: React.CSSProperties = {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      gap: '8px',
+      marginBottom: '4px',
+    };
+    const headingStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '12px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
+    const phaseStyle: React.CSSProperties = {
+      color: accent,
+      fontFamily: 'Verdana',
+      fontSize: '8px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    };
+    const pressureRailStyle: React.CSSProperties = {
+      height: '6px',
+      width: '100%',
+      background: 'rgba(255,255,255,0.16)',
+      borderRadius: '3px',
+      overflow: 'hidden',
+      marginTop: '3px',
+    };
+    const statusRowStyle: React.CSSProperties = {
+      ...labelStyle,
+      color: '#d4d4d4',
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: '8px',
+      marginTop: '5px',
+    };
+    const urgentTextStyle: React.CSSProperties = {
+      ...bodyStyle,
+      color: crisis.assaultActive ? '#ffaaaa' : accent,
+      fontWeight: 'bold',
+      marginTop: '5px',
+      marginBottom: 0,
+    };
+
+    return (
+      <section
+        style={cardStyle}
+        role="region"
+        aria-label="Personal goblin crisis status"
+        aria-labelledby="personal-crisis-title"
+      >
+        <div
+          style={headerStyle}
+          aria-live={crisis.urgent ? 'assertive' : 'polite'}
+          aria-atomic="true"
+        >
+          <div id="personal-crisis-title" style={headingStyle}>{crisis.title}</div>
+          <div style={phaseStyle}>
+            {crisis.phaseLabel}{crisis.warning ? ' · Warning' : ''}
+          </div>
+        </div>
+
+        {crisis.summary && <div style={bodyStyle}>{crisis.summary}</div>}
+        {crisis.actionHint &&
+          <div style={labelStyle}><strong>Next:</strong> {crisis.actionHint}</div>}
+
+        {crisis.pressure &&
+          <div style={{ marginTop: '6px' }}>
+            <div style={statusRowStyle}>
+              <span>Pressure</span>
+              <span>{crisis.pressure.value} / {crisis.pressure.max}</span>
+            </div>
+            <div
+              style={pressureRailStyle}
+              role="progressbar"
+              aria-label="Goblin crisis pressure"
+              aria-valuemin={0}
+              aria-valuemax={crisis.pressure.max}
+              aria-valuenow={crisis.pressure.value}
+              title={`Goblin crisis pressure: ${crisis.pressure.value} of ${crisis.pressure.max}`}
+            >
+              <div style={{
+                height: '100%',
+                width: `${crisis.pressure.percent}%`,
+                background: accent,
+              }} />
+            </div>
+          </div>}
+
+        {crisis.preparationLabel &&
+          <div style={statusRowStyle}>
+            <span>Preparation time</span>
+            <span>{crisis.preparationLabel}</span>
+          </div>}
+
+        {crisis.assaultActive &&
+          <div style={statusRowStyle}>
+            <span>Attackers remaining</span>
+            <span>{crisis.attackersLabel || 'Updating'}</span>
+          </div>}
+
+        {crisis.disconnectedWarning &&
+          <div style={urgentTextStyle}>{crisis.disconnectedWarning}</div>}
+
+        {crisis.resolved &&
+          <div style={urgentTextStyle}>Crisis resolved. Recover, repair, and rebuild.</div>}
+      </section>
+    );
+  }
+
   render() {
     const packetObjectives = this.state.objectiveState && this.state.objectiveState.objectives
       ? this.state.objectiveState.objectives
       : null;
     const objectives: ObjectiveProgress[] = packetObjectives || this.legacyObjectives();
     const activeObjective = this.activeObjective(objectives);
+    const crisis = crisisStatusView(this.state.crisisStatus);
 
     // Threat Pressure and Discovery sections were intentionally removed from the
     // Survival Thread (too wordy for players). The data still arrives over the
     // wire and the handlers/state remain, so they can be re-added later.
-    if (!activeObjective) {
+    if (!shouldRenderSurvivalThread(Boolean(activeObjective), this.state.crisisStatus)) {
       return null;
     }
 
@@ -386,6 +569,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       flex: '0 0 auto',
     };
 
+    const compactSummary = crisis && crisis.urgent
+      ? crisis.compactLabel || crisis.phaseLabel
+      : activeObjective
+        ? activeObjective.title
+        : crisis
+          ? crisis.title
+          : '';
+
     const objectiveRowStyle = (state: string): React.CSSProperties => ({
       display: 'flex',
       justifyContent: 'space-between',
@@ -412,16 +603,21 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             style={compactHeaderStyle}
             onClick={this.toggleCompactExpanded}
             aria-expanded={compactExpanded}
-            aria-label={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
+            aria-label={compactExpanded
+              ? 'Collapse survival thread'
+              : `Expand survival thread${compactSummary ? `: ${compactSummary}` : ''}`}
             title={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
           >
             <span style={compactTitleStyle}>Survival Thread</span>
-            {!compactExpanded && activeObjective &&
-              <span style={compactObjectiveStyle}>{activeObjective.title}</span>}
+            {!compactExpanded && compactSummary &&
+              <span style={compactObjectiveStyle}>{compactSummary}</span>}
             <span style={compactToggleStyle}>{compactExpanded ? '-' : '+'}</span>
           </button>
           :
           <div style={titleStyle}>Survival Thread</div>}
+
+        {(!compactDesktop || compactExpanded) && crisis &&
+          this.renderCrisisCard(crisis, bodyStyle, labelStyle)}
 
         {(!compactDesktop || compactExpanded) && activeObjective &&
           <div>

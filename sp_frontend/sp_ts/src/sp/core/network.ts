@@ -6,6 +6,9 @@ import { TileState } from './tileState';
 import { GameEvent } from './gameEvent';
 import { DEAD, NONE } from "./config";
 import { WeatherState } from './weatherState';
+import type { CrisisStatusPacket } from './crisisStatus';
+
+export type { CrisisStatusPacket } from './crisisStatus';
 
 export type NetworkPacket =
   | { cmd: 'select_class'; class_name: string; hero_name: string }
@@ -191,6 +194,7 @@ export type ResponsePacket =
   | { packet: 'log_levels'; overrides: Array<[string, string]> }
   | { packet: 'objective_state'; version: number; current_id: string; objectives: ObjectiveProgress[] }
   | { packet: 'threat_state'; version: number; day: number; phase: string; pressure_level: string; next_night_warning: string; known_risks: ThreatRisk[]; legendary_threats: LegendaryThreat[] }
+  | CrisisStatusPacket
   | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
   | { packet: 'discovery_event'; version: number; discovery_type: string; title: string; unlock_source: string; location?: string; result: string };
 
@@ -1885,6 +1889,8 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.OBJECTIVE_STATE, jsonData);
       } else if (jsonData.packet == 'threat_state') {
         Global.gameEmitter.emit(NetworkEvent.THREAT_STATE, jsonData);
+      } else if (jsonData.packet == 'crisis_status') {
+        Global.gameEmitter.emit(NetworkEvent.CRISIS_STATUS, jsonData);
       } else if (jsonData.packet == 'combat_state') {
         Global.combatState = jsonData;
         Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);

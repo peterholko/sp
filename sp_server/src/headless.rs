@@ -26,10 +26,10 @@ use crate::constants::{
 };
 use crate::database::DatabaseEvent;
 use crate::game::{
-    Client, Clients, CrisisAssaultUnit, DatabaseClient, DatabaseManagers, GameTick, Merchant,
-    MerchantSailState, Monolith, NetworkReceiver, Objectives, PlayerIntroEncounters,
-    PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState, SettlementCrisis,
-    SettlementCrisisState, SurvivalDirectorMode, VictoryState,
+    Client, Clients, CrisisAssaultUnit, CrisisPhase, CrisisTelemetryState, DatabaseClient,
+    DatabaseManagers, GameTick, Merchant, MerchantSailState, Monolith, NetworkReceiver, Objectives,
+    PlayerIntroEncounters, PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory,
+    RunScoreState, SettlementCrisis, SettlementCrisisState, SurvivalDirectorMode, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
@@ -267,6 +267,26 @@ fn to_item_view(item: &crate::item::Item) -> ItemView {
     }
 }
 
+fn packet_has_tag(packet: &str, expected: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(packet)
+        .ok()
+        .and_then(|value| value.get("packet")?.as_str().map(str::to_owned))
+        .as_deref()
+        == Some(expected)
+}
+
+const fn crisis_phase_name(phase: CrisisPhase) -> &'static str {
+    match phase {
+        CrisisPhase::Dormant => "dormant",
+        CrisisPhase::Signs => "signs",
+        CrisisPhase::Pressure => "pressure",
+        CrisisPhase::Preparing => "preparing",
+        CrisisPhase::AssaultReady => "assault_ready",
+        CrisisPhase::AssaultActive => "assault_active",
+        CrisisPhase::Resolved => "resolved",
+    }
+}
+
 // Per-run metrics emitted by the runner (CSV + JSON). Field names mirror the
 // game's own state structs (`PlayerRunScore`, `PlayerObjectives`,
 // `PlayerVictory`) so the data lines up with in-game scoring.
@@ -307,6 +327,45 @@ pub struct RunMetrics {
     pub final_skill_total: i32,
     pub final_inventory_count: i32,
     pub structures_built: i32,
+    // Personal-crisis runtime telemetry. These are appended to the runner
+    // schemas so every pre-Checkpoint-4 field keeps its original name/order.
+    pub crisis_highest_phase: String,
+    pub crisis_final_phase: String,
+    pub crisis_final_pressure: i32,
+    pub crisis_signs_tick: Option<i32>,
+    pub crisis_pressure_tick: Option<i32>,
+    pub crisis_preparing_tick: Option<i32>,
+    pub crisis_assault_ready_tick: Option<i32>,
+    pub crisis_assault_active_tick: Option<i32>,
+    pub crisis_resolved_tick: Option<i32>,
+    pub crisis_assaults_launched: i32,
+    pub crisis_assaults_resolved: i32,
+    pub crisis_units_remaining: i32,
+    pub crisis_status_packets_sent: i32,
+    pub crisis_login_snapshots_sent: i32,
+    pub crisis_duplicate_assaults: i32,
+    pub personal_crisis_automatic_dusk_hordes: i32,
+    pub crisis_invariants_ok: bool,
+}
+
+/// Runtime-only observations collected by the in-process harness. Gameplay
+/// state remains authoritative; this tracker only samples it after updates and
+/// never writes back into the world.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadlessCrisisTelemetry {
+    pub highest_phase: String,
+    pub signs_tick: Option<i32>,
+    pub pressure_tick: Option<i32>,
+    pub preparing_tick: Option<i32>,
+    pub assault_ready_tick: Option<i32>,
+    pub assault_active_tick: Option<i32>,
+    pub resolved_tick: Option<i32>,
+    pub assaults_launched: i32,
+    pub assaults_resolved: i32,
+    pub units_remaining: i32,
+    pub status_packets_sent: i32,
+    pub login_snapshots_sent: i32,
+    pub duplicate_assaults: i32,
 }
 
 pub struct HeadlessGame {
@@ -324,6 +383,13 @@ pub struct HeadlessGame {
     // tokio mpsc: game -> harness (captured client packets / db events).
     packet_tx: mpsc::Sender<String>,
     packet_rx: mpsc::Receiver<String>,
+    // Crisis packets are sparse because production delivery is deduplicated, so
+    // retain them for deterministic scenarios and per-run packet telemetry.
+    crisis_packet_history: Vec<String>,
+    // Full packet capture is opt-in around short scenarios; normal long runner
+    // runs do not retain the high-volume perception/update stream.
+    capture_packets: bool,
+    captured_packets: Vec<String>,
     // kept alive so the dummy DatabaseManager's sender stays open.
     _db_rx: mpsc::Receiver<DatabaseEvent>,
 
@@ -373,6 +439,9 @@ impl HeadlessGame {
             clients,
             packet_tx,
             packet_rx,
+            crisis_packet_history: Vec::new(),
+            capture_packets: false,
+            captured_packets: Vec::new(),
             _db_rx: db_rx,
             tick_count: 0,
         };
@@ -499,7 +568,14 @@ impl HeadlessGame {
     // Keep the bounded output channels empty. Captured packets are debug-only and
     // the bot reads `World` directly, so we discard here.
     fn drain_io(&mut self) {
-        while self.packet_rx.try_recv().is_ok() {}
+        while let Ok(packet) = self.packet_rx.try_recv() {
+            if packet_has_tag(&packet, "crisis_status") {
+                self.crisis_packet_history.push(packet.clone());
+            }
+            if self.capture_packets {
+                self.captured_packets.push(packet);
+            }
+        }
         while self._db_rx.try_recv().is_ok() {}
     }
 
@@ -514,6 +590,32 @@ impl HeadlessGame {
             }
         }
         out
+    }
+
+    /// Start bounded, explicit capture of all outgoing packets. Long-running
+    /// balance simulations should leave this disabled.
+    pub fn start_packet_capture(&mut self) {
+        self.captured_packets.clear();
+        self.capture_packets = true;
+    }
+
+    /// Stop full capture and return every successfully decoded packet observed
+    /// since `start_packet_capture`.
+    pub fn finish_packet_capture(&mut self) -> Vec<ResponsePacket> {
+        self.capture_packets = false;
+        std::mem::take(&mut self.captured_packets)
+            .into_iter()
+            .filter_map(|packet| serde_json::from_str::<ResponsePacket>(&packet).ok())
+            .collect()
+    }
+
+    /// Return and clear retained structured crisis-status packets. Cumulative
+    /// telemetry counters are intentionally unaffected.
+    pub fn take_crisis_status_packets(&mut self) -> Vec<ResponsePacket> {
+        std::mem::take(&mut self.crisis_packet_history)
+            .into_iter()
+            .filter_map(|packet| serde_json::from_str::<ResponsePacket>(&packet).ok())
+            .collect()
     }
 
     pub fn world(&self) -> &World {
@@ -547,6 +649,53 @@ impl HeadlessGame {
             sender: self.packet_tx.clone(),
         };
         self.clients.lock().unwrap().insert(client.id, client);
+    }
+
+    /// Reconnect through the production ordering: install the authenticated
+    /// client, then enqueue the ordinary Login event that drives resynchronization.
+    pub fn reconnect_player_with_login(&mut self) {
+        self.reconnect_player();
+        // Production authentication emits Login after inserting the client.
+        // Reuse that path so reconnect snapshot tests exercise real delivery.
+        self.inject(PlayerEvent::Login {
+            player_id: self.player_id,
+        });
+    }
+
+    pub fn crisis_telemetry(&self) -> HeadlessCrisisTelemetry {
+        let mut snapshot = HeadlessCrisisTelemetry::default();
+        if let Some(telemetry) = self
+            .app
+            .world()
+            .get_resource::<CrisisTelemetryState>()
+            .and_then(|state| state.get(&self.player_id))
+        {
+            snapshot.highest_phase = crisis_phase_name(telemetry.highest_phase).to_string();
+            snapshot.signs_tick = telemetry.signs_tick;
+            snapshot.pressure_tick = telemetry.pressure_tick;
+            snapshot.preparing_tick = telemetry.preparing_tick;
+            snapshot.assault_ready_tick = telemetry.assault_ready_tick;
+            snapshot.assault_active_tick = telemetry.assault_active_tick;
+            snapshot.resolved_tick = telemetry.resolved_tick;
+            snapshot.assaults_launched = telemetry.assaults_launched;
+            snapshot.assaults_resolved = telemetry.assaults_resolved;
+            snapshot.status_packets_sent = telemetry.status_packets_sent;
+            snapshot.login_snapshots_sent = telemetry.login_snapshots_sent;
+            snapshot.duplicate_assaults = telemetry.duplicate_assaults;
+        }
+        snapshot.units_remaining = self
+            .app
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&self.player_id)
+            .map(|crisis| {
+                crisis
+                    .assault_unit_ids
+                    .len()
+                    .saturating_sub(crisis.assault_defeated_unit_ids.len()) as i32
+            })
+            .unwrap_or(0);
+        snapshot
     }
 
     pub fn settlement_crisis(&self) -> Option<SettlementCrisis> {
@@ -866,6 +1015,7 @@ impl HeadlessGame {
     }
 
     pub fn metrics(&mut self) -> RunMetrics {
+        let crisis_telemetry = self.crisis_telemetry();
         let pid = self.player_id;
         let current_tick = self.game_tick();
         let world = self.app.world_mut();
@@ -925,6 +1075,7 @@ impl HeadlessGame {
             .get(&pid)
             .cloned()
             .unwrap_or_default();
+        let final_crisis = world.resource::<SettlementCrisisState>().get(&pid).cloned();
 
         let start_tick = if run.start_tick != 0 {
             run.start_tick
@@ -978,6 +1129,34 @@ impl HeadlessGame {
             final_skill_total,
             final_inventory_count,
             structures_built,
+            crisis_highest_phase: if crisis_telemetry.highest_phase.is_empty() {
+                "none".to_string()
+            } else {
+                crisis_telemetry.highest_phase.clone()
+            },
+            crisis_final_phase: final_crisis
+                .as_ref()
+                .map(|crisis| crisis_phase_name(crisis.phase).to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            crisis_final_pressure: final_crisis
+                .as_ref()
+                .map(|crisis| crisis.pressure)
+                .unwrap_or(0),
+            crisis_signs_tick: crisis_telemetry.signs_tick,
+            crisis_pressure_tick: crisis_telemetry.pressure_tick,
+            crisis_preparing_tick: crisis_telemetry.preparing_tick,
+            crisis_assault_ready_tick: crisis_telemetry.assault_ready_tick,
+            crisis_assault_active_tick: crisis_telemetry.assault_active_tick,
+            crisis_resolved_tick: crisis_telemetry.resolved_tick,
+            crisis_assaults_launched: crisis_telemetry.assaults_launched,
+            crisis_assaults_resolved: crisis_telemetry.assaults_resolved,
+            crisis_units_remaining: crisis_telemetry.units_remaining,
+            crisis_status_packets_sent: crisis_telemetry.status_packets_sent,
+            crisis_login_snapshots_sent: crisis_telemetry.login_snapshots_sent,
+            crisis_duplicate_assaults: crisis_telemetry.duplicate_assaults,
+            personal_crisis_automatic_dusk_hordes: run.waves_survived,
+            crisis_invariants_ok: crisis_telemetry.duplicate_assaults == 0
+                && crisis_telemetry.assaults_resolved <= crisis_telemetry.assaults_launched,
         }
     }
 }
@@ -985,6 +1164,57 @@ impl HeadlessGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::CrisisStatusSnapshot;
+
+    fn crisis_statuses(packets: Vec<ResponsePacket>) -> Vec<CrisisStatusSnapshot> {
+        packets
+            .into_iter()
+            .filter_map(|packet| match packet {
+                ResponsePacket::CrisisStatus { status } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn crisis_phase_sequence(statuses: &[CrisisStatusSnapshot]) -> Vec<String> {
+        let mut phases = Vec::new();
+        for phase in statuses
+            .iter()
+            .filter(|status| status.exists)
+            .filter_map(|status| status.phase.clone())
+        {
+            if phases.last() != Some(&phase) {
+                phases.push(phase);
+            }
+        }
+        phases
+    }
+
+    fn prepare_full_crisis_progression_facts(game: &mut HeadlessGame) {
+        use crate::game::{InitialEncounterState, PlayerIntroState};
+
+        let player_id = game.player_id();
+        game.set_sanctuary_at_base(5);
+        let world = game.app.world_mut();
+        world
+            .resource_mut::<PlayerIntroState>()
+            .get_mut(&player_id)
+            .expect("player intro state")
+            .danger_unlocked = true;
+        {
+            let mut objectives = world.resource_mut::<Objectives>();
+            let objectives = objectives.entry(player_id).or_default();
+            objectives.explore_poi = true;
+            objectives.choose_expansion = true;
+        }
+        world
+            .resource_mut::<InitialEncounterState>()
+            .remove(&player_id);
+        for _ in 0..3 {
+            world.spawn((PlayerId(player_id), State::None, ClassStructure));
+        }
+        world.spawn((PlayerId(player_id), State::None, SubclassVillager));
+    }
 
     fn prepare_for_scheduled_dusk(game: &mut HeadlessGame) {
         prepare_for_scheduled_dusk_on_day(game, 3);
