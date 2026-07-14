@@ -444,6 +444,9 @@ pub struct GameEvent {
 pub enum GameEventType {
     Login {
         player_id: i32,
+        /// Stored as u128 because this reflected event participates in Bevy's
+        /// runtime metadata while the network registry uses `Uuid`.
+        connection_id: u128,
     },
     PlayerNotice {
         player_id: i32,

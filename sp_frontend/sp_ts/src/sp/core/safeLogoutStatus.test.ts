@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { NetworkEvent } from './networkEvent';
 import {
   SAFE_LOGOUT_ACTIVE_ASSAULT_WARNING,
+  SAFE_LOGOUT_ARIA_LIVE,
   SAFE_LOGOUT_COMPLETION_MESSAGE,
   SAFE_LOGOUT_CONDITIONS,
+  SAFE_LOGOUT_RESUME_MESSAGE,
   SafeLogoutCloseGuard,
+  SafeLogoutResumeNoticeGuard,
+  SafeLogoutSnapshotGuard,
   SafeLogoutStatusPacket,
   SafeLogoutUiState,
   beginSafeLogoutCancellation,
@@ -19,6 +23,8 @@ import {
   rememberSafeLogoutCompletion,
   requestSafeLogoutPacket,
   safeLogoutReasonMessage,
+  safeLogoutLayoutMode,
+  safeLogoutStatusSignature,
   safeLogoutStatusView,
   shouldRenderSafeLogout,
 } from './safeLogoutStatus';
@@ -242,5 +248,75 @@ assert.deepEqual(clearSafeLogoutStatus(), {
   safeLogoutRequestInFlight: false,
   safeLogoutCancelInFlight: false,
 });
+
+// Checkpoint 4 lifecycle matrix: pure decisions are kept independent of React,
+// WebSocket, storage availability, and browser timer throttling.
+const snapshotGuard = new SafeLogoutSnapshotGuard();
+assert.equal(snapshotGuard.acceptSnapshot(protectedPacket), true, 'first protected snapshot is accepted');
+assert.equal(
+  snapshotGuard.acceptSnapshot({ ...protectedPacket }),
+  false,
+  'an identical protected snapshot is suppressed',
+);
+assert.equal(
+  snapshotGuard.acceptSnapshot({ ...protectedPacket, message: 'Updated server copy.' }),
+  true,
+  'a meaningful server change is delivered',
+);
+
+const resumedPacket = status({
+  state: 'online',
+  protected: false,
+  resumed_from_protection: true,
+  message: SAFE_LOGOUT_RESUME_MESSAGE,
+});
+assert.equal(SAFE_LOGOUT_RESUME_MESSAGE, 'Safe Logout ended. Your settlement has resumed.');
+assert.equal(snapshotGuard.acceptSnapshot(resumedPacket), true);
+assert.equal(snapshotGuard.acceptResume(resumedPacket), true, 'resume presentation is one-shot');
+assert.equal(snapshotGuard.acceptResume(resumedPacket), false, 'duplicate resume presentation is suppressed');
+assert.equal(
+  snapshotGuard.acceptResume({ ...resumedPacket, state: 'protected', protected: true }),
+  false,
+  'only a resumed online snapshot can announce resume',
+);
+snapshotGuard.resetForLogin();
+assert.equal(snapshotGuard.acceptSnapshot(resumedPacket), true, 'new login owns a fresh snapshot scope');
+assert.equal(snapshotGuard.acceptResume(resumedPacket), true, 'a later protected session may resume once');
+snapshotGuard.clearSnapshot();
+assert.equal(snapshotGuard.acceptSnapshot(resumedPacket), true, 'run cleanup clears the retained snapshot');
+assert.equal(
+  safeLogoutStatusSignature(resumedPacket),
+  safeLogoutStatusSignature({ ...resumedPacket }),
+  'semantic duplicate keys are stable',
+);
+
+assert.equal(
+  shouldRenderSafeLogout(status({ reason: 'assault_active', active_assault: true })),
+  true,
+  'active-assault rejection remains visible even outside the sanctuary',
+);
+assert.equal(safeLogoutLayoutMode(true, false, 1024), 'compact');
+assert.equal(safeLogoutLayoutMode(true, false, 1366), 'standard');
+assert.equal(safeLogoutLayoutMode(true, true, 1920), 'wide');
+assert.equal(SAFE_LOGOUT_ARIA_LIVE, 'polite', 'status and countdown use non-assertive live output');
+
+const resumeNotice = new SafeLogoutResumeNoticeGuard();
+resumeNotice.receive();
+assert.equal(resumeNotice.takeWhenReady(false), null, 'resume waits until gameplay UI is mounted');
+assert.equal(resumeNotice.takeWhenReady(true), SAFE_LOGOUT_RESUME_MESSAGE, 'resume copy displays once');
+assert.equal(resumeNotice.takeWhenReady(true), null, 'resume copy cannot display twice');
+resumeNotice.reset();
+assert.equal(resumeNotice.takeWhenReady(true), null, 'account or hero reset clears queued resume copy');
+
+const cancelledWithoutTimer = receiveSafeLogoutStatus(status({
+  state: 'online',
+  reason: 'manually_cancelled',
+  countdown_remaining_seconds: null,
+}));
+assert.equal(
+  safeLogoutStatusView(cancelledWithoutTimer.safeLogoutStatus)?.countdownSeconds,
+  null,
+  'cancellation has no client interpolation timer to retain',
+);
 
 console.log('safeLogoutStatus helper checks passed');

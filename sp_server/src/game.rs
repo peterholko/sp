@@ -78,8 +78,9 @@ use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
 use crate::safe_logout::{
     entity_belongs_to_protected_run, is_owner_offline_protected, is_player_offline_protected,
-    object_belongs_to_protected_run, remove_player_presence_for_run_cleanup,
-    PlayerWorldPresenceState, SafeLogoutPlugin,
+    mark_player_login_sync_complete, object_belongs_to_protected_run, protected_player_for_object,
+    remove_player_presence_for_run_cleanup, PlayerWorldPresenceState, SafeLogoutPlugin,
+    SafeLogoutTelemetryState,
 };
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
 use crate::skill_defs::Skill;
@@ -94,6 +95,14 @@ use crate::{villager_util, AppState};
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentConnectionSendError {
+    NotCurrent,
+    Full,
+    Closed,
+    RegistryUnavailable,
+}
 
 impl Clients {
     fn client_is_active(client_id: &Uuid, client: &Client, player_id: i32) -> bool {
@@ -145,6 +154,114 @@ impl Clients {
             }),
             Err(_) => false,
         }
+    }
+
+    /// Atomically makes `client` the sole authoritative connection for its
+    /// player. Returning the displaced connection ids lets the network layer
+    /// close their streams without granting them any further command authority.
+    pub fn activate(&self, client: Client) -> Vec<Uuid> {
+        let Ok(mut clients) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut displaced = clients
+            .iter()
+            .filter_map(|(client_id, current)| {
+                (current.player_id == client.player_id && *client_id != client.id)
+                    .then_some(*client_id)
+            })
+            .collect::<Vec<_>>();
+        displaced.sort_unstable();
+        for client_id in &displaced {
+            clients.remove(client_id);
+        }
+        clients.insert(client.id, client);
+        displaced
+    }
+
+    /// Exact authority check used at network ingress and delayed-login
+    /// boundaries. Player-level online presence is intentionally insufficient.
+    pub fn is_current_connection(&self, player_id: i32, connection_id: Uuid) -> bool {
+        match self.0.lock() {
+            Ok(clients) => clients
+                .get(&connection_id)
+                .map(|client| {
+                    Self::client_is_active(&connection_id, client, player_id)
+                        && !clients.iter().any(|(other_id, other)| {
+                            *other_id != connection_id
+                                && Self::client_is_active(other_id, other, player_id)
+                        })
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// The sole current connection for `player_id`, if the registry is in its
+    /// authoritative single-session shape.
+    pub fn current_connection_id(&self, player_id: i32) -> Option<Uuid> {
+        let clients = self.0.lock().ok()?;
+        let mut active = clients.iter().filter_map(|(client_id, client)| {
+            Self::client_is_active(client_id, client, player_id).then_some(*client_id)
+        });
+        let connection_id = active.next()?;
+        active.next().is_none().then_some(connection_id)
+    }
+
+    /// Removes only the exact current connection. An obsolete socket cleanup
+    /// cannot erase a replacement connection for the same player.
+    pub fn remove_if_current(&self, connection_id: Uuid) -> Option<Client> {
+        let mut clients = self.0.lock().ok()?;
+        let is_exact = clients
+            .get(&connection_id)
+            .map(|client| client.id == connection_id)
+            .unwrap_or(false);
+        is_exact.then(|| clients.remove(&connection_id)).flatten()
+    }
+
+    /// Atomically validates the sole current connection, reserves capacity for
+    /// the complete ordered bundle, and queues every serialized packet while
+    /// replacement activation is excluded by the same registry mutex.
+    pub fn try_send_current_bundle(
+        &self,
+        player_id: i32,
+        connection_id: Uuid,
+        packets: Vec<String>,
+    ) -> Result<(), CurrentConnectionSendError> {
+        if packets.is_empty() {
+            return Ok(());
+        }
+
+        let clients = self
+            .0
+            .lock()
+            .map_err(|_| CurrentConnectionSendError::RegistryUnavailable)?;
+        let Some(client) = clients.get(&connection_id) else {
+            return Err(CurrentConnectionSendError::NotCurrent);
+        };
+        if !Self::client_is_active(&connection_id, client, player_id)
+            || clients.iter().any(|(other_id, other)| {
+                *other_id != connection_id && Self::client_is_active(other_id, other, player_id)
+            })
+        {
+            return Err(CurrentConnectionSendError::NotCurrent);
+        }
+
+        let permits =
+            client
+                .sender
+                .try_reserve_many(packets.len())
+                .map_err(|error| match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(()) => {
+                        CurrentConnectionSendError::Full
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(()) => {
+                        CurrentConnectionSendError::Closed
+                    }
+                })?;
+        for (permit, packet) in permits.zip(packets) {
+            permit.send(packet);
+        }
+        Ok(())
     }
 }
 
@@ -377,11 +494,22 @@ impl Default for LogLevelOverrides {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PerceptionUpdateType {
     InitPerception,
+    ResumeInitPerception(Uuid),
     UpdatePerception,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug)]
 struct PerceptionUpdates(HashSet<(i32, PerceptionUpdateType)>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumeLoginSyncProgress {
+    connection_id: Uuid,
+    crisis_status_queued: bool,
+    perception_queued: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+struct ResumeLoginSyncState(HashMap<i32, ResumeLoginSyncProgress>);
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -1332,6 +1460,8 @@ fn crisis_status_delivery_system(
     mut login_sync: ResMut<CrisisStatusLoginSync>,
     mut delivery: ResMut<CrisisStatusDeliveryState>,
     mut telemetry_state: ResMut<CrisisTelemetryState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let active_clients = match clients.lock() {
         Ok(clients) => clients
@@ -1341,6 +1471,10 @@ fn crisis_status_delivery_system(
             .collect::<Vec<_>>(),
         Err(_) => return,
     };
+    let active_clients = active_clients
+        .into_iter()
+        .filter(|(client_id, player_id, _)| clients.is_current_connection(*player_id, *client_id))
+        .collect::<Vec<_>>();
     let active_client_players = active_clients
         .iter()
         .map(|(client_id, player_id, _)| (*client_id, *player_id))
@@ -1385,7 +1519,7 @@ fn crisis_status_delivery_system(
         delivery.observed_phases.clear();
     }
 
-    for (client_id, player_id, sender) in &active_clients {
+    for (client_id, player_id, _sender) in &active_clients {
         let status = if director.mode == SurvivalDirectorMode::PersonalCrisis {
             build_crisis_status(crisis_state.get(player_id))
         } else {
@@ -1393,13 +1527,32 @@ fn crisis_status_delivery_system(
         };
         let previous = delivery.sent.get(client_id);
         let new_connection = previous.is_none();
-        let should_send = if new_connection {
+        let resume_requires_sync = resume_login_sync
+            .get(player_id)
+            .map(|progress| progress.connection_id == *client_id && !progress.crisis_status_queued)
+            .unwrap_or(false);
+        let should_send = if resume_requires_sync {
+            previous
+                .map(|previous| previous.status != status)
+                .unwrap_or(true)
+        } else if new_connection {
             login_sync.contains(player_id)
         } else {
             previous.is_some_and(|previous| crisis_status_changed(&previous.status, &status))
         };
 
         if !should_send {
+            if resume_requires_sync
+                && previous
+                    .map(|previous| previous.status == status)
+                    .unwrap_or(false)
+            {
+                if let Some(progress) = resume_login_sync.get_mut(player_id) {
+                    if progress.connection_id == *client_id {
+                        progress.crisis_status_queued = true;
+                    }
+                }
+            }
             continue;
         }
 
@@ -1408,13 +1561,13 @@ fn crisis_status_delivery_system(
         };
         let Ok(serialized) = serde_json::to_string(&packet) else {
             error!(
-                "personal_crisis_status_serialization_failed player_id={} client_id={}",
-                player_id, client_id
+                "personal_crisis_status_serialization_failed player_id={}",
+                player_id
             );
             continue;
         };
 
-        match sender.try_send(serialized) {
+        match clients.try_send_current_bundle(*player_id, *client_id, vec![serialized]) {
             Ok(()) => {
                 delivery.sent.insert(
                     *client_id,
@@ -1430,19 +1583,26 @@ fn crisis_status_delivery_system(
                             telemetry.login_snapshots_sent.saturating_add(1);
                     }
                 }
+                if let Some(progress) = resume_login_sync.get_mut(player_id) {
+                    if progress.connection_id == *client_id {
+                        progress.crisis_status_queued = true;
+                    }
+                }
                 info!(
-                    "personal_crisis_status_sent player_id={} client_id={} phase={} exists={} reason={}",
+                    "personal_crisis_status_sent player_id={} phase={} exists={} reason={}",
                     player_id,
-                    client_id,
                     status.phase.as_deref().unwrap_or("none"),
                     status.exists,
                     if new_connection { "login" } else { "changed" }
                 );
             }
             Err(error) => {
+                if error != CurrentConnectionSendError::Full {
+                    safe_logout_telemetry.record_stale_connection_event(*player_id);
+                }
                 debug!(
-                    "personal_crisis_status_send_deferred player_id={} client_id={} error={:?}",
-                    player_id, client_id, error
+                    "personal_crisis_status_send_deferred player_id={} error={:?}",
+                    player_id, error
                 );
             }
         }
@@ -1814,10 +1974,12 @@ pub struct GameEventExtras<'w, 's> {
     pub plans: ResMut<'w, Plans>,
     pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
     pub crisis_status_login_sync: ResMut<'w, CrisisStatusLoginSync>,
+    resume_login_sync: ResMut<'w, ResumeLoginSyncState>,
     // Used to give a spawned villager its player's start-location team color.
     pub assigned_start_locations: Res<'w, AssignedStartLocations>,
     pub run_spawned_objs: ResMut<'w, RunSpawnedObjs>,
     pub presence: Res<'w, PlayerWorldPresenceState>,
+    pub safe_logout_telemetry: ResMut<'w, SafeLogoutTelemetryState>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -2234,6 +2396,7 @@ impl Plugin for GamePlugin {
         app.init_resource::<CrisisTelemetryState>();
         app.init_resource::<CrisisStatusLoginSync>();
         app.init_resource::<CrisisStatusDeliveryState>();
+        app.init_resource::<ResumeLoginSyncState>();
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -2539,7 +2702,16 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                perception_system.run_if(in_state(AppState::Running)),
+                perception_system
+                    .after(game_event_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                resume_login_sync_completion_system
+                    .after(crisis_status_delivery_system)
+                    .after(perception_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -3149,7 +3321,9 @@ fn game_event_belongs_to_ended_run(
 ) -> bool {
     let ended = |object_id: i32| ended_object_ids.contains(&object_id);
     match event_type {
-        GameEventType::Login { player_id: owner }
+        GameEventType::Login {
+            player_id: owner, ..
+        }
         | GameEventType::PlayerNotice {
             player_id: owner, ..
         }
@@ -8744,6 +8918,7 @@ fn spell_damage_event_system(
     _game_events: ResMut<GameEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     mut event_executing_query: Query<&mut EventExecuting>,
+    mut telemetry: Option<ResMut<SafeLogoutTelemetryState>>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -8756,6 +8931,13 @@ fn spell_damage_event_system(
             match &map_event.event_type {
                 VisibleEvent::SpellDamageEvent { spell, target_id } => {
                     if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        if let (Some(player_id), Some(telemetry)) = (
+                            protected_player_for_object(*target_id, &ids, &presence),
+                            telemetry.as_deref_mut(),
+                        ) {
+                            telemetry.record_protected_target_rejection(player_id);
+                            telemetry.record_protected_damage_block(player_id);
+                        }
                         events_to_remove.push(*map_event_id);
                         if let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) {
                             commands.trigger(StateChange {
@@ -11048,8 +11230,8 @@ fn visible_event_system(
                     Ok(_) => {}
                     Err(e) => {
                         error!(
-                            "Could not send message to client: {:?} error: {:?}",
-                            client.id, e
+                            "Could not send perception changes player_id={} error={:?}",
+                            player_id, e
                         );
                     }
                 }
@@ -11069,8 +11251,8 @@ fn visible_event_system(
                         Ok(_) => {}
                         Err(e) => {
                             error!(
-                                "Could not send message to client: {:?} error: {:?}",
-                                client.id, e
+                                "Could not send perception message player_id={} error={:?}",
+                                player_id, e
                             );
                         }
                     }
@@ -11165,10 +11347,14 @@ fn reveal_unhidden_system(
 
 fn perception_system(
     map: Res<Map>,
+    game_tick: Res<GameTick>,
     mut explored_map: ResMut<ExploredMap>,
     weather_areas: Res<WeatherAreas>,
     clients: Res<Clients>,
     mut perception_updates: ResMut<PerceptionUpdates>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
     observer_query: Query<ObjQueryVision>,
     obj_query: Query<ObjQuery>,
 ) {
@@ -11179,8 +11365,19 @@ fn perception_system(
 
     // Could not use HashSet here due to the trait `FromIterator<&std::collections::HashSet<(i32, i32)>>` is not implemented for `Vec<(i32, i32)>`
     let mut tiles_to_send: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
+    let mut retry_updates = Vec::new();
 
     for (perception_player, perception_update_type) in perception_updates.iter() {
+        let is_init_perception = matches!(
+            perception_update_type,
+            PerceptionUpdateType::InitPerception | PerceptionUpdateType::ResumeInitPerception(_)
+        );
+        let resume_connection_id = match perception_update_type {
+            PerceptionUpdateType::ResumeInitPerception(connection_id) => Some(*connection_id),
+            _ => None,
+        };
+        let mut init_perception_queued = false;
+        let mut retry_resume_perception = resume_connection_id.is_some();
         for observer in observer_query.iter() {
             debug!("Observer: {:?}", observer);
             if observer.player_id.0 == *perception_player {
@@ -11312,38 +11509,154 @@ fn perception_system(
                 weather: weather_tiles,
             };
 
-            let perception_packet =
-                if *perception_update_type == PerceptionUpdateType::InitPerception {
-                    ResponsePacket::InitPerception {
-                        data: perception_data,
-                    }
-                } else {
-                    ResponsePacket::NewPerception {
-                        data: perception_data,
-                    }
-                };
+            let init_for_requested_player = is_init_perception && *player_id == *perception_player;
+            let perception_packet = if is_init_perception {
+                ResponsePacket::InitPerception {
+                    data: perception_data,
+                }
+            } else {
+                ResponsePacket::NewPerception {
+                    data: perception_data,
+                }
+            };
 
-            debug!("clients: {:?}", clients);
-            for (_client_id, client) in clients.lock().unwrap().iter() {
+            if let Some(connection_id) = resume_connection_id {
+                if !init_for_requested_player {
+                    continue;
+                }
+                let Ok(serialized) = serde_json::to_string(&perception_packet) else {
+                    error!(
+                        "player_login_sync_serialization_failed player_id={} packet=init_perception",
+                        player_id
+                    );
+                    retry_resume_perception = false;
+                    resume_login_sync.remove(player_id);
+                    continue;
+                };
+                match clients.try_send_current_bundle(*player_id, connection_id, vec![serialized]) {
+                    Ok(()) => {
+                        init_perception_queued = true;
+                        retry_resume_perception = false;
+                    }
+                    Err(CurrentConnectionSendError::Full) => {
+                        debug!(
+                            "player_login_sync_deferred player_id={} game_tick={} reason=perception_channel_full",
+                            player_id, game_tick.0
+                        );
+                    }
+                    Err(error) => {
+                        retry_resume_perception = false;
+                        resume_login_sync.remove(player_id);
+                        safe_logout_telemetry.record_stale_connection_event(*player_id);
+                        info!(
+                            "player_login_sync_stale_connection_rejected player_id={} game_tick={} stage=perception reason={:?}",
+                            player_id, game_tick.0, error
+                        );
+                    }
+                }
+                continue;
+            }
+
+            for (client_id, client) in clients.lock().unwrap().iter() {
                 if client.player_id == *player_id {
                     match client
                         .sender
                         .try_send(serde_json::to_string(&perception_packet).unwrap())
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            if init_for_requested_player && *client_id == client.id {
+                                init_perception_queued = true;
+                            }
+                        }
                         Err(e) => {
                             error!(
-                                "Could not send message to client: {:?} error: {:?}",
-                                client.id, e
+                                "Could not send perception message player_id={} error={:?}",
+                                player_id, e
                             );
                         }
                     }
                 }
             }
         }
+
+        if let Some(connection_id) = resume_connection_id {
+            if init_perception_queued {
+                if let Some(progress) = resume_login_sync.get_mut(perception_player) {
+                    if progress.connection_id == connection_id {
+                        progress.perception_queued = true;
+                    }
+                }
+            } else if retry_resume_perception
+                && presence
+                    .players
+                    .get(perception_player)
+                    .map(|record| {
+                        record.resume_in_progress
+                            && record.resume_connection_id == Some(connection_id)
+                    })
+                    .unwrap_or(false)
+            {
+                retry_updates.push((*perception_player, perception_update_type.clone()));
+            }
+        }
     }
 
     perception_updates.clear();
+    perception_updates.extend(retry_updates);
+}
+
+/// Release-ready is published only after the exact reconnect has queued the
+/// complete core login bundle, its current crisis snapshot, and its initial
+/// perception. Final simulation release remains in the ordered PostUpdate
+/// resume barrier and therefore occurs no earlier than the following update.
+fn resume_login_sync_completion_system(
+    clients: Res<Clients>,
+    game_tick: Res<GameTick>,
+    mut presence: ResMut<PlayerWorldPresenceState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
+) {
+    let pending = resume_login_sync
+        .iter()
+        .map(|(player_id, progress)| (*player_id, *progress))
+        .collect::<Vec<_>>();
+
+    for (player_id, progress) in pending {
+        let record_matches = presence
+            .players
+            .get(&player_id)
+            .map(|record| {
+                record.resume_in_progress
+                    && record.resume_connection_id == Some(progress.connection_id)
+            })
+            .unwrap_or(false);
+        let connection_is_current =
+            clients.is_current_connection(player_id, progress.connection_id);
+
+        if !record_matches || !connection_is_current {
+            resume_login_sync.remove(&player_id);
+            if record_matches && !connection_is_current {
+                telemetry.record_stale_connection_event(player_id);
+                info!(
+                    "player_login_sync_stale_connection_rejected player_id={} game_tick={} stage=completion",
+                    player_id, game_tick.0
+                );
+            }
+            continue;
+        }
+
+        if progress.crisis_status_queued
+            && progress.perception_queued
+            && mark_player_login_sync_complete(
+                player_id,
+                progress.connection_id,
+                game_tick.0,
+                &mut presence,
+            )
+        {
+            resume_login_sync.remove(&player_id);
+        }
+    }
 }
 
 // On (re)login, evaluate the hero's proximity to monoliths and re-send its current
@@ -11514,8 +11827,80 @@ fn game_event_system(
             }
             // Execute event
             match &game_event_type.event_type {
-                GameEventType::Login { player_id } => {
+                GameEventType::Login {
+                    player_id,
+                    connection_id,
+                } => {
                     debug!("Processing Login: {:?}", player_id);
+                    let connection_id = Uuid::from_u128(*connection_id);
+                    if !clients.is_current_connection(*player_id, connection_id) {
+                        events_to_remove.push(*event_id);
+                        extras
+                            .safe_logout_telemetry
+                            .record_stale_connection_event(*player_id);
+                        info!(
+                            "player_login_sync_stale_connection_rejected player_id={} game_tick={}",
+                            player_id, game_tick.0
+                        );
+                        continue;
+                    }
+
+                    let mut sync_packets = Vec::new();
+                    if let Some(player_explored_map) = explored_map.get(&player_id) {
+                        let explored_map_packet = ResponsePacket::ExploredMap {
+                            tiles: Map::pos_to_tiles(player_explored_map, &map),
+                        };
+                        match serde_json::to_string(&explored_map_packet) {
+                            Ok(packet) => sync_packets.push(packet),
+                            Err(error) => {
+                                events_to_remove.push(*event_id);
+                                error!(
+                                    "player_login_sync_serialization_failed player_id={} packet=explored_map error={:?}",
+                                    player_id, error
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    debug!("Game tick: {:?}", game_tick.0);
+                    let world_packet = ResponsePacket::World {
+                        time_of_day: game_tick.time_of_day(),
+                        day: game_tick.day(),
+                    };
+                    match serde_json::to_string(&world_packet) {
+                        Ok(packet) => sync_packets.push(packet),
+                        Err(error) => {
+                            events_to_remove.push(*event_id);
+                            error!(
+                                "player_login_sync_serialization_failed player_id={} packet=world error={:?}",
+                                player_id, error
+                            );
+                            continue;
+                        }
+                    }
+
+                    match clients.try_send_current_bundle(*player_id, connection_id, sync_packets) {
+                        Ok(()) => {}
+                        Err(CurrentConnectionSendError::Full) => {
+                            debug!(
+                                "player_login_sync_deferred player_id={} game_tick={} reason=channel_full",
+                                player_id, game_tick.0
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            events_to_remove.push(*event_id);
+                            extras
+                                .safe_logout_telemetry
+                                .record_stale_connection_event(*player_id);
+                            info!(
+                                "player_login_sync_stale_connection_rejected player_id={} game_tick={} reason={:?}",
+                                player_id, game_tick.0, error
+                            );
+                            continue;
+                        }
+                    }
                     events_to_remove.push(*event_id);
 
                     // Crisis status uses this established delayed login point
@@ -11530,23 +11915,32 @@ fn game_event_system(
                         .sanctuary_login_checks
                         .push((*player_id, game_tick.0 + 10));
 
-                    if let Some(player_explored_map) = explored_map.get(&player_id) {
-                        let explored_map_packet = ResponsePacket::ExploredMap {
-                            tiles: Map::pos_to_tiles(player_explored_map, &map),
-                        };
-
-                        send_to_client(*player_id, explored_map_packet, &clients);
+                    let resuming = extras
+                        .presence
+                        .players
+                        .get(player_id)
+                        .map(|record| {
+                            record.resume_in_progress
+                                && record.resume_connection_id == Some(connection_id)
+                        })
+                        .unwrap_or(false);
+                    if resuming {
+                        extras.resume_login_sync.insert(
+                            *player_id,
+                            ResumeLoginSyncProgress {
+                                connection_id,
+                                crisis_status_queued: false,
+                                perception_queued: false,
+                            },
+                        );
+                        perception_updates.insert((
+                            *player_id,
+                            PerceptionUpdateType::ResumeInitPerception(connection_id),
+                        ));
+                    } else {
+                        perception_updates
+                            .insert((*player_id, PerceptionUpdateType::InitPerception));
                     }
-
-                    debug!("Game tick: {:?}", game_tick.0);
-                    let world_packet = ResponsePacket::World {
-                        time_of_day: game_tick.time_of_day(),
-                        day: game_tick.day(),
-                    };
-
-                    send_to_client(*player_id, world_packet, &clients);
-
-                    perception_updates.insert((*player_id, PerceptionUpdateType::InitPerception));
                 }
                 GameEventType::PlayerNotice {
                     player_id,
@@ -17576,6 +17970,7 @@ fn true_death_system(
         mut intro_encounter_state,
         mut settlement_crisis_state,
         mut player_world_presence_state,
+        mut safe_logout_telemetry,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -17592,6 +17987,7 @@ fn true_death_system(
         ResMut<IntroEncounterState>,
         ResMut<SettlementCrisisState>,
         ResMut<PlayerWorldPresenceState>,
+        ResMut<SafeLogoutTelemetryState>,
     ),
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
@@ -17820,6 +18216,7 @@ fn true_death_system(
                 player_id.0,
                 game_tick.0,
                 &mut player_world_presence_state,
+                &mut safe_logout_telemetry,
             );
 
             // Release this player's start location back to the pool so a new hero can

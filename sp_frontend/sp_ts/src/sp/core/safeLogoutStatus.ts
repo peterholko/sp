@@ -62,6 +62,8 @@ export interface SafeLogoutStatusPacket {
   in_own_sanctuary: boolean;
   active_assault: boolean;
   protected: boolean;
+  /** True only on the first online snapshot after protected-session resume. */
+  resumed_from_protection?: boolean;
   [futureField: string]: unknown;
 }
 
@@ -96,6 +98,11 @@ export const SAFE_LOGOUT_ACTIVE_ASSAULT_WARNING =
 export const SAFE_LOGOUT_COMPLETION_MESSAGE =
   'Safe Logout complete. Your settlement is protected.';
 
+export const SAFE_LOGOUT_RESUME_MESSAGE =
+  'Safe Logout ended. Your settlement has resumed.';
+
+export const SAFE_LOGOUT_ARIA_LIVE = 'polite';
+
 export const SAFE_LOGOUT_COMPLETION_STORAGE_KEY =
   'siege_perilous.safe_logout.completed';
 
@@ -129,6 +136,7 @@ const REASON_MESSAGES: Record<KnownSafeLogoutReason, string> = {
 };
 
 const INTERACTION_FEEDBACK_REASONS = new Set<string>([
+  'assault_active',
   'already_pending',
   'already_protected',
   'moved',
@@ -141,6 +149,25 @@ const INTERACTION_FEEDBACK_REASONS = new Set<string>([
   'manually_cancelled',
   'run_ended',
 ]);
+
+export type SafeLogoutLayoutMode = 'compact' | 'standard' | 'wide';
+
+export function safeLogoutLayoutMode(
+  desktop: boolean,
+  wide: boolean,
+  viewportWidth: number,
+  compactDesktopMaxWidth: number = 1280,
+): SafeLogoutLayoutMode {
+  if (wide) {
+    return 'wide';
+  }
+
+  if (desktop && viewportWidth <= compactDesktopMaxWidth) {
+    return 'compact';
+  }
+
+  return 'standard';
+}
 
 function finiteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -283,6 +310,94 @@ export function dispatchSafeLogoutStatus(
   emitStatus(packet);
   if (packet.state === 'protected' && packet.protected === true) {
     handleProtected(packet);
+  }
+}
+
+/**
+ * Stable presentation signature for suppressing duplicate authoritative
+ * snapshots. Unknown additive fields are intentionally ignored until the UI
+ * gives them meaning.
+ */
+export function safeLogoutStatusSignature(packet: SafeLogoutStatusPacket): string {
+  return JSON.stringify([
+    packet.version,
+    packet.state,
+    packet.can_request,
+    packet.can_cancel,
+    packet.countdown_total_seconds ?? null,
+    packet.countdown_remaining_seconds ?? null,
+    packet.reason ?? null,
+    packet.message,
+    packet.in_own_sanctuary,
+    packet.active_assault,
+    packet.protected,
+    packet.resumed_from_protection === true,
+  ]);
+}
+
+/** Connection-scoped semantic deduplication and one-shot resume presentation. */
+export class SafeLogoutSnapshotGuard {
+  private lastSignature: string | null = null;
+  private resumeHandled = false;
+
+  resetForLogin(): void {
+    this.lastSignature = null;
+    this.resumeHandled = false;
+  }
+
+  clearSnapshot(): void {
+    this.lastSignature = null;
+  }
+
+  acceptSnapshot(packet: SafeLogoutStatusPacket): boolean {
+    const signature = safeLogoutStatusSignature(packet);
+    if (signature === this.lastSignature) {
+      return false;
+    }
+
+    this.lastSignature = signature;
+    return true;
+  }
+
+  acceptResume(packet: SafeLogoutStatusPacket): boolean {
+    if (
+      this.resumeHandled
+      || packet.resumed_from_protection !== true
+      || packet.state !== 'online'
+      || packet.protected === true
+    ) {
+      return false;
+    }
+
+    this.resumeHandled = true;
+    return true;
+  }
+}
+
+/** Queues the transition-only resume notice until the gameplay UI is mounted. */
+export class SafeLogoutResumeNoticeGuard {
+  private pending = false;
+  private handled = false;
+
+  reset(): void {
+    this.pending = false;
+    this.handled = false;
+  }
+
+  receive(): void {
+    if (!this.handled) {
+      this.pending = true;
+    }
+  }
+
+  takeWhenReady(ready: boolean): string | null {
+    if (!ready || !this.pending || this.handled) {
+      return null;
+    }
+
+    this.pending = false;
+    this.handled = true;
+    return SAFE_LOGOUT_RESUME_MESSAGE;
   }
 }
 

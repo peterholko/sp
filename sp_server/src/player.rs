@@ -47,7 +47,7 @@ use crate::resource::{Resource, Resources};
 use crate::safe_logout::{
     initialize_player_presence, is_owner_offline_protected, is_player_offline_protected,
     mark_player_logged_in, object_belongs_to_protected_run, record_player_combat_activity,
-    CancelSafeLogout, PlayerWorldPresenceState, RequestSafeLogout,
+    CancelSafeLogout, PlayerWorldPresenceState, RequestSafeLogout, SafeLogoutTelemetryState,
 };
 use crate::skill::{SkillData, Skills, MAX_RANK};
 use crate::skill_defs::Skill;
@@ -111,12 +111,15 @@ pub enum PlayerEvent {
     },
     Login {
         player_id: i32,
+        connection_id: Uuid,
     },
     RequestSafeLogout {
         player_id: i32,
+        connection_id: Uuid,
     },
     CancelSafeLogout {
         player_id: i32,
+        connection_id: Uuid,
     },
     Move {
         player_id: i32,
@@ -513,9 +516,9 @@ impl PlayerEvent {
     fn player_id(&self) -> i32 {
         match self {
             Self::NewPlayer { player_id, .. }
-            | Self::Login { player_id }
-            | Self::RequestSafeLogout { player_id }
-            | Self::CancelSafeLogout { player_id }
+            | Self::Login { player_id, .. }
+            | Self::RequestSafeLogout { player_id, .. }
+            | Self::CancelSafeLogout { player_id, .. }
             | Self::Move { player_id, .. }
             | Self::Attack { player_id, .. }
             | Self::Ability { player_id, .. }
@@ -1103,16 +1106,17 @@ fn protected_player_event_guard_system(
     mut player_events: ResMut<PlayerEvents>,
     ids: Res<Ids>,
     presence: Res<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let mut rejected = Vec::new();
 
     for (event_id, event) in player_events.iter() {
         if protected_player_event_mutation(event, &ids, &presence) {
+            let player_id = event.player_id();
+            telemetry.record_protected_input_rejection(player_id);
             info!(
-                "safe_logout_protected_input_rejected player_id={} event_id={} event={:?}",
-                event.player_id(),
-                event_id,
-                event
+                "safe_logout_protected_input_rejected player_id={} reason=protected_source_or_target",
+                player_id
             );
             rejected.push(*event_id);
         }
@@ -1128,6 +1132,8 @@ fn protected_player_event_guard_system(
 /// presence transition; the Checkpoint 1 systems remain the sole authority.
 fn safe_logout_command_bridge_system(
     mut player_events: ResMut<PlayerEvents>,
+    clients: Res<Clients>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
     mut requests: MessageWriter<RequestSafeLogout>,
     mut cancellations: MessageWriter<CancelSafeLogout>,
 ) {
@@ -1144,11 +1150,37 @@ fn safe_logout_command_bridge_system(
 
     for event_id in command_ids {
         match player_events.remove(&event_id) {
-            Some(PlayerEvent::RequestSafeLogout { player_id }) => {
-                requests.write(RequestSafeLogout { player_id });
+            Some(PlayerEvent::RequestSafeLogout {
+                player_id,
+                connection_id,
+            }) if clients.is_current_connection(player_id, connection_id) => {
+                requests.write(RequestSafeLogout {
+                    player_id,
+                    connection_id,
+                });
             }
-            Some(PlayerEvent::CancelSafeLogout { player_id }) => {
-                cancellations.write(CancelSafeLogout { player_id });
+            Some(PlayerEvent::CancelSafeLogout {
+                player_id,
+                connection_id,
+            }) if clients.is_current_connection(player_id, connection_id) => {
+                cancellations.write(CancelSafeLogout {
+                    player_id,
+                    connection_id,
+                });
+            }
+            Some(PlayerEvent::RequestSafeLogout { player_id, .. }) => {
+                telemetry.record_stale_connection_event(player_id);
+                info!(
+                    "safe_logout_stale_command_rejected player_id={} command=request",
+                    player_id
+                );
+            }
+            Some(PlayerEvent::CancelSafeLogout { player_id, .. }) => {
+                telemetry.record_stale_connection_event(player_id);
+                info!(
+                    "safe_logout_stale_command_rejected player_id={} command=cancel",
+                    player_id
+                );
             }
             _ => {}
         }
@@ -1184,6 +1216,7 @@ fn new_player_system(
         ResMut<InitialEncounterState>,
         ResMut<SettlementCrisisState>,
         ResMut<PlayerWorldPresenceState>,
+        ResMut<SafeLogoutTelemetryState>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -1281,9 +1314,14 @@ fn new_player_system(
                             clients.is_player_online(*player_id),
                             game_tick.0,
                             &mut run_intro_state.4,
+                            &mut run_intro_state.5,
                         );
                         let event_type = GameEventType::Login {
                             player_id: *player_id,
+                            connection_id: clients
+                                .current_connection_id(*player_id)
+                                .map(|connection_id| connection_id.as_u128())
+                                .unwrap_or_default(),
                         };
                         let event_id = ids.new_map_event_id();
 
@@ -1338,20 +1376,53 @@ fn login_system(
     mut game_events: ResMut<GameEvents>,
     mut ids: ResMut<Ids>,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
     for (event_id, event) in events.iter() {
         match event {
-            PlayerEvent::Login { player_id } => {
+            PlayerEvent::Login {
+                player_id,
+                connection_id,
+            } => {
                 events_to_remove.push(*event_id);
 
-                if clients.is_player_online(*player_id) {
-                    mark_player_logged_in(*player_id, game_tick.0, &mut presence);
+                if !clients.is_current_connection(*player_id, *connection_id) {
+                    safe_logout_telemetry.record_stale_connection_event(*player_id);
+                    info!(
+                        "player_login_stale_connection_rejected player_id={} game_tick={}",
+                        player_id, game_tick.0
+                    );
+                    continue;
+                }
+                if !presence.players.contains_key(player_id) {
+                    // Presence is normally reconciled in PostUpdate, but an
+                    // authenticated Login queued during loading can be the
+                    // first Running-update event. Initialize that exact current
+                    // session here so its delayed map/world/perception sync is
+                    // not mistaken for a duplicate and permanently discarded.
+                    initialize_player_presence(
+                        *player_id,
+                        true,
+                        game_tick.0,
+                        &mut presence,
+                        &mut safe_logout_telemetry,
+                    );
+                }
+                if !mark_player_logged_in(
+                    *player_id,
+                    *connection_id,
+                    game_tick.0,
+                    &mut presence,
+                    &mut safe_logout_telemetry,
+                ) {
+                    continue;
                 }
 
                 let event_type = GameEventType::Login {
                     player_id: *player_id,
+                    connection_id: connection_id.as_u128(),
                 };
                 let event_id = ids.new_map_event_id();
 
@@ -11895,9 +11966,21 @@ mod tests {
 
     #[test]
     fn checkpoint2_player_event_classifier_keeps_read_only_and_lifecycle_events() {
-        assert!(!PlayerEvent::Login { player_id: 1 }.is_mutating_gameplay());
-        assert!(!PlayerEvent::RequestSafeLogout { player_id: 1 }.is_mutating_gameplay());
-        assert!(!PlayerEvent::CancelSafeLogout { player_id: 1 }.is_mutating_gameplay());
+        assert!(!PlayerEvent::Login {
+            player_id: 1,
+            connection_id: Uuid::nil(),
+        }
+        .is_mutating_gameplay());
+        assert!(!PlayerEvent::RequestSafeLogout {
+            player_id: 1,
+            connection_id: Uuid::nil(),
+        }
+        .is_mutating_gameplay());
+        assert!(!PlayerEvent::CancelSafeLogout {
+            player_id: 1,
+            connection_id: Uuid::nil(),
+        }
+        .is_mutating_gameplay());
         assert!(!PlayerEvent::NewPlayer {
             player_id: 1,
             hero_name: "Test".to_string(),
@@ -11937,17 +12020,51 @@ mod tests {
 
     #[test]
     fn safe_logout_checkpoint3_bridge_consumes_only_safe_logout_commands() {
+        let request_connection = Uuid::new_v4();
+        let cancel_connection = Uuid::new_v4();
+        let clients = Clients::default();
+        let mut client_receivers = Vec::new();
+        for (player_id, connection_id) in [(11, request_connection), (12, cancel_connection)] {
+            let (sender, receiver) = tokio::sync::mpsc::channel(1);
+            clients.activate(crate::game::Client {
+                id: connection_id,
+                player_id,
+                sender,
+            });
+            client_receivers.push(receiver);
+        }
         let mut app = App::new();
         app.add_message::<RequestSafeLogout>()
             .add_message::<CancelSafeLogout>()
+            .insert_resource(clients)
+            .init_resource::<SafeLogoutTelemetryState>()
             .insert_resource(PlayerEvents(HashMap::from([
-                (1, PlayerEvent::RequestSafeLogout { player_id: 11 }),
-                (2, PlayerEvent::CancelSafeLogout { player_id: 12 }),
+                (
+                    1,
+                    PlayerEvent::RequestSafeLogout {
+                        player_id: 11,
+                        connection_id: request_connection,
+                    },
+                ),
+                (
+                    2,
+                    PlayerEvent::CancelSafeLogout {
+                        player_id: 12,
+                        connection_id: cancel_connection,
+                    },
+                ),
                 (
                     3,
                     PlayerEvent::InfoInventory {
                         player_id: 13,
                         id: 130,
+                    },
+                ),
+                (
+                    4,
+                    PlayerEvent::RequestSafeLogout {
+                        player_id: 11,
+                        connection_id: Uuid::new_v4(),
                     },
                 ),
             ])))
@@ -11990,6 +12107,186 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![12]
         );
+        assert_eq!(
+            app.world()
+                .resource::<SafeLogoutTelemetryState>()
+                .get(&11)
+                .map(|telemetry| telemetry.stale_connection_events_rejected),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn checkpoint4_stale_login_event_cannot_resume_or_schedule_sync() {
+        let player_id = 21;
+        let stale_connection = Uuid::new_v4();
+        let current_connection = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(crate::game::Client {
+            id: current_connection,
+            player_id,
+            sender,
+        });
+
+        let mut app = App::new();
+        app.insert_resource(clients)
+            .insert_resource(PlayerEvents(HashMap::from([(
+                1,
+                PlayerEvent::Login {
+                    player_id,
+                    connection_id: stale_connection,
+                },
+            )])))
+            .insert_resource(GameTick(100))
+            .insert_resource(GameEvents::default())
+            .insert_resource(Ids::default())
+            .insert_resource(protected_presence(player_id))
+            .init_resource::<SafeLogoutTelemetryState>()
+            .add_systems(Update, login_system);
+
+        app.update();
+
+        assert!(app.world().resource::<PlayerEvents>().is_empty());
+        assert!(app.world().resource::<GameEvents>().is_empty());
+        assert_eq!(
+            app.world()
+                .resource::<PlayerWorldPresenceState>()
+                .players
+                .get(&player_id)
+                .map(|record| record.state),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        assert_eq!(
+            app.world()
+                .resource::<SafeLogoutTelemetryState>()
+                .get(&player_id)
+                .map(|telemetry| telemetry.stale_connection_events_rejected),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn checkpoint4_first_login_initializes_missing_presence_and_schedules_sync_once() {
+        let player_id = 23;
+        let connection_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(crate::game::Client {
+            id: connection_id,
+            player_id,
+            sender,
+        });
+
+        let mut app = App::new();
+        app.insert_resource(clients)
+            .insert_resource(PlayerEvents(HashMap::from([(
+                1,
+                PlayerEvent::Login {
+                    player_id,
+                    connection_id,
+                },
+            )])))
+            .insert_resource(GameTick(100))
+            .insert_resource(GameEvents::default())
+            .insert_resource(Ids::default())
+            .insert_resource(PlayerWorldPresenceState::default())
+            .init_resource::<SafeLogoutTelemetryState>()
+            .add_systems(Update, login_system);
+
+        app.update();
+
+        assert!(app.world().resource::<PlayerEvents>().is_empty());
+        let record = app
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .cloned()
+            .expect("first login initializes presence");
+        assert_eq!(record.state, PlayerWorldPresence::Online);
+        assert!(record.client_connected);
+        assert_eq!(record.last_login_connection_id, Some(connection_id));
+        let game_events = app.world().resource::<GameEvents>();
+        assert_eq!(game_events.len(), 1);
+        assert!(game_events.values().all(|event| matches!(
+            &event.event_type,
+            GameEventType::Login {
+                player_id: event_player,
+                connection_id: event_connection,
+            } if *event_player == player_id && *event_connection == connection_id.as_u128()
+        )));
+
+        app.world_mut().resource_mut::<PlayerEvents>().insert(
+            2,
+            PlayerEvent::Login {
+                player_id,
+                connection_id,
+            },
+        );
+        app.update();
+
+        assert!(app.world().resource::<PlayerEvents>().is_empty());
+        assert_eq!(
+            app.world().resource::<GameEvents>().len(),
+            1,
+            "only a true duplicate Login is suppressed"
+        );
+    }
+
+    #[test]
+    fn checkpoint4_duplicate_login_event_schedules_one_connection_scoped_sync() {
+        let player_id = 22;
+        let connection_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(crate::game::Client {
+            id: connection_id,
+            player_id,
+            sender,
+        });
+        let mut presence = PlayerWorldPresenceState::default();
+        presence
+            .players
+            .insert(player_id, PlayerPresenceRecord::new(true));
+
+        let mut app = App::new();
+        app.insert_resource(clients)
+            .insert_resource(PlayerEvents(HashMap::from([
+                (
+                    1,
+                    PlayerEvent::Login {
+                        player_id,
+                        connection_id,
+                    },
+                ),
+                (
+                    2,
+                    PlayerEvent::Login {
+                        player_id,
+                        connection_id,
+                    },
+                ),
+            ])))
+            .insert_resource(GameTick(100))
+            .insert_resource(GameEvents::default())
+            .insert_resource(Ids::default())
+            .insert_resource(presence)
+            .init_resource::<SafeLogoutTelemetryState>()
+            .add_systems(Update, login_system);
+
+        app.update();
+
+        assert!(app.world().resource::<PlayerEvents>().is_empty());
+        let game_events = app.world().resource::<GameEvents>();
+        assert_eq!(game_events.len(), 1);
+        assert!(game_events.values().all(|event| matches!(
+            &event.event_type,
+            GameEventType::Login {
+                player_id: event_player,
+                connection_id: event_connection,
+            } if *event_player == player_id && *event_connection == connection_id.as_u128()
+        )));
     }
 
     #[test]
@@ -12032,6 +12329,7 @@ mod tests {
                 4,
                 PlayerEvent::Login {
                     player_id: protected_player,
+                    connection_id: Uuid::nil(),
                 },
             ),
             (
@@ -12048,6 +12346,7 @@ mod tests {
         app.insert_resource(events)
             .insert_resource(ids)
             .insert_resource(protected_presence(protected_player))
+            .init_resource::<SafeLogoutTelemetryState>()
             .add_systems(Update, protected_player_event_guard_system);
         app.update();
 
@@ -12057,5 +12356,18 @@ mod tests {
         assert!(remaining.contains_key(&3), "read-only inspection");
         assert!(remaining.contains_key(&4), "login lifecycle event");
         assert!(remaining.contains_key(&5), "other player mutation");
+        let telemetry = app.world().resource::<SafeLogoutTelemetryState>();
+        assert_eq!(
+            telemetry
+                .get(&protected_player)
+                .map(|telemetry| telemetry.protected_input_rejections),
+            Some(1)
+        );
+        assert_eq!(
+            telemetry
+                .get(&active_player)
+                .map(|telemetry| telemetry.protected_input_rejections),
+            Some(1)
+        );
     }
 }

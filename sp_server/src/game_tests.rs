@@ -3652,6 +3652,8 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(telemetry_state);
+    app.insert_resource(ResumeLoginSyncState::default());
+    app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);
 
     app.update();
@@ -3728,6 +3730,186 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
 }
 
 #[test]
+fn checkpoint4_login_sync_bundle_is_atomic_and_connection_exact() {
+    let player_id = 70;
+    let displaced_id = Uuid::new_v4();
+    let replacement_id = Uuid::new_v4();
+    let clients = Clients::default();
+    let (displaced_sender, mut displaced_receiver) = tokio::sync::mpsc::channel(1);
+    clients.activate(Client {
+        id: displaced_id,
+        player_id,
+        sender: displaced_sender,
+    });
+
+    assert_eq!(
+        clients.try_send_current_bundle(
+            player_id,
+            displaced_id,
+            vec!["explored".to_string(), "world".to_string()],
+        ),
+        Err(CurrentConnectionSendError::Full),
+        "capacity must be reserved for the entire ordered login bundle"
+    );
+    assert!(
+        displaced_receiver.try_recv().is_err(),
+        "a partial login bundle must never be queued"
+    );
+
+    let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(4);
+    assert_eq!(
+        clients.activate(Client {
+            id: replacement_id,
+            player_id,
+            sender: replacement_sender,
+        }),
+        vec![displaced_id]
+    );
+    assert_eq!(
+        clients.try_send_current_bundle(player_id, displaced_id, vec!["stale".to_string()]),
+        Err(CurrentConnectionSendError::NotCurrent)
+    );
+    assert!(displaced_receiver.try_recv().is_err());
+
+    assert_eq!(
+        clients.try_send_current_bundle(
+            player_id,
+            replacement_id,
+            vec!["explored".to_string(), "world".to_string()],
+        ),
+        Ok(())
+    );
+    assert_eq!(replacement_receiver.try_recv().unwrap(), "explored");
+    assert_eq!(replacement_receiver.try_recv().unwrap(), "world");
+    assert!(replacement_receiver.try_recv().is_err());
+}
+
+fn checkpoint4_resume_sync_test_app(
+    player_id: i32,
+    connection_id: Uuid,
+    clients: Clients,
+    progress: ResumeLoginSyncProgress,
+) -> App {
+    let mut record = crate::safe_logout::PlayerPresenceRecord::new(true);
+    record.state = crate::safe_logout::PlayerWorldPresence::Online;
+    record.resume_in_progress = true;
+    record.resume_connection_id = Some(connection_id);
+    let mut presence = PlayerWorldPresenceState::default();
+    presence.players.insert(player_id, record);
+
+    let mut sync = ResumeLoginSyncState::default();
+    sync.insert(player_id, progress);
+
+    let mut app = App::new();
+    app.insert_resource(clients);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(presence);
+    app.insert_resource(sync);
+    app.insert_resource(SafeLogoutTelemetryState::default());
+    app.add_systems(Update, resume_login_sync_completion_system);
+    app
+}
+
+#[test]
+fn checkpoint4_resume_sync_waits_for_crisis_and_perception_delivery() {
+    let player_id = 71;
+    let connection_id = Uuid::new_v4();
+    let clients = Clients::default();
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    clients.activate(Client {
+        id: connection_id,
+        player_id,
+        sender,
+    });
+    let mut app = checkpoint4_resume_sync_test_app(
+        player_id,
+        connection_id,
+        clients,
+        ResumeLoginSyncProgress {
+            connection_id,
+            crisis_status_queued: false,
+            perception_queued: true,
+        },
+    );
+
+    app.update();
+    assert!(
+        !app.world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_sync_ready
+    );
+
+    app.world_mut()
+        .resource_mut::<ResumeLoginSyncState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .crisis_status_queued = true;
+    app.update();
+    assert!(
+        app.world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_sync_ready
+    );
+    assert!(app.world().resource::<ResumeLoginSyncState>().is_empty());
+}
+
+#[test]
+fn checkpoint4_resume_sync_rejects_authority_replaced_before_release() {
+    let player_id = 72;
+    let displaced_id = Uuid::new_v4();
+    let replacement_id = Uuid::new_v4();
+    let clients = Clients::default();
+    let (displaced_sender, _displaced_receiver) = tokio::sync::mpsc::channel(4);
+    clients.activate(Client {
+        id: displaced_id,
+        player_id,
+        sender: displaced_sender,
+    });
+    let mut app = checkpoint4_resume_sync_test_app(
+        player_id,
+        displaced_id,
+        clients.clone(),
+        ResumeLoginSyncProgress {
+            connection_id: displaced_id,
+            crisis_status_queued: true,
+            perception_queued: true,
+        },
+    );
+
+    let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(4);
+    clients.activate(Client {
+        id: replacement_id,
+        player_id,
+        sender: replacement_sender,
+    });
+    app.update();
+
+    assert!(
+        !app.world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_sync_ready
+    );
+    assert!(app.world().resource::<ResumeLoginSyncState>().is_empty());
+    assert_eq!(
+        app.world()
+            .resource::<SafeLogoutTelemetryState>()
+            .get(&player_id)
+            .unwrap()
+            .stale_connection_events_rejected,
+        1
+    );
+}
+
+#[test]
 fn checkpoint4_major_transition_notices_emit_once() {
     let player_id = 8;
     let client_id = Uuid::new_v4();
@@ -3752,6 +3934,8 @@ fn checkpoint4_major_transition_notices_emit_once() {
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(CrisisTelemetryState::default());
+    app.insert_resource(ResumeLoginSyncState::default());
+    app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);
 
     app.update();
@@ -3837,6 +4021,8 @@ fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(CrisisTelemetryState::default());
+    app.insert_resource(ResumeLoginSyncState::default());
+    app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);
     app.update();
 

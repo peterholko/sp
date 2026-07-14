@@ -29,7 +29,8 @@ use crate::obj::{BaseQueryEffects, ClassStructure};
 use crate::player;
 use crate::player::Player;
 use crate::safe_logout::{
-    is_owner_offline_protected, object_belongs_to_protected_run, PlayerWorldPresenceState,
+    is_owner_offline_protected, object_belongs_to_protected_run, protected_player_for_object,
+    PlayerWorldPresenceState, SafeLogoutTelemetryState,
 };
 use crate::templates::Templates;
 use crate::AppState;
@@ -176,6 +177,7 @@ pub fn protected_target_invalidation_system(
     mut commands: Commands,
     ids: Res<Ids>,
     protection: NpcProtection,
+    mut telemetry: Option<ResMut<SafeLogoutTelemetryState>>,
     mut map_events: ResMut<MapEvents>,
     mut npc_query: Query<
         (
@@ -210,6 +212,13 @@ pub fn protected_target_invalidation_system(
         let Some(lost_protected_target) = lost_protected_target else {
             continue;
         };
+
+        let protected_player = protection.presence.as_deref().and_then(|presence| {
+            protected_player_for_object(lost_protected_target, &ids, presence)
+        });
+        if let (Some(player_id), Some(telemetry)) = (protected_player, telemetry.as_deref_mut()) {
+            telemetry.record_protected_target_rejection(player_id);
+        }
 
         visible.target = NO_TARGET;
         if let Some(mut task) = task {
@@ -252,8 +261,12 @@ pub fn protected_target_invalidation_system(
             })
             .collect::<Vec<_>>();
 
+        let discarded = event_ids.len();
         for event_id in event_ids {
             map_events.remove(&event_id);
+        }
+        if let (Some(player_id), Some(telemetry)) = (protected_player, telemetry.as_deref_mut()) {
+            telemetry.record_protected_queued_events_discarded(player_id, discarded);
         }
     }
 }
@@ -306,7 +319,7 @@ mod tests {
     };
     use crate::event::{EventExecuting, EventExecutingState};
     use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
-    use crate::obj::{Misc, Name};
+    use crate::obj::{LastCombatTick, Misc, Name};
     use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence, ProtectedRunKey};
     use crate::templates::ObjTemplate;
 
@@ -1604,6 +1617,8 @@ mod tests {
         app.world_mut()
             .insert_resource(EntityObjMap(HashMap::new()));
         app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut()
+            .insert_resource(SafeLogoutTelemetryState::default());
         app.world_mut().insert_resource(minimal_templates());
         app.world_mut().insert_resource(flat_test_map());
 
@@ -1669,6 +1684,14 @@ mod tests {
                 dst: Position { x: 1, y: 0 },
             },
         );
+        app.world_mut().resource_mut::<MapEvents>().new(
+            100,
+            TICKS_PER_SEC + 10,
+            VisibleEvent::SpellDamageEvent {
+                spell: Spell::ShadowBolt,
+                target_id: 1,
+            },
+        );
 
         for _ in 0..3 {
             app.update();
@@ -1689,6 +1712,12 @@ mod tests {
         );
         assert!(app.world().resource::<MapEvents>().is_empty());
         assert!(npc.get::<ProtectedTargetInvalidated>().is_some());
+        let telemetry = app.world().resource::<SafeLogoutTelemetryState>();
+        let protected = telemetry.get(&1).expect("protected owner telemetry");
+        assert_eq!(protected.protected_target_rejections, 1);
+        assert_eq!(protected.queued_events_discarded, 2);
+        assert_eq!(protected.protected_damage_blocks, 0);
+        assert_eq!(telemetry.len(), 1);
 
         app.world_mut()
             .resource_mut::<PlayerWorldPresenceState>()
@@ -1711,6 +1740,132 @@ mod tests {
                 .target,
             1
         );
+        let telemetry = app.world().resource::<SafeLogoutTelemetryState>();
+        let protected = telemetry.get(&1).expect("protected owner telemetry");
+        assert_eq!(protected.protected_target_rejections, 1);
+        assert_eq!(protected.queued_events_discarded, 2);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_npc_damage_boundary_telemetry_is_owner_scoped_and_idempotent() {
+        let mut app = App::new();
+        app.add_systems(Update, attack_target_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+        app.world_mut().insert_resource(Clients::default());
+        app.world_mut().insert_resource(PlayerStats::default());
+        app.world_mut().insert_resource(minimal_templates());
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut()
+            .insert_resource(SafeLogoutTelemetryState::default());
+
+        let mut protected_record = PlayerPresenceRecord::new(false);
+        protected_record.state = PlayerWorldPresence::OfflineProtected;
+        let mut presence = PlayerWorldPresenceState::default();
+        presence.players.insert(1, protected_record);
+        app.world_mut().insert_resource(presence);
+
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                Position { x: 0, y: 0 },
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                Template("Goblin".to_string()),
+                State::None,
+                Misc {
+                    image: "goblin".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(100),
+                LastCombatTick(0),
+                VisibleTarget::new(1),
+                SubclassNPC,
+            ))
+            .id();
+        let target_entity = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                Position { x: 1, y: 0 },
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                Template("Human".to_string()),
+                State::None,
+                Misc {
+                    image: "hero".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(1),
+                LastCombatTick(0),
+            ))
+            .id();
+        let attack_action = app
+            .world_mut()
+            .spawn((Actor(npc_entity), ActionState::Requested, AttackTarget))
+            .id();
+
+        {
+            let mut ids = app.world_mut().resource_mut::<Ids>();
+            ids.new_obj(100, NPC_PLAYER_ID);
+            // Exercise the final owner-based safety boundary even if the ID
+            // ownership index is stale. Gameplay still trusts the ECS owner.
+            ids.new_obj(1, 2);
+        }
+        {
+            let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+            entity_map.new_obj(100, npc_entity);
+            entity_map.new_obj(1, target_entity);
+        }
+
+        let hp_before = app.world().entity(target_entity).get::<Stats>().unwrap().hp;
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().entity(target_entity).get::<Stats>().unwrap().hp,
+            hp_before
+        );
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .unwrap()
+                .target,
+            NO_TARGET
+        );
+        assert_eq!(
+            *app.world()
+                .entity(attack_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert!(app
+            .world()
+            .entity(npc_entity)
+            .get::<ProtectedTargetInvalidated>()
+            .is_some());
+
+        let telemetry = app.world().resource::<SafeLogoutTelemetryState>();
+        let protected = telemetry.get(&1).expect("protected owner telemetry");
+        assert_eq!(protected.protected_target_rejections, 1);
+        assert_eq!(protected.protected_damage_blocks, 1);
+        assert_eq!(protected.queued_events_discarded, 0);
+        assert_eq!(telemetry.len(), 1);
     }
 
     #[test]
@@ -5280,6 +5435,7 @@ pub struct TelegraphState<'w, 's> {
     crisis_assault_units: Query<'w, 's, &'static CrisisAssaultUnit>,
     next_attacks: Local<'s, std::collections::HashMap<i32, AttackType>>,
     protection: NpcProtection<'w, 's>,
+    telemetry: Option<ResMut<'w, SafeLogoutTelemetryState>>,
 }
 
 pub fn attack_target_system(
@@ -5333,6 +5489,18 @@ pub fn attack_target_system(
                         .unwrap_or(false)
                 {
                     let protected_target_id = visible_target.target;
+                    if let (Some(player_id), Some(telemetry)) = (
+                        telegraph
+                            .protection
+                            .presence
+                            .as_deref()
+                            .and_then(|presence| {
+                                protected_player_for_object(protected_target_id, &ids, presence)
+                            }),
+                        telegraph.telemetry.as_deref_mut(),
+                    ) {
+                        telemetry.record_protected_target_rejection(player_id);
+                    }
                     visible_target.target = NO_TARGET;
                     commands.entity(*actor).try_remove::<Target>().try_insert(
                         ProtectedTargetInvalidated {
@@ -5499,6 +5667,24 @@ pub fn attack_target_system(
                     })
                     .unwrap_or(false)
                 {
+                    if let (Some(player_id), Some(telemetry)) = (
+                        telegraph
+                            .protection
+                            .presence
+                            .as_deref()
+                            .and_then(|presence| {
+                                protected_player_for_object(target.id.0, &ids, presence).or_else(
+                                    || {
+                                        is_owner_offline_protected(target.player_id, presence)
+                                            .then_some(target.player_id.0)
+                                    },
+                                )
+                            }),
+                        telegraph.telemetry.as_deref_mut(),
+                    ) {
+                        telemetry.record_protected_target_rejection(player_id);
+                        telemetry.record_protected_damage_block(player_id);
+                    }
                     visible_target.target = NO_TARGET;
                     commands.entity(*actor).try_remove::<Target>().try_insert(
                         ProtectedTargetInvalidated {

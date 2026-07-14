@@ -4,10 +4,20 @@
 
 Checkpoints 1, **Safe Logout State Foundation and Eligibility**, 2,
 **Protected Simulation Enforcement**, and 3, **Network Protocol and
-Player-Facing UI**, are implemented. This update records the Checkpoint 3
-architecture, implementation, and validation while retaining the Checkpoint 1
-and 2 records below. Checkpoint 4 hardening and final milestone sign-off remain
-deferred.
+Player-Facing UI**, are complete. The Checkpoint 4 reconnect, authority,
+telemetry, client-lifecycle, exploit, multiplayer, and long-duration work is
+implemented and its final architecture and validation record appear below.
+
+Final milestone sign-off remains blocked by two pre-existing repository
+validation failures outside the approved Checkpoint 4 scope: the unmodified
+frontend declaration set fails plain `npx tsc --noEmit`, and one extended
+randomized runner sample reached the unmodified `Windstride Stag` resource/item
+template mismatch and recorded a panic. The supported client compile and both
+production bundles pass, the complete Rust test suite passes, and the focused
+five-run Safe Logout sample completes without panic. In accordance with the
+definition of done, Checkpoint 4 is not marked fully complete while either
+validation blocker remains. The deterministic eight-scenario Safe Logout
+matrix passes; it is functional validation, not a balance conclusion.
 
 The authoritative gameplay rule for the milestone is:
 
@@ -43,7 +53,523 @@ sanctuary control, and an intentional protected-confirmation close flow.
    restoration semantics, observability, race/exploit coverage, and final
    milestone validation.
 
-Items 1 through 3 are implemented. Item 4 remains deferred.
+Items 1 through 3 are complete. Item 4 is implemented, with final sign-off
+blocked by the two exact validation findings recorded above and below.
+
+## Checkpoint 4 pre-implementation audit and selected design
+
+Checkpoint 4 is limited to hardening and proving the Safe Logout contract that
+Checkpoints 1 through 3 introduced. It does not add persistence, offline gains,
+automatic protection, active-assault protection, a new crisis family, a map or
+economy change, or any broader persistent-world feature.
+
+### Exact architecture findings
+
+* Production authentication validates the HTTP session and account, creates a
+  fresh WebSocket UUID, inserts a `Client`, queues `PlayerEvent::Login`, and
+  sends the immediate login response. Socket close removes the UUID; the ECS
+  has no disconnect event and reconciles `Clients` in `PostUpdate`.
+* `Clients` currently treats every matching open UUID as active. Duplicate-
+  session replacement is an asynchronous scan of `Streams`, is requested before
+  account validation and `Client` insertion finish, and has no current-
+  connection generation. During that interval both sockets can be authoritative;
+  two near-simultaneous manager messages can also terminate one another.
+* Normal incoming commands continue using the socket task's authenticated
+  player ID. Safe-logout request/cancel commands revalidate their exact UUID at
+  ingress, but `PlayerEvent` then retains only the player ID. A replacement
+  between that check and ECS consumption cannot be distinguished from the
+  originating connection. `PlayerEvent::Login` and delayed
+  `GameEventType::Login` are likewise player-only.
+* `ProtectedRunKey` records the player, authoritative hero, assigned start-
+  location name, bound-monolith ID, and sorted neutral run-object IDs. A `First`
+  integrity system checks the protected timestamp, living exact hero, current
+  run key, and the prohibition on `AssaultActive` before gameplay.
+* Reconnect currently sets `protection_exit_requested`, keeps the reconnect
+  `Update` protected, and uses an exclusive `PostUpdate` system to validate the
+  run, calculate the exact protected duration, rebase the inventoried owner
+  deadlines, and publish `Online`. The deadline inventory covers introduction,
+  personal crisis, run score, legendary, crops, map/game events, build/work and
+  item times, needs/effects/combat/damage/death/burning, and tax collectors.
+* The current resume rebase is idempotent, but it publishes `Online` several
+  updates before the delayed Login event sends explored map/world time and
+  requests initial perception. That ordering does not meet the Checkpoint 4
+  reconnect sequence.
+* Status delivery is per live connection UUID, caches only successful queue
+  attempts, retries a full channel, and suppresses equal snapshots. It has no
+  one-shot `resumed_from_protection` signal and no send/suppression counters.
+* Existing stale-state recovery handles a missing/future protected timestamp,
+  an active assault, a missing/dead/True-Death hero, a missing assigned run, and
+  an exact run-key mismatch. It does not explicitly recover impossible pending
+  timer/position/connection combinations, does not bind resume to a connection,
+  and has no typed recovery telemetry.
+* The central protected `PlayerEvent` guard rejects owner and cross-owner
+  mutations. Hostile selection/action and final map-event damage gates provide
+  defence in depth. These paths log or silently skip but do not currently
+  contribute safe-logout input, target, damage, or queued-event metrics.
+* The headless harness already uses the production plugins, `Clients`,
+  `PlayerEvent` ingress, deterministic ticks, sparse safe-status packet capture,
+  disconnect/reconnect helpers, comprehensive owner snapshots, a 10,000-tick
+  freeze/rebase test, and one connected-neighbour test. Its reconnect helper
+  inserts another UUID without modelling production eviction. `RunMetrics`,
+  JSON, CSV, and aggregate reporting contain personal-crisis metrics but no Safe
+  Logout metrics; the normal bot never requests Safe Logout.
+* The client has a server-authoritative status helper, in-flight action guards,
+  a one-shot protected-close guard, session-scoped completion/reconnect
+  suppression, lifecycle reset events, and desktop accessibility copy. It has
+  no resume signal/notice. Its pure-helper tests do not yet cover a resume pulse,
+  callback duplication, scoped storage resets, or every Checkpoint 4 stale-
+  lifecycle case.
+* Authentication currently logs parsed cookie values and the raw session value.
+  Those are credentials/session identifiers and conflict with Checkpoint 4's
+  logging rule.
+
+### Repository conflicts and selected resolutions
+
+| Repository reality | Checkpoint 4 conflict | Selected resolution |
+| --- | --- | --- |
+| Multiple same-player `Client` records are valid until an asynchronous manager closes them. | An old socket can request/cancel Safe Logout or mutate gameplay, and near-simultaneous reconnects can terminate each other. | Add an atomic single-authority `Clients` activation operation after all authentication checks. Evict prior client records at that boundary, terminate only the returned old UUIDs, linearize mutating ingress with activation, and revalidate connection-scoped login/status synchronization against the exact current UUID. Ordinary player broadcasts see only the sole current registry entry. |
+| Safe-logout and Login ECS events retain only player ID. | A command or login can become stale while queued. | Carry the authenticated connection UUID through `PlayerEvent`, the internal safe-logout message, and delayed Login synchronization; reject a UUID that is no longer current. |
+| Rebase currently publishes normal simulation before delayed run synchronization. | Several gameplay updates can occur before explored-map/world/perception sync. | Split resume into an exact-once rebase phase and a synchronization barrier. Presence becomes connected/online after rebase, while canonical owner simulation remains suspended until the connection-scoped Login sync completes in `Update`; final `PostUpdate` release makes the following update safe to simulate. |
+| A replacement can occur while the synchronization barrier is open. | The first connection could complete another connection's resume or receive duplicate sync. | Bind the barrier to one current UUID. A stale scheduled Login is discarded; loss/replacement returns the run to protected state with a new interval and never repeats an already-applied duration. |
+| The wire status has only steady states. | The client cannot distinguish a normal online snapshot from a successfully resumed protected run. | Add the narrow additive boolean `resumed_from_protection`. Keep it pending until a status is successfully queued, suppress duplicate client notice/close reactions, and never replay the earlier completion packet. |
+| Counters do not exist and protection lasts across a global clock. | Per-tick counting would be noisy and expensive, while resume already knows the exact interval. | Add runtime-only per-player transition telemetry. Count duration when an interval closes and add any still-open interval only when reporting; do not write per protected tick or to the database. |
+| Final protection gates are distributed by design. | Counting every early return would require a broad gameplay rewrite and double-count defence-in-depth checks. | Instrument authoritative transition points, the central input guard, target invalidation, final damage rejection, and entry-event purge. Keep all existing redundant gameplay gates unchanged. |
+| The runner's default bot has no logout lifecycle. | New columns would otherwise always be zero. | Preserve the normal default and add a bounded explicit Safe Logout scenario cycle for functional multi-run validation. Append fields without renaming or reordering the existing schema. |
+| Client tests are dependency-free TypeScript helpers and production builds. | There is no configured DOM/WebSocket test framework. | Extend the existing pure lifecycle/state helpers for the twenty requested client cases, inspect the component/network integrations, compile focused helpers, run supported TypeScript validation, and build both production bundles without adding a framework dependency. |
+
+### Selected configuration and persistence approach
+
+Safe Logout remains an explicit player action in both survival-director modes;
+Checkpoint 4 adds no new gameplay mode or feature flag. Connection authority,
+presence, protected-run identity, resume barriers, and telemetry remain
+runtime-only Bevy/server state, matching the coherent runtime-only run model.
+No database table, schema migration, snapshot format, restart restoration, or
+offline simulation configuration is introduced.
+
+The production network selects exactly one authoritative UUID per player. The
+headless harness uses the same activation rule. Direct internal messages remain
+available only to deterministic server tests and supply an explicit live UUID;
+there is no player-ID-only production escape hatch.
+
+### Exact files selected for Checkpoint 4
+
+* `sp_server/src/game.rs` — atomic client authority, connection-scoped Login
+  synchronization, resume-sync completion hook, final damage/target telemetry,
+  and existing game-event ordering.
+* `sp_server/src/game_tests.rs` — isolated game-system fixtures updated for the
+  new resume-sync and Safe Logout telemetry resources, plus resume-status and
+  final damage-boundary regression coverage.
+* `sp_server/src/network.rs` — post-validation authoritative activation,
+  per-packet old-socket rejection, connection-bearing lifecycle events, additive
+  status field, replacement tests, and removal of cookie/session-value logs.
+* `sp_server/src/player.rs` — connection-scoped Login and safe-logout bridge,
+  stale-event rejection, central input telemetry, and focused tests.
+* `sp_server/src/event.rs` — connection identity on the existing delayed Login
+  event only.
+* `sp_server/src/safe_logout.rs` — resume barrier/state, stale invariant
+  recovery, canonical telemetry, status pulse/deduplication, and unit tests.
+* `sp_server/src/ai/npc/npc.rs` — transition-only protected-target rejection
+  telemetry at the existing invalidation boundary.
+* `sp_server/src/headless.rs` — authoritative replacement helpers, telemetry
+  snapshots, reconnect/exploit/multiplayer scenarios, 50,000-tick clock
+  arithmetic coverage, and appended run metrics.
+* `sp_server/src/bin/headless_runner.rs` — appended JSON/CSV fields, optional
+  Safe Logout scenario cycle, aggregate rates/reasons/duration, and schema tests.
+* `sp_frontend/sp_ts/src/sp/core/network.ts` — one-shot resume notice and
+  intentional-close callback hardening.
+* `sp_frontend/sp_ts/src/sp/core/networkEvent.ts` — the additive resume and
+  lifecycle-reset events used by both client layouts.
+* `sp_frontend/sp_ts/src/sp/core/safeLogoutStatus.ts` — additive resume field,
+  resume guard, and scoped completion/suppression lifecycle helpers.
+* `sp_frontend/sp_ts/src/sp/core/safeLogoutStatus.test.ts` — the focused client
+  lifecycle, unknown-code, storage, callback, and resume matrix.
+* `sp_frontend/sp_ts/src/sp/core/network.safeLogout.test.ts` — fake-WebSocket
+  intentional-close, stale-callback, reconnect, account-switch, and duplicate-
+  packet lifecycle tests.
+* `sp_frontend/sp_ts/src/sp/desktop/login.tsx` — explicit-login and account/run
+  reset integration plus the one-shot resume notice.
+* `sp_frontend/sp_ts/src/sp/desktop/ui/objectivesPanel.tsx` — semantic snapshot
+  deduplication, mount replay, snapshot-driven countdown presentation, and
+  active-assault presentation.
+* `sp_frontend/sp_ts/src/sp/desktop/ui/objectivesPanel.safeLogout.test.tsx` —
+  compact, wide, keyboard, accessibility, duplicate-output, and unmount tests.
+* `sp_frontend/sp_ts/src/sp/mobile/login.tsx` — mobile parity for intentional
+  close, login reset, account/run cleanup, and resume messaging.
+* `docs/safe_logout_milestone.md` — audit, implementation record, exact
+  validation, limitations, and final milestone contract.
+
+`player_setup.rs`, `combat.rs`, `headless_bot.rs`, `global.ts`, the economy,
+database, map, deployment, and infrastructure are audited regression surfaces;
+they receive no planned Checkpoint 4 gameplay redesign.
+
+## Checkpoint 4 implementation and final validation record
+
+### Current gameplay contract
+
+Ordinary disconnect does not provide protection.
+
+Safe Logout must be explicitly requested from the player’s own sanctuary and
+must complete its server-authoritative countdown.
+
+Movement, combat, damage, nearby hostiles, death, disconnect, or an active
+assault can prevent completion.
+
+Once protected, the player’s run receives neither harm nor benefit while the
+shared world continues.
+
+Reconnecting ends protection and resumes the same run without offline catch-up.
+
+An active personal assault cannot be escaped through Safe Logout and continues
+after an ordinary disconnect.
+
+### Final authority and reconnect architecture
+
+The runtime presence model remains `Online`, `SafeLogoutPending`,
+`OfflineProtected`, and `Disconnected`. `ProtectedRunKey` continues to bind
+protection to the exact player, hero, assigned start location, bound monolith,
+and attributed run objects. Checkpoint 4 adds only resume-barrier and telemetry
+state to that runtime record; it adds no persistence or alternate gameplay
+mode.
+
+After HTTP session and account validation, `Clients::activate` atomically makes
+the new WebSocket UUID the sole authoritative UUID for the player and returns
+the displaced UUIDs for termination. Mutating network ingress shares the same
+registry lock for the current-UUID check and event enqueue, so it linearizes
+before or after replacement without a check/enqueue gap. Immediate and delayed
+Login, Safe Logout request/cancel, status delivery, and resume release retain
+and validate the exact UUID; ordinary player broadcasts see only the sole
+current registry entry. Removing an old socket uses exact-UUID removal and
+cannot remove its replacement. Thus a stale or near-simultaneous connection
+cannot originate new mutations, cancel, restart, or finish another connection's
+lifecycle, and one player never has two authoritative controllers. UUIDs are
+authority tokens only and are not written to transition logs.
+
+Selected-class and hero-recreation operations already cross database awaits.
+For those paths, authority is accepted atomically before the await and carried
+as an accepted-operation token: replacement before acceptance rejects the
+operation, while replacement after acceptance does not retroactively cancel an
+operation the server already accepted. A first exact-current Login initializes
+missing presence and schedules one delayed synchronization; a duplicate Login
+from the same session does not reschedule it, and a stale Login is discarded and
+counted.
+
+The authoritative protected reconnect sequence is:
+
+1. An exact authenticated Login on `OfflineProtected` requests resume and binds
+   it to the current connection.
+2. The exclusive first `PostUpdate` resume phase validates the exact run and
+   rebases the long protected interval. It publishes connected `Online` state
+   but retains `resume_in_progress`, so all canonical owner simulation still
+   treats the run as protected.
+3. The connection-scoped delayed Login reserves capacity and atomically queues
+   the ordered core bundle (`ExploredMap` when present, then current `World`
+   time/day) for the exact UUID, then requests current crisis status and a fresh
+   `InitPerception`. A full core queue retries without exposing a partial
+   map/world snapshot; a replaced connection cannot complete this step.
+4. Crisis-status delivery and perception queuing each acknowledge the exact
+   resume UUID. Only both acknowledgements mark that connection's login
+   synchronization ready.
+5. The next exclusive `PostUpdate` phase rebases the short synchronization
+   interval, atomically revalidates authority under the same client-registry
+   mutex used by activation, arms the one-shot resume pulse, and releases the
+   simulation barrier. Status delivery queues and consumes the pulse afterward;
+   replacement before snapshot construction or at send time retargets it to the
+   sole new authority. The following `Update` is the first active update.
+
+That order preserves the same hero, crisis phase and pressure, health, needs,
+effects, villagers, assignments, work, crafting, refining, crops, upgrades,
+fuel, inventory, stored resources, and run identity. No assault, production,
+needs damage, effect expiry, or stale hostile event can run between rebase and
+fresh synchronization. A replacement during either rebase interval restores
+`OfflineProtected`; an already shifted boundary is advanced to the current
+tick, so no interval can be applied twice.
+
+### Recovery, rebasing, and simulation boundaries
+
+The `First` integrity pass validates the protected timestamp, exact live run
+key, own sanctuary binding, living/non-True-Death hero, absence of an active
+assault, and possible pending/resume fields before gameplay. Missing runs,
+future or missing timestamps, run-key mismatch, recycled start locations,
+True Death, active-assault conflict, and impossible countdown/resume state are
+recovered deterministically and idempotently. True Death and fresh-run cleanup
+win; a fresh run receives neither stale protection nor stale timer rebase.
+`AssaultActive` removes invalid protection without resolving the crisis or
+despawning attackers. In particular, `invalid_resume_fields` is recovered in
+`First` before deadline collection or any rebase walk, and repeating that
+recovery shifts no timer.
+
+Absolute owner-scoped deadlines are shifted only when a protected or resume-
+barrier interval closes. The inventory remains the Checkpoint 2 inventory:
+introduction, crisis and score clocks; legendary state; crops; map/game events;
+build, upgrade, work, item, crafting, and refining time; hero/villager needs,
+effects, combat, damage, death, and burning; and tax collectors. Telemetry
+counts one logical reconnect rebase even though the disjoint long protection
+and short synchronization intervals are each shifted once internally. Removed
+stale owner events are counted. The global `GameTick`, day/night, weather,
+visibility, ambient world, and other online players continue normally.
+
+The central protected input guard, NPC target/action gates, event ownership
+filter, and final damage boundary remain redundant by design. Checkpoint 4 adds
+transition-level counters at the actual NPC scorer/action and final damage
+boundaries. Final damage attribution falls back to the target entity's ECS
+`PlayerId` when the `Ids` ownership index is stale. This does not remove or
+redesign the underlying crisis, combat, resource, crafting, farming, refining,
+structure, villager, or trade systems.
+
+### Client lifecycle and status semantics
+
+The existing version-one `safe_logout_status` packet gains one additive,
+transition-only `resumed_from_protection` boolean; the client treats an absent
+field as `false` for compatibility. It is connection-bound, cached only after
+successful queuing, and cleared after delivery. A reconnect therefore receives
+current world/crisis/Safe Logout state plus exactly one
+`Safe Logout ended. Your settlement has resumed.` notice, never the prior
+completion message or a fabricated offline-results summary.
+
+`Network` accepts messages and callbacks only from its current WebSocket and
+only while it is the current `Network` instance. Delayed error work and all
+tracked timers recheck that identity. The obsolete untracked ping interval was
+removed. A protected confirmation sets the intentional-close suppression only
+at the authoritative packet boundary, closes once, remains silent through its
+matching close callback, and reloads only while the suppression still belongs
+to that lifecycle. Duplicate protected packets cannot close, navigate, notify,
+or schedule timers twice. A manual pre-confirmation close remains an ordinary
+network failure.
+
+Explicit login/authentication, account change, class/hero recreation, fresh
+run, True Death, and authoritative reset events clear the suppression, semantic
+status cache, timers, and one-shot guards on desktop and mobile. Later ordinary
+failures retain the existing reconnect/server-offline presentation. Deliberate
+authentication and account-switch entry points first invalidate the old
+`Network` socket, cancel its tracked callbacks, clear its cached status, and
+close it silently, so an awaited HTTP authentication cannot replay prior-
+account state. The
+Objectives Panel replays one cached semantic snapshot on mount, suppresses
+equivalent snapshots, retains active-assault copy, and preserves compact, wide,
+keyboard, and `aria-live` behavior. Countdown presentation is driven only by
+server snapshots; the component creates no interpolation timer, so cancellation,
+reset, and unmount leave no Safe Logout timer to leak. Local countdown
+modification cannot create protection.
+
+### Runtime telemetry
+
+`SafeLogoutTelemetryState` is process-memory-only and attributed per player.
+It records:
+
+* requests, accepted requests, rejections, cancellations, completions,
+  protected sessions started, and protected sessions resumed;
+* total protected ticks, ordinary disconnects, and active-assault disconnects;
+* status packets sent and stable duplicate snapshots suppressed;
+* protected input rejections, final damage blocks, target rejections, and
+  queued events discarded;
+* invariant recoveries, run-key mismatches, logical timer rebases, and stale
+  connection events rejected; and
+* typed rejection, cancellation, and invariant-recovery reason maps.
+
+Duration is derived when intervals close, with an open interval added only to a
+reporting snapshot. No per-tick counter, database write, credential, cookie,
+raw session value, or UUID log was added. The obsolete cookie/session-value
+logs were removed.
+
+### Runner schema and modes
+
+The runner's existing 48 CSV columns retain their exact names, order, and
+meaning. Twenty-five Safe Logout columns are appended:
+
+```text
+safe_logout_scenario_mode
+safe_logout_requests
+safe_logout_accepted
+safe_logout_rejected
+safe_logout_cancelled
+safe_logout_completed
+safe_logout_protected_sessions_started
+safe_logout_resumed
+safe_logout_protected_ticks_total
+safe_logout_ordinary_disconnects
+safe_logout_active_assault_disconnects
+safe_logout_status_packets_sent
+safe_logout_status_packets_duplicate_suppressed
+safe_logout_protected_input_rejections
+safe_logout_protected_damage_blocks
+safe_logout_protected_target_rejections
+safe_logout_queued_events_discarded
+safe_logout_invariant_recoveries
+safe_logout_run_key_mismatches
+safe_logout_timer_rebases
+safe_logout_stale_connection_events_rejected
+safe_logout_rejection_reasons
+safe_logout_cancellation_reasons
+safe_logout_invariant_reasons
+safe_logout_invariants_ok
+```
+
+The same fields are structured in per-run JSON. Reason maps serialize as JSON
+objects and are correctly CSV-escaped. Aggregate output adds request,
+acceptance, rejection, completion, cancellation, resume, duration, disconnect,
+boundary, rebase, stale-event, recovery, reason, and panic values without
+removing crisis or gameplay metrics. The optional third argument is explicitly
+`standard`, `safe-logout`, or runner-only `safe-logout-matrix`; omitted mode
+remains `standard`. Safe Logout mode runs one authenticated completion,
+protected interval, and reconnect cycle before normal bot play. The validation-
+only matrix cycles eight deterministic row labels: normal play, completion,
+cancellation, long protection, reconnect, ordinary disconnect, active-assault
+disconnect, and multiple players. These modes do not change production
+gameplay or infer logout actions from ordinary bot behavior.
+
+### Exploit and multiplayer validation
+
+The final-tick matrix runs six separately initialized cases: movement, outgoing
+combat, incoming damage, hostile entry, assault launch, and disconnect. In each
+case the authoritative danger/cancellation phase precedes `PostUpdate`
+completion and no protection is granted. Retained tests cover one tick before,
+the boundary tick, and after completion; duplicate request/cancel; queued
+movement/combo/damage; deferred hostiles; dead/friendly proximity; unauthenticated
+and forged packet shapes; active-assault rejection; protected external
+inventory mutation; and stale event purging. Stale sockets and two rapid
+replacements are rejected at both ingress and commit.
+
+The multiplayer scenario covers A protected/B online, then A and B both
+protected, followed by reconnecting A only. B's needs, villagers, production,
+and personal crisis advance while A remains byte-for-byte frozen; B cannot
+mutate A's assets. Each run key and telemetry record remains independent, B
+stays protected when A resumes, ambient targets reject A without forced cross-
+settlement retargeting, and owner-attributed crisis attackers retain their
+owner. Separate scenarios distinguish ordinary and active-assault disconnects;
+neither becomes protected, and the active assault retains its ID, generation,
+units, and connected-helper/villager continuation.
+
+The retained 10,000-update Checkpoint 2 soak verifies the full owner snapshot,
+connected-neighbor progress, global advancement, and exact post-reconnect
+deadline shifts. The runner matrix's long-protection row performs 20,000 actual
+protected updates. Separately, the Checkpoint 4 large-clock arithmetic test
+jumps `GameTick` forward by 50,000, executes the production schedule, reports
+the open duration once, closes it once, rebases once, and resumes without
+overflow, catch-up, harm, benefit, or panic; it is not a 50,000-update soak.
+
+### Checkpoint 4 validation commands and exact results
+
+Server commands were run from `sp_server/` on 2026-07-13:
+
+* `cargo fmt --check` — passed with exit status 0 and no output.
+* `cargo check` — passed with exit status 0; the retained 70 warnings remain.
+* `cargo test --lib safe_logout_checkpoint4_ -- --nocapture` — passed: 14
+  passed, 0 failed, 391 filtered out.
+* `cargo test --lib checkpoint4_ -- --nocapture` — passed: 34 passed, 0
+  failed, 371 filtered out.
+* `cargo test --lib connection_authority -- --nocapture` — passed: 5 passed,
+  0 failed, 400 filtered out.
+* `cargo test --lib checkpoint4_stale_login -- --nocapture` — passed: 1
+  passed, 0 failed.
+* `cargo test --lib checkpoint4_duplicate_login -- --nocapture` — passed: 1
+  passed, 0 failed.
+* `cargo test --lib checkpoint4_first_login -- --nocapture` and the focused
+  `checkpoint4_login_sync` filter — each passed its single test. The focused
+  `checkpoint4_resume_sync` filter passed 2 tests.
+* `cargo test --lib safe_logout_checkpoint1_` — passed: 18 passed, 0 failed.
+* `cargo test --lib checkpoint2_` — passed: 17 passed, 0 failed.
+* `cargo test --lib checkpoint3_` — passed: 41 passed, 0 failed.
+* `cargo test --lib personal_crisis_` — passed: 7 passed, 0 failed.
+* `cargo test --lib legacy_mode` — passed: 2 passed, 0 failed.
+* `cargo test --bin headless_runner` — passed: 5 passed, 0 failed.
+* The first final `cargo test` attempt ran 404 of 405 library tests successfully
+  but retained the bound-monolith expiry item in one test. The fully qualified
+  test then passed 18/18 fresh-process repetitions, `cargo test --lib` passed
+  405/405, and an unchanged full `cargo test` rerun passed. The successful full
+  rerun had 405 library tests and 5 runner tests all passing; the day-system
+  integration target ran 6 tests, all passing; main/empty integration targets
+  ran 0 tests; and the one
+  documentation test remained ignored. No production or economy timing change
+  was made for the non-reproducible first result.
+* `cargo clippy --all-targets --all-features` — passed with exit status 0 and
+  warnings only. Clippy reported 1,327 warnings for the library and 1,342 for
+  the library-test build, of which 1,327 were duplicates.
+* `cargo run --bin headless_runner -- 1 6000 standard` — command passed. The
+  single run reached `MaxTicks` at 6,007 ticks: 2 days, 5 enemies, 0 deaths,
+  60 HP, 775 skill XP, inventory 18, 2 structures, `signs`, 0 launches,
+  0 resolutions, 0 panics, 0 invalid crisis/Safe Logout invariants, and 0
+  automatic dusk waves.
+* `cargo run --bin headless_runner -- 5 600 safe-logout` — command and all five
+  runs passed. Each recorded one request, acceptance, completion, protected
+  session, resume, and timer rebase; aggregate completion and reconnect were
+  5/5, protected duration was 1,285 ticks total/257 mean, and there were 0
+  cancellations, duplicate completions, invariant recoveries, or panics.
+* `cargo run --bin headless_runner -- 8 600 safe-logout-matrix` — command and
+  all eight scenario rows passed at `MaxTicks` with 0 panics and 0 invariant
+  failures. It recorded 6 requests, 5 accepted, 1 rejected
+  (`assault_active`), 1 cancelled (`manual`), 4 completions, 4 resumes, 4
+  logical rebases, 20,531 protected ticks total (5,132.75 mean over the four
+  resumed sessions; 20,008 in the long row), 2 ordinary disconnects, 1
+  active-assault disconnect, and 0 protected-input rejects, damage blocks, or
+  invariant recoveries.
+* `cargo run --bin headless_runner -- 3 2000 safe-logout` — the command exited
+  0 because the existing runner catches per-run panics, but the sample is not
+  counted as passing: two runs recorded completion/resume and 257 protected
+  ticks; the third recorded `Panic` in unchanged `gather_event_system` because
+  `Windstride Stag` has no `produces` mapping and no same-named item template.
+  This is the exact pre-existing data defect described under limitations.
+
+Client commands were run from `sp_frontend/sp_ts/`:
+
+* `npx tsc --noEmit --skipLibCheck` — passed.
+* `npx tsc --skipLibCheck --sourceMap false --outDir
+  /tmp/sp_cp4_client_validation` — passed.
+* `NODE_PATH=/Users/peter/projects/sp/sp_frontend/sp_ts/node_modules node -e
+  "require('/tmp/sp_cp4_client_validation/core/safeLogoutStatus.test.js');
+  require('/tmp/sp_cp4_client_validation/core/network.safeLogout.test.js');
+  require('/tmp/sp_cp4_client_validation/desktop/ui/objectivesPanel.safeLogout.test.js')"`
+  — passed all three suites, printing `safeLogoutStatus helper checks passed`,
+  `network Safe Logout lifecycle checks passed`, and
+  `ObjectivesPanel Safe Logout component checks passed`. An earlier invocation
+  without `NODE_PATH` passed the first two suites but could not resolve React
+  from `/tmp`; the corrected exact command above passed all three.
+* `npx webpack --mode production --stats=errors-warnings` — passed for desktop
+  (3.36 MiB) and mobile (2.42 MiB), retaining three existing performance
+  warnings per bundle. No development server was started.
+* `npx tsc --noEmit` — executed and failed with exit status 2 on the unchanged
+  Phaser declaration baseline: `TS6200` duplicate definitions between
+  `node_modules/phaser/types/phaser.d.ts` and `src/phaser.d.ts`, `TS2432` enum
+  initializer errors in those declarations, and `TS2688` because
+  `src/phaser.d.ts` references the missing `./matter` type definition. The
+  supported skip-library-check type-check, focused compile, tests, and
+  production bundles pass.
+
+### Obsolete paths removed, limitations, and deferred work
+
+The old multi-authority client insertion/removal behavior is replaced by one
+atomic activation/current-UUID contract. Player-ID-only Safe Logout and delayed
+Login paths are replaced by connection-bearing events. The dead client ping
+interval, stale callback/timer paths, raw cookie/session logs, and obsolete
+unscoped resume/status flags are removed. Legacy crisis systems, internal
+deterministic test ingress, all economy systems, and all Checkpoint 1–3 defenses
+remain.
+
+Two validation blockers prevent final milestone sign-off:
+
+1. Plain frontend `npx tsc --noEmit` cannot pass until the repository's duplicate
+   Phaser declarations and missing `./matter` type reference are reconciled.
+2. The base resource data defines `Windstride Stag` without `produces`, while
+   the unchanged gather fallback requests an item literally named `Windstride
+   Stag`; only `Windstride Deer Carcass` exists. Correcting that mapping would
+   change resource/production output and was not silently included in this
+   checkpoint. The focused Safe Logout runner sample and all Rust tests pass,
+   but the extended randomized sample proves the broader runner is not fully
+   panic-free.
+
+Client coverage uses dependency-free pure helpers, a fake WebSocket, and direct
+component lifecycle/render calls rather than a browser DOM runner. It does not
+literally close a real socket before confirmation, and desktop/mobile
+`LoginControls` reset integration was verified through the shared helpers,
+focused network tests, compilation, and source audit rather than mounted login
+components. These are test-depth limitations, not alternate authority paths.
+
+Presence, telemetry, protected identity, and duration remain process-memory-
+only. Server restart restoration, database persistence, offline production,
+offline shops/reports, offline healing or repair, Safe Logout during an active
+assault, automatic/inactivity protection, notifications, permissions/groups,
+regional or new crisis families, larger maps/worlds, cross-server sessions,
+and seasonal resets remain deferred. No part of Checkpoint 4 implies support
+for them.
 
 ## Checkpoint 3 implementation record
 
@@ -544,9 +1070,15 @@ remain outside this checkpoint and are not implied by Checkpoint 4.
   aggression, NPC markers, live state, visible-target capability, and special
   personal-assault ownership rules.
 * The Checkpoint 1 immediate-threat query therefore requires `SubclassNPC`,
-  `VisibleTarget`, `Subclass::Npc`, NPC ownership, live state, no `StateDead`,
-  positive HP, and non-passive template aggression. Missing aggression metadata
-  is treated as threatening rather than safe. Because the query runs in
+  `VisibleTarget`, `Subclass::Npc`, NPC ownership, live and visible state, no
+  `StateDead`, positive HP, and non-passive template aggression. Hidden NPCs are
+  inert and absent from every perception path until reveal, so they are not an
+  immediate threat; once revealed, the next eligibility/countdown pass blocks
+  or cancels as normal. This distinction also prevents the deliberately hidden
+  future intro Necromancer, pre-spawned inside every starting sanctuary's
+  eight-tile radius, from making Safe Logout impossible from run creation.
+  Missing aggression metadata is treated as threatening rather than safe.
+  Because the query runs in
   `PostUpdate`, deferred Update despawns have already been applied; a still-live
   orphan ECS threat fails closed as hostile instead of being hidden by a stale
   object map.

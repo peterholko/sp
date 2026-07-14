@@ -9,11 +9,14 @@ import { WeatherState } from './weatherState';
 import type { CrisisStatusPacket } from './crisisStatus';
 import {
   SAFE_LOGOUT_COMPLETION_MESSAGE,
+  SAFE_LOGOUT_RESUME_MESSAGE,
   SafeLogoutCloseGuard,
+  SafeLogoutSnapshotGuard,
   SafeLogoutStatusPacket,
   cancelSafeLogoutPacket,
   clearSafeLogoutReconnectSuppression,
   dispatchSafeLogoutStatus,
+  hasSafeLogoutReconnectSuppression,
   rememberSafeLogoutCompletion,
   requestSafeLogoutPacket,
 } from './safeLogoutStatus';
@@ -636,14 +639,79 @@ export class Network {
 
   private websocket;
   private networkErrorTimeoutId: number | null = null;
+  private perceptionTimeoutId: number | null = null;
   private readonly networkErrorGraceMs = 1500;
   private readonly safeLogoutCloseGuard = new SafeLogoutCloseGuard();
+  private readonly safeLogoutSnapshotGuard = new SafeLogoutSnapshotGuard();
+  private latestSafeLogoutStatus: SafeLogoutStatusPacket | null = null;
   private reloadAfterSafeLogoutClose = false;
+
+  private isActiveSocket(socket): boolean {
+    return Global.network === this && socket === this.websocket;
+  }
 
   private clearNetworkErrorTimeout() {
     if (this.networkErrorTimeoutId !== null) {
       window.clearTimeout(this.networkErrorTimeoutId);
       this.networkErrorTimeoutId = null;
+    }
+  }
+
+  private clearPerceptionTimeout() {
+    if (this.perceptionTimeoutId !== null) {
+      window.clearTimeout(this.perceptionTimeoutId);
+      this.perceptionTimeoutId = null;
+    }
+  }
+
+  private clearLifecycleTimers() {
+    this.clearNetworkErrorTimeout();
+    this.clearPerceptionTimeout();
+  }
+
+  public getLatestSafeLogoutStatus(): SafeLogoutStatusPacket | null {
+    return this.latestSafeLogoutStatus;
+  }
+
+  public clearLatestSafeLogoutStatus(): void {
+    this.latestSafeLogoutStatus = null;
+    this.safeLogoutSnapshotGuard.clearSnapshot();
+  }
+
+  /**
+   * End the current connection lifecycle before deliberate authentication or
+   * an account switch. Invalidating `this.websocket` first makes every pending
+   * callback fail `isActiveSocket`, while explicitly clearing timers avoids
+   * waiting for those callbacks to discover that they are stale.
+   */
+  public resetForAuthentication(): void {
+    const socket = this.websocket;
+
+    this.clearLifecycleTimers();
+    this.safeLogoutCloseGuard.resetForLogin();
+    this.safeLogoutSnapshotGuard.resetForLogin();
+    this.latestSafeLogoutStatus = null;
+    this.reloadAfterSafeLogoutClose = false;
+    this.websocket = null;
+    Global.connected = false;
+
+    try {
+      clearSafeLogoutReconnectSuppression(window.sessionStorage);
+    } catch (error) {
+      console.warn('Unable to clear Safe Logout reconnect suppression', error);
+    }
+
+    Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
+
+    if (
+      socket
+      && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+    ) {
+      try {
+        socket.close(1000, 'Authentication reset');
+      } catch (error) {
+        console.warn('Unable to close superseded authentication socket', error);
+      }
     }
   }
 
@@ -653,7 +721,7 @@ export class Network {
     this.networkErrorTimeoutId = window.setTimeout(() => {
       this.networkErrorTimeoutId = null;
 
-      if (socket !== this.websocket) {
+      if (!this.isActiveSocket(socket)) {
         return;
       }
 
@@ -676,7 +744,7 @@ export class Network {
     this.networkErrorTimeoutId = window.setTimeout(() => {
       this.networkErrorTimeoutId = null;
 
-      if (socket !== this.websocket) {
+      if (!this.isActiveSocket(socket)) {
         return;
       }
 
@@ -1648,12 +1716,16 @@ export class Network {
     console.log('[Admin] To reset log levels, restart the server or set each module to "OFF"');
   }
 
-  private completeSafeLogout(packet: SafeLogoutStatusPacket) {
+  private completeSafeLogout(packet: SafeLogoutStatusPacket, socket) {
+    if (!this.isActiveSocket(socket)) {
+      return;
+    }
+
     if (!this.safeLogoutCloseGuard.acceptProtectedStatus(packet)) {
       return;
     }
 
-    this.clearNetworkErrorTimeout();
+    this.clearLifecycleTimers();
     Global.connected = false;
     this.reloadAfterSafeLogoutClose = false;
 
@@ -1668,8 +1740,8 @@ export class Network {
       message: SAFE_LOGOUT_COMPLETION_MESSAGE,
     });
 
-    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-      this.websocket.close(1000, 'Safe Logout complete');
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.close(1000, 'Safe Logout complete');
     }
   }
 
@@ -1678,8 +1750,10 @@ export class Network {
   public connect() {
     const url: string = "wss://" + window.location.hostname + ":8443";
 
-    this.clearNetworkErrorTimeout();
+    this.clearLifecycleTimers();
     this.safeLogoutCloseGuard.resetForLogin();
+    this.safeLogoutSnapshotGuard.resetForLogin();
+    this.latestSafeLogoutStatus = null;
     this.reloadAfterSafeLogoutClose = false;
     try {
       clearSafeLogoutReconnectSuppression(window.sessionStorage);
@@ -1691,28 +1765,30 @@ export class Network {
     const websocket = this.websocket;
 
     this.websocket.onopen = (evt) => {
-      if (websocket !== this.websocket) {
+      if (!this.isActiveSocket(websocket)) {
         return;
       }
 
       this.clearNetworkErrorTimeout();
       console.log('Opened websocket');
-      setInterval(function () {
-        console.log('Sending Ping');
-        //Network.sendPing()
-      }, 50000);
     };
 
     this.websocket.onclose = (evt) => {
-      if (websocket !== this.websocket) {
+      if (!this.isActiveSocket(websocket)) {
         return;
       }
 
       console.log('Websocket Closing...');
+      this.clearLifecycleTimers();
+      Global.connected = false;
       if (this.safeLogoutCloseGuard.suppressConnectionFailure()) {
-        this.clearNetworkErrorTimeout();
-        Global.connected = false;
-        if (this.reloadAfterSafeLogoutClose) {
+        let reconnectSuppressed = false;
+        try {
+          reconnectSuppressed = hasSafeLogoutReconnectSuppression(window.sessionStorage);
+        } catch (error) {
+          console.warn('Unable to read Safe Logout reconnect suppression', error);
+        }
+        if (this.reloadAfterSafeLogoutClose && reconnectSuppressed) {
           window.location.reload();
         }
         return;
@@ -1721,7 +1797,7 @@ export class Network {
     }
 
     this.websocket.onerror = (evt) => {
-      if (websocket !== this.websocket) {
+      if (!this.isActiveSocket(websocket)) {
         return;
       }
 
@@ -1729,14 +1805,19 @@ export class Network {
       if (this.safeLogoutCloseGuard.suppressConnectionFailure()) {
         return;
       }
+      this.clearPerceptionTimeout();
       this.scheduleNetworkError(websocket);
     }
 
-    this.setupMessageHandler();
+    this.setupMessageHandler(websocket);
   }
 
-  private setupMessageHandler() {
-    this.websocket.onmessage = (evt) => {
+  private setupMessageHandler(websocket) {
+    websocket.onmessage = (evt) => {
+      if (!this.isActiveSocket(websocket)) {
+        return;
+      }
+
       var jsonData = JSON.parse(evt.data);
 
       //Check if error message is in the packet
@@ -1748,6 +1829,8 @@ export class Network {
       } else if (jsonData.packet == "combat_telegraph") {
         Global.gameEmitter.emit(NetworkEvent.COMBAT_TELEGRAPH, jsonData);
       } else if (jsonData.packet == "select_class") {
+        this.clearLatestSafeLogoutStatus();
+        Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
         Global.playerId = jsonData.player;
         if (Global.pendingClassSelection) {
           const { className, heroName } = Global.pendingClassSelection;
@@ -1759,6 +1842,8 @@ export class Network {
       } else if (jsonData.packet == "info_select_class") {
         if (jsonData.result == "success") {
           console.log("Class selected, logging in")
+          this.clearLatestSafeLogoutStatus();
+          Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
           Global.gameEmitter.emit(NetworkEvent.FIRST_LOGIN, {});
         }
       } else if (jsonData.packet == "login") {
@@ -1775,8 +1860,17 @@ export class Network {
         this.processInitObjStates(jsonData.data.observers); // Add observers after to overwrite if observers end up being visible objects
         this.processInitWeather(jsonData.data.weather);
 
-        //Add small delay to prevent perception event before Scenes are created.
-        setTimeout(function () { console.log('Emitting perception event'); Global.gameEmitter.emit(NetworkEvent.PERCEPTION, jsonData); }, 3000);
+        // Add a tracked delay to prevent perception delivery before Scenes are
+        // created. Connection replacement and navigation cancel stale delivery.
+        this.clearPerceptionTimeout();
+        this.perceptionTimeoutId = window.setTimeout(() => {
+          this.perceptionTimeoutId = null;
+          if (!this.isActiveSocket(websocket)) {
+            return;
+          }
+          console.log('Emitting perception event');
+          Global.gameEmitter.emit(NetworkEvent.PERCEPTION, jsonData);
+        }, 3000);
       } else if (jsonData.packet == 'new_perception') {
         console.log('$$$$$$$$$$ Received New Perception $$$$$$$$$$$$$$$');
         this.processNewPerceptionVisibleObjStates(jsonData.data.visible_objs);
@@ -1878,6 +1972,8 @@ export class Network {
       } else if (jsonData.packet == "info_crop") {
         Global.gameEmitter.emit(NetworkEvent.INFO_CROP, jsonData);
       } else if (jsonData.packet == "info_true_death") {
+        this.clearLatestSafeLogoutStatus();
+        Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
         Global.gameEmitter.emit(NetworkEvent.INFO_TRUE_DEATH, jsonData);
       } else if (jsonData.packet == "nearby_resources") {
         Global.gameEmitter.emit(NetworkEvent.NEARBY_RESOURCES, jsonData);
@@ -1983,13 +2079,22 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.CRISIS_STATUS, jsonData);
       } else if (jsonData.packet == 'safe_logout_status') {
         const safeLogoutStatus = jsonData as SafeLogoutStatusPacket;
+        if (!this.safeLogoutSnapshotGuard.acceptSnapshot(safeLogoutStatus)) {
+          return;
+        }
+        this.latestSafeLogoutStatus = safeLogoutStatus;
         // UI observers receive the authoritative protected snapshot before the
         // one-shot transport reaction closes the gameplay socket.
         dispatchSafeLogoutStatus(
           safeLogoutStatus,
           (status) => Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_STATUS, status),
-          (status) => this.completeSafeLogout(status),
+          (status) => this.completeSafeLogout(status, websocket),
         );
+        if (this.safeLogoutSnapshotGuard.acceptResume(safeLogoutStatus)) {
+          Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESUMED, {
+            message: SAFE_LOGOUT_RESUME_MESSAGE,
+          });
+        }
       } else if (jsonData.packet == 'combat_state') {
         Global.combatState = jsonData;
         Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);

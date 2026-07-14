@@ -14,6 +14,7 @@ import {
 } from "../../core/crisisStatus";
 import {
   SAFE_LOGOUT_CONDITIONS,
+  SAFE_LOGOUT_ARIA_LIVE,
   SafeLogoutStatusPacket,
   SafeLogoutStatusView,
   SafeLogoutUiState,
@@ -22,6 +23,7 @@ import {
   clearSafeLogoutStatus,
   receiveSafeLogoutStatus,
   safeLogoutStatusView,
+  safeLogoutLayoutMode,
   shouldRenderSafeLogout,
 } from "../../core/safeLogoutStatus";
 
@@ -140,6 +142,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     if (typeof window !== 'undefined') {
       window.addEventListener('resize', this.handleResize);
+    }
+
+    const latestSafeLogoutStatus = Global.network
+      && typeof Global.network.getLatestSafeLogoutStatus === 'function'
+      ? Global.network.getLatestSafeLogoutStatus()
+      : null;
+    if (latestSafeLogoutStatus) {
+      this.handleSafeLogoutStatus(latestSafeLogoutStatus);
     }
   }
 
@@ -274,6 +284,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   }
 
   handleRunReset() {
+    if (Global.network && typeof Global.network.clearLatestSafeLogoutStatus === 'function') {
+      Global.network.clearLatestSafeLogoutStatus();
+    }
     this.observedHeroId = null;
     this.safeLogoutRequestLocked = false;
     this.safeLogoutCancelLocked = false;
@@ -290,6 +303,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     // auto-expansion. A recreated run receives a different hero id and clears
     // any locally retained snapshot while the authoritative packet is resent.
     if (this.observedHeroId !== null && this.observedHeroId !== nextHeroId) {
+      if (Global.network && typeof Global.network.clearLatestSafeLogoutStatus === 'function') {
+        Global.network.clearLatestSafeLogoutStatus();
+      }
       this.safeLogoutRequestLocked = false;
       this.safeLogoutCancelLocked = false;
       this.setState((state) => ({
@@ -601,7 +617,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           id="safe-logout-message"
           style={bodyStyle}
           role="status"
-          aria-live="polite"
+          aria-live={SAFE_LOGOUT_ARIA_LIVE}
           aria-atomic="true"
         >
           {safeLogout.message}
@@ -612,7 +628,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         )}
 
         {pending && (
-          <div style={countdownStyle} aria-live="polite" aria-atomic="true">
+          <div style={countdownStyle} aria-live={SAFE_LOGOUT_ARIA_LIVE} aria-atomic="true">
             {safeLogout.countdownLabel || 'Countdown updating…'}
           </div>
         )}
@@ -671,7 +687,13 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     }
 
     const wide = isWideScreen();
-    const compactDesktop = isDesktop() && !wide && this.state.viewportWidth <= COMPACT_DESKTOP_MAX_WIDTH;
+    const layoutMode = safeLogoutLayoutMode(
+      isDesktop(),
+      wide,
+      this.state.viewportWidth,
+      COMPACT_DESKTOP_MAX_WIDTH,
+    );
+    const compactDesktop = layoutMode === 'compact';
     const compactExpanded = compactDesktop && this.state.compactExpanded;
     const panelChrome: React.CSSProperties = {
       backgroundColor: 'rgba(8, 10, 12, 0.82)',

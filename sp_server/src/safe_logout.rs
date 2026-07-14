@@ -14,7 +14,7 @@ use crate::constants::TICKS_PER_SEC;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
 use crate::farm::{CropStages, Crops};
 use crate::game::{
-    BoundMonolith, Burning, Clients, CrisisAssaultUnit, CrisisPhase, GameTick,
+    BoundMonolith, Burning, Client, Clients, CrisisAssaultUnit, CrisisPhase, GameTick,
     InitialEncounterState, IntroEncounterState, LegendaryThreatState, Merchant, Monolith,
     PlayerIntroState, RunScoreState, SanctuaryZones, SettlementCrisisState,
 };
@@ -57,7 +57,7 @@ impl PlayerWorldPresence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SafeLogoutCancelReason {
     Moved,
     EnteredCombat,
@@ -70,6 +70,7 @@ pub enum SafeLogoutCancelReason {
     Disconnected,
     Manual,
     RunEnded,
+    InvalidState,
 }
 
 impl SafeLogoutCancelReason {
@@ -86,11 +87,12 @@ impl SafeLogoutCancelReason {
             Self::Disconnected => "disconnected",
             Self::Manual => "manual",
             Self::RunEnded => "run_ended",
+            Self::InvalidState => "invalid_state",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SafeLogoutRejectionReason {
     NotOnline,
     InvalidRun,
@@ -170,10 +172,22 @@ pub struct PlayerPresenceRecord {
     pub(crate) last_observed_hp: Option<i32>,
     pub(crate) client_connected: bool,
     pub(crate) safe_logout_connection_ids: Vec<Uuid>,
-    /// A login or disconnected -> connected edge requests an ordered resume.
+    /// An exact authenticated Login event requests an ordered resume.
     /// The state remains protected until all owner deadlines are rebased in
     /// PostUpdate, so the reconnect Update cannot run a backlog.
     pub(crate) protection_exit_requested: bool,
+    /// Rebase has published connected `Online` presence, but owner simulation
+    /// remains suspended until the connection-scoped Login sync finishes.
+    pub(crate) resume_in_progress: bool,
+    /// The one authoritative connection allowed to finish this resume.
+    pub(crate) resume_connection_id: Option<Uuid>,
+    /// Set only after the delayed Login world/perception synchronization ran.
+    pub(crate) resume_sync_ready: bool,
+    /// The exact connection that may receive one successfully queued online
+    /// resume announcement. This is a delivery pulse, not gameplay state.
+    pub(crate) resume_notice_connection_id: Option<Uuid>,
+    /// Deduplicates repeated Login events from the same authoritative socket.
+    pub(crate) last_login_connection_id: Option<Uuid>,
 }
 
 impl PlayerPresenceRecord {
@@ -197,6 +211,11 @@ impl PlayerPresenceRecord {
             client_connected: connected,
             safe_logout_connection_ids: Vec::new(),
             protection_exit_requested: false,
+            resume_in_progress: false,
+            resume_connection_id: None,
+            resume_sync_ready: false,
+            resume_notice_connection_id: None,
+            last_login_connection_id: None,
         }
     }
 }
@@ -206,10 +225,117 @@ pub struct PlayerWorldPresenceState {
     pub players: HashMap<i32, PlayerPresenceRecord>,
 }
 
+/// Runtime-only, per-run Safe Logout observations. Counters are incremented at
+/// authoritative transitions and final rejection boundaries, never per skipped
+/// simulation tick and never in the database.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SafeLogoutTelemetry {
+    pub requests: u64,
+    pub accepted: u64,
+    pub rejected: u64,
+    pub cancelled: u64,
+    pub completed: u64,
+    pub protected_sessions_started: u64,
+    pub resumed: u64,
+    pub protected_ticks_total: u64,
+    pub ordinary_disconnects: u64,
+    pub active_assault_disconnects: u64,
+    pub status_packets_sent: u64,
+    pub status_packets_duplicate_suppressed: u64,
+    pub protected_input_rejections: u64,
+    pub protected_damage_blocks: u64,
+    pub protected_target_rejections: u64,
+    pub queued_events_discarded: u64,
+    pub invariant_recoveries: u64,
+    pub run_key_mismatches: u64,
+    pub timer_rebases: u64,
+    pub stale_connection_events_rejected: u64,
+    pub rejection_reasons: HashMap<SafeLogoutRejectionReason, u64>,
+    pub cancellation_reasons: HashMap<SafeLogoutCancelReason, u64>,
+    pub invariant_reasons: HashMap<String, u64>,
+}
+
+impl SafeLogoutTelemetry {
+    fn record_rejection(&mut self, reason: SafeLogoutRejectionReason) {
+        self.rejected = self.rejected.saturating_add(1);
+        let count = self.rejection_reasons.entry(reason).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn record_cancellation(&mut self, reason: SafeLogoutCancelReason) {
+        self.cancelled = self.cancelled.saturating_add(1);
+        let count = self.cancellation_reasons.entry(reason).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    fn record_invariant(&mut self, reason: &str) {
+        self.invariant_recoveries = self.invariant_recoveries.saturating_add(1);
+        let count = self
+            .invariant_reasons
+            .entry(reason.to_string())
+            .or_default();
+        *count = count.saturating_add(1);
+        if reason.contains("run_key_mismatch") {
+            self.run_key_mismatches = self.run_key_mismatches.saturating_add(1);
+        }
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SafeLogoutTelemetryState(pub HashMap<i32, SafeLogoutTelemetry>);
+
+impl SafeLogoutTelemetryState {
+    fn player_mut(&mut self, player_id: i32) -> &mut SafeLogoutTelemetry {
+        self.entry(player_id).or_default()
+    }
+
+    pub fn record_protected_input_rejection(&mut self, player_id: i32) {
+        let telemetry = self.player_mut(player_id);
+        telemetry.protected_input_rejections =
+            telemetry.protected_input_rejections.saturating_add(1);
+    }
+
+    pub fn record_stale_connection_event(&mut self, player_id: i32) {
+        let telemetry = self.player_mut(player_id);
+        telemetry.stale_connection_events_rejected =
+            telemetry.stale_connection_events_rejected.saturating_add(1);
+    }
+
+    pub fn record_protected_damage_block(&mut self, player_id: i32) {
+        let telemetry = self.player_mut(player_id);
+        telemetry.protected_damage_blocks = telemetry.protected_damage_blocks.saturating_add(1);
+    }
+
+    pub fn record_protected_target_rejection(&mut self, player_id: i32) {
+        let telemetry = self.player_mut(player_id);
+        telemetry.protected_target_rejections =
+            telemetry.protected_target_rejections.saturating_add(1);
+    }
+
+    pub fn record_protected_queued_events_discarded(&mut self, player_id: i32, discarded: usize) {
+        let telemetry = self.player_mut(player_id);
+        telemetry.queued_events_discarded = telemetry
+            .queued_events_discarded
+            .saturating_add(discarded as u64);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SentSafeLogoutStatus {
     player_id: i32,
     status: SafeLogoutStatusSnapshot,
+    /// Count one suppressed duplicate per stable snapshot period, not once per
+    /// game tick, so observability remains low-volume.
+    duplicate_suppression_recorded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SafeLogoutStatusSendOutcome {
+    Sent,
+    StaleConnection,
+    RegistryUnavailable,
+    ChannelFull,
+    ChannelClosed,
 }
 
 /// Last successfully queued status per authenticated connection. Failed sends
@@ -224,7 +350,9 @@ pub fn is_player_offline_protected(player_id: i32, presence: &PlayerWorldPresenc
     presence
         .players
         .get(&player_id)
-        .map(|record| record.state == PlayerWorldPresence::OfflineProtected)
+        .map(|record| {
+            record.state == PlayerWorldPresence::OfflineProtected || record.resume_in_progress
+        })
         .unwrap_or(false)
 }
 
@@ -245,7 +373,7 @@ pub fn object_belongs_to_protected_run(
         .map(|player_id| is_player_offline_protected(player_id, presence))
         .unwrap_or(false)
         || presence.players.values().any(|record| {
-            record.state == PlayerWorldPresence::OfflineProtected
+            (record.state == PlayerWorldPresence::OfflineProtected || record.resume_in_progress)
                 && record
                     .protected_run_key
                     .as_ref()
@@ -253,6 +381,27 @@ pub fn object_belongs_to_protected_run(
                         key.bound_monolith_id == obj_id || key.run_object_ids.contains(&obj_id)
                     })
                     .unwrap_or(false)
+        })
+}
+
+/// Resolve the protected player for one object ID. Telemetry uses this at
+/// final mutation/target rejection boundaries so defence-in-depth checks do
+/// not need to infer ownership from proximity or hostile attribution.
+pub fn protected_player_for_object(
+    obj_id: i32,
+    ids: &Ids,
+    presence: &PlayerWorldPresenceState,
+) -> Option<i32> {
+    ids.get_player(obj_id)
+        .filter(|player_id| is_player_offline_protected(*player_id, presence))
+        .or_else(|| {
+            presence.players.iter().find_map(|(player_id, record)| {
+                (is_player_offline_protected(*player_id, presence)
+                    && record.protected_run_key.as_ref().is_some_and(|key| {
+                        key.bound_monolith_id == obj_id || key.run_object_ids.contains(&obj_id)
+                    }))
+                .then_some(*player_id)
+            })
         })
 }
 
@@ -265,7 +414,7 @@ pub fn entity_belongs_to_protected_run(
 ) -> bool {
     is_owner_offline_protected(owner, presence)
         || presence.players.values().any(|record| {
-            record.state == PlayerWorldPresence::OfflineProtected
+            (record.state == PlayerWorldPresence::OfflineProtected || record.resume_in_progress)
                 && record
                     .protected_run_key
                     .as_ref()
@@ -277,11 +426,13 @@ pub fn entity_belongs_to_protected_run(
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestSafeLogout {
     pub player_id: i32,
+    pub connection_id: Uuid,
 }
 
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CancelSafeLogout {
     pub player_id: i32,
+    pub connection_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -369,10 +520,63 @@ enum SafeLogoutCompletionOutcome {
     NotPending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectionResumePhase {
+    Starting,
+    Finalizing,
+}
+
+fn protected_resume_fields_are_impossible(record: &PlayerPresenceRecord) -> bool {
+    record.state == PlayerWorldPresence::OfflineProtected
+        && record.protection_exit_requested
+        && record.resume_in_progress
+}
+
+fn protection_resume_phase(record: &PlayerPresenceRecord) -> Option<ProtectionResumePhase> {
+    if record.state == PlayerWorldPresence::OfflineProtected
+        && record.protection_exit_requested
+        && !record.resume_in_progress
+        && !record.resume_sync_ready
+        && record.resume_connection_id.is_some()
+    {
+        Some(ProtectionResumePhase::Starting)
+    } else if record.state == PlayerWorldPresence::Online
+        && !record.protection_exit_requested
+        && record.resume_in_progress
+        && record.resume_sync_ready
+        && record.resume_connection_id.is_some()
+    {
+        Some(ProtectionResumePhase::Finalizing)
+    } else {
+        None
+    }
+}
+
 fn clear_protected_fields(record: &mut PlayerPresenceRecord) {
     record.protected_since_tick = None;
     record.protected_run_key = None;
     record.protection_exit_requested = false;
+    record.resume_in_progress = false;
+    record.resume_connection_id = None;
+    record.resume_sync_ready = false;
+}
+
+fn clear_pending_fields(record: &mut PlayerPresenceRecord) {
+    record.safe_logout_requested_tick = None;
+    record.safe_logout_start_position = None;
+    record.safe_logout_connection_ids.clear();
+}
+
+fn close_protected_interval(
+    record: &PlayerPresenceRecord,
+    tick: i32,
+    telemetry: &mut SafeLogoutTelemetry,
+) {
+    if let Some(started) = record.protected_since_tick {
+        telemetry.protected_ticks_total = telemetry
+            .protected_ticks_total
+            .saturating_add(tick.saturating_sub(started).max(0) as u64);
+    }
 }
 
 fn recover_invalid_protection(
@@ -381,13 +585,15 @@ fn recover_invalid_protection(
     tick: i32,
     reason: &str,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
 ) {
     let Some(record) = presence.players.get_mut(&player_id) else {
         return;
     };
-    if record.state != PlayerWorldPresence::OfflineProtected {
+    if record.state != PlayerWorldPresence::OfflineProtected && !record.resume_in_progress {
         return;
     }
+    close_protected_interval(record, tick, telemetry.player_mut(player_id));
     let previous = record.state;
     record.state = if connected {
         PlayerWorldPresence::Online
@@ -395,7 +601,10 @@ fn recover_invalid_protection(
         PlayerWorldPresence::Disconnected
     };
     record.client_connected = connected;
+    clear_pending_fields(record);
     clear_protected_fields(record);
+    record.resume_notice_connection_id = None;
+    telemetry.player_mut(player_id).record_invariant(reason);
     warn!(
         "safe_logout_protection_invalidated player_id={} previous_presence={} new_presence={} game_tick={} reason={}",
         player_id,
@@ -415,19 +624,40 @@ fn protected_presence_integrity_system(
     entity_map: Res<EntityObjMap>,
     assigned_runs: Res<AssignedStartLocations>,
     run_spawned: Res<RunSpawnedObjs>,
+    zones: Res<SanctuaryZones>,
     crises: Res<SettlementCrisisState>,
     hero_query: HeroPresenceQuery,
+    monolith_query: BoundMonolithQuery,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let protected_players = presence
         .players
         .iter()
         .filter_map(|(player_id, record)| {
-            (record.state == PlayerWorldPresence::OfflineProtected).then_some(*player_id)
+            (record.state == PlayerWorldPresence::OfflineProtected || record.resume_in_progress)
+                .then_some(*player_id)
         })
         .collect::<Vec<_>>();
 
     for player_id in protected_players {
+        let resume_fields_are_impossible = presence
+            .players
+            .get(&player_id)
+            .map(protected_resume_fields_are_impossible)
+            .unwrap_or(false);
+        if resume_fields_are_impossible {
+            recover_invalid_protection(
+                player_id,
+                clients.is_player_online(player_id),
+                game_tick.0,
+                "invalid_resume_fields",
+                &mut presence,
+                &mut telemetry,
+            );
+            continue;
+        }
+
         let protected_since_is_valid = presence
             .players
             .get(&player_id)
@@ -441,6 +671,7 @@ fn protected_presence_integrity_system(
                 game_tick.0,
                 "invalid_protected_since_tick",
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -452,13 +683,17 @@ fn protected_presence_integrity_system(
                 game_tick.0,
                 "assault_active",
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
 
         let current_key =
             resolve_hero(player_id, &ids, &entity_map, &hero_query).and_then(|hero| {
-                (hero.alive && !hero.true_death)
+                (hero.alive
+                    && !hero.true_death
+                    && own_sanctuary_status(hero, &zones, &entity_map, &monolith_query)
+                        == OwnSanctuaryStatus::Inside)
                     .then(|| protected_run_key(player_id, hero, &assigned_runs, &run_spawned))
                     .flatten()
             });
@@ -473,6 +708,47 @@ fn protected_presence_integrity_system(
                 game_tick.0,
                 "run_key_mismatch",
                 &mut presence,
+                &mut telemetry,
+            );
+        }
+    }
+
+    let invalid_pending = presence
+        .players
+        .iter()
+        .filter_map(|(player_id, record)| {
+            (record.state == PlayerWorldPresence::SafeLogoutPending
+                && (record.safe_logout_requested_tick.is_none()
+                    || record
+                        .safe_logout_requested_tick
+                        .is_some_and(|started| started > game_tick.0)
+                    || record.safe_logout_start_position.is_none()
+                    || record.safe_logout_connection_ids.is_empty()
+                    || record.protected_since_tick.is_some()
+                    || record.protected_run_key.is_some()
+                    || record.protection_exit_requested
+                    || record.resume_in_progress
+                    || record.resume_connection_id.is_some()
+                    || record.resume_sync_ready))
+                .then_some(*player_id)
+        })
+        .collect::<Vec<_>>();
+    for player_id in invalid_pending {
+        let connected = clients.is_player_online(player_id);
+        if cancel_pending(
+            player_id,
+            SafeLogoutCancelReason::InvalidState,
+            connected,
+            game_tick.0,
+            &mut presence,
+            &mut telemetry,
+        ) {
+            telemetry
+                .player_mut(player_id)
+                .record_invariant("invalid_pending_fields");
+            warn!(
+                "safe_logout_invariant_recovered player_id={} game_tick={} reason=invalid_pending_fields",
+                player_id, game_tick.0
             );
         }
     }
@@ -559,6 +835,104 @@ struct ProtectionResume {
     player_id: i32,
     duration: i32,
     key: ProtectedRunKey,
+    connection_id: Uuid,
+    finalizing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeCommitOutcome {
+    AwaitingSync,
+    Released,
+    AuthorityChanged,
+    Stale,
+}
+
+fn locked_client_is_active(
+    clients: &HashMap<Uuid, Client>,
+    client_id: Uuid,
+    player_id: i32,
+) -> bool {
+    clients.get(&client_id).is_some_and(|client| {
+        client.id == client_id && client.player_id == player_id && !client.sender.is_closed()
+    })
+}
+
+fn locked_connection_is_current(
+    clients: &HashMap<Uuid, Client>,
+    player_id: i32,
+    connection_id: Uuid,
+) -> bool {
+    locked_client_is_active(clients, connection_id, player_id)
+        && !clients.iter().any(|(other_id, client)| {
+            *other_id != connection_id
+                && client.id == *other_id
+                && client.player_id == player_id
+                && !client.sender.is_closed()
+        })
+}
+
+/// Commit one already-rebased protection interval. If connection authority
+/// changed during the rebase walk, advance the interval boundary to `tick` but
+/// keep the run protected so the same duration cannot be applied twice.
+fn commit_rebased_resume_presence(
+    record: &mut PlayerPresenceRecord,
+    resume: &ProtectionResume,
+    tick: i32,
+    connection_is_current: bool,
+    player_connected: bool,
+) -> ResumeCommitOutcome {
+    let expected_state = if resume.finalizing {
+        record.state == PlayerWorldPresence::Online
+            && record.resume_in_progress
+            && record.resume_sync_ready
+    } else {
+        record.state == PlayerWorldPresence::OfflineProtected
+            && !record.resume_in_progress
+            && record.protection_exit_requested
+    };
+    if !expected_state || record.protected_run_key.as_ref() != Some(&resume.key) {
+        return ResumeCommitOutcome::Stale;
+    }
+
+    if let Some(value) = record.last_combat_tick.as_mut() {
+        rebase_tick(value, resume.duration);
+    }
+    if let Some(value) = record.last_damage_tick.as_mut() {
+        rebase_tick(value, resume.duration);
+    }
+    record.last_protection_end_tick = Some(tick);
+    record.cancel_reason = None;
+    record.rejection_reason = None;
+
+    if !connection_is_current {
+        record.state = PlayerWorldPresence::OfflineProtected;
+        record.client_connected = player_connected;
+        record.protected_since_tick = Some(tick);
+        record.protected_run_key = Some(resume.key.clone());
+        record.protection_exit_requested = false;
+        record.resume_in_progress = false;
+        record.resume_connection_id = None;
+        record.resume_sync_ready = false;
+        record.resume_notice_connection_id = None;
+        record.last_login_connection_id = None;
+        return ResumeCommitOutcome::AuthorityChanged;
+    }
+
+    record.client_connected = true;
+    if resume.finalizing {
+        record.state = PlayerWorldPresence::Online;
+        clear_protected_fields(record);
+        record.resume_notice_connection_id = Some(resume.connection_id);
+        ResumeCommitOutcome::Released
+    } else {
+        record.state = PlayerWorldPresence::Online;
+        record.protected_since_tick = Some(tick);
+        record.protected_run_key = Some(resume.key.clone());
+        record.protection_exit_requested = false;
+        record.resume_in_progress = true;
+        record.resume_sync_ready = false;
+        ResumeCommitOutcome::AwaitingSync
+    }
 }
 
 fn rebase_tick(value: &mut i32, duration: i32) {
@@ -715,26 +1089,39 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
         .players
         .iter()
         .filter_map(|(player_id, record)| {
-            (record.state == PlayerWorldPresence::OfflineProtected
-                && record.protection_exit_requested)
-                .then_some((
-                    *player_id,
-                    record.protected_since_tick,
-                    record.protected_run_key.clone(),
-                ))
+            let phase = protection_resume_phase(record)?;
+            Some((
+                *player_id,
+                record.protected_since_tick,
+                record.protected_run_key.clone(),
+                record.resume_connection_id,
+                phase == ProtectionResumePhase::Finalizing,
+            ))
         })
         .collect::<Vec<_>>();
 
     let mut resumes = Vec::new();
-    for (player_id, protected_since_tick, recorded_key) in requested {
-        if !world.resource::<Clients>().is_player_online(player_id) {
+    for (player_id, protected_since_tick, recorded_key, connection_id, finalizing) in requested {
+        let connection_is_current = connection_id.is_some_and(|connection_id| {
+            world
+                .resource::<Clients>()
+                .has_active_connection_from(player_id, &[connection_id])
+        });
+        if !connection_is_current {
+            let connected = world.resource::<Clients>().is_player_online(player_id);
             if let Some(record) = world
                 .resource_mut::<PlayerWorldPresenceState>()
                 .players
                 .get_mut(&player_id)
             {
-                record.client_connected = false;
+                record.client_connected = connected;
                 record.protection_exit_requested = false;
+                if record.resume_in_progress {
+                    record.state = PlayerWorldPresence::OfflineProtected;
+                    record.resume_in_progress = false;
+                    record.resume_connection_id = None;
+                    record.resume_sync_ready = false;
+                }
             }
             continue;
         }
@@ -742,16 +1129,23 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
         let current_key = current_run_key_from_world(world, player_id);
         if current_key.is_none() || current_key != recorded_key {
             let connected = world.resource::<Clients>().is_player_online(player_id);
-            recover_invalid_protection(
-                player_id,
-                connected,
-                tick,
-                "resume_run_key_mismatch",
-                &mut world.resource_mut::<PlayerWorldPresenceState>(),
-            );
+            world.resource_scope(|world, mut presence: Mut<PlayerWorldPresenceState>| {
+                let mut telemetry = world.resource_mut::<SafeLogoutTelemetryState>();
+                recover_invalid_protection(
+                    player_id,
+                    connected,
+                    tick,
+                    "resume_run_key_mismatch",
+                    &mut presence,
+                    &mut telemetry,
+                );
+            });
             continue;
         }
         let Some(key) = recorded_key else {
+            continue;
+        };
+        let Some(connection_id) = connection_id else {
             continue;
         };
         let duration = tick.saturating_sub(protected_since_tick.unwrap_or(tick));
@@ -759,6 +1153,8 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
             player_id,
             duration,
             key,
+            connection_id,
+            finalizing,
         });
     }
     if resumes.is_empty() {
@@ -788,6 +1184,7 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
             .collect::<HashMap<_, _>>()
     };
     let mut rebased_timers = HashMap::<i32, usize>::new();
+    let mut discarded_events = HashMap::<i32, usize>::new();
     let mut count = |player_id: i32, amount: usize| {
         *rebased_timers.entry(player_id).or_default() += amount;
     };
@@ -882,10 +1279,11 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
                         .then_some(*player_id)
                     })
                 });
-            if is_hostile_destructive_event(&event.event_type) && destructive_target_owner.is_some()
-            {
-                remove.push(*event_id);
-                continue;
+            if is_hostile_destructive_event(&event.event_type) {
+                if let Some(owner) = destructive_target_owner {
+                    remove.push((*event_id, owner));
+                    continue;
+                }
             }
             let Some(owner) = object_run_owner(event.obj_id, &ordinary_owners, &run_owners)
                 .or_else(|| collector_owners.get(&event.obj_id).copied())
@@ -897,8 +1295,9 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
                 count(owner, 1);
             }
         }
-        for event_id in remove {
+        for (event_id, owner) in remove {
             map_events.remove(&event_id);
+            *discarded_events.entry(owner).or_default() += 1;
         }
     }
     {
@@ -1033,38 +1432,98 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
         }
     }
 
+    // Hold the same registry mutex used by activation/removal while committing
+    // presence. A replacement after this guard is released is ordered after a
+    // successful resume; a replacement before it cannot release protection.
+    let clients_resource = world.resource::<Clients>().clone();
+    let clients_guard = clients_resource
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut telemetry_updates = Vec::new();
     let mut presence = world.resource_mut::<PlayerWorldPresenceState>();
     for resume in resumes {
         let Some(record) = presence.players.get_mut(&resume.player_id) else {
             continue;
         };
-        if record.state != PlayerWorldPresence::OfflineProtected
-            || record.protected_run_key.as_ref() != Some(&resume.key)
-        {
+        let previous = record.state;
+        let timer_count = rebased_timers.get(&resume.player_id).copied().unwrap_or(0);
+        let connection_is_current =
+            locked_connection_is_current(&clients_guard, resume.player_id, resume.connection_id);
+        let player_connected = clients_guard
+            .keys()
+            .copied()
+            .any(|client_id| locked_client_is_active(&clients_guard, client_id, resume.player_id));
+        let outcome = commit_rebased_resume_presence(
+            record,
+            &resume,
+            tick,
+            connection_is_current,
+            player_connected,
+        );
+        if outcome == ResumeCommitOutcome::Stale {
             continue;
         }
-        if let Some(tick) = record.last_combat_tick.as_mut() {
-            rebase_tick(tick, resume.duration);
-        }
-        if let Some(tick) = record.last_damage_tick.as_mut() {
-            rebase_tick(tick, resume.duration);
-        }
-        let previous = record.state;
-        record.state = PlayerWorldPresence::Online;
-        record.client_connected = true;
-        record.last_protection_end_tick = Some(tick);
-        clear_protected_fields(record);
-        record.cancel_reason = None;
-        record.rejection_reason = None;
-        info!(
-            "safe_logout_protection_resumed player_id={} previous_presence={} new_presence={} game_tick={} protected_duration={} rebased_timers={}",
+        telemetry_updates.push((
             resume.player_id,
-            previous.as_str(),
-            record.state.as_str(),
-            tick,
             resume.duration,
-            rebased_timers.get(&resume.player_id).copied().unwrap_or(0)
-        );
+            outcome == ResumeCommitOutcome::Released,
+            outcome == ResumeCommitOutcome::AuthorityChanged,
+        ));
+        match outcome {
+            ResumeCommitOutcome::Released => info!(
+                "safe_logout_protection_resumed player_id={} previous_presence={} new_presence={} game_tick={} protected_duration={} rebased_timers={}",
+                resume.player_id,
+                previous.as_str(),
+                record.state.as_str(),
+                tick,
+                resume.duration,
+                timer_count
+            ),
+            ResumeCommitOutcome::AwaitingSync => info!(
+                "safe_logout_resume_rebased player_id={} previous_presence={} new_presence={} game_tick={} protected_duration={} rebased_timers={} awaiting_sync=true",
+                resume.player_id,
+                previous.as_str(),
+                record.state.as_str(),
+                tick,
+                resume.duration,
+                timer_count
+            ),
+            ResumeCommitOutcome::AuthorityChanged => info!(
+                "safe_logout_resume_authority_changed player_id={} previous_presence={} new_presence={} game_tick={} protected_duration={} rebased_timers={} replacement_connected={}",
+                resume.player_id,
+                previous.as_str(),
+                record.state.as_str(),
+                tick,
+                resume.duration,
+                timer_count,
+                player_connected
+            ),
+            ResumeCommitOutcome::Stale => unreachable!(),
+        }
+    }
+    drop(presence);
+    drop(clients_guard);
+
+    let mut telemetry = world.resource_mut::<SafeLogoutTelemetryState>();
+    for (player_id, duration, released, authority_changed) in telemetry_updates {
+        let telemetry = telemetry.player_mut(player_id);
+        telemetry.protected_ticks_total = telemetry
+            .protected_ticks_total
+            .saturating_add(duration.max(0) as u64);
+        if authority_changed {
+            telemetry.stale_connection_events_rejected =
+                telemetry.stale_connection_events_rejected.saturating_add(1);
+        }
+        if released {
+            // One logical reconnect rebase is reported when its sync barrier
+            // releases. The implementation may shift a short follow-up
+            // protected interval, but never counts the same resume twice.
+            telemetry.timer_rebases = telemetry.timer_rebases.saturating_add(1);
+            telemetry.resumed = telemetry.resumed.saturating_add(1);
+        }
+    }
+    for (player_id, discarded) in discarded_events {
+        telemetry.record_protected_queued_events_discarded(player_id, discarded);
     }
 }
 
@@ -1073,6 +1532,7 @@ pub struct SafeLogoutPlugin;
 impl Plugin for SafeLogoutPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerWorldPresenceState>()
+            .init_resource::<SafeLogoutTelemetryState>()
             .init_resource::<SafeLogoutStatusDeliveryState>()
             .add_message::<RequestSafeLogout>()
             .add_message::<CancelSafeLogout>()
@@ -1101,11 +1561,13 @@ pub fn initialize_player_presence(
     connected: bool,
     tick: i32,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
 ) {
     let previous = presence.players.get(&player_id).map(|record| record.state);
     let record = PlayerPresenceRecord::new(connected);
     let next = record.state;
     presence.players.insert(player_id, record);
+    telemetry.insert(player_id, SafeLogoutTelemetry::default());
     info!(
         "safe_logout_run_initialized player_id={} previous_presence={} new_presence={} game_tick={}",
         player_id,
@@ -1115,38 +1577,52 @@ pub fn initialize_player_presence(
     );
 }
 
-pub fn mark_player_logged_in(player_id: i32, tick: i32, presence: &mut PlayerWorldPresenceState) {
-    let Some(record) = presence.players.get_mut(&player_id) else {
-        return;
+pub fn mark_player_logged_in(
+    player_id: i32,
+    connection_id: Uuid,
+    tick: i32,
+    presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
+) -> bool {
+    let Some(snapshot) = presence.players.get(&player_id).cloned() else {
+        return false;
     };
-    let previous = record.state;
+    let previous = snapshot.state;
+    if snapshot.last_login_connection_id == Some(connection_id)
+        && (previous != PlayerWorldPresence::OfflineProtected
+            || snapshot.protection_exit_requested
+            || snapshot.resume_in_progress)
+    {
+        return false;
+    }
     if previous == PlayerWorldPresence::SafeLogoutPending {
         // Login is the authenticated reconnect boundary. Conservatively cancel
         // an in-flight handoff even if the socket gap occurred between ECS
         // evaluations and was therefore not visible to reconciliation.
-        record.client_connected = true;
-        record.state = PlayerWorldPresence::Online;
-        record.safe_logout_requested_tick = None;
-        record.safe_logout_start_position = None;
-        record.safe_logout_connection_ids.clear();
-        record.protected_since_tick = None;
-        record.protected_run_key = None;
-        record.protection_exit_requested = false;
-        record.cancel_reason = Some(SafeLogoutCancelReason::Disconnected);
-        record.rejection_reason = None;
-        info!(
-            "safe_logout_countdown_cancelled player_id={} previous_presence={} new_presence={} game_tick={} reason={}",
+        cancel_pending(
             player_id,
-            previous.as_str(),
-            record.state.as_str(),
+            SafeLogoutCancelReason::Disconnected,
+            true,
             tick,
-            SafeLogoutCancelReason::Disconnected.as_str()
+            presence,
+            telemetry,
         );
-        return;
+        if let Some(record) = presence.players.get_mut(&player_id) {
+            record.last_login_connection_id = Some(connection_id);
+        }
+        return true;
     }
     if previous == PlayerWorldPresence::OfflineProtected {
+        let record = presence
+            .players
+            .get_mut(&player_id)
+            .expect("presence snapshot still exists");
         record.client_connected = true;
-        if !record.protection_exit_requested {
+        let changed_connection = record.resume_connection_id != Some(connection_id);
+        record.resume_connection_id = Some(connection_id);
+        record.resume_sync_ready = false;
+        record.last_login_connection_id = Some(connection_id);
+        if !record.protection_exit_requested || changed_connection {
             record.protection_exit_requested = true;
             info!(
                 "safe_logout_resume_requested player_id={} presence={} game_tick={} source=login",
@@ -1155,17 +1631,52 @@ pub fn mark_player_logged_in(player_id: i32, tick: i32, presence: &mut PlayerWor
                 tick
             );
         }
-        return;
+        return true;
+    }
+    if snapshot.resume_in_progress {
+        let record = presence
+            .players
+            .get_mut(&player_id)
+            .expect("presence snapshot still exists");
+        if record.resume_connection_id == Some(connection_id) {
+            return false;
+        }
+        // A replacement during the sync barrier starts a new protected
+        // interval at the prior rebase boundary. Already-rebased time is never
+        // applied twice; only the new interval is considered on this socket.
+        record.state = PlayerWorldPresence::OfflineProtected;
+        record.client_connected = true;
+        record.resume_in_progress = false;
+        record.resume_sync_ready = false;
+        record.resume_connection_id = Some(connection_id);
+        record.protection_exit_requested = true;
+        record.last_login_connection_id = Some(connection_id);
+        info!(
+            "safe_logout_resume_replaced player_id={} previous_presence={} new_presence={} game_tick={}",
+            player_id,
+            previous.as_str(),
+            record.state.as_str(),
+            tick
+        );
+        return true;
+    }
+    let record = presence
+        .players
+        .get_mut(&player_id)
+        .expect("presence snapshot still exists");
+    if record
+        .resume_notice_connection_id
+        .is_some_and(|resume_connection_id| resume_connection_id != connection_id)
+    {
+        record.resume_notice_connection_id = None;
     }
     record.client_connected = true;
     record.state = PlayerWorldPresence::Online;
+    record.last_login_connection_id = Some(connection_id);
     if previous != record.state {
-        record.safe_logout_requested_tick = None;
-        record.safe_logout_start_position = None;
-        record.safe_logout_connection_ids.clear();
-        record.protected_since_tick = None;
-        record.protected_run_key = None;
-        record.protection_exit_requested = false;
+        clear_pending_fields(record);
+        clear_protected_fields(record);
+        record.resume_notice_connection_id = None;
         record.cancel_reason = None;
         record.rejection_reason = None;
         info!(
@@ -1176,17 +1687,50 @@ pub fn mark_player_logged_in(player_id: i32, tick: i32, presence: &mut PlayerWor
             tick
         );
     }
+    true
+}
+
+/// Mark the exact authoritative reconnect's current-run synchronization ready.
+/// Final release remains in the ordered PostUpdate rebase barrier.
+pub fn mark_player_login_sync_complete(
+    player_id: i32,
+    connection_id: Uuid,
+    tick: i32,
+    presence: &mut PlayerWorldPresenceState,
+) -> bool {
+    let Some(record) = presence.players.get_mut(&player_id) else {
+        return false;
+    };
+    if record.state != PlayerWorldPresence::Online
+        || !record.resume_in_progress
+        || record.resume_connection_id != Some(connection_id)
+        || record.resume_sync_ready
+    {
+        return false;
+    }
+    record.resume_sync_ready = true;
+    info!(
+        "safe_logout_resume_sync_ready player_id={} presence={} game_tick={}",
+        player_id,
+        record.state.as_str(),
+        tick
+    );
+    true
 }
 
 pub fn remove_player_presence_for_run_cleanup(
     player_id: i32,
     tick: i32,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
 ) {
     let Some(record) = presence.players.remove(&player_id) else {
         return;
     };
     if record.state == PlayerWorldPresence::SafeLogoutPending {
+        telemetry
+            .player_mut(player_id)
+            .record_cancellation(SafeLogoutCancelReason::RunEnded);
         info!(
             "safe_logout_countdown_cancelled player_id={} previous_presence={} new_presence=removed game_tick={} reason={}",
             player_id,
@@ -1194,6 +1738,9 @@ pub fn remove_player_presence_for_run_cleanup(
             tick,
             SafeLogoutCancelReason::RunEnded.as_str()
         );
+    }
+    if record.state == PlayerWorldPresence::OfflineProtected || record.resume_in_progress {
+        close_protected_interval(&record, tick, telemetry.player_mut(player_id));
     }
     info!(
         "safe_logout_run_cleanup player_id={} previous_presence={} new_presence=removed game_tick={} reason={}",
@@ -1318,6 +1865,13 @@ fn hostile_nearby(
             if *subclass != Subclass::Npc
                 || !owner.is_npc()
                 || !state.is_alive()
+                // `State::Hiding` is deliberately absent from every perception
+                // path and NPC actions keep it inert until a reveal transition.
+                // Treating it as an immediate threat made every fresh run
+                // ineligible because the later intro Necromancer is pre-spawned
+                // hidden inside this radius. A reveal is observed on the next
+                // eligibility/countdown pass and blocks or cancels as normal.
+                || !state.is_visible()
                 || state_dead.is_some()
                 || stats.hp <= 0
             {
@@ -1366,6 +1920,7 @@ fn cancel_pending(
     connected: bool,
     tick: i32,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
 ) -> bool {
     let Some(record) = presence.players.get_mut(&player_id) else {
         return false;
@@ -1380,14 +1935,12 @@ fn cancel_pending(
         PlayerWorldPresence::Disconnected
     };
     record.client_connected = connected;
-    record.safe_logout_requested_tick = None;
-    record.safe_logout_start_position = None;
-    record.safe_logout_connection_ids.clear();
-    record.protected_since_tick = None;
-    record.protected_run_key = None;
-    record.protection_exit_requested = false;
+    clear_pending_fields(record);
+    clear_protected_fields(record);
+    record.resume_notice_connection_id = None;
     record.cancel_reason = Some(reason);
     record.rejection_reason = None;
+    telemetry.player_mut(player_id).record_cancellation(reason);
     info!(
         "safe_logout_countdown_cancelled player_id={} previous_presence={} new_presence={} game_tick={} reason={}",
         player_id,
@@ -1405,6 +1958,7 @@ fn cancel_pending_with_current_connection(
     clients: &Clients,
     tick: i32,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
 ) -> bool {
     cancel_pending(
         player_id,
@@ -1412,6 +1966,7 @@ fn cancel_pending_with_current_connection(
         clients.is_player_online(player_id),
         tick,
         presence,
+        telemetry,
     )
 }
 
@@ -1428,6 +1983,7 @@ fn complete_pending_with_connection_check(
     tick: i32,
     run_key: ProtectedRunKey,
     presence: &mut PlayerWorldPresenceState,
+    telemetry: &mut SafeLogoutTelemetryState,
     mut has_request_connection: impl FnMut() -> bool,
     mut is_currently_connected: impl FnMut() -> bool,
 ) -> SafeLogoutCompletionOutcome {
@@ -1438,6 +1994,7 @@ fn complete_pending_with_connection_check(
             is_currently_connected(),
             tick,
             presence,
+            telemetry,
         );
         return SafeLogoutCompletionOutcome::Cancelled;
     }
@@ -1460,7 +2017,6 @@ fn complete_pending_with_connection_check(
     record.safe_logout_connection_ids.clear();
     record.cancel_reason = None;
     record.rejection_reason = None;
-
     if !has_request_connection() {
         let connected = is_currently_connected();
         record.state = if connected {
@@ -1469,10 +2025,11 @@ fn complete_pending_with_connection_check(
             PlayerWorldPresence::Disconnected
         };
         record.client_connected = connected;
-        record.protected_since_tick = None;
-        record.protected_run_key = None;
-        record.protection_exit_requested = false;
+        clear_protected_fields(record);
         record.cancel_reason = Some(SafeLogoutCancelReason::Disconnected);
+        telemetry
+            .player_mut(player_id)
+            .record_cancellation(SafeLogoutCancelReason::Disconnected);
         info!(
             "safe_logout_countdown_cancelled player_id={} previous_presence={} new_presence={} game_tick={} reason={}",
             player_id,
@@ -1483,6 +2040,10 @@ fn complete_pending_with_connection_check(
         );
         return SafeLogoutCompletionOutcome::Cancelled;
     }
+
+    let telemetry = telemetry.player_mut(player_id);
+    telemetry.completed = telemetry.completed.saturating_add(1);
+    telemetry.protected_sessions_started = telemetry.protected_sessions_started.saturating_add(1);
 
     info!(
         "safe_logout_countdown_completed player_id={} previous_presence={} new_presence={} game_tick={}",
@@ -1500,8 +2061,10 @@ fn reconcile_player_world_presence_system(
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     assigned_runs: Res<AssignedStartLocations>,
+    crises: Res<SettlementCrisisState>,
     hero_query: HeroPresenceQuery,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let mut player_ids = presence.players.keys().copied().collect::<HashSet<_>>();
     player_ids.extend(ids.player_hero_map.keys().copied());
@@ -1511,13 +2074,24 @@ fn reconcile_player_world_presence_system(
         let valid_run = assigned_runs.contains_key(&player_id);
         let hero = resolve_hero(player_id, &ids, &entity_map, &hero_query);
         if !valid_run || hero.is_none() {
-            remove_player_presence_for_run_cleanup(player_id, game_tick.0, &mut presence);
+            remove_player_presence_for_run_cleanup(
+                player_id,
+                game_tick.0,
+                &mut presence,
+                &mut telemetry,
+            );
             continue;
         }
         let hero = hero.expect("checked above");
         let connected = clients.is_player_online(player_id);
         if !presence.players.contains_key(&player_id) {
-            initialize_player_presence(player_id, connected, game_tick.0, &mut presence);
+            initialize_player_presence(
+                player_id,
+                connected,
+                game_tick.0,
+                &mut presence,
+                &mut telemetry,
+            );
         }
 
         if let Some(record) = presence.players.get_mut(&player_id) {
@@ -1542,18 +2116,57 @@ fn reconcile_player_world_presence_system(
         if !connected {
             let state = presence.players.get(&player_id).map(|record| record.state);
             if state == Some(PlayerWorldPresence::SafeLogoutPending) {
-                cancel_pending(
+                if cancel_pending(
                     player_id,
                     SafeLogoutCancelReason::Disconnected,
                     false,
                     game_tick.0,
                     &mut presence,
-                );
+                    &mut telemetry,
+                ) {
+                    let player_telemetry = telemetry.player_mut(player_id);
+                    player_telemetry.ordinary_disconnects =
+                        player_telemetry.ordinary_disconnects.saturating_add(1);
+                    if crisis_is_assault_active(player_id, &crises) {
+                        player_telemetry.active_assault_disconnects = player_telemetry
+                            .active_assault_disconnects
+                            .saturating_add(1);
+                    }
+                }
             } else if state == Some(PlayerWorldPresence::Online) {
                 if let Some(record) = presence.players.get_mut(&player_id) {
+                    if record.resume_in_progress {
+                        // A socket lost during the synchronization barrier has
+                        // never resumed owner simulation. Preserve the run key
+                        // and current protected interval for the replacement.
+                        let previous = record.state;
+                        record.state = PlayerWorldPresence::OfflineProtected;
+                        record.client_connected = false;
+                        record.protection_exit_requested = false;
+                        record.resume_in_progress = false;
+                        record.resume_connection_id = None;
+                        record.resume_sync_ready = false;
+                        record.last_login_connection_id = None;
+                        info!(
+                            "safe_logout_resume_interrupted player_id={} previous_presence={} new_presence={} game_tick={}",
+                            player_id,
+                            previous.as_str(),
+                            record.state.as_str(),
+                            game_tick.0
+                        );
+                        continue;
+                    }
                     let previous = record.state;
                     record.state = PlayerWorldPresence::Disconnected;
                     record.client_connected = false;
+                    let player_telemetry = telemetry.player_mut(player_id);
+                    player_telemetry.ordinary_disconnects =
+                        player_telemetry.ordinary_disconnects.saturating_add(1);
+                    if crisis_is_assault_active(player_id, &crises) {
+                        player_telemetry.active_assault_disconnects = player_telemetry
+                            .active_assault_disconnects
+                            .saturating_add(1);
+                    }
                     info!(
                         "safe_logout_ordinary_disconnect player_id={} previous_presence={} new_presence={} game_tick={}",
                         player_id,
@@ -1578,25 +2191,15 @@ fn reconcile_player_world_presence_system(
         }
 
         if let Some(record) = presence.players.get_mut(&player_id) {
-            let previous_connection = record.client_connected;
             record.client_connected = true;
-            if record.state == PlayerWorldPresence::OfflineProtected && !previous_connection {
-                if !record.protection_exit_requested {
-                    record.protection_exit_requested = true;
-                    info!(
-                        "safe_logout_resume_requested player_id={} presence={} game_tick={} source=connection_edge",
-                        player_id,
-                        record.state.as_str(),
-                        game_tick.0
-                    );
-                }
-            } else if record.state == PlayerWorldPresence::Disconnected {
+            // Only the exact authenticated Login event may request release
+            // from OfflineProtected. A raw connection edge is insufficient.
+            if record.state == PlayerWorldPresence::Disconnected {
                 let previous = record.state;
                 record.state = PlayerWorldPresence::Online;
-                record.safe_logout_requested_tick = None;
-                record.safe_logout_start_position = None;
-                record.safe_logout_connection_ids.clear();
+                clear_pending_fields(record);
                 clear_protected_fields(record);
+                record.resume_notice_connection_id = None;
                 record.cancel_reason = None;
                 record.rejection_reason = None;
                 info!(
@@ -1629,6 +2232,9 @@ fn request_rejection(
     let Some(record) = record else {
         return Some(SafeLogoutRejectionReason::InvalidRun);
     };
+    if record.resume_in_progress {
+        return Some(SafeLogoutRejectionReason::AlreadyProtected);
+    }
     match record.state {
         PlayerWorldPresence::SafeLogoutPending => {
             return Some(SafeLogoutRejectionReason::AlreadyPending);
@@ -1850,6 +2456,10 @@ fn cancellation_status(reason: SafeLogoutCancelReason) -> (&'static str, &'stati
             "run_ended",
             "Safe Logout was cancelled because the run ended.",
         ),
+        SafeLogoutCancelReason::InvalidState => (
+            "invalid_state",
+            "Safe Logout was cancelled because its server state could not be verified.",
+        ),
     }
 }
 
@@ -1896,6 +2506,7 @@ fn build_safe_logout_status(
     record: Option<&PlayerPresenceRecord>,
     tick: i32,
     eligibility: SafeLogoutEligibility,
+    connection_id: Option<Uuid>,
 ) -> SafeLogoutStatusSnapshot {
     let state = record
         .map(|record| record.state)
@@ -1974,6 +2585,13 @@ fn build_safe_logout_status(
         in_own_sanctuary: eligibility.in_own_sanctuary,
         active_assault: eligibility.active_assault,
         protected: state == PlayerWorldPresence::OfflineProtected,
+        resumed_from_protection: record
+            .map(|record| {
+                connection_id.is_some()
+                    && record.resume_notice_connection_id == connection_id
+                    && !record.resume_in_progress
+            })
+            .unwrap_or(false),
     }
 }
 
@@ -1983,8 +2601,87 @@ fn should_send_safe_logout_status(
     status: &SafeLogoutStatusSnapshot,
 ) -> bool {
     previous
-        .map(|sent| sent.player_id != player_id || sent.status != *status)
+        .map(|sent| {
+            if sent.player_id != player_id || sent.status == *status {
+                return sent.player_id != player_id;
+            }
+            // The acknowledgement is a one-shot pulse. Clearing only that bit
+            // after a successful send must not produce a second announcement
+            // packet; any other semantic status change remains deliverable.
+            let mut previous_without_resume = sent.status.clone();
+            previous_without_resume.resumed_from_protection = false;
+            previous_without_resume != *status
+        })
         .unwrap_or(true)
+}
+
+fn locked_current_connection_id(clients: &HashMap<Uuid, Client>, player_id: i32) -> Option<Uuid> {
+    let mut active = clients.iter().filter_map(|(client_id, _client)| {
+        locked_client_is_active(clients, *client_id, player_id).then_some(*client_id)
+    });
+    let connection_id = active.next()?;
+    active.next().is_none().then_some(connection_id)
+}
+
+/// Queue one status only while `connection_id` is still the player's sole
+/// authoritative connection. The registry lock stays held through both the
+/// non-blocking enqueue and one-shot resume-pulse consumption, so activation of
+/// a replacement is ordered entirely before or entirely after this operation.
+fn try_send_safe_logout_status_to_current_connection(
+    clients: &Clients,
+    player_id: i32,
+    connection_id: Uuid,
+    serialized: String,
+    consumes_resume_notice: bool,
+    presence: &mut PlayerWorldPresenceState,
+) -> SafeLogoutStatusSendOutcome {
+    let Ok(clients) = clients.lock() else {
+        return SafeLogoutStatusSendOutcome::RegistryUnavailable;
+    };
+
+    if !locked_connection_is_current(&clients, player_id, connection_id) {
+        // If replacement won the registry race, preserve the one-shot pulse for
+        // that exact new authority. The stale socket neither receives nor
+        // consumes it, and the next delivery pass will build a fresh snapshot.
+        if consumes_resume_notice {
+            if let Some(replacement_connection_id) =
+                locked_current_connection_id(&clients, player_id)
+            {
+                if let Some(record) = presence.players.get_mut(&player_id) {
+                    if record.resume_notice_connection_id == Some(connection_id)
+                        && !record.resume_in_progress
+                    {
+                        record.resume_notice_connection_id = Some(replacement_connection_id);
+                    }
+                }
+            }
+        }
+        return SafeLogoutStatusSendOutcome::StaleConnection;
+    }
+
+    let Some(client) = clients.get(&connection_id) else {
+        return SafeLogoutStatusSendOutcome::StaleConnection;
+    };
+    match client.sender.try_send(serialized) {
+        Ok(()) => {
+            if consumes_resume_notice {
+                if let Some(record) = presence.players.get_mut(&player_id) {
+                    if record.resume_notice_connection_id == Some(connection_id)
+                        && !record.resume_in_progress
+                    {
+                        record.resume_notice_connection_id = None;
+                    }
+                }
+            }
+            SafeLogoutStatusSendOutcome::Sent
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            SafeLogoutStatusSendOutcome::ChannelFull
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            SafeLogoutStatusSendOutcome::ChannelClosed
+        }
+    }
 }
 
 fn safe_logout_request_system(
@@ -2001,9 +2698,25 @@ fn safe_logout_request_system(
     monolith_query: BoundMonolithQuery,
     hostile_query: HostileQuery,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     for request in requests.read() {
-        let active_connection_ids = clients.active_connection_ids(request.player_id);
+        let player_telemetry = telemetry.player_mut(request.player_id);
+        player_telemetry.requests = player_telemetry.requests.saturating_add(1);
+        if !clients.is_current_connection(request.player_id, request.connection_id) {
+            player_telemetry.record_rejection(SafeLogoutRejectionReason::NotOnline);
+            player_telemetry.stale_connection_events_rejected = player_telemetry
+                .stale_connection_events_rejected
+                .saturating_add(1);
+            info!(
+                "safe_logout_request_rejected player_id={} game_tick={} reason={} source=stale_connection",
+                request.player_id,
+                game_tick.0,
+                SafeLogoutRejectionReason::NotOnline.as_str()
+            );
+            continue;
+        }
+        let active_connection_ids = vec![request.connection_id];
         let previous = presence
             .players
             .get(&request.player_id)
@@ -2024,6 +2737,9 @@ fn safe_logout_request_system(
             presence.players.get(&request.player_id),
         );
         if let Some(reason) = eligibility.reason {
+            telemetry
+                .player_mut(request.player_id)
+                .record_rejection(reason);
             let Some(record) = presence.players.get_mut(&request.player_id) else {
                 continue;
             };
@@ -2052,6 +2768,8 @@ fn safe_logout_request_system(
             continue;
         };
         let previous = record.state;
+        let player_telemetry = telemetry.player_mut(request.player_id);
+        player_telemetry.accepted = player_telemetry.accepted.saturating_add(1);
         info!(
             "safe_logout_requested player_id={} previous_presence={} new_presence={} game_tick={}",
             request.player_id,
@@ -2065,7 +2783,11 @@ fn safe_logout_request_system(
         record.protected_since_tick = None;
         record.protected_run_key = None;
         record.protection_exit_requested = false;
-        record.safe_logout_connection_ids = active_connection_ids;
+        record.resume_in_progress = false;
+        record.resume_connection_id = None;
+        record.resume_sync_ready = false;
+        record.resume_notice_connection_id = None;
+        record.safe_logout_connection_ids = vec![request.connection_id];
         record.cancel_reason = None;
         record.rejection_reason = None;
         info!(
@@ -2084,14 +2806,20 @@ fn safe_logout_manual_cancel_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     for cancellation in cancellations.read() {
+        if !clients.is_current_connection(cancellation.player_id, cancellation.connection_id) {
+            telemetry.record_stale_connection_event(cancellation.player_id);
+            continue;
+        }
         cancel_pending_with_current_connection(
             cancellation.player_id,
             SafeLogoutCancelReason::Manual,
             &clients,
             game_tick.0,
             &mut presence,
+            &mut telemetry,
         );
     }
 }
@@ -2111,6 +2839,7 @@ fn safe_logout_pending_system(
     hostile_query: HostileQuery,
     mut map_events: ResMut<MapEvents>,
     mut presence: ResMut<PlayerWorldPresenceState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let pending_players = presence
         .players
@@ -2133,15 +2862,26 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
         if !assigned_runs.contains_key(&player_id) {
-            remove_player_presence_for_run_cleanup(player_id, game_tick.0, &mut presence);
+            remove_player_presence_for_run_cleanup(
+                player_id,
+                game_tick.0,
+                &mut presence,
+                &mut telemetry,
+            );
             continue;
         }
         let Some(hero) = resolve_hero(player_id, &ids, &entity_map, &hero_query) else {
-            remove_player_presence_for_run_cleanup(player_id, game_tick.0, &mut presence);
+            remove_player_presence_for_run_cleanup(
+                player_id,
+                game_tick.0,
+                &mut presence,
+                &mut telemetry,
+            );
             continue;
         };
         if hero.true_death || !hero.alive {
@@ -2151,6 +2891,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2161,6 +2902,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2183,6 +2925,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2198,6 +2941,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2208,6 +2952,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2220,6 +2965,7 @@ fn safe_logout_pending_system(
                     &clients,
                     game_tick.0,
                     &mut presence,
+                    &mut telemetry,
                 );
                 continue;
             }
@@ -2232,6 +2978,7 @@ fn safe_logout_pending_system(
                     &clients,
                     game_tick.0,
                     &mut presence,
+                    &mut telemetry,
                 );
                 continue;
             }
@@ -2243,6 +2990,7 @@ fn safe_logout_pending_system(
                 &clients,
                 game_tick.0,
                 &mut presence,
+                &mut telemetry,
             );
             continue;
         }
@@ -2251,7 +2999,12 @@ fn safe_logout_pending_system(
             continue;
         }
         let Some(run_key) = protected_run_key(player_id, hero, &assigned_runs, &run_spawned) else {
-            remove_player_presence_for_run_cleanup(player_id, game_tick.0, &mut presence);
+            remove_player_presence_for_run_cleanup(
+                player_id,
+                game_tick.0,
+                &mut presence,
+                &mut telemetry,
+            );
             continue;
         };
         let completion_connection_ids = record_snapshot.safe_logout_connection_ids.clone();
@@ -2260,11 +3013,16 @@ fn safe_logout_pending_system(
             game_tick.0,
             run_key.clone(),
             &mut presence,
+            &mut telemetry,
             || clients.has_active_connection_from(player_id, &completion_connection_ids),
             || clients.is_player_online(player_id),
         );
         if outcome == SafeLogoutCompletionOutcome::Completed {
             let purged = purge_unsafe_queued_events(player_id, &run_key, &ids, &mut map_events);
+            let player_telemetry = telemetry.player_mut(player_id);
+            player_telemetry.queued_events_discarded = player_telemetry
+                .queued_events_discarded
+                .saturating_add(purged as u64);
             info!(
                 "safe_logout_protection_activated player_id={} game_tick={} hero_id={} start_location={} bound_monolith_id={} purged_events={}",
                 player_id,
@@ -2295,8 +3053,9 @@ fn safe_logout_status_delivery_system(
     hero_query: HeroPresenceQuery,
     monolith_query: BoundMonolithQuery,
     hostile_query: HostileQuery,
-    presence: Res<PlayerWorldPresenceState>,
+    mut presence: ResMut<PlayerWorldPresenceState>,
     mut delivery: ResMut<SafeLogoutStatusDeliveryState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
     let active_clients = match clients.lock() {
         Ok(clients) => clients
@@ -2304,16 +3063,20 @@ fn safe_logout_status_delivery_system(
             .filter(|(client_id, client)| {
                 **client_id == client.id && client.player_id >= 0 && !client.sender.is_closed()
             })
-            .map(|(client_id, client)| (*client_id, client.player_id, client.sender.clone()))
+            .map(|(client_id, client)| (*client_id, client.player_id))
             .collect::<Vec<_>>(),
         Err(_) => return,
     };
+    let active_clients = active_clients
+        .into_iter()
+        .filter(|(client_id, player_id)| clients.is_current_connection(*player_id, *client_id))
+        .collect::<Vec<_>>();
     let active_client_players = active_clients
         .iter()
-        .map(|(client_id, player_id, _)| (*client_id, *player_id))
+        .map(|(client_id, player_id)| (*client_id, *player_id))
         .collect::<HashMap<_, _>>();
     let mut connection_ids_by_player = HashMap::<i32, Vec<Uuid>>::new();
-    for (client_id, player_id, _) in &active_clients {
+    for (client_id, player_id) in &active_clients {
         connection_ids_by_player
             .entry(*player_id)
             .or_default()
@@ -2326,10 +3089,34 @@ fn safe_logout_status_delivery_system(
 
     let mut statuses = HashMap::<i32, SafeLogoutStatusSnapshot>::new();
     for player_id in connection_ids_by_player.keys().copied() {
+        if presence
+            .players
+            .get(&player_id)
+            .map(|record| record.resume_in_progress)
+            .unwrap_or(false)
+        {
+            // Resume remains simulation-protected until the current-run sync
+            // barrier is complete. Do not publish an online snapshot early.
+            continue;
+        }
         let connection_ids = connection_ids_by_player
             .get(&player_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        if let [current_connection_id] = connection_ids {
+            if let Some(record) = presence.players.get_mut(&player_id) {
+                if !record.resume_in_progress
+                    && record.resume_notice_connection_id.is_some()
+                    && record.resume_notice_connection_id != Some(*current_connection_id)
+                {
+                    // Replacement may have become authoritative before this
+                    // delivery pass took its registry snapshot. Preserve the
+                    // one-shot acknowledgement for that sole current socket;
+                    // the locked send below handles replacements after here.
+                    record.resume_notice_connection_id = Some(*current_connection_id);
+                }
+            }
+        }
         let eligibility = safe_logout_eligibility(
             player_id,
             game_tick.0,
@@ -2347,15 +3134,29 @@ fn safe_logout_status_delivery_system(
         );
         statuses.insert(
             player_id,
-            build_safe_logout_status(presence.players.get(&player_id), game_tick.0, eligibility),
+            build_safe_logout_status(
+                presence.players.get(&player_id),
+                game_tick.0,
+                eligibility,
+                connection_ids.first().copied(),
+            ),
         );
     }
 
-    for (client_id, player_id, sender) in active_clients {
+    for (client_id, player_id) in active_clients {
         let Some(status) = statuses.get(&player_id) else {
             continue;
         };
         if !should_send_safe_logout_status(delivery.sent.get(&client_id), player_id, status) {
+            if let Some(sent) = delivery.sent.get_mut(&client_id) {
+                if !sent.duplicate_suppression_recorded {
+                    sent.duplicate_suppression_recorded = true;
+                    let player_telemetry = telemetry.player_mut(player_id);
+                    player_telemetry.status_packets_duplicate_suppressed = player_telemetry
+                        .status_packets_duplicate_suppressed
+                        .saturating_add(1);
+                }
+            }
             continue;
         }
 
@@ -2364,18 +3165,35 @@ fn safe_logout_status_delivery_system(
         };
         let Ok(serialized) = serde_json::to_string(&packet) else {
             error!(
-                "safe_logout_status_serialization_failed player_id={} client_id={}",
-                player_id, client_id
+                "safe_logout_status_serialization_failed player_id={}",
+                player_id
             );
             continue;
         };
-        if sender.try_send(serialized).is_ok() {
+        let outcome = try_send_safe_logout_status_to_current_connection(
+            &clients,
+            player_id,
+            client_id,
+            serialized,
+            status.resumed_from_protection,
+            &mut presence,
+        );
+        if outcome == SafeLogoutStatusSendOutcome::Sent {
+            let player_telemetry = telemetry.player_mut(player_id);
+            player_telemetry.status_packets_sent =
+                player_telemetry.status_packets_sent.saturating_add(1);
             delivery.sent.insert(
                 client_id,
                 SentSafeLogoutStatus {
                     player_id,
                     status: status.clone(),
+                    duplicate_suppression_recorded: false,
                 },
+            );
+        } else {
+            debug!(
+                "safe_logout_status_send_deferred player_id={} outcome={:?}",
+                player_id, outcome
             );
         }
     }
@@ -2407,6 +3225,7 @@ mod tests {
             .insert_resource(SanctuaryZones::default())
             .insert_resource(SettlementCrisisState::default())
             .insert_resource(PlayerWorldPresenceState::default())
+            .insert_resource(SafeLogoutTelemetryState::default())
             .insert_resource(SafeLogoutStatusDeliveryState::default())
             .add_systems(Update, safe_logout_status_delivery_system);
         app
@@ -2493,6 +3312,7 @@ mod tests {
             ),
             (SafeLogoutCancelReason::Manual, "manually_cancelled"),
             (SafeLogoutCancelReason::RunEnded, "run_ended"),
+            (SafeLogoutCancelReason::InvalidState, "invalid_state"),
         ];
 
         for (reason, expected) in cases {
@@ -2508,9 +3328,9 @@ mod tests {
         pending.safe_logout_requested_tick = Some(100);
         let eligibility = test_eligibility(false);
 
-        let at_start = build_safe_logout_status(Some(&pending), 100, eligibility);
-        let same_second = build_safe_logout_status(Some(&pending), 109, eligibility);
-        let next_second = build_safe_logout_status(Some(&pending), 110, eligibility);
+        let at_start = build_safe_logout_status(Some(&pending), 100, eligibility, None);
+        let same_second = build_safe_logout_status(Some(&pending), 109, eligibility, None);
+        let next_second = build_safe_logout_status(Some(&pending), 110, eligibility, None);
         assert_eq!(at_start.state, "pending");
         assert_eq!(at_start.countdown_total_seconds, Some(10));
         assert_eq!(at_start.countdown_remaining_seconds, Some(10));
@@ -2520,7 +3340,7 @@ mod tests {
         assert!(!next_second.can_request);
 
         pending.state = PlayerWorldPresence::OfflineProtected;
-        let protected = build_safe_logout_status(Some(&pending), 200, eligibility);
+        let protected = build_safe_logout_status(Some(&pending), 200, eligibility, None);
         assert_eq!(protected.state, "protected");
         assert_eq!(protected.countdown_remaining_seconds, Some(0));
         assert!(protected.protected);
@@ -2531,12 +3351,13 @@ mod tests {
     fn safe_logout_checkpoint3_status_deduplicates_and_new_connections_resync() {
         let player_id = 77;
         let record = PlayerPresenceRecord::new(true);
-        let status = build_safe_logout_status(Some(&record), 10, test_eligibility(true));
+        let status = build_safe_logout_status(Some(&record), 10, test_eligibility(true), None);
         assert!(should_send_safe_logout_status(None, player_id, &status));
 
         let sent = SentSafeLogoutStatus {
             player_id,
             status: status.clone(),
+            duplicate_suppression_recorded: false,
         };
         assert!(!should_send_safe_logout_status(
             Some(&sent),
@@ -2584,7 +3405,7 @@ mod tests {
                 in_own_sanctuary: reason != SafeLogoutRejectionReason::OutsideOwnSanctuary,
                 active_assault: reason == SafeLogoutRejectionReason::AssaultActive,
             };
-            let status = build_safe_logout_status(Some(&record), 50, eligibility);
+            let status = build_safe_logout_status(Some(&record), 50, eligibility, None);
             assert!(!status.can_request);
             assert_eq!(status.reason.as_deref(), Some(rejection_status(reason).0));
             assert_eq!(status.message, rejection_status(reason).1);
@@ -2667,7 +3488,7 @@ mod tests {
         let mut protected_record = PlayerPresenceRecord::new(false);
         protected_record.state = PlayerWorldPresence::OfflineProtected;
         let protected =
-            build_safe_logout_status(Some(&protected_record), 200, test_eligibility(false));
+            build_safe_logout_status(Some(&protected_record), 200, test_eligibility(false), None);
         assert!(protected.protected);
 
         let cleared = build_safe_logout_status(
@@ -2679,6 +3500,7 @@ mod tests {
                 in_own_sanctuary: false,
                 active_assault: false,
             },
+            None,
         );
         assert_eq!(cleared.state, "disconnected");
         assert!(!cleared.protected);
@@ -2686,13 +3508,15 @@ mod tests {
             Some(&SentSafeLogoutStatus {
                 player_id,
                 status: protected,
+                duplicate_suppression_recorded: false,
             }),
             player_id,
             &cleared,
         ));
 
         let fresh_record = PlayerPresenceRecord::new(true);
-        let fresh = build_safe_logout_status(Some(&fresh_record), 202, test_eligibility(true));
+        let fresh =
+            build_safe_logout_status(Some(&fresh_record), 202, test_eligibility(true), None);
         assert_eq!(fresh.state, "online");
         assert!(fresh.can_request);
         assert!(fresh.reason.is_none());
@@ -2716,10 +3540,16 @@ mod tests {
                 if status.state == "protected" && status.protected
         ));
 
-        {
-            let mut presence = app.world_mut().resource_mut::<PlayerWorldPresenceState>();
-            remove_player_presence_for_run_cleanup(player_id, 201, &mut presence);
-        }
+        app.world_mut()
+            .resource_scope(|world, mut presence: Mut<PlayerWorldPresenceState>| {
+                let mut telemetry = world.resource_mut::<SafeLogoutTelemetryState>();
+                remove_player_presence_for_run_cleanup(
+                    player_id,
+                    201,
+                    &mut presence,
+                    &mut telemetry,
+                );
+            });
         app.update();
         let cleared_packet: ResponsePacket =
             serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
@@ -2729,10 +3559,11 @@ mod tests {
                 if status.state == "disconnected" && !status.protected
         ));
 
-        {
-            let mut presence = app.world_mut().resource_mut::<PlayerWorldPresenceState>();
-            initialize_player_presence(player_id, true, 202, &mut presence);
-        }
+        app.world_mut()
+            .resource_scope(|world, mut presence: Mut<PlayerWorldPresenceState>| {
+                let mut telemetry = world.resource_mut::<SafeLogoutTelemetryState>();
+                initialize_player_presence(player_id, true, 202, &mut presence, &mut telemetry);
+            });
         app.update();
         let fresh_packet: ResponsePacket =
             serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
@@ -2747,7 +3578,7 @@ mod tests {
     fn safe_logout_checkpoint3_manual_cancellation_is_online_and_requestable_again() {
         let mut record = PlayerPresenceRecord::new(true);
         record.cancel_reason = Some(SafeLogoutCancelReason::Manual);
-        let status = build_safe_logout_status(Some(&record), 20, test_eligibility(true));
+        let status = build_safe_logout_status(Some(&record), 20, test_eligibility(true), None);
 
         assert_eq!(status.state, "online");
         assert_eq!(status.reason.as_deref(), Some("manually_cancelled"));
@@ -2759,6 +3590,7 @@ mod tests {
     fn safe_logout_checkpoint1_pending_cancellation_is_typed_and_idempotent() {
         let player_id = 7;
         let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
         let mut record = PlayerPresenceRecord::new(true);
         record.state = PlayerWorldPresence::SafeLogoutPending;
         record.safe_logout_requested_tick = Some(100);
@@ -2771,6 +3603,7 @@ mod tests {
             true,
             101,
             &mut presence,
+            &mut telemetry,
         ));
         let cancelled = presence.players.get(&player_id).unwrap().clone();
         assert_eq!(cancelled.state, PlayerWorldPresence::Online);
@@ -2784,6 +3617,7 @@ mod tests {
             true,
             101,
             &mut presence,
+            &mut telemetry,
         ));
         assert_eq!(presence.players.get(&player_id), Some(&cancelled));
     }
@@ -2804,8 +3638,9 @@ mod tests {
     #[test]
     fn safe_logout_checkpoint1_fresh_run_and_cleanup_are_isolated() {
         let mut presence = PlayerWorldPresenceState::default();
-        initialize_player_presence(1, true, 10, &mut presence);
-        initialize_player_presence(2, false, 10, &mut presence);
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        initialize_player_presence(1, true, 10, &mut presence, &mut telemetry);
+        initialize_player_presence(2, false, 10, &mut presence, &mut telemetry);
         {
             let first = presence.players.get_mut(&1).unwrap();
             first.state = PlayerWorldPresence::OfflineProtected;
@@ -2813,15 +3648,15 @@ mod tests {
             first.last_damage_tick = Some(8);
         }
 
-        remove_player_presence_for_run_cleanup(1, 11, &mut presence);
-        remove_player_presence_for_run_cleanup(1, 11, &mut presence);
+        remove_player_presence_for_run_cleanup(1, 11, &mut presence, &mut telemetry);
+        remove_player_presence_for_run_cleanup(1, 11, &mut presence, &mut telemetry);
         assert!(!presence.players.contains_key(&1));
         assert_eq!(
             presence.players.get(&2).map(|record| record.state),
             Some(PlayerWorldPresence::Disconnected),
         );
 
-        initialize_player_presence(1, true, 12, &mut presence);
+        initialize_player_presence(1, true, 12, &mut presence, &mut telemetry);
         let fresh = presence.players.get(&1).unwrap();
         assert_eq!(fresh.state, PlayerWorldPresence::Online);
         assert_eq!(fresh.safe_logout_requested_tick, None);
@@ -2835,7 +3670,8 @@ mod tests {
     fn safe_logout_checkpoint1_player_combat_aggregate_is_monotonic() {
         let player_id = 9;
         let mut presence = PlayerWorldPresenceState::default();
-        initialize_player_presence(player_id, true, 1, &mut presence);
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        initialize_player_presence(player_id, true, 1, &mut presence, &mut telemetry);
         record_player_combat_activity(player_id, 50, &mut presence);
         record_player_combat_activity(player_id, 40, &mut presence);
         assert_eq!(
@@ -2853,6 +3689,7 @@ mod tests {
 
         let player_id = 11;
         let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
         let mut record = PlayerPresenceRecord::new(true);
         record.state = PlayerWorldPresence::SafeLogoutPending;
         record.safe_logout_requested_tick = Some(100);
@@ -2871,6 +3708,7 @@ mod tests {
                 run_object_ids: Vec::new(),
             },
             &mut presence,
+            &mut telemetry,
             || {
                 let sample = samples.get();
                 samples.set(sample + 1);
@@ -2897,6 +3735,7 @@ mod tests {
 
         let player_id = 12;
         let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
         let mut record = PlayerPresenceRecord::new(true);
         record.state = PlayerWorldPresence::SafeLogoutPending;
         record.safe_logout_requested_tick = Some(100);
@@ -2915,6 +3754,7 @@ mod tests {
                 run_object_ids: Vec::new(),
             },
             &mut presence,
+            &mut telemetry,
             || {
                 let sample = samples.get();
                 samples.set(sample + 1);
@@ -2982,5 +3822,618 @@ mod tests {
             &ids,
             &presence
         ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_resume_is_connection_scoped_and_duplicate_safe() {
+        let player_id = 81;
+        let first = Uuid::new_v4();
+        let replacement = Uuid::new_v4();
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        let mut record = PlayerPresenceRecord::new(false);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        record.protected_since_tick = Some(100);
+        record.protected_run_key = Some(ProtectedRunKey {
+            player_id,
+            hero_id: 810,
+            start_location_name: "checkpoint4".to_string(),
+            bound_monolith_id: 811,
+            run_object_ids: vec![812],
+        });
+        presence.players.insert(player_id, record);
+
+        assert!(mark_player_logged_in(
+            player_id,
+            first,
+            200,
+            &mut presence,
+            &mut telemetry,
+        ));
+        assert!(!mark_player_logged_in(
+            player_id,
+            first,
+            200,
+            &mut presence,
+            &mut telemetry,
+        ));
+        let record = presence.players.get_mut(&player_id).unwrap();
+        assert_eq!(record.resume_connection_id, Some(first));
+        assert!(record.protection_exit_requested);
+
+        // Model the first rebase boundary. The exact sync marker may release
+        // only this socket; a duplicate or replacement cannot acknowledge it.
+        record.state = PlayerWorldPresence::Online;
+        record.protection_exit_requested = false;
+        record.resume_in_progress = true;
+        record.resume_sync_ready = false;
+        record.protected_since_tick = Some(200);
+        assert!(!mark_player_login_sync_complete(
+            player_id,
+            replacement,
+            204,
+            &mut presence,
+        ));
+        assert!(mark_player_login_sync_complete(
+            player_id,
+            first,
+            204,
+            &mut presence,
+        ));
+        assert!(!mark_player_login_sync_complete(
+            player_id,
+            first,
+            204,
+            &mut presence,
+        ));
+
+        // A replacement before final release re-enters OfflineProtected and
+        // starts a new connection-scoped barrier without losing the run key.
+        assert!(mark_player_logged_in(
+            player_id,
+            replacement,
+            205,
+            &mut presence,
+            &mut telemetry,
+        ));
+        let record = presence.players.get(&player_id).unwrap();
+        assert_eq!(record.state, PlayerWorldPresence::OfflineProtected);
+        assert!(record.protection_exit_requested);
+        assert!(!record.resume_in_progress);
+        assert_eq!(record.resume_connection_id, Some(replacement));
+        assert!(record.protected_run_key.is_some());
+        assert_eq!(
+            telemetry
+                .get(&player_id)
+                .map(|telemetry| telemetry.resumed)
+                .unwrap_or_default(),
+            0
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_authority_change_during_rebase_keeps_protection() {
+        let player_id = 92;
+        let displaced = Uuid::new_v4();
+        let replacement = Uuid::new_v4();
+        let key = ProtectedRunKey {
+            player_id,
+            hero_id: 920,
+            start_location_name: "authority-race".to_string(),
+            bound_monolith_id: 921,
+            run_object_ids: vec![922],
+        };
+        let mut record = PlayerPresenceRecord::new(true);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        record.protected_since_tick = Some(100);
+        record.protected_run_key = Some(key.clone());
+        record.protection_exit_requested = true;
+        record.resume_connection_id = Some(displaced);
+        record.last_combat_tick = Some(80);
+
+        let displaced_resume = ProtectionResume {
+            player_id,
+            duration: 100,
+            key: key.clone(),
+            connection_id: displaced,
+            finalizing: false,
+        };
+        assert_eq!(
+            commit_rebased_resume_presence(&mut record, &displaced_resume, 200, false, true,),
+            ResumeCommitOutcome::AuthorityChanged,
+        );
+        assert_eq!(record.state, PlayerWorldPresence::OfflineProtected);
+        assert_eq!(record.protected_since_tick, Some(200));
+        assert_eq!(record.protected_run_key.as_ref(), Some(&key));
+        assert_eq!(record.last_combat_tick, Some(180));
+        assert_eq!(record.resume_connection_id, None);
+        assert!(!record.resume_in_progress);
+
+        // Reprocessing the displaced work cannot apply the old duration twice.
+        assert_eq!(
+            commit_rebased_resume_presence(&mut record, &displaced_resume, 200, false, true,),
+            ResumeCommitOutcome::Stale,
+        );
+        assert_eq!(record.last_combat_tick, Some(180));
+
+        record.protection_exit_requested = true;
+        record.resume_connection_id = Some(replacement);
+        let replacement_resume = ProtectionResume {
+            player_id,
+            duration: 5,
+            key: key.clone(),
+            connection_id: replacement,
+            finalizing: false,
+        };
+        assert_eq!(
+            commit_rebased_resume_presence(&mut record, &replacement_resume, 205, true, true,),
+            ResumeCommitOutcome::AwaitingSync,
+        );
+        assert!(record.resume_in_progress);
+        assert_eq!(record.last_combat_tick, Some(185));
+
+        record.resume_sync_ready = true;
+        let final_release = ProtectionResume {
+            player_id,
+            duration: 2,
+            key,
+            connection_id: replacement,
+            finalizing: true,
+        };
+        assert_eq!(
+            commit_rebased_resume_presence(&mut record, &final_release, 207, true, true),
+            ResumeCommitOutcome::Released,
+        );
+        assert_eq!(record.state, PlayerWorldPresence::Online);
+        assert!(!record.resume_in_progress);
+        assert_eq!(record.protected_since_tick, None);
+        assert_eq!(record.last_combat_tick, Some(187));
+        assert_eq!(record.resume_notice_connection_id, Some(replacement));
+
+        let replacement_status = build_safe_logout_status(
+            Some(&record),
+            207,
+            test_eligibility(true),
+            Some(replacement),
+        );
+        let displaced_status =
+            build_safe_logout_status(Some(&record), 207, test_eligibility(true), Some(displaced));
+        assert!(replacement_status.resumed_from_protection);
+        assert!(!displaced_status.resumed_from_protection);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_completion_and_duration_telemetry_are_exactly_once() {
+        let player_id = 82;
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        let mut record = PlayerPresenceRecord::new(true);
+        record.state = PlayerWorldPresence::SafeLogoutPending;
+        record.safe_logout_requested_tick = Some(100);
+        record.safe_logout_start_position = Some(Position { x: 3, y: 4 });
+        presence.players.insert(player_id, record);
+        let key = ProtectedRunKey {
+            player_id,
+            hero_id: 820,
+            start_location_name: "checkpoint4".to_string(),
+            bound_monolith_id: 821,
+            run_object_ids: Vec::new(),
+        };
+
+        assert_eq!(
+            complete_pending_with_connection_check(
+                player_id,
+                200,
+                key.clone(),
+                &mut presence,
+                &mut telemetry,
+                || true,
+                || true,
+            ),
+            SafeLogoutCompletionOutcome::Completed,
+        );
+        assert_eq!(
+            complete_pending_with_connection_check(
+                player_id,
+                201,
+                key,
+                &mut presence,
+                &mut telemetry,
+                || true,
+                || true,
+            ),
+            SafeLogoutCompletionOutcome::NotPending,
+        );
+        let counters = telemetry.get(&player_id).unwrap();
+        assert_eq!(counters.completed, 1);
+        assert_eq!(counters.protected_sessions_started, 1);
+
+        remove_player_presence_for_run_cleanup(player_id, 250, &mut presence, &mut telemetry);
+        remove_player_presence_for_run_cleanup(player_id, 300, &mut presence, &mut telemetry);
+        assert_eq!(telemetry.get(&player_id).unwrap().protected_ticks_total, 50);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_invalid_protection_recovery_is_idempotent() {
+        let player_id = 83;
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        let mut record = PlayerPresenceRecord::new(false);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        record.protected_run_key = Some(ProtectedRunKey {
+            player_id,
+            hero_id: 830,
+            start_location_name: "stale".to_string(),
+            bound_monolith_id: 831,
+            run_object_ids: Vec::new(),
+        });
+        presence.players.insert(player_id, record);
+
+        recover_invalid_protection(
+            player_id,
+            false,
+            400,
+            "invalid_protected_since_tick",
+            &mut presence,
+            &mut telemetry,
+        );
+        recover_invalid_protection(
+            player_id,
+            false,
+            401,
+            "invalid_protected_since_tick",
+            &mut presence,
+            &mut telemetry,
+        );
+
+        let record = presence.players.get(&player_id).unwrap();
+        assert_eq!(record.state, PlayerWorldPresence::Disconnected);
+        assert!(record.protected_run_key.is_none());
+        let counters = telemetry.get(&player_id).unwrap();
+        assert_eq!(counters.invariant_recoveries, 1);
+        assert_eq!(
+            counters
+                .invariant_reasons
+                .get("invalid_protected_since_tick"),
+            Some(&1),
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_invalid_resume_phase_never_rebases_deadlines() {
+        use crate::headless::HeadlessGame;
+
+        let mut game = HeadlessGame::new(20_000);
+        game.spawn_hero("Warrior", "InvalidResumePhaseBot");
+        game.prepare_safe_logout_scenario();
+        game.complete_valid_safe_logout();
+
+        let player_id = game.player_id();
+        let connection_id = game
+            .current_connection_id()
+            .expect("completed safe logout retains its authenticated client");
+        let score_start_tick = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&player_id)
+            .expect("headless run score")
+            .start_tick;
+        {
+            let world = game.app_mut().world_mut();
+            let mut presence = world.resource_mut::<PlayerWorldPresenceState>();
+            let record = presence
+                .players
+                .get_mut(&player_id)
+                .expect("protected presence");
+            assert_eq!(record.state, PlayerWorldPresence::OfflineProtected);
+            record.protection_exit_requested = true;
+            record.resume_in_progress = true;
+            record.resume_connection_id = Some(connection_id);
+            record.resume_sync_ready = false;
+        }
+
+        game.tick(1);
+
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&player_id)
+                .expect("run score after recovery")
+                .start_tick,
+            score_start_tick,
+            "an impossible phase must be rejected before the world deadline walk"
+        );
+        let recovered = game
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .cloned()
+            .expect("recovered presence");
+        assert_eq!(recovered.state, PlayerWorldPresence::Online);
+        assert!(recovered.protected_since_tick.is_none());
+        assert!(recovered.protected_run_key.is_none());
+        let counters = game
+            .world()
+            .resource::<SafeLogoutTelemetryState>()
+            .get(&player_id)
+            .cloned()
+            .expect("safe logout telemetry");
+        assert_eq!(counters.timer_rebases, 0);
+        assert_eq!(counters.invariant_recoveries, 1);
+        assert_eq!(
+            counters.invariant_reasons.get("invalid_resume_fields"),
+            Some(&1)
+        );
+
+        game.tick(1);
+
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&player_id)
+                .expect("run score after duplicate integrity pass")
+                .start_tick,
+            score_start_tick
+        );
+        let counters = game
+            .world()
+            .resource::<SafeLogoutTelemetryState>()
+            .get(&player_id)
+            .expect("safe logout telemetry after duplicate integrity pass");
+        assert_eq!(counters.invariant_recoveries, 1);
+        assert_eq!(
+            counters.invariant_reasons.get("invalid_resume_fields"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_resume_status_pulse_is_sent_once() {
+        let player_id = 84;
+        let mut app = status_delivery_test_app();
+        let (client_id, mut receiver) = add_status_test_client(&mut app, player_id, 8);
+        let mut record = PlayerPresenceRecord::new(true);
+        record.resume_notice_connection_id = Some(client_id);
+        app.world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .insert(player_id, record);
+
+        app.update();
+        let packet: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            packet,
+            ResponsePacket::SafeLogoutStatus { status }
+                if status.state == "online" && status.resumed_from_protection
+        ));
+        assert!(app
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_notice_connection_id
+            .is_none());
+
+        app.update();
+        assert!(receiver.try_recv().is_err());
+        let counters = app
+            .world()
+            .resource::<SafeLogoutTelemetryState>()
+            .get(&player_id)
+            .unwrap();
+        assert_eq!(counters.status_packets_sent, 1);
+        assert_eq!(counters.status_packets_duplicate_suppressed, 1);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_replacement_before_status_snapshot_rebinds_resume_pulse() {
+        use crate::game::Client;
+
+        let player_id = 86;
+        let mut app = status_delivery_test_app();
+        let clients = app.world().resource::<Clients>().clone();
+        let old_connection_id = Uuid::new_v4();
+        let replacement_connection_id = Uuid::new_v4();
+        let (old_sender, mut old_receiver) = tokio::sync::mpsc::channel(2);
+        let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(2);
+        clients.activate(Client {
+            id: old_connection_id,
+            player_id,
+            sender: old_sender.clone(),
+        });
+
+        let mut record = PlayerPresenceRecord::new(true);
+        record.resume_notice_connection_id = Some(old_connection_id);
+        app.world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .insert(player_id, record);
+
+        // Replacement is already authoritative before delivery snapshots the
+        // registry, so there is no attempted stale send to trigger retargeting.
+        assert_eq!(
+            clients.activate(Client {
+                id: replacement_connection_id,
+                player_id,
+                sender: replacement_sender,
+            }),
+            vec![old_connection_id]
+        );
+
+        app.update();
+
+        assert!(matches!(
+            old_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let delivered: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            delivered,
+            ResponsePacket::SafeLogoutStatus { status }
+                if status.state == "online" && status.resumed_from_protection
+        ));
+        assert!(app
+            .world()
+            .resource::<PlayerWorldPresenceState>()
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_notice_connection_id
+            .is_none());
+
+        app.update();
+
+        assert!(matches!(
+            old_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            replacement_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let counters = app
+            .world()
+            .resource::<SafeLogoutTelemetryState>()
+            .get(&player_id)
+            .expect("safe logout telemetry");
+        assert_eq!(counters.status_packets_sent, 1);
+        assert_eq!(counters.status_packets_duplicate_suppressed, 1);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_replacement_at_status_send_preserves_resume_pulse_for_new_authority()
+    {
+        use crate::game::Client;
+
+        let player_id = 85;
+        let clients = Clients::default();
+        let old_connection_id = Uuid::new_v4();
+        let replacement_connection_id = Uuid::new_v4();
+        let (old_sender, mut old_receiver) = tokio::sync::mpsc::channel(2);
+        let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(2);
+        clients.activate(Client {
+            id: old_connection_id,
+            player_id,
+            sender: old_sender,
+        });
+        let old_snapshot_sender = clients
+            .lock()
+            .unwrap()
+            .get(&old_connection_id)
+            .unwrap()
+            .sender
+            .clone();
+
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut record = PlayerPresenceRecord::new(true);
+        record.resume_notice_connection_id = Some(old_connection_id);
+        presence.players.insert(player_id, record);
+
+        // Model replacement after the delivery system snapshots the old UUID
+        // but before it enqueues the status. Atomic activation must win this
+        // interleaving completely.
+        assert_eq!(
+            clients.activate(Client {
+                id: replacement_connection_id,
+                player_id,
+                sender: replacement_sender,
+            }),
+            vec![old_connection_id]
+        );
+        let stale_status = build_safe_logout_status(
+            presence.players.get(&player_id),
+            100,
+            test_eligibility(true),
+            Some(old_connection_id),
+        );
+        assert!(stale_status.resumed_from_protection);
+        let stale_packet = serde_json::to_string(&ResponsePacket::SafeLogoutStatus {
+            status: stale_status,
+        })
+        .unwrap();
+        assert_eq!(
+            try_send_safe_logout_status_to_current_connection(
+                &clients,
+                player_id,
+                old_connection_id,
+                stale_packet,
+                true,
+                &mut presence,
+            ),
+            SafeLogoutStatusSendOutcome::StaleConnection
+        );
+        assert!(matches!(
+            old_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            presence
+                .players
+                .get(&player_id)
+                .and_then(|record| record.resume_notice_connection_id),
+            Some(replacement_connection_id),
+            "the displaced socket must not consume the resume pulse"
+        );
+
+        let replacement_status = build_safe_logout_status(
+            presence.players.get(&player_id),
+            101,
+            test_eligibility(true),
+            Some(replacement_connection_id),
+        );
+        assert!(replacement_status.resumed_from_protection);
+        let replacement_packet = serde_json::to_string(&ResponsePacket::SafeLogoutStatus {
+            status: replacement_status,
+        })
+        .unwrap();
+        assert_eq!(
+            try_send_safe_logout_status_to_current_connection(
+                &clients,
+                player_id,
+                replacement_connection_id,
+                replacement_packet,
+                true,
+                &mut presence,
+            ),
+            SafeLogoutStatusSendOutcome::Sent
+        );
+        let delivered: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            delivered,
+            ResponsePacket::SafeLogoutStatus { status }
+                if status.state == "online" && status.resumed_from_protection
+        ));
+        assert!(presence
+            .players
+            .get(&player_id)
+            .unwrap()
+            .resume_notice_connection_id
+            .is_none());
+        drop(old_snapshot_sender);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint4_boundary_telemetry_is_owner_scoped() {
+        let mut telemetry = SafeLogoutTelemetryState::default();
+        telemetry.record_protected_input_rejection(90);
+        telemetry.record_protected_damage_block(90);
+        telemetry.record_protected_target_rejection(90);
+        telemetry.record_protected_queued_events_discarded(90, 3);
+        telemetry.record_stale_connection_event(91);
+
+        let protected = telemetry.get(&90).unwrap();
+        assert_eq!(protected.protected_input_rejections, 1);
+        assert_eq!(protected.protected_damage_blocks, 1);
+        assert_eq!(protected.protected_target_rejections, 1);
+        assert_eq!(protected.queued_events_discarded, 3);
+        assert_eq!(protected.stale_connection_events_rejected, 0);
+        assert_eq!(
+            telemetry.get(&91).unwrap().stale_connection_events_rejected,
+            1
+        );
     }
 }
