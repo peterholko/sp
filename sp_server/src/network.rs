@@ -358,6 +358,18 @@ pub struct StructureList {
     pub result: Vec<Structure>,
 }
 
+/// One server-authoritative preparation affordance shown while a personal
+/// crisis is gathering or ready to launch. IDs and states are stable protocol
+/// values; copy remains presentation data and deliberately exposes no ECS IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CrisisPreparationOption {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub detail: String,
+    pub action_hint: String,
+}
+
 /// Versioned, player-facing personal-crisis state. Gameplay systems remain
 /// authoritative; this snapshot deliberately excludes ECS/object IDs,
 /// generation bookkeeping, and cleanup/debug state.
@@ -382,6 +394,9 @@ pub struct CrisisStatusSnapshot {
     pub total_attackers: Option<i32>,
     pub preparation_seconds_remaining: Option<i32>,
     pub preferred_launch_window: Option<String>,
+    /// Additive v1 presentation field. Omitted outside Preparing and
+    /// AssaultReady so older clients retain their existing compact payload.
+    pub preparation_options: Option<Vec<CrisisPreparationOption>>,
     pub continues_while_disconnected: bool,
 }
 
@@ -4509,6 +4524,7 @@ mod tests {
             total_attackers: None,
             preparation_seconds_remaining: None,
             preferred_launch_window: None,
+            preparation_options: None,
             continues_while_disconnected: false,
         }
     }
@@ -4598,6 +4614,41 @@ mod tests {
         assert!(value.get("phase").is_none());
         assert!(value.get("pressure").is_none());
         assert!(value.get("remaining_attackers").is_none());
+        assert!(value.get("preparation_options").is_none());
+    }
+
+    #[test]
+    fn checkpoint3_preparation_options_are_additive_flat_v1_fields() {
+        let mut status = no_crisis_status();
+        status.exists = true;
+        status.phase = Some("preparing".to_string());
+        status.preparation_options = Some(vec![CrisisPreparationOption {
+            id: "defences".to_string(),
+            label: "Defences".to_string(),
+            state: "needs_attention".to_string(),
+            detail: "One completed wall is damaged.".to_string(),
+            action_hint: "Order a living villager to repair it.".to_string(),
+        }]);
+
+        let encoded = serde_json::to_string(&ResponsePacket::CrisisStatus { status }).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["preparation_options"][0]["id"], "defences");
+        assert_eq!(value["preparation_options"][0]["state"], "needs_attention");
+        assert!(value.get("status").is_none(), "payload must remain flat");
+
+        let decoded: ResponsePacket = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            ResponsePacket::CrisisStatus {
+                status: CrisisStatusSnapshot {
+                    preparation_options: Some(options),
+                    ..
+                }
+            } if options.len() == 1 && options[0].id == "defences"
+        ));
     }
 
     #[test]

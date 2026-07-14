@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::constants::NPC_PLAYER_ID;
 use crate::game::{CrisisAssaultUnit, CrisisPhase, SettlementCrisisState};
@@ -362,11 +363,254 @@ pub struct CrisisPreparationActions {
     pub online_ticks_away_from_settlement: i32,
     pub returned_to_settlement_after_warning: bool,
     pub performed_preparation_action: bool,
+    pub repairs_started: i32,
+    pub repairs_completed: i32,
+    pub defensive_structures_started: i32,
+    pub defensive_structures_completed: i32,
+    pub healing_items_carried_at_launch: i32,
+    pub healing_items_used_before_launch: i32,
+    pub combat_capable_villagers_at_launch: i32,
+    pub first_preparation_action_tick: Option<i32>,
+    pub meaningful_preparation_categories: Vec<String>,
+    pub meaningful_preparation_category_count: i32,
+    #[serde(skip)]
+    repair_starts: BTreeSet<i32>,
+    #[serde(skip)]
+    repair_completions: BTreeSet<i32>,
+    #[serde(skip)]
+    defensive_structure_starts: BTreeSet<i32>,
+    #[serde(skip)]
+    defensive_structure_completions: BTreeSet<i32>,
+    #[serde(skip)]
+    equipment_items: BTreeSet<i32>,
+    #[serde(skip)]
+    healing_use_events: BTreeSet<Uuid>,
+    #[serde(skip)]
+    recruited_villagers: BTreeSet<i32>,
+    #[serde(skip)]
+    reassigned_villagers: BTreeSet<i32>,
+    #[serde(skip)]
+    meaningful_category_keys: BTreeSet<CrisisPreparationCategory>,
+    #[serde(skip)]
+    healing_items_high_water: Option<i32>,
+    #[serde(skip)]
+    total_run_items_high_water: Option<i32>,
+    #[serde(skip)]
+    stored_items_high_water: Option<i32>,
+    #[serde(skip)]
+    sanctuary_level_high_water: Option<i32>,
+    #[serde(skip)]
+    launch_readiness_recorded: bool,
 }
 
 impl CrisisPreparationActions {
     pub fn mark_action(&mut self) {
         self.performed_preparation_action = true;
+    }
+
+    pub fn mark_action_at(&mut self, game_tick: i32) {
+        self.mark_action();
+        self.first_preparation_action_tick = Some(
+            self.first_preparation_action_tick
+                .map_or(game_tick, |first_tick| first_tick.min(game_tick)),
+        );
+    }
+
+    pub fn record_repair_started(&mut self, structure_id: i32, game_tick: i32) -> bool {
+        if !self.repair_starts.insert(structure_id) {
+            return false;
+        }
+        self.repairs_started = self.repairs_started.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::Repair, game_tick);
+        true
+    }
+
+    pub fn record_repair_completed(&mut self, structure_id: i32, game_tick: i32) -> bool {
+        if !self.repair_completions.insert(structure_id) {
+            return false;
+        }
+        self.repairs_completed = self.repairs_completed.saturating_add(1);
+        self.structures_repaired = self.structures_repaired.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::Repair, game_tick);
+        true
+    }
+
+    pub fn record_defensive_structure_started(
+        &mut self,
+        structure_id: i32,
+        game_tick: i32,
+    ) -> bool {
+        if !self.defensive_structure_starts.insert(structure_id) {
+            return false;
+        }
+        self.defensive_structures_started = self.defensive_structures_started.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::Defenses, game_tick);
+        true
+    }
+
+    pub fn record_defensive_structure_completed(
+        &mut self,
+        structure_id: i32,
+        is_wall: bool,
+        game_tick: i32,
+    ) -> bool {
+        if !self.defensive_structure_completions.insert(structure_id) {
+            return false;
+        }
+        self.defensive_structures_completed = self.defensive_structures_completed.saturating_add(1);
+        self.structures_built = self.structures_built.saturating_add(1);
+        if is_wall {
+            self.walls_built = self.walls_built.saturating_add(1);
+        }
+        self.record_meaningful_action(CrisisPreparationCategory::Defenses, game_tick);
+        true
+    }
+
+    pub fn record_equipment_change(&mut self, item_id: i32, game_tick: i32) -> bool {
+        if !self.equipment_items.insert(item_id) {
+            return false;
+        }
+        self.equipment_changes = self.equipment_changes.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::Equipment, game_tick);
+        true
+    }
+
+    pub fn observe_healing_items(&mut self, healing_items: i32, game_tick: i32) -> i32 {
+        let acquired =
+            Self::record_high_water_delta(&mut self.healing_items_high_water, healing_items.max(0));
+        if acquired > 0 {
+            self.healing_items_acquired = self.healing_items_acquired.saturating_add(acquired);
+            self.record_meaningful_action(CrisisPreparationCategory::Healing, game_tick);
+        }
+        acquired
+    }
+
+    pub fn record_healing_item_used_before_launch(
+        &mut self,
+        use_event_id: Uuid,
+        game_tick: i32,
+    ) -> bool {
+        if !self.healing_use_events.insert(use_event_id) {
+            return false;
+        }
+        self.healing_items_used_before_launch =
+            self.healing_items_used_before_launch.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::Healing, game_tick);
+        true
+    }
+
+    pub fn record_villager_recruited(&mut self, villager_id: i32, game_tick: i32) -> bool {
+        if !self.recruited_villagers.insert(villager_id) {
+            return false;
+        }
+        self.villagers_recruited = self.villagers_recruited.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::VillagerSupport, game_tick);
+        true
+    }
+
+    pub fn record_villager_assignment_changed(&mut self, villager_id: i32, game_tick: i32) -> bool {
+        if !self.reassigned_villagers.insert(villager_id) {
+            return false;
+        }
+        self.villager_assignments_changed = self.villager_assignments_changed.saturating_add(1);
+        self.record_meaningful_action(CrisisPreparationCategory::VillagerSupport, game_tick);
+        true
+    }
+
+    pub fn observe_sanctuary_level(&mut self, sanctuary_level: i32, game_tick: i32) -> i32 {
+        let upgrades = Self::record_high_water_delta(
+            &mut self.sanctuary_level_high_water,
+            sanctuary_level.max(0),
+        );
+        if upgrades > 0 {
+            self.sanctuary_upgrades = self.sanctuary_upgrades.saturating_add(upgrades);
+            self.record_meaningful_action(CrisisPreparationCategory::Sanctuary, game_tick);
+        }
+        upgrades
+    }
+
+    pub fn observe_total_run_items(&mut self, total_items: i32, game_tick: i32) -> i32 {
+        let acquired =
+            Self::record_high_water_delta(&mut self.total_run_items_high_water, total_items.max(0));
+        if acquired > 0 {
+            self.resource_units_acquired = self.resource_units_acquired.saturating_add(acquired);
+            self.mark_action_at(game_tick);
+        }
+        acquired
+    }
+
+    pub fn observe_stored_items(&mut self, stored_items: i32, game_tick: i32) -> i32 {
+        let added =
+            Self::record_high_water_delta(&mut self.stored_items_high_water, stored_items.max(0));
+        if added > 0 {
+            self.storage_units_added = self.storage_units_added.saturating_add(added);
+            self.mark_action_at(game_tick);
+        }
+        added
+    }
+
+    pub fn record_launch_readiness(
+        &mut self,
+        healing_items: i32,
+        combat_capable_villager_ids: impl IntoIterator<Item = i32>,
+    ) -> bool {
+        if self.launch_readiness_recorded {
+            return false;
+        }
+        self.launch_readiness_recorded = true;
+        self.healing_items_carried_at_launch = healing_items.max(0);
+        self.combat_capable_villagers_at_launch = combat_capable_villager_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .len() as i32;
+        true
+    }
+
+    fn record_meaningful_action(&mut self, category: CrisisPreparationCategory, game_tick: i32) {
+        self.mark_action_at(game_tick);
+        if self.meaningful_category_keys.insert(category) {
+            self.meaningful_preparation_categories = self
+                .meaningful_category_keys
+                .iter()
+                .map(|category| category.label().to_string())
+                .collect();
+            self.meaningful_preparation_category_count = self.meaningful_category_keys.len() as i32;
+        }
+    }
+
+    fn record_high_water_delta(high_water: &mut Option<i32>, observed: i32) -> i32 {
+        let Some(previous_high_water) = *high_water else {
+            *high_water = Some(observed);
+            return 0;
+        };
+        if observed <= previous_high_water {
+            return 0;
+        }
+        *high_water = Some(observed);
+        observed.saturating_sub(previous_high_water)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CrisisPreparationCategory {
+    Defenses,
+    Equipment,
+    Healing,
+    Repair,
+    Sanctuary,
+    VillagerSupport,
+}
+
+impl CrisisPreparationCategory {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Defenses => "defenses",
+            Self::Equipment => "equipment",
+            Self::Healing => "healing",
+            Self::Repair => "repair",
+            Self::Sanctuary => "sanctuary",
+            Self::VillagerSupport => "villager_support",
+        }
     }
 }
 
@@ -706,12 +950,17 @@ pub(crate) struct CrisisBalanceObservation {
     pub online_active_ticks: i32,
     pub phase: Option<CrisisPhase>,
     pub completed_structure_ids: BTreeSet<i32>,
+    pub foundation_ids: BTreeSet<i32>,
+    pub defensive_structure_ids: BTreeSet<i32>,
+    pub defensive_foundation_ids: BTreeSet<i32>,
     pub wall_ids: BTreeSet<i32>,
     pub structure_health: HashMap<i32, i32>,
     pub equipped_weapon: Option<String>,
     pub equipped_armor_count: i32,
+    pub equipped_item_ids: BTreeSet<i32>,
     pub healing_items: i32,
     pub villagers: BTreeSet<i32>,
+    pub combat_capable_villagers: BTreeSet<i32>,
     pub villager_assignments: HashMap<i32, i32>,
     pub sanctuary_level: i32,
     pub total_run_items: i32,
@@ -943,6 +1192,119 @@ mod tests {
         assert_eq!(actions.walls_built, 3);
         assert_eq!(actions.healing_items_acquired, 1);
         assert_eq!(actions.resource_units_acquired, 12);
+    }
+
+    #[test]
+    fn preparation_categories_are_distinct_and_stably_ordered() {
+        let mut actions = CrisisPreparationActions::default();
+
+        assert!(actions.record_repair_started(100, 500));
+        assert!(actions.record_repair_completed(100, 550));
+        assert!(actions.record_defensive_structure_started(200, 600));
+        assert!(actions.record_defensive_structure_completed(200, true, 650));
+        assert!(actions.record_equipment_change(300, 700));
+        assert_eq!(actions.observe_healing_items(0, 750), 0);
+        assert_eq!(actions.observe_healing_items(2, 800), 2);
+        assert!(actions.record_villager_recruited(400, 850));
+        assert_eq!(actions.observe_sanctuary_level(0, 875), 0);
+        assert_eq!(actions.observe_sanctuary_level(1, 900), 1);
+
+        assert_eq!(actions.meaningful_preparation_category_count, 6);
+        assert_eq!(
+            actions.meaningful_preparation_categories,
+            vec![
+                "defenses",
+                "equipment",
+                "healing",
+                "repair",
+                "sanctuary",
+                "villager_support",
+            ]
+        );
+    }
+
+    #[test]
+    fn preparation_first_action_tick_is_the_absolute_earliest_recorded_tick() {
+        let mut actions = CrisisPreparationActions::default();
+        assert_eq!(actions.first_preparation_action_tick, None);
+
+        assert!(actions.record_defensive_structure_started(10, 700));
+        assert_eq!(actions.first_preparation_action_tick, Some(700));
+        assert!(actions.record_equipment_change(20, 450));
+        assert_eq!(actions.first_preparation_action_tick, Some(450));
+
+        actions.mark_action_at(500);
+        actions.mark_action_at(300);
+        assert_eq!(actions.first_preparation_action_tick, Some(300));
+        assert!(actions.performed_preparation_action);
+    }
+
+    #[test]
+    fn repeated_preparation_observations_do_not_inflate_meaningful_counts() {
+        let mut actions = CrisisPreparationActions::default();
+
+        assert!(actions.record_repair_started(10, 100));
+        assert!(!actions.record_repair_started(10, 101));
+        assert!(actions.record_repair_completed(10, 110));
+        assert!(!actions.record_repair_completed(10, 111));
+
+        assert!(actions.record_defensive_structure_started(20, 120));
+        assert!(!actions.record_defensive_structure_started(20, 121));
+        assert!(actions.record_defensive_structure_completed(20, true, 130));
+        assert!(!actions.record_defensive_structure_completed(20, true, 131));
+
+        assert!(actions.record_equipment_change(30, 140));
+        assert!(!actions.record_equipment_change(30, 141));
+        assert!(actions.record_equipment_change(31, 142));
+        assert!(!actions.record_equipment_change(30, 143));
+
+        assert_eq!(actions.observe_healing_items(1, 150), 0);
+        assert_eq!(actions.observe_healing_items(3, 151), 2);
+        assert_eq!(actions.observe_healing_items(1, 152), 0);
+        assert_eq!(actions.observe_healing_items(3, 153), 0);
+        let healing_use_event_id = Uuid::from_u128(40);
+        assert!(actions.record_healing_item_used_before_launch(healing_use_event_id, 154));
+        assert!(!actions.record_healing_item_used_before_launch(healing_use_event_id, 155));
+
+        assert!(actions.record_villager_recruited(50, 160));
+        assert!(!actions.record_villager_recruited(50, 161));
+        assert!(actions.record_villager_assignment_changed(50, 162));
+        assert!(!actions.record_villager_assignment_changed(50, 163));
+
+        assert_eq!(actions.observe_total_run_items(100, 170), 0);
+        assert_eq!(actions.observe_total_run_items(112, 171), 12);
+        assert_eq!(actions.observe_total_run_items(80, 172), 0);
+        assert_eq!(actions.observe_total_run_items(112, 173), 0);
+        assert_eq!(actions.observe_stored_items(50, 180), 0);
+        assert_eq!(actions.observe_stored_items(57, 181), 7);
+        assert_eq!(actions.observe_stored_items(40, 182), 0);
+        assert_eq!(actions.observe_stored_items(57, 183), 0);
+        assert_eq!(actions.observe_sanctuary_level(2, 184), 0);
+        assert_eq!(actions.observe_sanctuary_level(3, 185), 1);
+        assert_eq!(actions.observe_sanctuary_level(2, 186), 0);
+        assert_eq!(actions.observe_sanctuary_level(3, 187), 0);
+
+        assert!(actions.record_launch_readiness(3, [50, 50, 51]));
+        assert!(!actions.record_launch_readiness(99, [60, 61, 62]));
+
+        assert_eq!(actions.repairs_started, 1);
+        assert_eq!(actions.repairs_completed, 1);
+        assert_eq!(actions.structures_repaired, 1);
+        assert_eq!(actions.defensive_structures_started, 1);
+        assert_eq!(actions.defensive_structures_completed, 1);
+        assert_eq!(actions.structures_built, 1);
+        assert_eq!(actions.walls_built, 1);
+        assert_eq!(actions.equipment_changes, 2);
+        assert_eq!(actions.healing_items_acquired, 2);
+        assert_eq!(actions.healing_items_used_before_launch, 1);
+        assert_eq!(actions.villagers_recruited, 1);
+        assert_eq!(actions.villager_assignments_changed, 1);
+        assert_eq!(actions.resource_units_acquired, 12);
+        assert_eq!(actions.storage_units_added, 7);
+        assert_eq!(actions.sanctuary_upgrades, 1);
+        assert_eq!(actions.healing_items_carried_at_launch, 3);
+        assert_eq!(actions.combat_capable_villagers_at_launch, 2);
+        assert_eq!(actions.meaningful_preparation_category_count, 6);
     }
 
     #[test]

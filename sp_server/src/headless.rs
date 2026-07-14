@@ -43,15 +43,16 @@ use crate::game::{
     PlayerVictory, RunScoreState, SettlementCrisis, SettlementCrisisState, SurvivalDirectorMode,
     VictoryState,
 };
-use crate::ids::Ids;
-use crate::item::{AttrKey, AttrVal, Inventory};
+use crate::ids::{EntityObjMap, Ids};
+use crate::item::{AttrKey, AttrVal, Inventory, Slot};
 use crate::map::Map;
 use crate::obj::{
-    ActiveTask, Assignment, Assignments, BuildUpgradeState, Class, ClassStructure, Id,
-    LastCombatTick, LastDamageTick, Misc, Name, Order, PlayerId, Position, State, StateBuilding,
-    StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager, Template, TrueDeath,
-    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    ActiveTask, Assignment, Assignments, BuildUpgradeState, Class, ClassStructure, HeroClass, Id,
+    LastCombatTick, LastDamageTick, Misc, Name, Obj, Order, PlayerId, Position, State,
+    StateBuilding, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
+    Template, TrueDeath, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
+use crate::player_setup::StartLocations;
 use crate::resource::Resources;
 use crate::safe_logout::{
     is_player_offline_protected, record_player_combat_activity, CancelSafeLogout,
@@ -68,6 +69,344 @@ use crate::{build_headless_app_with_director, AppState, PlayerEvent, ResponsePac
 // (1000) so `PlayerId::is_human()` is true and NPC factions (player id 1000+)
 // stay distinct.
 pub const HEADLESS_PLAYER_ID: i32 = 1;
+
+pub const PREPARATION_PAIR_START_LOCATION: &str = "startpos3";
+pub const PREPARATION_STOCKADE_ANCHOR: Position = Position { x: 15, y: 13 };
+const PREPARATION_COMMON_STRUCTURE_ANCHOR: Position = Position { x: 16, y: 13 };
+const PREPARATION_STOCKADE_HP: i32 = 20;
+
+/// Checkpoint 3's synthetic preparation comparisons. These labels are part of
+/// the versioned runner output; keep them stable for report consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationComparison {
+    ExistingWalls,
+    EquipmentPrepared,
+    HealingPrepared,
+    CombinedPreparation,
+}
+
+impl PreparationComparison {
+    pub const ALL: [Self; 4] = [
+        Self::ExistingWalls,
+        Self::EquipmentPrepared,
+        Self::HealingPrepared,
+        Self::CombinedPreparation,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ExistingWalls => "existing_walls",
+            Self::EquipmentPrepared => "equipment_prepared",
+            Self::HealingPrepared => "healing_prepared",
+            Self::CombinedPreparation => "combined_preparation",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|comparison| comparison.label() == label)
+    }
+
+    pub const fn includes_wall(self) -> bool {
+        matches!(self, Self::ExistingWalls | Self::CombinedPreparation)
+    }
+
+    pub const fn includes_equipment(self) -> bool {
+        matches!(self, Self::EquipmentPrepared | Self::CombinedPreparation)
+    }
+
+    pub const fn includes_healing(self) -> bool {
+        matches!(self, Self::HealingPrepared | Self::CombinedPreparation)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreparationPairLeg {
+    Control,
+    Treatment,
+}
+
+impl PreparationPairLeg {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Treatment => "treatment",
+        }
+    }
+
+    const fn receives(self, included: bool) -> bool {
+        matches!(self, Self::Treatment) && included
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationAssaultGeometry {
+    pub template: String,
+    pub template_ordinal: u32,
+    pub position: [i32; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationAssaultUnitFingerprint {
+    pub template: String,
+    pub position: [i32; 2],
+    pub hp: i32,
+    pub base_hp: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationInventoryFingerprint {
+    pub name: String,
+    pub class: String,
+    pub subclass: String,
+    pub slot: Option<String>,
+    pub quantity: i32,
+    pub equipped: bool,
+}
+
+impl PreparationInventoryFingerprint {
+    fn from_item(item: &crate::item::Item) -> Self {
+        Self {
+            name: item.name.clone(),
+            class: item.class.clone(),
+            subclass: item.subclass.clone(),
+            slot: Slot::to_str(item.slot),
+            quantity: item.quantity,
+            equipped: item.equipped,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationStructureFingerprint {
+    pub template: String,
+    pub subclass: String,
+    pub position: [i32; 2],
+    pub state: String,
+    pub hp: i32,
+    pub base_hp: i32,
+}
+
+/// Selected observed launch fields expected to be identical after normalizing
+/// only the declared synthetic treatment. This is neither a full-ECS nor an RNG
+/// fingerprint.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PreparationCommonLaunchFingerprint {
+    pub start_location: String,
+    pub world_tick: i32,
+    pub hero_class: String,
+    pub hero_template: String,
+    pub hero_position: [i32; 2],
+    pub hero_hp: i32,
+    pub hero_base_hp: i32,
+    pub hero_base_defence: i32,
+    pub hero_state: String,
+    pub crisis_phase: String,
+    pub crisis_pressure: i32,
+    pub crisis_online_active_ticks: i32,
+    pub crisis_phase_online_ticks: i32,
+    pub crisis_assault_started_tick: Option<i32>,
+    pub non_crisis_living_hostiles: i32,
+    pub normalized_inventory: Vec<PreparationInventoryFingerprint>,
+    pub normalized_structures: Vec<PreparationStructureFingerprint>,
+    pub assault_units: Vec<PreparationAssaultUnitFingerprint>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PreparationFixtureState {
+    pub completed_structures: i32,
+    pub completed_wall_segments: i32,
+    pub completed_stockades: i32,
+    pub declared_anchor_stockades: Vec<PreparationStructureFingerprint>,
+    pub hide_wraps: i32,
+    pub hide_wraps_equipped: bool,
+    pub hide_wraps_items: Vec<PreparationInventoryFingerprint>,
+    pub tattered_shirt_items: Vec<PreparationInventoryFingerprint>,
+    pub crude_bandages: i32,
+    pub crude_bandage_items: Vec<PreparationInventoryFingerprint>,
+    pub other_healing_items: i32,
+}
+
+fn expected_preparation_stockade() -> PreparationStructureFingerprint {
+    PreparationStructureFingerprint {
+        template: "Stockade".to_string(),
+        subclass: "wall".to_string(),
+        position: [PREPARATION_STOCKADE_ANCHOR.x, PREPARATION_STOCKADE_ANCHOR.y],
+        state: "none".to_string(),
+        hp: PREPARATION_STOCKADE_HP,
+        base_hp: PREPARATION_STOCKADE_HP,
+    }
+}
+
+fn expected_hide_wraps(equipped: bool) -> PreparationInventoryFingerprint {
+    PreparationInventoryFingerprint {
+        name: "Hide Wraps".to_string(),
+        class: "Armor".to_string(),
+        subclass: "Chest".to_string(),
+        slot: Some("Chest".to_string()),
+        quantity: 1,
+        equipped,
+    }
+}
+
+fn expected_crude_bandage() -> PreparationInventoryFingerprint {
+    PreparationInventoryFingerprint {
+        name: "Crude Bandage".to_string(),
+        class: "Medical".to_string(),
+        subclass: "Bandage".to_string(),
+        slot: None,
+        quantity: 1,
+        equipped: false,
+    }
+}
+
+fn expected_tattered_shirt(equipped: bool) -> PreparationInventoryFingerprint {
+    PreparationInventoryFingerprint {
+        name: "Tattered Shirt".to_string(),
+        class: "Clothing".to_string(),
+        subclass: "Shirt".to_string(),
+        slot: Some("Chest".to_string()),
+        quantity: 1,
+        equipped,
+    }
+}
+
+fn normalize_declared_inventory_artifact(
+    comparison: PreparationComparison,
+    mut item: PreparationInventoryFingerprint,
+) -> Option<PreparationInventoryFingerprint> {
+    if comparison.includes_healing() && item.name == "Crude Bandage" {
+        return None;
+    }
+    if comparison.includes_equipment() && item.name == "Hide Wraps" {
+        item.equipped = false;
+    }
+    if comparison.includes_equipment() && item.name == "Tattered Shirt" {
+        // Equipping Hide Wraps through the production event necessarily
+        // displaces this exact starting chest item. Normalize that one known
+        // consequence, not the rest of the chest slot.
+        item.equipped = true;
+    }
+    Some(item)
+}
+
+fn is_declared_stockade_artifact(
+    comparison: PreparationComparison,
+    structure: &PreparationStructureFingerprint,
+) -> bool {
+    comparison.includes_wall()
+        && structure.template == "Stockade"
+        && structure.position == [PREPARATION_STOCKADE_ANCHOR.x, PREPARATION_STOCKADE_ANCHOR.y]
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationDeclaredDifference {
+    pub comparison: String,
+    pub completed_stockade_delta: i32,
+    pub completed_wall_segment_delta: i32,
+    pub hide_wraps_equipped_changes_to_true: bool,
+    pub tattered_shirt_equipped_changes_to_false: bool,
+    pub crude_bandage_delta: i32,
+}
+
+impl PreparationDeclaredDifference {
+    pub fn for_comparison(comparison: PreparationComparison) -> Self {
+        Self {
+            comparison: comparison.label().to_string(),
+            completed_stockade_delta: i32::from(comparison.includes_wall()),
+            completed_wall_segment_delta: i32::from(comparison.includes_wall()),
+            hide_wraps_equipped_changes_to_true: comparison.includes_equipment(),
+            tattered_shirt_equipped_changes_to_false: comparison.includes_equipment(),
+            crude_bandage_delta: i32::from(comparison.includes_healing()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationPairLaunch {
+    pub leg: PreparationPairLeg,
+    pub geometry: Vec<PreparationAssaultGeometry>,
+    pub common_fingerprint: PreparationCommonLaunchFingerprint,
+    pub fixture: PreparationFixtureState,
+}
+
+/// Reject a pair if anything in the normalized launch state differs, or if
+/// the controlled fixtures contain any delta other than the declared one.
+pub fn validate_preparation_pair_launches(
+    comparison: PreparationComparison,
+    control: &PreparationPairLaunch,
+    treatment: &PreparationPairLaunch,
+) -> Result<PreparationDeclaredDifference, String> {
+    if control.leg != PreparationPairLeg::Control || treatment.leg != PreparationPairLeg::Treatment
+    {
+        return Err("preparation pair legs must be control then treatment".to_string());
+    }
+    if control.common_fingerprint != treatment.common_fingerprint {
+        return Err(format!(
+            "undeclared common launch fingerprint mismatch: control={:?}; treatment={:?}",
+            control.common_fingerprint, treatment.common_fingerprint
+        ));
+    }
+
+    let expected = PreparationDeclaredDifference::for_comparison(comparison);
+    let actual_stockade_delta = treatment
+        .fixture
+        .completed_stockades
+        .saturating_sub(control.fixture.completed_stockades);
+    let actual_wall_delta = treatment
+        .fixture
+        .completed_wall_segments
+        .saturating_sub(control.fixture.completed_wall_segments);
+    let actual_bandage_delta = treatment
+        .fixture
+        .crude_bandages
+        .saturating_sub(control.fixture.crude_bandages);
+    let expected_treatment_stockades = if comparison.includes_wall() {
+        vec![expected_preparation_stockade()]
+    } else {
+        Vec::new()
+    };
+    let expected_treatment_bandages = if comparison.includes_healing() {
+        vec![expected_crude_bandage()]
+    } else {
+        Vec::new()
+    };
+    if actual_stockade_delta != expected.completed_stockade_delta
+        || actual_wall_delta != expected.completed_wall_segment_delta
+        || !control.fixture.declared_anchor_stockades.is_empty()
+        || treatment.fixture.declared_anchor_stockades != expected_treatment_stockades
+        || control.fixture.hide_wraps != 1
+        || treatment.fixture.hide_wraps != 1
+        || control.fixture.hide_wraps_equipped
+        || treatment.fixture.hide_wraps_equipped != expected.hide_wraps_equipped_changes_to_true
+        || control.fixture.hide_wraps_items != vec![expected_hide_wraps(false)]
+        || treatment.fixture.hide_wraps_items
+            != vec![expected_hide_wraps(comparison.includes_equipment())]
+        || control.fixture.tattered_shirt_items != vec![expected_tattered_shirt(true)]
+        || treatment.fixture.tattered_shirt_items
+            != vec![expected_tattered_shirt(!comparison.includes_equipment())]
+        || actual_bandage_delta != expected.crude_bandage_delta
+        || control.fixture.crude_bandages != 0
+        || !control.fixture.crude_bandage_items.is_empty()
+        || treatment.fixture.crude_bandage_items != expected_treatment_bandages
+        || control.fixture.other_healing_items != 0
+        || treatment.fixture.other_healing_items != 0
+        || treatment
+            .fixture
+            .completed_structures
+            .saturating_sub(control.fixture.completed_structures)
+            != expected.completed_stockade_delta
+    {
+        return Err(format!(
+            "undeclared preparation fixture mismatch for {}: expected={expected:?}; control={:?}; treatment={:?}",
+            comparison.label(), control.fixture, treatment.fixture
+        ));
+    }
+    Ok(expected)
+}
 
 /// Bounded result for non-assertive Safe Logout scenario drivers. Production
 /// eligibility and cancellation remain authoritative; the harness reports the
@@ -802,6 +1141,680 @@ impl HeadlessGame {
                 );
             }
         });
+    }
+
+    /// Restrict the production start-location resource before spawning a hero.
+    /// This removes start-position RNG from the matched-observation fixture without
+    /// replacing the ordinary `NewPlayer` spawn path.
+    pub fn restrict_to_preparation_pair_start_location(&mut self) -> Result<(), String> {
+        if self.player_id != 0 {
+            return Err(
+                "preparation start location must be selected before spawn_hero".to_string(),
+            );
+        }
+        let starts = &mut self.app.world_mut().resource_mut::<StartLocations>().0;
+        let Some(selected) = starts
+            .iter()
+            .find(|start| start.name == PREPARATION_PAIR_START_LOCATION)
+            .cloned()
+        else {
+            return Err(format!(
+                "missing required start location {PREPARATION_PAIR_START_LOCATION}"
+            ));
+        };
+        starts.clear();
+        starts.push(selected);
+        Ok(())
+    }
+
+    /// Build one leg of a Checkpoint 3 matched-observation comparison and launch
+    /// the existing production assault. The optional geometry must be the
+    /// control leg's post-launch geometry and is required for treatment legs.
+    pub fn prepare_preparation_pair_launch(
+        &mut self,
+        comparison: PreparationComparison,
+        leg: PreparationPairLeg,
+        control_geometry: Option<&[PreparationAssaultGeometry]>,
+    ) -> Result<PreparationPairLaunch, String> {
+        use crate::constants::DUSK;
+        use crate::game::{
+            CrisisKind, InitialEncounterState, ASSAULT_READY_GRACE_TICKS,
+            GOBLIN_ASSAULT_READY_PRESSURE, GOBLIN_PREPARING_PRESSURE,
+        };
+
+        if self.player_id == 0 {
+            return Err("spawn_hero must run before preparing a pair leg".to_string());
+        }
+        match (leg, control_geometry) {
+            (PreparationPairLeg::Control, Some(_)) => {
+                return Err("control leg must establish, not consume, launch geometry".to_string());
+            }
+            (PreparationPairLeg::Treatment, None) => {
+                return Err("treatment leg requires the control launch geometry".to_string());
+            }
+            _ => {}
+        }
+
+        // Reuse the existing bounded developed-settlement facts so production
+        // pressure evaluation continues to produce a legitimate ready value.
+        self.prepare_crisis_balance_progression_fixture(CrisisBalanceScenario::PreparedSolo);
+        self.normalize_preparation_non_crisis_hostiles();
+
+        let player_id = self.player_id;
+        let preparing_tick = self.game_tick();
+        {
+            let world = self.app.world_mut();
+            world
+                .resource_mut::<PlayerIntroState>()
+                .get_mut(&player_id)
+                .ok_or_else(|| "missing player intro state".to_string())?
+                .danger_unlocked = true;
+            world
+                .resource_mut::<InitialEncounterState>()
+                .remove(&player_id);
+            world.resource_mut::<SettlementCrisisState>().insert(
+                player_id,
+                SettlementCrisis {
+                    kind: CrisisKind::Goblin,
+                    phase: CrisisPhase::Preparing,
+                    pressure: GOBLIN_PREPARING_PRESSURE,
+                    phase_started_tick: preparing_tick,
+                    online_active_ticks: 10_000,
+                    phase_online_ticks: 0,
+                    warning_active: true,
+                    last_evaluated_tick: preparing_tick,
+                    ..SettlementCrisis::default()
+                },
+            );
+        }
+
+        let hide_wraps_id =
+            self.install_preparation_inventory(leg.receives(comparison.includes_healing()))?;
+        // Keep the production three-structure pressure contributor identical;
+        // otherwise adding the treatment wall would itself add 20 pressure.
+        self.spawn_completed_preparation_structure("Cache", PREPARATION_COMMON_STRUCTURE_ANCHOR)?;
+        if leg.receives(comparison.includes_wall()) {
+            self.spawn_completed_preparation_structure("Stockade", PREPARATION_STOCKADE_ANCHOR)?;
+        }
+        if leg.receives(comparison.includes_equipment()) {
+            let hero_id = self
+                .observe()
+                .hero
+                .map(|hero| hero.id)
+                .ok_or_else(|| "missing hero before equipment preparation".to_string())?;
+            self.inject(PlayerEvent::Equip {
+                player_id,
+                obj_id: hero_id,
+                item_id: hide_wraps_id,
+                status: true,
+            });
+        }
+
+        // Give both legs the same event-processing budget. Only treatment sends
+        // Equip, and the ordinary player-event system remains authoritative.
+        self.tick(2);
+        self.normalize_preparation_non_crisis_hostiles();
+
+        let preferred_tick = self
+            .game_tick()
+            .div_euclid(GAME_TICKS_PER_DAY)
+            .saturating_mul(GAME_TICKS_PER_DAY)
+            .saturating_add(DUSK);
+        let preferred_tick = if preferred_tick <= self.game_tick() {
+            preferred_tick.saturating_add(GAME_TICKS_PER_DAY)
+        } else {
+            preferred_tick
+        };
+        let ready_tick = preferred_tick.saturating_sub(ASSAULT_READY_GRACE_TICKS);
+        {
+            let world = self.app.world_mut();
+            world.resource_mut::<GameTick>().0 = ready_tick;
+            world.resource_mut::<SettlementCrisisState>().insert(
+                player_id,
+                SettlementCrisis {
+                    kind: CrisisKind::Goblin,
+                    phase: CrisisPhase::AssaultReady,
+                    pressure: GOBLIN_ASSAULT_READY_PRESSURE,
+                    phase_started_tick: ready_tick,
+                    online_active_ticks: 10_000,
+                    phase_online_ticks: 0,
+                    warning_active: true,
+                    last_evaluated_tick: ready_tick,
+                    ..SettlementCrisis::default()
+                },
+            );
+            world.resource_mut::<GameTick>().0 = preferred_tick.saturating_sub(2);
+        }
+        self.tick(1);
+        if self.settlement_crisis().map(|crisis| crisis.phase) != Some(CrisisPhase::AssaultReady) {
+            return Err("production crisis left AssaultReady before launch tick".to_string());
+        }
+        if !self.crisis_assault_units().is_empty() {
+            return Err("production assault launched before the requested dusk tick".to_string());
+        }
+        self.tick(1);
+        if self.settlement_crisis().map(|crisis| crisis.phase) != Some(CrisisPhase::AssaultActive) {
+            return Err("production assault did not enter AssaultActive".to_string());
+        }
+
+        self.normalize_preparation_non_crisis_hostiles();
+        if let Some(control_geometry) = control_geometry {
+            self.normalize_preparation_assault_geometry(control_geometry)?;
+        }
+        let geometry = self.preparation_assault_geometry()?;
+        let fixture = self.preparation_fixture_state()?;
+        let common_fingerprint = self.preparation_common_launch_fingerprint(comparison)?;
+
+        Ok(PreparationPairLaunch {
+            leg,
+            geometry,
+            common_fingerprint,
+            fixture,
+        })
+    }
+
+    /// Return a normal client command for the one treatment bandage only when
+    /// the hero is wounded. The runner owns the at-most-once latch.
+    pub fn preparation_bandage_use_event(&mut self) -> Option<PlayerEvent> {
+        let view = self.observe();
+        let hero = view.hero?;
+        if hero.dead || hero.true_death || hero.hp >= hero.base_hp {
+            return None;
+        }
+        let bandage = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Crude Bandage" && item.quantity > 0)?;
+        Some(PlayerEvent::Use {
+            player_id: self.player_id,
+            obj_id: hero.id,
+            item_id: bandage.id,
+        })
+    }
+
+    fn install_preparation_inventory(&mut self, add_bandage: bool) -> Result<i32, String> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let templates = world.resource::<Templates>().item_templates.clone();
+        let hide_wraps_id = world.resource_mut::<Ids>().new_item_id();
+        let bandage_id = add_bandage.then(|| world.resource_mut::<Ids>().new_item_id());
+        let mut heroes = world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
+        let (_, mut inventory) = heroes
+            .iter_mut(world)
+            .find(|(owner, _)| owner.0 == player_id)
+            .ok_or_else(|| "missing hero inventory".to_string())?;
+        inventory.items.retain(|item| {
+            !matches!(item.attrs.get(&AttrKey::Healing), Some(AttrVal::Num(value)) if *value > 0.0)
+                && !(item.class == "Medical" && item.subclass == "Bandage")
+        });
+        inventory.new(hide_wraps_id, "Hide Wraps".to_string(), 1, &templates);
+        if let Some(bandage_id) = bandage_id {
+            inventory.new(bandage_id, "Crude Bandage".to_string(), 1, &templates);
+        }
+        Ok(hide_wraps_id)
+    }
+
+    fn spawn_completed_preparation_structure(
+        &mut self,
+        template_name: &str,
+        anchor: Position,
+    ) -> Result<(), String> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let already_exists = {
+            let mut structures =
+                world.query_filtered::<(&PlayerId, &Template, &Position), With<ClassStructure>>();
+            structures.iter(world).any(|(owner, template, position)| {
+                owner.0 == player_id && template.0 == template_name && *position == anchor
+            })
+        };
+        if already_exists {
+            return Err(format!(
+                "preparation {template_name} already exists at its anchor"
+            ));
+        }
+        let template = world
+            .resource::<Templates>()
+            .obj_templates
+            .get(template_name.to_string());
+        let obj_id = world.resource_mut::<Ids>().new_obj_id();
+        let object = Obj {
+            id: Id(obj_id),
+            player_id: PlayerId(player_id),
+            position: anchor,
+            name: Name(template_name.to_string()),
+            template: Template(template_name.to_string()),
+            class: Class(template.class),
+            subclass: Subclass::from_str(&template.subclass),
+            state: State::None,
+            misc: Misc {
+                image: template.image,
+                hsl: Vec::new(),
+                groups: Vec::new(),
+            },
+            stats: Stats {
+                hp: template.base_hp.unwrap_or(20),
+                base_hp: template.base_hp.unwrap_or(20),
+                stamina: None,
+                mana: None,
+                base_stamina: None,
+                base_mana: None,
+                base_def: template.base_def.unwrap_or(0),
+                base_damage: None,
+                damage_range: None,
+                base_speed: None,
+                base_vision: None,
+            },
+            effects: Effects(std::collections::HashMap::new()),
+            inventory: Inventory {
+                owner: obj_id,
+                items: Vec::new(),
+            },
+            last_combat_tick: LastCombatTick::default(),
+        };
+        let entity = world
+            .spawn((
+                object,
+                BuildUpgradeState {
+                    build_upgrade_cost: template.build_cost.unwrap_or(30) as f32,
+                    work_done: template.build_cost.unwrap_or(30) as f32,
+                    work_per_sec: 0.0,
+                    start_time: 0,
+                },
+                Assignments(Vec::new()),
+                WorkQueue(Vec::new()),
+                ClassStructure,
+            ))
+            .id();
+        world.resource_mut::<Ids>().new_obj(obj_id, player_id);
+        world.resource_mut::<EntityObjMap>().new_obj(obj_id, entity);
+        Ok(())
+    }
+
+    fn normalize_preparation_non_crisis_hostiles(&mut self) {
+        let world = self.app.world_mut();
+        let entities = {
+            let mut hostiles = world.query_filtered::<
+                (Entity, &PlayerId, &State, Option<&CrisisAssaultUnit>),
+                With<SubclassNPC>,
+            >();
+            hostiles
+                .iter(world)
+                .filter(|(_, owner, state, assault)| {
+                    owner.is_npc() && state.is_alive() && assault.is_none()
+                })
+                .map(|(entity, ..)| entity)
+                .collect::<Vec<_>>()
+        };
+        for entity in entities {
+            if let Some(mut state) = world.get_mut::<State>(entity) {
+                *state = State::Dead;
+            }
+            if let Some(mut stats) = world.get_mut::<Stats>(entity) {
+                stats.hp = 0;
+            }
+            world
+                .entity_mut(entity)
+                .remove::<crate::npc::VisibleTarget>();
+        }
+    }
+
+    fn preparation_assault_geometry(&mut self) -> Result<Vec<PreparationAssaultGeometry>, String> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let mut query = world.query::<(&Id, &Template, &Position, &CrisisAssaultUnit)>();
+        let mut units = query
+            .iter(world)
+            .filter(|(_, _, _, assault)| assault.owner_player_id == player_id)
+            .map(|(id, template, position, _)| (template.0.clone(), id.0, *position))
+            .collect::<Vec<_>>();
+        units.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        if units.is_empty() {
+            return Err("production launch created no attributed assault units".to_string());
+        }
+        let mut last_template = String::new();
+        let mut ordinal = 0_u32;
+        Ok(units
+            .into_iter()
+            .map(|(template, _, position)| {
+                if template == last_template {
+                    ordinal = ordinal.saturating_add(1);
+                } else {
+                    last_template = template.clone();
+                    ordinal = 0;
+                }
+                PreparationAssaultGeometry {
+                    template,
+                    template_ordinal: ordinal,
+                    position: [position.x, position.y],
+                }
+            })
+            .collect())
+    }
+
+    fn normalize_preparation_assault_geometry(
+        &mut self,
+        requested: &[PreparationAssaultGeometry],
+    ) -> Result<(), String> {
+        let actual = self.preparation_assault_geometry()?;
+        let actual_keys = actual
+            .iter()
+            .map(|unit| (unit.template.clone(), unit.template_ordinal))
+            .collect::<Vec<_>>();
+        let requested_keys = requested
+            .iter()
+            .map(|unit| (unit.template.clone(), unit.template_ordinal))
+            .collect::<Vec<_>>();
+        if actual_keys != requested_keys {
+            return Err(format!(
+                "assault composition mismatch before geometry normalization: actual={actual_keys:?}; requested={requested_keys:?}"
+            ));
+        }
+
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let mut entities = {
+            let mut query = world.query::<(Entity, &Id, &Template, &CrisisAssaultUnit)>();
+            query
+                .iter(world)
+                .filter(|(_, _, _, assault)| assault.owner_player_id == player_id)
+                .map(|(entity, id, template, _)| (template.0.clone(), id.0, entity))
+                .collect::<Vec<_>>()
+        };
+        entities.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        for ((_, _, entity), geometry) in entities.into_iter().zip(requested.iter()) {
+            *world
+                .get_mut::<Position>(entity)
+                .ok_or_else(|| "assault unit missing Position".to_string())? = Position {
+                x: geometry.position[0],
+                y: geometry.position[1],
+            };
+        }
+        Ok(())
+    }
+
+    fn preparation_fixture_state(&mut self) -> Result<PreparationFixtureState, String> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let (
+            completed_structures,
+            completed_wall_segments,
+            completed_stockades,
+            mut declared_anchor_stockades,
+        ) = {
+            let mut structures = world.query_filtered::<
+                (&PlayerId, &Template, &Subclass, &Position, &State, &Stats),
+                With<ClassStructure>,
+            >();
+            let mut totals = (0_i32, 0_i32, 0_i32, Vec::new());
+            for (_, template, subclass, position, state, stats) in
+                structures.iter(world).filter(|(owner, _, _, _, state, _)| {
+                    owner.0 == player_id && Structure::is_built(**state)
+                })
+            {
+                totals.0 = totals.0.saturating_add(1);
+                if *subclass == Subclass::Wall {
+                    totals.1 = totals.1.saturating_add(1);
+                }
+                if template.0 == "Stockade" {
+                    totals.2 = totals.2.saturating_add(1);
+                    if *position == PREPARATION_STOCKADE_ANCHOR {
+                        totals.3.push(PreparationStructureFingerprint {
+                            template: template.0.clone(),
+                            subclass: subclass.to_string(),
+                            position: [position.x, position.y],
+                            state: Obj::state_to_str(*state),
+                            hp: stats.hp,
+                            base_hp: stats.base_hp,
+                        });
+                    }
+                }
+            }
+            totals
+        };
+        declared_anchor_stockades.sort_by(|left, right| {
+            left.template
+                .cmp(&right.template)
+                .then(left.position.cmp(&right.position))
+                .then(left.state.cmp(&right.state))
+                .then(left.hp.cmp(&right.hp))
+                .then(left.base_hp.cmp(&right.base_hp))
+        });
+        let mut heroes = world.query_filtered::<(&PlayerId, &Inventory), With<SubclassHero>>();
+        let (_, inventory) = heroes
+            .iter(world)
+            .find(|(owner, _)| owner.0 == player_id)
+            .ok_or_else(|| "missing hero inventory for fixture fingerprint".to_string())?;
+        let hide_wraps = inventory
+            .items
+            .iter()
+            .filter(|item| item.name == "Hide Wraps")
+            .map(|item| item.quantity)
+            .sum();
+        let mut hide_wraps_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.name == "Hide Wraps")
+            .map(PreparationInventoryFingerprint::from_item)
+            .collect::<Vec<_>>();
+        hide_wraps_items.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.class.cmp(&right.class))
+                .then(left.subclass.cmp(&right.subclass))
+                .then(left.slot.cmp(&right.slot))
+                .then(left.quantity.cmp(&right.quantity))
+                .then(left.equipped.cmp(&right.equipped))
+        });
+        let mut tattered_shirt_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.name == "Tattered Shirt")
+            .map(PreparationInventoryFingerprint::from_item)
+            .collect::<Vec<_>>();
+        tattered_shirt_items.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.class.cmp(&right.class))
+                .then(left.subclass.cmp(&right.subclass))
+                .then(left.slot.cmp(&right.slot))
+                .then(left.quantity.cmp(&right.quantity))
+                .then(left.equipped.cmp(&right.equipped))
+        });
+        let crude_bandages = inventory
+            .items
+            .iter()
+            .filter(|item| item.name == "Crude Bandage")
+            .map(|item| item.quantity)
+            .sum();
+        let mut crude_bandage_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.name == "Crude Bandage")
+            .map(PreparationInventoryFingerprint::from_item)
+            .collect::<Vec<_>>();
+        crude_bandage_items.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.class.cmp(&right.class))
+                .then(left.subclass.cmp(&right.subclass))
+                .then(left.slot.cmp(&right.slot))
+                .then(left.quantity.cmp(&right.quantity))
+                .then(left.equipped.cmp(&right.equipped))
+        });
+        let other_healing_items = inventory
+            .items
+            .iter()
+            .filter(|item| {
+                item.name != "Crude Bandage"
+                    && (matches!(item.attrs.get(&AttrKey::Healing), Some(AttrVal::Num(value)) if *value > 0.0)
+                        || (item.class == "Medical" && item.subclass == "Bandage"))
+            })
+            .map(|item| item.quantity)
+            .sum();
+        Ok(PreparationFixtureState {
+            completed_structures,
+            completed_wall_segments,
+            completed_stockades,
+            declared_anchor_stockades,
+            hide_wraps,
+            hide_wraps_equipped: inventory
+                .items
+                .iter()
+                .any(|item| item.name == "Hide Wraps" && item.equipped),
+            hide_wraps_items,
+            tattered_shirt_items,
+            crude_bandages,
+            crude_bandage_items,
+            other_healing_items,
+        })
+    }
+
+    fn preparation_common_launch_fingerprint(
+        &mut self,
+        comparison: PreparationComparison,
+    ) -> Result<PreparationCommonLaunchFingerprint, String> {
+        let player_id = self.player_id;
+        let world_tick = self.game_tick();
+        let world = self.app.world_mut();
+        let (
+            hero_class,
+            hero_template,
+            hero_position,
+            hero_hp,
+            hero_base_hp,
+            hero_base_defence,
+            hero_state,
+            mut normalized_inventory,
+        ) = {
+            let mut heroes = world.query_filtered::<(
+                &PlayerId,
+                &HeroClass,
+                &Template,
+                &Position,
+                &Stats,
+                &State,
+                &Inventory,
+            ), With<SubclassHero>>();
+            let (_, hero_class, template, position, stats, state, inventory) = heroes
+                .iter(world)
+                .find(|(owner, ..)| owner.0 == player_id)
+                .ok_or_else(|| "missing hero for common launch fingerprint".to_string())?;
+            let inventory = inventory
+                .items
+                .iter()
+                .map(PreparationInventoryFingerprint::from_item)
+                // Normalize only the comparison's declared artifact. Unrelated
+                // chest-slot and healing inventory remains in the fingerprint.
+                .filter_map(|item| normalize_declared_inventory_artifact(comparison, item))
+                .collect::<Vec<_>>();
+            (
+                hero_class.to_str().to_string(),
+                template.0.clone(),
+                [position.x, position.y],
+                stats.hp,
+                stats.base_hp,
+                stats.base_def,
+                Obj::state_to_str(*state),
+                inventory,
+            )
+        };
+        normalized_inventory.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then(left.class.cmp(&right.class))
+                .then(left.subclass.cmp(&right.subclass))
+        });
+
+        let mut normalized_structures = {
+            let mut structures = world.query_filtered::<
+                (&PlayerId, &Template, &Subclass, &Position, &State, &Stats),
+                With<ClassStructure>,
+            >();
+            structures
+                .iter(world)
+                .filter(|(owner, ..)| owner.0 == player_id)
+                .map(|(_, template, subclass, position, state, stats)| {
+                    PreparationStructureFingerprint {
+                        template: template.0.clone(),
+                        subclass: subclass.to_string(),
+                        position: [position.x, position.y],
+                        state: Obj::state_to_str(*state),
+                        hp: stats.hp,
+                        base_hp: stats.base_hp,
+                    }
+                })
+                // Only the declared Stockade at the fixed treatment anchor is
+                // normalized away. Every other Stockade remains comparable.
+                .filter(|structure| !is_declared_stockade_artifact(comparison, structure))
+                .collect::<Vec<_>>()
+        };
+        normalized_structures.sort_by(|left, right| {
+            left.template
+                .cmp(&right.template)
+                .then(left.position.cmp(&right.position))
+        });
+
+        let non_crisis_living_hostiles = {
+            let mut hostiles = world.query_filtered::<
+                (&PlayerId, &State, Option<&CrisisAssaultUnit>),
+                With<SubclassNPC>,
+            >();
+            hostiles
+                .iter(world)
+                .filter(|(owner, state, assault)| {
+                    owner.is_npc() && state.is_alive() && assault.is_none()
+                })
+                .count() as i32
+        };
+        let mut assault_units = {
+            let mut units =
+                world.query::<(&Template, &Position, &Stats, &State, &CrisisAssaultUnit)>();
+            units
+                .iter(world)
+                .filter(|(_, _, _, state, assault)| {
+                    assault.owner_player_id == player_id && state.is_alive()
+                })
+                .map(
+                    |(template, position, stats, _, _)| PreparationAssaultUnitFingerprint {
+                        template: template.0.clone(),
+                        position: [position.x, position.y],
+                        hp: stats.hp,
+                        base_hp: stats.base_hp,
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        assault_units.sort_by(|left, right| {
+            left.template
+                .cmp(&right.template)
+                .then(left.position.cmp(&right.position))
+        });
+        let crisis = world
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .cloned()
+            .ok_or_else(|| "missing crisis for common launch fingerprint".to_string())?;
+        Ok(PreparationCommonLaunchFingerprint {
+            start_location: PREPARATION_PAIR_START_LOCATION.to_string(),
+            world_tick,
+            hero_class,
+            hero_template,
+            hero_position,
+            hero_hp,
+            hero_base_hp,
+            hero_base_defence,
+            hero_state,
+            crisis_phase: crisis_phase_name(crisis.phase).to_string(),
+            crisis_pressure: crisis.pressure,
+            crisis_online_active_ticks: crisis.online_active_ticks,
+            crisis_phase_online_ticks: crisis.phase_online_ticks,
+            crisis_assault_started_tick: crisis.assault_started_tick,
+            non_crisis_living_hostiles,
+            normalized_inventory,
+            normalized_structures,
+            assault_units,
+        })
     }
 
     pub fn is_player_connected(&self, player_id: i32) -> bool {
@@ -9006,5 +10019,358 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(after_inventory_signature, expected_inventory_signature);
+    }
+
+    #[test]
+    fn checkpoint3_prelaunch_sample_captures_ready_action_between_periodic_samples() {
+        use crate::game::is_usable_crisis_healing_item;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "PrelaunchPreparationSampleBot");
+        game.set_sanctuary_at_base(3);
+        game.set_crisis_balance_sample_interval(Some(600));
+
+        // Remove any starting heal before the Ready baseline so the one item
+        // added below is the only positive preparation delta under test.
+        {
+            let world = game.app.world_mut();
+            let mut heroes =
+                world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
+            let (_, mut inventory) = heroes
+                .iter_mut(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .expect("headless hero inventory");
+            inventory
+                .items
+                .retain(|item| !is_usable_crisis_healing_item(item));
+        }
+
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        game.app.world_mut().resource_mut::<GameTick>().0 = preferred_tick - 2;
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().expect("ready crisis").phase,
+            CrisisPhase::AssaultReady
+        );
+        assert_eq!(
+            game.crisis_balance_telemetry()
+                .preparation_actions
+                .healing_items_acquired,
+            0,
+            "the first Ready observation establishes the periodic baseline"
+        );
+
+        // This acquisition happens one tick after the prior sample, far short
+        // of the 600-tick interval. The successful launch boundary must close
+        // the final Ready interval before the phase changes to AssaultActive.
+        {
+            let world = game.app.world_mut();
+            let templates = world.resource::<Templates>().item_templates.clone();
+            let bandage_id = world.resource_mut::<Ids>().new_item_id();
+            let mut heroes =
+                world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
+            let (_, mut inventory) = heroes
+                .iter_mut(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .expect("headless hero inventory");
+            inventory.new(bandage_id, "Crude Bandage".to_string(), 1, &templates);
+        }
+
+        game.tick(1);
+        let launched = game.settlement_crisis().expect("launched crisis");
+        assert_eq!(launched.phase, CrisisPhase::AssaultActive);
+        let launch_tick = launched.assault_started_tick.expect("launch tick");
+        let actions = game.crisis_balance_telemetry().preparation_actions;
+        assert_eq!(actions.healing_items_acquired, 1);
+        assert_eq!(actions.healing_items_carried_at_launch, 1);
+        assert_eq!(actions.first_preparation_action_tick, Some(launch_tick));
+        assert!(actions
+            .meaningful_preparation_categories
+            .contains(&"healing".to_string()));
+
+        game.tick(1);
+        assert_eq!(
+            game.crisis_balance_telemetry()
+                .preparation_actions
+                .healing_items_acquired,
+            1,
+            "the following Active sample must not recount the Ready action"
+        );
+    }
+
+    #[test]
+    fn preparation_pair_comparison_labels_are_stable() {
+        let labels = PreparationComparison::ALL
+            .into_iter()
+            .map(PreparationComparison::label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "existing_walls",
+                "equipment_prepared",
+                "healing_prepared",
+                "combined_preparation",
+            ]
+        );
+        for comparison in PreparationComparison::ALL {
+            assert_eq!(
+                PreparationComparison::from_label(comparison.label()),
+                Some(comparison)
+            );
+        }
+    }
+
+    fn valid_preparation_test_launches(
+        comparison: PreparationComparison,
+    ) -> (PreparationPairLaunch, PreparationPairLaunch) {
+        let control = PreparationPairLaunch {
+            leg: PreparationPairLeg::Control,
+            geometry: Vec::new(),
+            common_fingerprint: PreparationCommonLaunchFingerprint::default(),
+            fixture: PreparationFixtureState {
+                completed_structures: 2,
+                hide_wraps: 1,
+                hide_wraps_items: vec![expected_hide_wraps(false)],
+                tattered_shirt_items: vec![expected_tattered_shirt(true)],
+                ..PreparationFixtureState::default()
+            },
+        };
+        let treatment = PreparationPairLaunch {
+            leg: PreparationPairLeg::Treatment,
+            geometry: Vec::new(),
+            common_fingerprint: control.common_fingerprint.clone(),
+            fixture: PreparationFixtureState {
+                completed_structures: 2 + i32::from(comparison.includes_wall()),
+                completed_wall_segments: i32::from(comparison.includes_wall()),
+                completed_stockades: i32::from(comparison.includes_wall()),
+                declared_anchor_stockades: comparison
+                    .includes_wall()
+                    .then(expected_preparation_stockade)
+                    .into_iter()
+                    .collect(),
+                hide_wraps: 1,
+                hide_wraps_equipped: comparison.includes_equipment(),
+                hide_wraps_items: vec![expected_hide_wraps(comparison.includes_equipment())],
+                tattered_shirt_items: vec![expected_tattered_shirt(
+                    !comparison.includes_equipment(),
+                )],
+                crude_bandages: i32::from(comparison.includes_healing()),
+                crude_bandage_items: comparison
+                    .includes_healing()
+                    .then(expected_crude_bandage)
+                    .into_iter()
+                    .collect(),
+                ..PreparationFixtureState::default()
+            },
+        };
+        (control, treatment)
+    }
+
+    #[test]
+    fn preparation_pair_validation_accepts_only_declared_fixture_delta() {
+        let (control, treatment) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .is_ok());
+
+        let mut drifted = treatment.clone();
+        drifted.common_fingerprint.world_tick = 1;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &drifted,
+        )
+        .unwrap_err()
+        .contains("common launch fingerprint mismatch"));
+
+        let mut undeclared_bandage = treatment;
+        undeclared_bandage.fixture.crude_bandages = 1;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &undeclared_bandage,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+    }
+
+    #[test]
+    fn preparation_pair_normalization_erases_only_comparison_artifacts() {
+        let other_chest = PreparationInventoryFingerprint {
+            name: "Copper Cuirass".to_string(),
+            class: "Armor".to_string(),
+            subclass: "Chest".to_string(),
+            slot: Some("Chest".to_string()),
+            quantity: 1,
+            equipped: true,
+        };
+        assert_eq!(
+            normalize_declared_inventory_artifact(
+                PreparationComparison::EquipmentPrepared,
+                other_chest.clone(),
+            ),
+            Some(other_chest)
+        );
+        assert_eq!(
+            normalize_declared_inventory_artifact(
+                PreparationComparison::EquipmentPrepared,
+                expected_hide_wraps(true),
+            ),
+            Some(expected_hide_wraps(false))
+        );
+        assert_eq!(
+            normalize_declared_inventory_artifact(
+                PreparationComparison::EquipmentPrepared,
+                expected_tattered_shirt(false),
+            ),
+            Some(expected_tattered_shirt(true))
+        );
+
+        let other_healing = PreparationInventoryFingerprint {
+            name: "Herbal Poultice".to_string(),
+            class: "Potion".to_string(),
+            subclass: "Health".to_string(),
+            slot: None,
+            quantity: 1,
+            equipped: false,
+        };
+        assert_eq!(
+            normalize_declared_inventory_artifact(
+                PreparationComparison::HealingPrepared,
+                other_healing.clone(),
+            ),
+            Some(other_healing)
+        );
+        assert_eq!(
+            normalize_declared_inventory_artifact(
+                PreparationComparison::HealingPrepared,
+                expected_crude_bandage(),
+            ),
+            None
+        );
+
+        let stockade = expected_preparation_stockade();
+        assert!(is_declared_stockade_artifact(
+            PreparationComparison::ExistingWalls,
+            &stockade,
+        ));
+        assert!(!is_declared_stockade_artifact(
+            PreparationComparison::EquipmentPrepared,
+            &stockade,
+        ));
+        let mut other_stockade = stockade;
+        other_stockade.position[0] -= 1;
+        assert!(!is_declared_stockade_artifact(
+            PreparationComparison::ExistingWalls,
+            &other_stockade,
+        ));
+    }
+
+    #[test]
+    fn preparation_pair_validation_rejects_undeclared_inventory_drift() {
+        let (control, mut treatment) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        treatment
+            .common_fingerprint
+            .normalized_inventory
+            .push(PreparationInventoryFingerprint {
+                name: "Copper Cuirass".to_string(),
+                class: "Armor".to_string(),
+                subclass: "Chest".to_string(),
+                slot: Some("Chest".to_string()),
+                quantity: 1,
+                equipped: true,
+            });
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .unwrap_err()
+        .contains("common launch fingerprint mismatch"));
+
+        let (control, mut treatment) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        treatment.fixture.hide_wraps_items[0].class = "Clothing".to_string();
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+
+        let (control, mut treatment) =
+            valid_preparation_test_launches(PreparationComparison::HealingPrepared);
+        treatment.fixture.crude_bandage_items[0].subclass = "Health".to_string();
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::HealingPrepared,
+            &control,
+            &treatment,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+    }
+
+    #[test]
+    fn preparation_pair_validation_rejects_stockade_anchor_health_state_and_extra_drift() {
+        let (control, treatment) =
+            valid_preparation_test_launches(PreparationComparison::ExistingWalls);
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &treatment,
+        )
+        .is_ok());
+
+        let mut wrong_anchor = treatment.clone();
+        wrong_anchor.fixture.declared_anchor_stockades[0].position[0] -= 1;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &wrong_anchor,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+
+        let mut damaged = treatment.clone();
+        damaged.fixture.declared_anchor_stockades[0].hp -= 1;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &damaged,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+
+        let mut unfinished = treatment.clone();
+        unfinished.fixture.declared_anchor_stockades[0].state = "founded".to_string();
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &unfinished,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+
+        let mut extra_stockade = treatment;
+        let mut undeclared = expected_preparation_stockade();
+        undeclared.position[0] -= 1;
+        extra_stockade
+            .common_fingerprint
+            .normalized_structures
+            .push(undeclared);
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &extra_stockade,
+        )
+        .unwrap_err()
+        .contains("common launch fingerprint mismatch"));
     }
 }

@@ -472,6 +472,38 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       marginTop: '5px',
       marginBottom: 0,
     };
+    const preparationSectionStyle: React.CSSProperties = {
+      borderTop: '1px solid rgba(255,255,255,0.14)',
+      marginTop: '7px',
+      paddingTop: '6px',
+    };
+    const preparationHeadingStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      fontWeight: 'bold',
+      marginBottom: '4px',
+    };
+    const preparationRowStyle: React.CSSProperties = {
+      padding: '4px 0',
+      borderTop: '1px solid rgba(255,255,255,0.07)',
+    };
+    const preparationRowHeaderStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      gap: '8px',
+      color: '#e2dacb',
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      fontWeight: 'bold',
+      lineHeight: 1.25,
+    };
+    const preparationStateColor = (state: string) => {
+      if (state === 'ready') return '#8fbf88';
+      if (state === 'needs_attention') return '#f2d27a';
+      return '#a9adb1';
+    };
 
     return (
       <section
@@ -523,6 +555,31 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             <span>Minimum warning</span>
             <span>{crisis.preparationLabel}</span>
           </div>}
+
+        {crisis.preparationOptions.length > 0 &&
+          <section
+            style={preparationSectionStyle}
+            aria-labelledby="personal-crisis-preparation-title"
+          >
+            <div
+              id="personal-crisis-preparation-title"
+              style={preparationHeadingStyle}
+            >
+              Prepare your settlement
+            </div>
+            {crisis.preparationOptions.map((option) =>
+              <div key={option.id} style={preparationRowStyle}>
+                <div style={preparationRowHeaderStyle}>
+                  <span>{option.label}</span>
+                  <span style={{ color: preparationStateColor(option.state) }}>
+                    {option.stateLabel}
+                  </span>
+                </div>
+                {option.detail && <div style={labelStyle}>{option.detail}</div>}
+                {option.actionHint &&
+                  <div style={labelStyle}><strong>Action:</strong> {option.actionHint}</div>}
+              </div>)}
+          </section>}
 
         {crisis.assaultActive &&
           <div style={statusRowStyle}>

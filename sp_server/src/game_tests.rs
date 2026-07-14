@@ -2872,6 +2872,27 @@ fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
     // scenario labels or mutate gameplay state to classify these actions.
     *app.world_mut().get_mut::<State>(foundation).unwrap() = State::None;
     app.world_mut().get_mut::<Stats>(damaged_wall).unwrap().hp = 20;
+    {
+        let mut inventory = app.world_mut().get_mut::<Inventory>(hero).unwrap();
+        inventory.items.push(checkpoint3_guidance_item(
+            7_705,
+            hero_id,
+            "Crude Bandage",
+            item::MEDICAL,
+            "Bandage",
+            false,
+            None,
+        ));
+        inventory.items.push(checkpoint3_guidance_item(
+            7_706,
+            hero_id,
+            "Training Bow",
+            WEAPON,
+            "Bow",
+            true,
+            None,
+        ));
+    }
     app.world_mut()
         .get_mut::<Monolith>(monolith)
         .unwrap()
@@ -2905,12 +2926,51 @@ fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
     assert_eq!(actions.structures_built, 1);
     assert_eq!(actions.walls_built, 1);
     assert_eq!(actions.structures_repaired, 1);
+    assert_eq!(actions.repairs_completed, 1);
+    assert_eq!(actions.defensive_structures_completed, 1);
+    assert_eq!(actions.equipment_changes, 1);
+    assert_eq!(actions.healing_items_acquired, 1);
     assert_eq!(actions.villagers_recruited, 1);
     assert_eq!(actions.villager_assignments_changed, 1);
     assert_eq!(actions.sanctuary_upgrades, 1);
+    assert_eq!(actions.first_preparation_action_tick, Some(110));
+    assert_eq!(actions.meaningful_preparation_category_count, 6);
+    assert_eq!(
+        actions.meaningful_preparation_categories,
+        [
+            "defenses",
+            "equipment",
+            "healing",
+            "repair",
+            "sanctuary",
+            "villager_support",
+        ]
+    );
     assert_eq!(actions.online_ticks_near_settlement, 10);
     assert_eq!(actions.online_ticks_away_from_settlement, 0);
     assert!(actions.performed_preparation_action);
+
+    // Re-observing identical authoritative state must not inflate any action
+    // or meaningful-category count.
+    app.world_mut().resource_mut::<GameTick>().0 = 111;
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .online_active_ticks = 111;
+    app.update();
+    {
+        let telemetry = app.world().resource::<CrisisBalanceTelemetryState>();
+        let actions = &telemetry.get(&player_id).unwrap().preparation_actions;
+        assert_eq!(actions.structures_repaired, 1);
+        assert_eq!(actions.defensive_structures_completed, 1);
+        assert_eq!(actions.equipment_changes, 1);
+        assert_eq!(actions.healing_items_acquired, 1);
+        assert_eq!(actions.villagers_recruited, 1);
+        assert_eq!(actions.villager_assignments_changed, 1);
+        assert_eq!(actions.sanctuary_upgrades, 1);
+        assert_eq!(actions.meaningful_preparation_category_count, 6);
+    }
 
     // Returning after an away Signs warning is observable even before the
     // formal preparation phases. This must not be hidden behind action-count
@@ -2932,6 +2992,19 @@ fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
     app.update();
 
     *app.world_mut().get_mut::<Position>(hero).unwrap() = position;
+    app.world_mut()
+        .get_mut::<Inventory>(hero)
+        .unwrap()
+        .items
+        .push(checkpoint3_guidance_item(
+            7_707,
+            hero_id,
+            "Spare Spear",
+            WEAPON,
+            "Spear",
+            true,
+            None,
+        ));
     app.world_mut().resource_mut::<GameTick>().0 = 130;
     {
         let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
@@ -2948,6 +3021,56 @@ fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
             .preparation_actions
             .returned_to_settlement_after_warning
     );
+    let telemetry = app.world().resource::<CrisisBalanceTelemetryState>();
+    let actions = &telemetry.get(&player_id).unwrap().preparation_actions;
+    assert_eq!(
+        actions.equipment_changes, 1,
+        "equipment changes outside Preparing/AssaultReady must be ignored"
+    );
+    assert_eq!(actions.meaningful_preparation_category_count, 6);
+
+    // Establish an AssaultReady sample, then mutate equipment on the sample
+    // that first observes AssaultActive. Launch readiness is a launch snapshot,
+    // but the Active-side mutation must not be backdated into preparation.
+    app.world_mut().resource_mut::<GameTick>().0 = 140;
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&player_id).unwrap();
+        crisis.phase = CrisisPhase::AssaultReady;
+        crisis.online_active_ticks = 140;
+    }
+    app.update();
+
+    app.world_mut()
+        .get_mut::<Inventory>(hero)
+        .unwrap()
+        .items
+        .push(checkpoint3_guidance_item(
+            7_708,
+            hero_id,
+            "Launch-tick Axe",
+            WEAPON,
+            "Axe",
+            true,
+            None,
+        ));
+    app.world_mut().resource_mut::<GameTick>().0 = 150;
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&player_id).unwrap();
+        crisis.phase = CrisisPhase::AssaultActive;
+        crisis.online_active_ticks = 150;
+    }
+    app.update();
+
+    let telemetry = app.world().resource::<CrisisBalanceTelemetryState>();
+    let actions = &telemetry.get(&player_id).unwrap().preparation_actions;
+    assert_eq!(
+        actions.equipment_changes, 1,
+        "an Active-boundary state delta is not a preparation action"
+    );
+    assert_eq!(actions.healing_items_carried_at_launch, 1);
+    assert_eq!(actions.combat_capable_villagers_at_launch, 1);
 }
 
 #[test]
@@ -3835,6 +3958,374 @@ fn checkpoint4_crisis(phase: CrisisPhase, pressure: i32) -> SettlementCrisis {
         CrisisPhase::Preparing | CrisisPhase::AssaultReady | CrisisPhase::AssaultActive
     );
     crisis
+}
+
+fn checkpoint3_guidance_item(
+    id: i32,
+    owner: i32,
+    name: &str,
+    class: &str,
+    subclass: &str,
+    equipped: bool,
+    healing: Option<f32>,
+) -> Item {
+    let mut item = consumable_item(
+        id,
+        owner,
+        name,
+        class,
+        AttrKey::Healing,
+        healing.unwrap_or(0.0),
+    );
+    item.subclass = subclass.to_string();
+    item.equipped = equipped;
+    if healing.is_none() {
+        item.attrs.clear();
+    }
+    item
+}
+
+fn checkpoint3_guidance_stats(hp: i32, base_hp: i32, base_damage: i32) -> Stats {
+    Stats {
+        hp,
+        stamina: Some(100),
+        mana: None,
+        base_hp,
+        base_stamina: Some(100),
+        base_mana: None,
+        base_def: 0,
+        damage_range: Some(0),
+        base_damage: Some(base_damage),
+        base_speed: Some(10),
+        base_vision: Some(3),
+    }
+}
+
+#[test]
+fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
+    let facts = CrisisPreparationFacts {
+        completed_walls: 2,
+        damaged_walls: 1,
+        living_villagers: 1,
+        combat_capable_villagers: 1,
+        live_hero: true,
+        hero_idle: true,
+        hero_equipped_weapon: Some("Training Bow".to_string()),
+        hero_equipped_armor: 1,
+        hero_carried_healing: 1,
+        ..CrisisPreparationFacts::default()
+    };
+
+    let options = derive_crisis_preparation_options(&facts);
+    assert_eq!(options.len(), 4);
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["defences", "defenders", "equipment", "recovery"]
+    );
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["needs_attention", "ready", "ready", "ready"]
+    );
+    assert!(options.iter().all(|option| matches!(
+        option.state.as_str(),
+        "ready" | "needs_attention" | "unavailable"
+    )));
+
+    let buildable = CrisisPreparationFacts {
+        live_hero: true,
+        hero_idle: true,
+        stockade_plan_available: true,
+        stockade_log_units_carried: 3,
+        can_start_stockade: true,
+        ..CrisisPreparationFacts::default()
+    };
+    let buildable = derive_crisis_preparation_options(&buildable);
+    assert_eq!(buildable[0].state, "needs_attention");
+    assert!(buildable[0].detail.contains("Stockade plan"));
+
+    let occupied_foundation_tile = CrisisPreparationFacts {
+        live_hero: true,
+        hero_idle: true,
+        current_tile_wall_present: true,
+        stockade_plan_available: true,
+        stockade_log_units_carried: 3,
+        can_start_stockade: false,
+        ..CrisisPreparationFacts::default()
+    };
+    let occupied_foundation_tile = derive_crisis_preparation_options(&occupied_foundation_tile);
+    assert_eq!(occupied_foundation_tile[0].state, "unavailable");
+    assert!(occupied_foundation_tile[0]
+        .action_hint
+        .contains("without an existing wall"));
+}
+
+#[test]
+fn checkpoint3_recovery_uses_actual_usable_item_semantics() {
+    let bandage = checkpoint3_guidance_item(
+        1,
+        10,
+        "Crude Bandage",
+        item::MEDICAL,
+        "Bandage",
+        false,
+        None,
+    );
+    let potion = checkpoint3_guidance_item(
+        2,
+        10,
+        "Health Potion",
+        item::POTION,
+        item::HEALTH,
+        false,
+        Some(10.0),
+    );
+    let zero_heal_potion = checkpoint3_guidance_item(
+        3,
+        10,
+        "Empty Potion",
+        item::POTION,
+        item::HEALTH,
+        false,
+        Some(0.0),
+    );
+    let healing_food = checkpoint3_guidance_item(4, 10, "Stew", FOOD, "Stew", false, Some(10.0));
+
+    assert!(is_usable_crisis_healing_item(&bandage));
+    assert!(is_usable_crisis_healing_item(&potion));
+    assert!(!is_usable_crisis_healing_item(&zero_heal_potion));
+    assert!(!is_usable_crisis_healing_item(&healing_food));
+
+    let mut empty_bandage = bandage;
+    empty_bandage.quantity = 0;
+    assert!(!is_usable_crisis_healing_item(&empty_bandage));
+}
+
+#[test]
+fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
+    let facts = CrisisPreparationFacts {
+        live_hero: true,
+        hero_carried_healing: 1,
+        ..CrisisPreparationFacts::default()
+    };
+    assert!(
+        build_crisis_status_with_preparation(None, Some(&facts))
+            .preparation_options
+            .is_none(),
+        "a no-crisis clear snapshot must never expose preparation rows"
+    );
+    for phase in [
+        CrisisPhase::Dormant,
+        CrisisPhase::Signs,
+        CrisisPhase::Pressure,
+        CrisisPhase::AssaultActive,
+        CrisisPhase::Resolved,
+    ] {
+        let crisis = checkpoint4_crisis(phase, 70);
+        assert!(
+            build_crisis_status_with_preparation(Some(&crisis), Some(&facts))
+                .preparation_options
+                .is_none()
+        );
+    }
+
+    for phase in [CrisisPhase::Preparing, CrisisPhase::AssaultReady] {
+        let crisis = checkpoint4_crisis(phase, 70);
+        let crisis_before = crisis.clone();
+        let facts_before = facts.clone();
+        let status = build_crisis_status_with_preparation(Some(&crisis), Some(&facts));
+        assert_eq!(status.preparation_options.as_ref().map(Vec::len), Some(4));
+        assert_eq!(crisis, crisis_before);
+        assert_eq!(facts, facts_before);
+    }
+
+    let crisis = checkpoint4_crisis(CrisisPhase::Preparing, 70);
+    let baseline = build_crisis_status_with_preparation(Some(&crisis), Some(&facts));
+    assert!(
+        !crisis_status_changed(&baseline, &baseline),
+        "unchanged preparation rows must retain packet deduplication"
+    );
+    let mut changed_facts = facts;
+    changed_facts.hero_carried_healing = 0;
+    let changed = build_crisis_status_with_preparation(Some(&crisis), Some(&changed_facts));
+    assert!(crisis_status_changed(&baseline, &changed));
+}
+
+#[derive(Resource)]
+struct Checkpoint3GuidanceOwner(i32);
+
+#[derive(Resource, Default)]
+struct Checkpoint3CapturedFacts(Option<CrisisPreparationFacts>);
+
+fn checkpoint3_capture_preparation_facts(
+    owner: Res<Checkpoint3GuidanceOwner>,
+    collector: CrisisPreparationCollector,
+    mut captured: ResMut<Checkpoint3CapturedFacts>,
+) {
+    captured.0 = Some(collector.collect(owner.0));
+}
+
+#[test]
+fn checkpoint3_preparation_collector_is_owner_exact_and_non_mutating() {
+    let player_id = 7;
+    let mut app = App::new();
+    app.insert_resource(Checkpoint3GuidanceOwner(player_id));
+    app.insert_resource(Checkpoint3CapturedFacts::default());
+    let mut ids = Ids::default();
+    ids.new_hero(10, player_id);
+    ids.new_hero(20, 8);
+    app.insert_resource(ids);
+    app.add_systems(Update, checkpoint3_capture_preparation_facts);
+
+    let weapon = checkpoint3_guidance_item(10, 10, "Training Bow", WEAPON, "Bow", true, None);
+    let bandage = checkpoint3_guidance_item(
+        11,
+        10,
+        "Crude Bandage",
+        item::MEDICAL,
+        "Bandage",
+        false,
+        None,
+    );
+    let healing_food = checkpoint3_guidance_item(12, 10, "Stew", FOOD, "Stew", false, Some(10.0));
+    let hero = app
+        .world_mut()
+        .spawn((
+            PlayerId(player_id),
+            Id(10),
+            Position { x: 5, y: 5 },
+            Template("Novice Ranger".to_string()),
+            State::None,
+            checkpoint3_guidance_stats(100, 100, 0),
+            Inventory {
+                owner: 10,
+                items: vec![weapon, bandage, healing_food],
+            },
+            SubclassHero,
+        ))
+        .id();
+
+    app.world_mut().spawn((
+        PlayerId(player_id),
+        State::None,
+        checkpoint3_guidance_stats(500, 500, 1),
+        Inventory {
+            owner: 11,
+            items: vec![],
+        },
+        SubclassVillager,
+    ));
+    app.world_mut().spawn((
+        PlayerId(player_id),
+        Position { x: 6, y: 5 },
+        Subclass::Wall,
+        State::None,
+        checkpoint3_guidance_stats(10, 20, 0),
+        Inventory {
+            owner: 12,
+            items: vec![],
+        },
+        ClassStructure,
+    ));
+
+    // Other-player facts must not leak into the requested owner's guidance.
+    app.world_mut().spawn((
+        PlayerId(8),
+        State::None,
+        checkpoint3_guidance_stats(500, 500, 1),
+        Inventory {
+            owner: 21,
+            items: vec![],
+        },
+        SubclassVillager,
+    ));
+    app.world_mut().spawn((
+        PlayerId(8),
+        Position { x: 5, y: 5 },
+        Subclass::Wall,
+        State::None,
+        checkpoint3_guidance_stats(200, 200, 0),
+        Inventory {
+            owner: 22,
+            items: vec![],
+        },
+        ClassStructure,
+    ));
+    app.world_mut().spawn((
+        PlayerId(8),
+        Position { x: 5, y: 5 },
+        Subclass::Storage,
+        State::None,
+        checkpoint3_guidance_stats(100, 100, 0),
+        Inventory {
+            owner: 23,
+            items: vec![checkpoint3_guidance_item(
+                20,
+                23,
+                "Health Potion",
+                item::POTION,
+                item::HEALTH,
+                false,
+                Some(50.0),
+            )],
+        },
+        ClassStructure,
+    ));
+
+    let before_hp = app.world().entity(hero).get::<Stats>().unwrap().hp;
+    let before_items = app
+        .world()
+        .entity(hero)
+        .get::<Inventory>()
+        .unwrap()
+        .items
+        .iter()
+        .map(|item| (item.name.clone(), item.quantity, item.equipped))
+        .collect::<Vec<_>>();
+
+    app.update();
+
+    let facts = app
+        .world()
+        .resource::<Checkpoint3CapturedFacts>()
+        .0
+        .as_ref()
+        .unwrap();
+    assert_eq!(facts.completed_walls, 1);
+    assert_eq!(facts.damaged_walls, 1);
+    assert!(
+        facts.current_tile_wall_present,
+        "the placement blocker must include an unfinished or other-player wall on the hero tile"
+    );
+    assert_eq!(facts.living_villagers, 1);
+    assert_eq!(facts.combat_capable_villagers, 1);
+    assert_eq!(facts.hero_equipped_weapon.as_deref(), Some("Training Bow"));
+    assert_eq!(facts.hero_carried_healing, 1, "food must not count");
+    assert_eq!(
+        facts.stored_healing, 0,
+        "other-player storage must not leak"
+    );
+
+    assert_eq!(
+        app.world().entity(hero).get::<Stats>().unwrap().hp,
+        before_hp
+    );
+    assert_eq!(
+        app.world()
+            .entity(hero)
+            .get::<Inventory>()
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| (item.name.clone(), item.quantity, item.equipped))
+            .collect::<Vec<_>>(),
+        before_items
+    );
 }
 
 #[test]

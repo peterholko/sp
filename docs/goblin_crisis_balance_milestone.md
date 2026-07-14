@@ -4,15 +4,20 @@
 
 Checkpoint 1, **Balance Audit and Telemetry Baseline**, and Checkpoint 2,
 **Pressure and Phase Pacing**, are implementation- and validation-complete.
-Checkpoint 1 added observation, controlled headless scenarios, and reporting;
-Checkpoint 2 used that evidence to change only the two late phase thresholds
-and clarify warning semantics.
+Checkpoint 3's guidance, telemetry, desktop presentation, observed-launch-field
+comparison harness, and 20-pair evidence artifact are implemented. No gameplay
+value changed. Checkpoint 3 does **not** meet its formal balance acceptance:
+none of four tested preparation paths improved a directional outcome, prepared
+solo did not outperform control, and deterministic same-seed replay is not
+available in the current entropy-backed architecture.
 
 > Checkpoint 1 measures the current goblin crisis and intentionally does not make material balance changes.
 
 The bounded runtime matrices and validation records below contain the completed
-Checkpoint 1 and 2 evidence. The milestone itself is not complete: Checkpoints
-3 and 4 remain deferred.
+Checkpoint 1 and 2 evidence. The detailed Checkpoint 3 proposal, implementation,
+raw outcomes, validation record, and limitations are in
+`docs/goblin_crisis_balance_checkpoint3.md`. The milestone itself is not
+complete: Checkpoint 3 balance acceptance and Checkpoint 4 remain outstanding.
 
 ## Milestone goal and checkpoint plan
 
@@ -859,19 +864,81 @@ in `docs/goblin_crisis_balance_checkpoint2.md`.
 * Adjacent-settlement balance remains outside the matrix. Focused crisis
   ownership/isolation tests remain the evidence.
 
-## Work deferred to Checkpoint 3
+## Checkpoint 3 implementation and evidence
 
-Checkpoint 3 owns preparation gameplay and defensive value. Based on the now
-reachable warning path, it should use existing resources and systems to measure
-and improve return-to-settlement, equip, craft, repair, stock, wall, sanctuary,
-healing, and defender choices. It should make optional assistance reliable
-without requiring multiplayer and preserve solo completion.
+Checkpoint 3 retains the exact Checkpoint 2 pressure and phase controls and
+adds no combat/economy value. The flat v1 crisis snapshot now has an additive,
+optional `preparation_options` field with at most four fixed-order,
+server-authoritative rows: Defences, Defenders, Equipment, and Recovery. Each
+row reports `ready`, `needs_attention`, or `unavailable` with factual detail and
+an action hint. It is owner exact, read only, present only in Preparing and
+AssaultReady, deduplicated by the existing successful-delivery cache, and shown
+inside the desktop crisis card. Active assault and all other phases omit it.
 
-Checkpoint 3 must not silently retune these thresholds or implement final wave/
-class combat work without new evidence. Assault composition/stats and final
-class validation remain Checkpoint 4.
+Opt-in telemetry now records deduplicated repair/build starts and completions,
+healing carried/used before launch, combat-capable villagers at launch, first
+meaningful action tick, and stable distinct action categories. The normal
+headless CSV retains its original 191 columns as an exact prefix and appends ten
+fields. Event hooks and bounded state observations are gated to the two
+preparation phases; they do not change simulation behavior.
 
-No Checkpoint 3 gameplay is implemented here. New enemies, objectives,
+The new `preparation_pair_runner` compares Existing Walls, Equipment Prepared,
+Healing Prepared, and Combined Preparation. It preserves production combat and
+RNG, fixes and validates selected authoritative launch fields and post-launch
+geometry after normalizing only each declared comparison artifact, and also
+validates the exact declared fixture difference. It explicitly reports
+`full_ecs_state_matched: false` and `random_stream_replayed: false`; pair labels
+are not seeds. The generated artifact contains 20 pairs/40 legs, five per
+comparison, with all 20 selected fingerprints valid and no setup failure,
+caught panic, and all 20 producing quantitative deltas. Thirty-eight legs
+ended at True Death; the control/treatment legs of one Healing Prepared Ranger
+pair were retained as unresolved at the 15,000-tick cap.
+
+The result failed the declared preparation-value hypothesis. Thirty-eight legs
+reached two hero deaths/True Death; the other two remained alive with zero
+damage/deaths/kills and timed out unresolved. Every leg defeated zero of three
+attackers and no assault resolved. Each comparison was 0 improved, 5 unchanged, 0
+worsened on directional outcomes. No wall/structure damage or destruction was
+recorded; wall contact was not measured. Nine of ten healing treatments
+consumed their bandage; the unwounded capped Ranger retained it. The small extra
+damage buffer did not affect paired survival, death count, resolution, or
+kills. Warrior (8 pairs), Ranger (8), and Mage (4) demonstrated no benefit.
+These unseeded sequential results are descriptive, not causal.
+
+The affected implementation areas are `sp_server/src/network.rs`, `game.rs`,
+`game_tests.rs`, `player.rs`, `crisis_balance.rs`, `headless.rs`,
+`bin/headless_runner.rs`, and the new `bin/preparation_pair_runner.rs`; the five
+desktop/core TypeScript files named in the Checkpoint 3 report; this milestone
+and the Checkpoint 3 report; and the generated raw pair JSON. Resource,
+crafting, farming, refining, villager, Safe Logout, disconnect, ownership,
+world, map, and production code retain their existing behavior.
+
+The implementation passed formatting, compilation, Clippy, focused guidance,
+telemetry, persistent-crisis, Safe Logout, pacing, runner, and supported
+frontend checks. The exact command record also preserves three limitations: an
+initial broad Rust run had one non-repeatable visibility assertion failure; the
+eight-case Safe Logout runner retained two existing random Windstride Stag
+template panics; and required `npx tsc --noEmit` remains blocked by the
+repository's duplicate Phaser declarations/missing Matter type while the
+focused compile, `--skipLibCheck`, and production webpack build pass. See the
+detailed report for exact counts and reruns.
+
+## Work deferred to Checkpoint 4
+
+Checkpoint 4 must first create and validate useful first-assault outcome range:
+38/40 Checkpoint 3 legs died twice and the other two took zero damage and
+remained unresolved at the cap; every leg killed zero attackers. That result
+prevents walls, equipment, healing, or combined preparation from demonstrating
+meaningful value. It should
+then add wall-contact/core-exposure measurement, reevaluate existing healing
+and equipment magnitude, and validate Warrior, Ranger, and Mage combat
+policy/outcomes. A controlled RNG/replay architecture is required before future
+A/B results can be called deterministic or causal.
+
+Checkpoint 4 must preserve personal ownership, offline rules, Safe Logout,
+ordinary disconnect behavior, cross-player isolation, the 50x50 map, and the
+entire existing resource/production economy. New enemies, objectives,
 resources, buildings, recipes, loot, rewards, villager AI, crisis types,
-regional crises, offline production, persistence, multiplayer scaling,
-cross-world interaction, and larger maps remain out of scope.
+regional crises, offline production, durable restart persistence, multiplayer
+scaling, cross-world interaction, and larger maps remain out of scope unless a
+later explicit milestone authorizes them.

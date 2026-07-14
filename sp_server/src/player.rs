@@ -23,9 +23,9 @@ use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
-    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, DamageRecord, DebugObjs,
-    GameTick, InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
-    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
+    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, CrisisPhase, DamageRecord,
+    DebugObjs, GameTick, InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant,
+    Monolith, MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
     PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
     SettlementCrisisState, SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
 };
@@ -7045,6 +7045,8 @@ fn create_foundation_system(
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<(&Position, &Subclass), With<ClassStructure>>,
     presence: Res<PlayerWorldPresenceState>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -7128,6 +7130,7 @@ fn create_foundation_system(
                 }
 
                 let structure_id = ids.new_obj_id();
+                let structure_subclass = Subclass::from_str(&structure_template.subclass);
 
                 let structure = Obj {
                     id: Id(structure_id),
@@ -7139,7 +7142,7 @@ fn create_foundation_system(
                     name: Name(structure_name.clone()),
                     template: Template(structure_template.template.clone()),
                     class: Class(structure_template.class),
-                    subclass: Subclass::from_str(&structure_template.subclass),
+                    subclass: structure_subclass,
                     state: State::Founded,
                     misc: Misc {
                         image: structure_template.image.clone(),
@@ -7189,6 +7192,24 @@ fn create_foundation_system(
 
                 ids.new_obj(structure_id, *player_id);
                 entity_map.insert(structure_id, structure_entity);
+
+                if matches!(structure_subclass, Subclass::Wall | Subclass::Watchtower)
+                    && matches!(
+                        crisis_state
+                            .as_ref()
+                            .and_then(|state| state.get(player_id))
+                            .map(|crisis| crisis.phase),
+                        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                    )
+                {
+                    if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                        telemetry_state
+                            .entry(*player_id)
+                            .or_default()
+                            .preparation_actions
+                            .record_defensive_structure_started(structure_id, game_tick.0);
+                    }
+                }
 
                 // Create a new object event
                 commands.trigger(NewObj {
@@ -8534,6 +8555,8 @@ fn equip_system(
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     templates: Res<Templates>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
     mut query: Query<(
         &PlayerId,
         &Class,
@@ -8629,6 +8652,9 @@ fn equip_system(
 
                 let mut items_updated: Vec<Item> = Vec::new();
                 let mut items_removed: Vec<i32> = Vec::new();
+                let meaningful_preparation_equip = *status
+                    && !item_to_equip.equipped
+                    && matches!(item_to_equip.class.as_str(), WEAPON | ARMOR);
 
                 let vision_modifier = owner_effects.get_vision_modifier(&templates);
 
@@ -8714,6 +8740,27 @@ fn equip_system(
 
                 if item_to_equip.id != source_item.id {
                     items_updated.push(source_item.clone());
+                }
+
+                if meaningful_preparation_equip
+                    && owner_inventory
+                        .get_by_id(item_to_equip.id)
+                        .is_some_and(|item| item.equipped)
+                    && matches!(
+                        crisis_state
+                            .as_ref()
+                            .and_then(|state| state.get(player_id))
+                            .map(|crisis| crisis.phase),
+                        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                    )
+                {
+                    if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                        telemetry_state
+                            .entry(*player_id)
+                            .or_default()
+                            .preparation_actions
+                            .record_equipment_change(item_to_equip.id, game_tick.0);
+                    }
                 }
 
                 let item_update_packet: ResponsePacket = ResponsePacket::InfoItemsUpdate {
@@ -10106,8 +10153,11 @@ fn order_repair_system(
     mut events: ResMut<PlayerEvents>,
     mut map_events: ResMut<MapEvents>,
     villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    structure_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
     ids: Res<Ids>,
     presence: Res<PlayerWorldPresenceState>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -10150,6 +10200,37 @@ fn order_repair_system(
                 );
 
                 commands.entity(villager.entity).insert(Order::Repair);
+
+                // A repair starts only when this authoritative order has a
+                // currently damaged owner structure to target. The balance
+                // recorder is observation-only and is gated to the two
+                // preparation phases, so ordinary repairs and rejected input
+                // cannot contaminate crisis preparation metrics.
+                if matches!(
+                    crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(player_id))
+                        .map(|crisis| crisis.phase),
+                    Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                ) {
+                    if let Some((_, structure_id, _, _, _)) = structure_query
+                        .iter()
+                        .filter(|(owner, _, _, class, stats)| {
+                            owner.0 == *player_id
+                                && class.is_structure()
+                                && stats.hp < stats.base_hp
+                        })
+                        .min_by_key(|(_, _, pos, _, _)| Map::dist(*villager.pos, **pos))
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(*player_id)
+                                .or_default()
+                                .preparation_actions
+                                .record_repair_started(structure_id.0, game_tick.0);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -11490,7 +11571,7 @@ pub fn is_player(player_id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::Fortified;
+    use crate::game::{Fortified, SettlementCrisis};
     use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence};
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
@@ -11552,6 +11633,127 @@ mod tests {
             owner: 1,
             items: vec![item],
         }
+    }
+
+    #[test]
+    fn checkpoint3_villager_equipment_counts_once_only_during_preparation() {
+        let player_id = 7;
+        let villager_id = 70;
+        let first_item_id = 700;
+        let second_item_id = 701;
+
+        let mut first_weapon = equipped_test_weapon("Training Bow", "Bow", 2, 85);
+        first_weapon.id = first_item_id;
+        first_weapon.owner = villager_id;
+        first_weapon.equipped = false;
+        let mut second_weapon = equipped_test_weapon("Stone Knife", "Dagger", 1, 100);
+        second_weapon.id = second_item_id;
+        second_weapon.owner = villager_id;
+        second_weapon.equipped = false;
+
+        let mut app = App::new();
+        let entity = app
+            .world_mut()
+            .spawn((
+                PlayerId(player_id),
+                Class("Human".to_string()),
+                Template("Human Villager".to_string()),
+                State::None,
+                Inventory {
+                    owner: villager_id,
+                    items: vec![first_weapon, second_weapon],
+                },
+                Effects(HashMap::new()),
+                SubclassVillager,
+            ))
+            .id();
+
+        let mut ids = Ids::default();
+        ids.item = second_item_id;
+        ids.new_obj(villager_id, player_id);
+        let mut crises = SettlementCrisisState::default();
+        crises.insert(
+            player_id,
+            SettlementCrisis {
+                phase: CrisisPhase::Preparing,
+                ..SettlementCrisis::default()
+            },
+        );
+        app.insert_resource(GameTick(100));
+        app.insert_resource(ids);
+        app.insert_resource(PlayerEvents(HashMap::from([(
+            1,
+            PlayerEvent::Equip {
+                player_id,
+                obj_id: villager_id,
+                item_id: first_item_id,
+                status: true,
+            },
+        )])));
+        app.insert_resource(MapEvents::default());
+        app.insert_resource(EntityObjMap(HashMap::from([(villager_id, entity)])));
+        app.insert_resource(Clients::default());
+        app.insert_resource(Templates::from_obj_templates(Vec::new()));
+        app.insert_resource(crises);
+        app.insert_resource(CrisisBalanceTelemetryState::default());
+        app.add_systems(Update, equip_system);
+
+        app.update();
+        {
+            let telemetry = app.world().resource::<CrisisBalanceTelemetryState>();
+            let actions = &telemetry.get(&player_id).unwrap().preparation_actions;
+            assert_eq!(actions.equipment_changes, 1);
+            assert_eq!(actions.meaningful_preparation_category_count, 1);
+            assert_eq!(actions.meaningful_preparation_categories, ["equipment"]);
+        }
+
+        // Repeating the same authoritative equip cannot inflate the action.
+        app.world_mut().resource_mut::<PlayerEvents>().insert(
+            2,
+            PlayerEvent::Equip {
+                player_id,
+                obj_id: villager_id,
+                item_id: first_item_id,
+                status: true,
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<CrisisBalanceTelemetryState>()
+                .get(&player_id)
+                .unwrap()
+                .preparation_actions
+                .equipment_changes,
+            1
+        );
+
+        // A different successful equip after launch still changes ordinary
+        // inventory state, but must not become crisis-preparation telemetry.
+        app.world_mut()
+            .resource_mut::<SettlementCrisisState>()
+            .get_mut(&player_id)
+            .unwrap()
+            .phase = CrisisPhase::AssaultActive;
+        app.world_mut().resource_mut::<PlayerEvents>().insert(
+            3,
+            PlayerEvent::Equip {
+                player_id,
+                obj_id: villager_id,
+                item_id: second_item_id,
+                status: true,
+            },
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<CrisisBalanceTelemetryState>()
+                .get(&player_id)
+                .unwrap()
+                .preparation_actions
+                .equipment_changes,
+            1
+        );
     }
 
     #[test]

@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import {
+  CrisisPreparationOption,
   CrisisStatusPacket,
   CrisisUiState,
   clearCrisisStatus,
+  crisisPreparationOptionsView,
   formatCrisisCountdown,
   crisisPressureView,
   crisisStatusView,
@@ -25,6 +27,19 @@ function status(overrides: Partial<CrisisStatusPacket> = {}): CrisisStatusPacket
   };
 }
 
+function preparationOption(
+  overrides: Partial<CrisisPreparationOption> = {},
+): CrisisPreparationOption {
+  return {
+    id: 'defences',
+    label: 'Defences',
+    state: 'needs_attention',
+    detail: 'Two defensive structures are damaged.',
+    action_hint: 'Repair walls before the raid begins.',
+    ...overrides,
+  };
+}
+
 const initialUiState: CrisisUiState = {
   crisisStatus: null,
   previousCrisisPhase: null,
@@ -41,6 +56,71 @@ const preparing = crisisStatusView(status({
 }));
 assert.equal(preparing?.warning, true, 'preparing exposes its warning');
 assert.equal(preparing?.phaseLabel, 'Preparing');
+assert.deepEqual(preparing?.preparationOptions, [], 'missing additive rows remain compatible');
+
+const preparationRows = [
+  preparationOption(),
+  preparationOption({
+    id: 'defenders',
+    label: 'Defenders',
+    state: 'ready',
+    detail: 'One combat-capable villager is available.',
+    action_hint: 'Keep the defender near the settlement.',
+  }),
+  preparationOption({
+    id: 'equipment',
+    label: 'Equipment',
+    state: 'unavailable',
+    detail: 'No carried armor can be equipped.',
+    action_hint: '',
+  }),
+  preparationOption({
+    id: 'recovery',
+    label: 'Recovery',
+    state: 'needs_attention',
+    detail: 'Healing supplies are stored away from the hero.',
+    action_hint: 'Carry one healing item before the raid.',
+  }),
+  preparationOption({ id: 'fifth', label: 'Fifth option' }),
+];
+const preparedView = crisisStatusView(status({
+  phase: 'preparing',
+  preparation_options: preparationRows,
+}));
+assert.equal(preparedView?.preparationOptions.length, 4, 'preparation rows are capped at four');
+assert.deepEqual(
+  preparedView?.preparationOptions.map((option) => option.stateLabel),
+  ['Needs attention', 'Ready', 'Unavailable', 'Needs attention'],
+  'every stable state has literal text',
+);
+assert.equal(preparedView?.preparationOptions[0].id, 'defences');
+assert.equal(preparedView?.preparationOptions[0].actionHint, 'Repair walls before the raid begins.');
+
+assert.deepEqual(
+  crisisPreparationOptionsView('preparing', [
+    preparationOption({ id: 'duplicate' }),
+    preparationOption({ id: 'duplicate', label: 'Duplicate' }),
+    { ...preparationOption({ id: 'future' }), state: 'future_state' },
+    null,
+    preparationOption({ id: 'outside-bound', label: 'Outside bound' }),
+  ]),
+  [
+    {
+      id: 'duplicate',
+      label: 'Defences',
+      state: 'needs_attention',
+      stateLabel: 'Needs attention',
+      detail: 'Two defensive structures are damaged.',
+      actionHint: 'Repair walls before the raid begins.',
+    },
+  ],
+  'duplicate, unknown, malformed, and out-of-bound rows fail safely',
+);
+assert.deepEqual(
+  crisisPreparationOptionsView('preparing', { malformed: true }),
+  [],
+  'a malformed optional field does not crash',
+);
 
 const ready = crisisStatusView(status({
   phase: 'assault_ready',
@@ -60,6 +140,33 @@ const active = crisisStatusView(status({
 }));
 assert.equal(active?.attackersLabel, '2 / 3');
 assert.equal(active?.disconnectedWarning, 'The assault continues while disconnected.');
+assert.deepEqual(
+  crisisStatusView(status({
+    phase: 'assault_active',
+    assault_active: true,
+    preparation_options: preparationRows,
+  }))?.preparationOptions,
+  [],
+  'active combat hides stale preparation guidance',
+);
+
+assert.equal(
+  crisisStatusView(status({
+    phase: 'assault_ready',
+    preparation_options: [preparationOption()],
+  }))?.preparationOptions.length,
+  1,
+  'AssaultReady retains preparation guidance',
+);
+assert.deepEqual(
+  crisisStatusView(status({
+    phase: 'resolved',
+    resolved: true,
+    preparation_options: preparationRows,
+  }))?.preparationOptions,
+  [],
+  'resolved crises hide preparation guidance',
+);
 
 assert.equal(
   crisisStatusView(status({ phase: 'resolved', resolved: true }))?.tone,

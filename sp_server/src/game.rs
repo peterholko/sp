@@ -62,8 +62,8 @@ use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, SOULSHARD};
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
-    self, send_to_client, send_to_database, BroadcastEvents, CrisisStatusSnapshot, ObjAttr,
-    RefiningItem,
+    self, send_to_client, send_to_database, BroadcastEvents, CrisisPreparationOption,
+    CrisisStatusSnapshot, ObjAttr, RefiningItem,
 };
 use crate::network::{ResponsePacket, StatsData};
 use crate::npc::{NPCPlugin, VisibleTarget};
@@ -759,6 +759,298 @@ struct CrisisStatusDeliveryState {
     observed_phases: HashMap<i32, CrisisPhase>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CrisisPreparationFacts {
+    completed_walls: usize,
+    damaged_walls: usize,
+    current_tile_wall_present: bool,
+    stockade_plan_available: bool,
+    stockade_log_units_carried: usize,
+    can_start_stockade: bool,
+    living_villagers: usize,
+    combat_capable_villagers: usize,
+    villager_held_spare_weapons: usize,
+    actionable_villager_weapons: usize,
+    hero_spare_weapons: usize,
+    live_hero: bool,
+    hero_idle: bool,
+    hero_equipped_weapon: Option<String>,
+    hero_equipped_armor: usize,
+    hero_carried_weapons: usize,
+    hero_carried_armor: usize,
+    hero_carried_healing: usize,
+    stored_weapons: usize,
+    stored_armor: usize,
+    stored_healing: usize,
+    transferable_stored_weapons: usize,
+    transferable_stored_armor: usize,
+    transferable_stored_healing: usize,
+}
+
+#[derive(SystemParam)]
+struct CrisisPreparationCollector<'w, 's> {
+    ids: Option<Res<'w, Ids>>,
+    templates: Option<Res<'w, Templates>>,
+    plans: Option<Res<'w, Plans>>,
+    hero_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+            Option<&'static TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Position,
+            &'static Subclass,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+}
+
+pub(crate) fn is_usable_crisis_healing_item(item: &Item) -> bool {
+    if item.quantity <= 0 {
+        return false;
+    }
+
+    match (item.class.as_str(), item.subclass.as_str()) {
+        // Bandages use a fixed server-side heal and bleed cure rather than a
+        // Healing attribute, so attribute-only detection would omit them.
+        (item::MEDICAL, "Bandage") => true,
+        (item::POTION, item::HEALTH) => matches!(
+            item.attrs.get(&AttrKey::Healing),
+            Some(item::AttrVal::Num(value)) if *value > 0.0
+        ),
+        // Food follows the Eat path. A Healing attribute on food is not a
+        // currently usable crisis heal and must not create a false-ready row.
+        _ => false,
+    }
+}
+
+fn positive_item_units(item: &Item) -> usize {
+    item.quantity.max(0) as usize
+}
+
+fn item_fits_normal_transfer(item: &Item, target_weight: i32, target_capacity: i32) -> bool {
+    let transfer_weight = (item.quantity.max(0) as f32 * item.weight) as i32;
+    item.quantity > 0
+        && target_capacity >= 0
+        && target_weight.saturating_add(transfer_weight) <= target_capacity
+}
+
+impl CrisisPreparationCollector<'_, '_> {
+    fn collect(&self, player_id: i32) -> CrisisPreparationFacts {
+        let mut facts = CrisisPreparationFacts::default();
+        let mapped_hero_id = self.ids.as_ref().and_then(|ids| ids.get_hero(player_id));
+        let hero = self
+            .hero_query
+            .iter()
+            .filter(|(owner, id, _, _, state, stats, _, dead, true_death)| {
+                owner.0 == player_id
+                    && mapped_hero_id.map(|mapped| mapped == id.0).unwrap_or(true)
+                    && state.is_alive()
+                    && stats.hp > 0
+                    && dead.is_none()
+                    && true_death.is_none()
+            })
+            .min_by_key(|(_, id, _, _, _, _, _, _, _)| id.0);
+
+        let mut hero_position = None;
+        let mut hero_inventory_weight = 0;
+        let mut hero_capacity = None;
+        if let Some((_, _, position, template, state, _, inventory, _, _)) = hero {
+            facts.live_hero = true;
+            facts.hero_idle = *state == State::None;
+            hero_position = Some(*position);
+            hero_inventory_weight = inventory.get_total_weight();
+            hero_capacity = self
+                .templates
+                .as_ref()
+                .map(|templates| Obj::get_capacity(&template.0, &templates.obj_templates));
+            facts.hero_equipped_weapon = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && item.equipped && item.class == WEAPON)
+                .map(|item| item.name.clone())
+                .min();
+            facts.hero_equipped_armor = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && item.equipped && item.class == ARMOR)
+                .count();
+            facts.hero_carried_weapons = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == WEAPON)
+                .map(positive_item_units)
+                .sum();
+            facts.hero_carried_armor = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == ARMOR)
+                .map(positive_item_units)
+                .sum();
+            facts.hero_carried_healing = inventory
+                .items
+                .iter()
+                .filter(|item| is_usable_crisis_healing_item(item))
+                .map(positive_item_units)
+                .sum();
+            facts.stockade_log_units_carried = inventory.count_for_build_req(LOG).max(0) as usize;
+        }
+
+        facts.stockade_plan_available = self
+            .plans
+            .as_ref()
+            .zip(self.templates.as_ref())
+            .map(|(plans, templates)| {
+                Structure::available_to_build(player_id, plans.to_vec(), &templates.obj_templates)
+                    .iter()
+                    .any(|structure| structure.template == "Stockade")
+            })
+            .unwrap_or(false);
+        for (owner, state, stats, inventory, dead) in self.villager_query.iter() {
+            if owner.0 != player_id || !state.is_alive() || stats.hp <= 0 || dead.is_some() {
+                continue;
+            }
+            facts.living_villagers = facts.living_villagers.saturating_add(1);
+            let combat_capable = stats.base_damage.unwrap_or(0) > 0
+                || inventory
+                    .items
+                    .iter()
+                    .any(|item| item.quantity > 0 && item.equipped && item.class == WEAPON);
+            if combat_capable {
+                facts.combat_capable_villagers = facts.combat_capable_villagers.saturating_add(1);
+            }
+            let held_spare_weapons = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == WEAPON)
+                .map(positive_item_units)
+                .sum::<usize>();
+            facts.villager_held_spare_weapons = facts
+                .villager_held_spare_weapons
+                .saturating_add(held_spare_weapons);
+            if !combat_capable && *state == State::None {
+                facts.actionable_villager_weapons = facts
+                    .actionable_villager_weapons
+                    .saturating_add(held_spare_weapons);
+            }
+        }
+
+        for (owner, position, subclass, state, stats, inventory, dead) in
+            self.structure_query.iter()
+        {
+            // Foundation placement rejects any wall already on the hero's
+            // current tile, including an unfinished or other-player wall. Keep
+            // this owner-agnostic occupancy fact separate from the owner-only
+            // preparation details below so guidance never promises a command
+            // the authoritative placement system will reject.
+            if hero_position.is_some_and(|hero_position| {
+                hero_position == *position && *subclass == Subclass::Wall
+            }) {
+                facts.current_tile_wall_present = true;
+            }
+
+            if owner.0 != player_id || dead.is_some() || !Structure::is_built(*state) {
+                continue;
+            }
+
+            if *subclass == Subclass::Wall {
+                facts.completed_walls = facts.completed_walls.saturating_add(1);
+                if stats.hp < stats.base_hp {
+                    facts.damaged_walls = facts.damaged_walls.saturating_add(1);
+                }
+            }
+
+            if *subclass != Subclass::Storage {
+                continue;
+            }
+
+            let normal_transfer_available = hero_position
+                .map(|hero_position| Map::is_adjacent_including_source(hero_position, *position))
+                .unwrap_or(false);
+
+            for stored_item in inventory.items.iter().filter(|item| item.quantity > 0) {
+                let units = positive_item_units(stored_item);
+                let fits = normal_transfer_available
+                    && hero_capacity
+                        .map(|capacity| {
+                            item_fits_normal_transfer(stored_item, hero_inventory_weight, capacity)
+                        })
+                        .unwrap_or(false);
+
+                if !stored_item.equipped && stored_item.class == WEAPON {
+                    facts.stored_weapons = facts.stored_weapons.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_weapons =
+                            facts.transferable_stored_weapons.saturating_add(units);
+                    }
+                }
+                if !stored_item.equipped && stored_item.class == ARMOR {
+                    facts.stored_armor = facts.stored_armor.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_armor =
+                            facts.transferable_stored_armor.saturating_add(units);
+                    }
+                }
+                if is_usable_crisis_healing_item(stored_item) {
+                    facts.stored_healing = facts.stored_healing.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_healing =
+                            facts.transferable_stored_healing.saturating_add(units);
+                    }
+                }
+            }
+        }
+
+        facts.can_start_stockade = facts.live_hero
+            && facts.hero_idle
+            && !facts.current_tile_wall_present
+            && facts.stockade_plan_available
+            && facts.stockade_log_units_carried >= 3;
+
+        // A hero without an equipped weapon should retain the first carried
+        // weapon as an equipment option. Hero/storage weapons are observed,
+        // but never presented as immediately equippable by a villager without
+        // the normal adjacent transfer step.
+        facts.hero_spare_weapons = facts.hero_carried_weapons;
+        if facts.live_hero && facts.hero_equipped_weapon.is_none() {
+            facts.hero_spare_weapons = facts.hero_spare_weapons.saturating_sub(1);
+        }
+
+        facts
+    }
+}
+
 /// Explicit ownership for a personal-crisis combatant. NPC faction ownership
 /// remains `NPC_PLAYER_ID`; this component is the authoritative link to the
 /// settlement owner and logical assault.
@@ -1396,6 +1688,363 @@ fn crisis_phase_presentation(
     }
 }
 
+fn crisis_preparation_option(
+    id: &str,
+    label: &str,
+    state: &str,
+    detail: String,
+    action_hint: &str,
+) -> CrisisPreparationOption {
+    CrisisPreparationOption {
+        id: id.to_string(),
+        label: label.to_string(),
+        state: state.to_string(),
+        detail,
+        action_hint: action_hint.to_string(),
+    }
+}
+
+fn derive_crisis_preparation_options(
+    facts: &CrisisPreparationFacts,
+) -> Vec<CrisisPreparationOption> {
+    let defences = if facts.completed_walls > 0 && facts.damaged_walls == 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "ready",
+            format!(
+                "{} completed wall{} fully repaired.",
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "No wall repair action is needed.",
+        )
+    } else if facts.damaged_walls > 0 && facts.living_villagers > 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "needs_attention",
+            format!(
+                "{} of {} completed wall{} damaged.",
+                facts.damaged_walls,
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Order a living villager to repair a damaged wall.",
+        )
+    } else if facts.damaged_walls > 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "unavailable",
+            format!(
+                "{} of {} completed wall{} damaged.",
+                facts.damaged_walls,
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Wall repair orders require a living owned villager.",
+        )
+    } else if facts.can_start_stockade {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "needs_attention",
+            "No completed wall is present; a Stockade plan and 3 carried Log-compatible units are ready."
+                .to_string(),
+            "Place a Stockade foundation using the existing plan and carried materials.",
+        )
+    } else {
+        let blocker = if !facts.live_hero {
+            "A live owned hero is required to place a Stockade foundation."
+        } else if !facts.hero_idle {
+            "Finish the current hero action before placing a Stockade foundation."
+        } else if facts.current_tile_wall_present {
+            "Move to a tile without an existing wall before placing a Stockade foundation."
+        } else if !facts.stockade_plan_available {
+            "The Stockade plan is not available to this player."
+        } else if facts.stockade_log_units_carried < 3 {
+            "A Stockade requires 3 carried Log-compatible units."
+        } else {
+            "A completed wall is required before wall repairs are available."
+        };
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "unavailable",
+            "No completed defensive walls are available.".to_string(),
+            blocker,
+        )
+    };
+
+    let unarmed_villagers = facts
+        .living_villagers
+        .saturating_sub(facts.combat_capable_villagers);
+    let defenders = if facts.living_villagers == 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "unavailable",
+            "No living owned villagers are available.".to_string(),
+            "A living villager is required for this preparation option.",
+        )
+    } else if unarmed_villagers == 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "ready",
+            format!(
+                "{} living villager{} combat-capable.",
+                facts.combat_capable_villagers,
+                if facts.combat_capable_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your existing combat-capable defenders are ready.",
+        )
+    } else if facts.actionable_villager_weapons > 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "needs_attention",
+            format!(
+                "{} of {} living villager{} combat-capable; {} spare weapon{} available.",
+                facts.combat_capable_villagers,
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                },
+                facts.actionable_villager_weapons,
+                if facts.actionable_villager_weapons == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Equip the weapon already carried by an idle unarmed villager.",
+        )
+    } else if facts.combat_capable_villagers > 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "ready",
+            format!(
+                "{} of {} living villager{} combat-capable; no spare weapon is available.",
+                facts.combat_capable_villagers,
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your existing combat-capable defenders are ready.",
+        )
+    } else {
+        let blocker = if facts.villager_held_spare_weapons > 0 {
+            "A carried villager weapon cannot be equipped until its unarmed owner is idle."
+        } else if facts.hero_spare_weapons > 0 || facts.transferable_stored_weapons > 0 {
+            "Available hero or storage weapons require a normal adjacent transfer first."
+        } else {
+            "An existing spare weapon is required to arm a villager."
+        };
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "unavailable",
+            format!(
+                "{} living villager{} unarmed, and no spare weapon is available.",
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            blocker,
+        )
+    };
+
+    let equipment = if !facts.live_hero {
+        crisis_preparation_option(
+            "equipment",
+            "Equipment",
+            "unavailable",
+            "No live hero is available for equipment preparation.".to_string(),
+            "A live owned hero is required for this preparation option.",
+        )
+    } else {
+        let weapon_ready = facts.hero_equipped_weapon.is_some();
+        let armor_ready = facts.hero_equipped_armor > 0;
+        if weapon_ready && armor_ready {
+            crisis_preparation_option(
+                "equipment",
+                "Equipment",
+                "ready",
+                format!(
+                    "{} is equipped with {} armor piece{}.",
+                    facts.hero_equipped_weapon.as_deref().unwrap_or("A weapon"),
+                    facts.hero_equipped_armor,
+                    if facts.hero_equipped_armor == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                "Your hero's combat equipment is ready.",
+            )
+        } else {
+            let carried_action = facts.hero_idle
+                && ((!weapon_ready && facts.hero_carried_weapons > 0)
+                    || (!armor_ready && facts.hero_carried_armor > 0));
+            let storage_action = (!weapon_ready && facts.transferable_stored_weapons > 0)
+                || (!armor_ready && facts.transferable_stored_armor > 0);
+            let (detail, missing_label) =
+                match (weapon_ready, armor_ready) {
+                    (false, false) => (
+                        format!(
+                        "No weapon or armor is equipped; carried: {} weapon{}, {} armor piece{}.",
+                        facts.hero_carried_weapons,
+                        if facts.hero_carried_weapons == 1 { "" } else { "s" },
+                        facts.hero_carried_armor,
+                        if facts.hero_carried_armor == 1 { "" } else { "s" }
+                    ),
+                        "weapon or armor",
+                    ),
+                    (false, true) => (
+                        format!(
+                            "No weapon is equipped; {} armor piece{} equipped.",
+                            facts.hero_equipped_armor,
+                            if facts.hero_equipped_armor == 1 {
+                                " is"
+                            } else {
+                                "s are"
+                            }
+                        ),
+                        "weapon",
+                    ),
+                    (true, false) => (
+                        format!(
+                            "{} is equipped; no armor is equipped.",
+                            facts.hero_equipped_weapon.as_deref().unwrap_or("A weapon")
+                        ),
+                        "armor",
+                    ),
+                    (true, true) => unreachable!(),
+                };
+
+            if carried_action || storage_action {
+                let hint = match (carried_action, storage_action) {
+                    (true, true) => {
+                        "Equip carried gear or transfer missing gear from nearby storage."
+                    }
+                    (true, false) => "Equip the available carried gear while your hero is idle.",
+                    (false, true) => {
+                        "Transfer the missing gear from nearby storage, then equip it."
+                    }
+                    (false, false) => unreachable!(),
+                };
+                crisis_preparation_option("equipment", "Equipment", "needs_attention", detail, hint)
+            } else {
+                let has_carried_missing = (!weapon_ready && facts.hero_carried_weapons > 0)
+                    || (!armor_ready && facts.hero_carried_armor > 0);
+                let hint = if has_carried_missing && !facts.hero_idle {
+                    "Finish the current hero action before changing carried equipment."
+                } else if (!weapon_ready && facts.stored_weapons > 0)
+                    || (!armor_ready && facts.stored_armor > 0)
+                {
+                    "Stored equipment is not currently available through normal item transfer."
+                } else {
+                    match missing_label {
+                        "weapon" => "No weapon is carried or transferable from nearby storage.",
+                        "armor" => "No armor is carried or transferable from nearby storage.",
+                        _ => "No missing equipment is carried or transferable from nearby storage.",
+                    }
+                };
+                crisis_preparation_option("equipment", "Equipment", "unavailable", detail, hint)
+            }
+        }
+    };
+
+    let recovery = if !facts.live_hero {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No live hero is available to carry healing supplies.".to_string(),
+            "A live owned hero is required for this preparation option.",
+        )
+    } else if facts.hero_carried_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "ready",
+            format!(
+                "{} usable healing item{} carried by your hero.",
+                facts.hero_carried_healing,
+                if facts.hero_carried_healing == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your hero is carrying an existing recovery option.",
+        )
+    } else if facts.transferable_stored_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "needs_attention",
+            format!(
+                "No healing is carried; {} usable item{} available in nearby storage.",
+                facts.transferable_stored_healing,
+                if facts.transferable_stored_healing == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Transfer a usable healing item from nearby storage to your hero.",
+        )
+    } else if facts.stored_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No healing is carried; stored supplies are not currently transferable.".to_string(),
+            "Stored healing must be available through normal item transfer.",
+        )
+    } else {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No usable healing supplies are carried or held in completed storage.".to_string(),
+            "An existing usable healing item is required for this preparation option.",
+        )
+    };
+
+    let options = vec![defences, defenders, equipment, recovery];
+    debug_assert!(options.len() <= 4);
+    options
+}
+
 pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisStatusSnapshot {
     let Some(crisis) = crisis else {
         return CrisisStatusSnapshot {
@@ -1417,6 +2066,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
             total_attackers: None,
             preparation_seconds_remaining: None,
             preferred_launch_window: None,
+            preparation_options: None,
             continues_while_disconnected: false,
         };
     };
@@ -1472,8 +2122,25 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         total_attackers,
         preparation_seconds_remaining,
         preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
+        preparation_options: None,
         continues_while_disconnected: assault_active,
     }
+}
+
+fn build_crisis_status_with_preparation(
+    crisis: Option<&SettlementCrisis>,
+    facts: Option<&CrisisPreparationFacts>,
+) -> CrisisStatusSnapshot {
+    let mut status = build_crisis_status(crisis);
+    if crisis.is_some_and(|crisis| {
+        matches!(
+            crisis.phase,
+            CrisisPhase::Preparing | CrisisPhase::AssaultReady
+        )
+    }) {
+        status.preparation_options = facts.map(derive_crisis_preparation_options);
+    }
+    status
 }
 
 pub(crate) fn crisis_status_changed(
@@ -1540,6 +2207,7 @@ fn crisis_status_delivery_system(
     mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
     mut resume_login_sync: ResMut<ResumeLoginSyncState>,
     mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
+    preparation_collector: CrisisPreparationCollector,
 ) {
     let active_clients = match clients.lock() {
         Ok(clients) => clients
@@ -1599,7 +2267,18 @@ fn crisis_status_delivery_system(
 
     for (client_id, player_id, _sender) in &active_clients {
         let status = if director.mode == SurvivalDirectorMode::PersonalCrisis {
-            build_crisis_status(crisis_state.get(player_id))
+            let crisis = crisis_state.get(player_id);
+            if crisis.is_some_and(|crisis| {
+                matches!(
+                    crisis.phase,
+                    CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                )
+            }) {
+                let facts = preparation_collector.collect(*player_id);
+                build_crisis_status_with_preparation(crisis, Some(&facts))
+            } else {
+                build_crisis_status_with_preparation(crisis, None)
+            }
         } else {
             build_crisis_status(None)
         };
@@ -4747,6 +5426,8 @@ pub fn build_system(
         (Entity, &PlayerId, &Position, &State, &mut Effects),
         Without<ClassStructure>,
     >,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -4864,6 +5545,28 @@ pub fn build_system(
 
             // Set structure hp to base hp
             structure_stats.hp = structure_stats.base_hp;
+
+            if matches!(*structure_subclass, Subclass::Wall | Subclass::Watchtower)
+                && matches!(
+                    crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(&structure_player_id.0))
+                        .map(|crisis| crisis.phase),
+                    Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                )
+            {
+                if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                    telemetry_state
+                        .entry(structure_player_id.0)
+                        .or_default()
+                        .preparation_actions
+                        .record_defensive_structure_completed(
+                            structure_id.0,
+                            *structure_subclass == Subclass::Wall,
+                            game_tick.0,
+                        );
+                }
+            }
 
             if *structure_subclass == Subclass::Wall {
                 for (entity, player_id, pos, state, mut effects) in occupant_query.iter_mut() {
@@ -8790,6 +9493,8 @@ fn repair_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     active_infos: Res<ActiveInfos>,
     mut run_score_state: ResMut<RunScoreState>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     let mut events_to_remove = Vec::new();
 
@@ -8839,8 +9544,26 @@ fn repair_event_system(
                         continue;
                     };
 
-                    // Repair structure to full health
+                    // Repair structure to full health.
+                    let previous_hp = structure.stats.hp;
                     structure.stats.hp = structure.stats.base_hp;
+                    if previous_hp < structure.stats.hp
+                        && matches!(
+                            crisis_state
+                                .as_ref()
+                                .and_then(|state| state.get(&structure.player_id.0))
+                                .map(|crisis| crisis.phase),
+                            Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                        )
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(structure.player_id.0)
+                                .or_default()
+                                .preparation_actions
+                                .record_repair_completed(*structure_id, game_tick.0);
+                        }
+                    }
                     run_score_state
                         .entry(structure.player_id.0)
                         .or_insert_with(|| PlayerRunScore {
@@ -9304,6 +10027,8 @@ fn use_item_system(
     mut plans: ResMut<Plans>,
     mut visible_events: ResMut<VisibleEvents>,
     mut map_events: ResMut<MapEvents>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
     mut query: Query<ObjWithStatsQuery, Without<ClassStructure>>,
     mut structure_query: Query<
         (&Id, &PlayerId, &Position, &mut State, &mut Effects),
@@ -9344,6 +10069,7 @@ fn use_item_system(
                         continue;
                     };
 
+                    let mut successful_healing_use = false;
                     match (item.class.as_str(), item.subclass.as_str()) {
                         (item::POTION, item::HEALTH) => {
                             if let Some(healing_attrval) = item.attrs.get(&item::AttrKey::Healing) {
@@ -9355,6 +10081,7 @@ fn use_item_system(
                                 };
 
                                 if item_owner.stats.hp < item_owner.stats.base_hp {
+                                    successful_healing_use = healing_value > 0;
                                     if (item_owner.stats.hp + healing_value)
                                         > item_owner.stats.base_hp
                                     {
@@ -9427,6 +10154,7 @@ fn use_item_system(
                             let healed = missing_hp.min(BANDAGE_HEAL_HP).max(0);
 
                             if stopped_bleeding || healed > 0 {
+                                successful_healing_use = true;
                                 if healed > 0 {
                                     item_owner.stats.hp += healed;
 
@@ -9819,6 +10547,23 @@ fn use_item_system(
                             events_to_add.push(sleep_map_event);
                         }
                         _ => {}
+                    }
+
+                    if successful_healing_use
+                        && is_preparation_phase(
+                            crisis_state
+                                .as_ref()
+                                .and_then(|state| state.get(&item_owner.player_id.0))
+                                .map(|crisis| crisis.phase),
+                        )
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(item_owner.player_id.0)
+                                .or_default()
+                                .preparation_actions
+                                .record_healing_item_used_before_launch(*map_event_id, game_tick.0);
+                        }
                     }
                 }
                 _ => {}
@@ -12975,55 +13720,77 @@ fn personal_crisis_system(
     }
 }
 
+#[derive(SystemParam)]
+pub(crate) struct CrisisBalanceSnapshotQueries<'w, 's> {
+    hero_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            Option<&'static HeroClass>,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static BoundMonolith>,
+            &'static State,
+            Option<&'static StateDead>,
+            Option<&'static TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static Assignment>,
+            Option<&'static StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            &'static Subclass,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: Query<
+        'w,
+        's,
+        (
+            &'static Id,
+            &'static Position,
+            &'static Monolith,
+            &'static State,
+            Option<&'static StateDead>,
+        ),
+    >,
+}
+
 fn crisis_preparation_snapshot(
     player_id: i32,
     crisis: &SettlementCrisis,
     spawn_positions: &SpawnPositions,
-    hero_query: &Query<
-        (
-            &PlayerId,
-            &Id,
-            &Position,
-            &Template,
-            Option<&HeroClass>,
-            &Stats,
-            &Inventory,
-            Option<&BoundMonolith>,
-            &State,
-            Option<&StateDead>,
-            Option<&TrueDeath>,
-        ),
-        With<SubclassHero>,
-    >,
-    villager_query: &Query<
-        (
-            &PlayerId,
-            &Id,
-            &State,
-            &Stats,
-            &Inventory,
-            Option<&Assignment>,
-            Option<&StateDead>,
-        ),
-        With<SubclassVillager>,
-    >,
-    structure_query: &Query<
-        (
-            &PlayerId,
-            &Id,
-            &Position,
-            &Template,
-            &Subclass,
-            &State,
-            &Stats,
-            &Inventory,
-            Option<&StateDead>,
-        ),
-        With<ClassStructure>,
-    >,
-    monolith_query: &Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+    queries: &CrisisBalanceSnapshotQueries,
 ) -> (CrisisPreparationSnapshot, CrisisBalanceObservation) {
-    let hero = hero_query
+    let hero = queries
+        .hero_query
         .iter()
         .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == player_id);
     let hero_is_alive = hero
@@ -13074,10 +13841,18 @@ fn crisis_preparation_snapshot(
             .iter()
             .filter(|item| item.equipped && item.class == ARMOR)
             .count() as i32;
+        observation.equipped_item_ids = inventory
+            .items
+            .iter()
+            .filter(|item| {
+                item.quantity > 0 && item.equipped && (item.class == WEAPON || item.class == ARMOR)
+            })
+            .map(|item| item.id)
+            .collect();
         snapshot.healing_items = inventory
             .items
             .iter()
-            .filter(|item| item.attrs.contains_key(&AttrKey::Healing))
+            .filter(|item| is_usable_crisis_healing_item(item))
             .map(|item| item.quantity.max(0))
             .sum();
         snapshot.food_items = inventory
@@ -13104,7 +13879,7 @@ fn crisis_preparation_snapshot(
 
     let mut assault_structures = Vec::new();
     for (owner, id, pos, template, subclass, state, stats, inventory, dead) in
-        structure_query.iter()
+        queries.structure_query.iter()
     {
         if owner.0 != player_id || dead.is_some() {
             continue;
@@ -13143,6 +13918,9 @@ fn crisis_preparation_snapshot(
             if *subclass == Subclass::Watchtower {
                 snapshot.watchtowers = snapshot.watchtowers.saturating_add(1);
             }
+            if matches!(*subclass, Subclass::Wall | Subclass::Watchtower) {
+                observation.defensive_structure_ids.insert(id.0);
+            }
             if *subclass == Subclass::Storage {
                 let stored = inventory
                     .items
@@ -13166,11 +13944,15 @@ fn crisis_preparation_snapshot(
             }
         } else {
             snapshot.foundations = snapshot.foundations.saturating_add(1);
+            observation.foundation_ids.insert(id.0);
+            if matches!(*subclass, Subclass::Wall | Subclass::Watchtower) {
+                observation.defensive_foundation_ids.insert(id.0);
+            }
         }
     }
 
     let mut living_villager_ids = BTreeSet::new();
-    for (owner, id, state, stats, inventory, assignment, dead) in villager_query.iter() {
+    for (owner, id, state, stats, inventory, assignment, dead) in queries.villager_query.iter() {
         if owner.0 != player_id || !state.is_alive() || dead.is_some() || stats.hp <= 0 {
             continue;
         }
@@ -13183,6 +13965,7 @@ fn crisis_preparation_snapshot(
                 .any(|item| item.equipped && item.class == WEAPON)
         {
             snapshot.villagers_combat_capable = snapshot.villagers_combat_capable.saturating_add(1);
+            observation.combat_capable_villagers.insert(id.0);
         }
         observation.total_run_items = observation.total_run_items.saturating_add(
             inventory
@@ -13199,7 +13982,8 @@ fn crisis_preparation_snapshot(
     }
     observation.villagers = living_villager_ids;
 
-    let assault_monoliths = monolith_query
+    let assault_monoliths = queries
+        .monolith_query
         .iter()
         .filter(|(_, _, _, state, dead)| Structure::is_built(**state) && dead.is_none())
         .map(|(id, pos, monolith, _, _)| {
@@ -13254,6 +14038,125 @@ fn is_preparation_phase(phase: Option<CrisisPhase>) -> bool {
     )
 }
 
+fn record_crisis_preparation_observation(
+    telemetry: &mut CrisisBalanceTelemetry,
+    previous: Option<&CrisisBalanceObservation>,
+    current: &CrisisBalanceObservation,
+    offline_protected: bool,
+) {
+    telemetry.latest_near_settlement = current.near_settlement;
+    telemetry.latest_online = current.online;
+
+    let Some(previous) = previous else {
+        return;
+    };
+
+    if is_preparation_phase(previous.phase)
+        && is_preparation_phase(current.phase)
+        && current.online
+        && !offline_protected
+    {
+        let elapsed = current
+            .online_active_ticks
+            .saturating_sub(previous.online_active_ticks)
+            .max(0);
+        if current.near_settlement {
+            telemetry.preparation_actions.online_ticks_near_settlement = telemetry
+                .preparation_actions
+                .online_ticks_near_settlement
+                .saturating_add(elapsed);
+        } else {
+            telemetry
+                .preparation_actions
+                .online_ticks_away_from_settlement = telemetry
+                .preparation_actions
+                .online_ticks_away_from_settlement
+                .saturating_add(elapsed);
+        }
+
+        let actions = &mut telemetry.preparation_actions;
+
+        for structure_id in current
+            .defensive_foundation_ids
+            .difference(&previous.defensive_foundation_ids)
+        {
+            actions.record_defensive_structure_started(*structure_id, current.tick);
+        }
+
+        for structure_id in current
+            .completed_structure_ids
+            .difference(&previous.completed_structure_ids)
+        {
+            if current.defensive_structure_ids.contains(structure_id) {
+                actions.record_defensive_structure_completed(
+                    *structure_id,
+                    current.wall_ids.contains(structure_id),
+                    current.tick,
+                );
+            } else {
+                actions.structures_built = actions.structures_built.saturating_add(1);
+                actions.mark_action_at(current.tick);
+            }
+        }
+
+        for (structure_id, hp) in &current.structure_health {
+            let repaired = previous.completed_structure_ids.contains(structure_id)
+                && current.completed_structure_ids.contains(structure_id)
+                && previous
+                    .structure_health
+                    .get(structure_id)
+                    .is_some_and(|previous_hp| *hp > *previous_hp);
+            if repaired {
+                actions.record_repair_completed(*structure_id, current.tick);
+            }
+        }
+
+        for item_id in current
+            .equipped_item_ids
+            .difference(&previous.equipped_item_ids)
+        {
+            actions.record_equipment_change(*item_id, current.tick);
+        }
+
+        // Establish each high-water baseline from the prior sample before
+        // observing the current value. This counts genuine new supply once
+        // while ignoring transfer-out/transfer-back loops.
+        actions.observe_healing_items(previous.healing_items, previous.tick);
+        actions.observe_healing_items(current.healing_items, current.tick);
+
+        for villager_id in current.villagers.difference(&previous.villagers) {
+            actions.record_villager_recruited(*villager_id, current.tick);
+        }
+        for (villager_id, structure_id) in &current.villager_assignments {
+            if previous.villager_assignments.get(villager_id) != Some(structure_id) {
+                actions.record_villager_assignment_changed(*villager_id, current.tick);
+            }
+        }
+
+        actions.observe_sanctuary_level(previous.sanctuary_level, previous.tick);
+        actions.observe_sanctuary_level(current.sanctuary_level, current.tick);
+        actions.observe_total_run_items(previous.total_run_items, previous.tick);
+        actions.observe_total_run_items(current.total_run_items, current.tick);
+        actions.observe_stored_items(previous.stored_items, previous.tick);
+        actions.observe_stored_items(current.stored_items, current.tick);
+    }
+
+    // Warning response is observation, not a preparation-phase gate: a player
+    // may receive Signs while away and return during Signs or Pressure, before
+    // the formal Preparing phase begins.
+    let warning_was_away = matches!(telemetry.warnings.signs_near_settlement, Some(false))
+        || matches!(telemetry.warnings.preparing_near_settlement, Some(false))
+        || matches!(
+            telemetry.warnings.assault_ready_near_settlement,
+            Some(false)
+        );
+    if warning_was_away && !previous.near_settlement && current.near_settlement {
+        telemetry
+            .preparation_actions
+            .returned_to_settlement_after_warning = true;
+    }
+}
+
 /// Samples authoritative state after crisis evaluation. It writes only the
 /// runtime telemetry resources and never feeds a value back into gameplay.
 pub(crate) fn crisis_balance_snapshot_system(
@@ -13265,49 +14168,7 @@ pub(crate) fn crisis_balance_snapshot_system(
     config: Res<CrisisBalanceTelemetryConfig>,
     mut telemetry_state: ResMut<CrisisBalanceTelemetryState>,
     mut observation_state: ResMut<CrisisBalanceObservationState>,
-    hero_query: Query<
-        (
-            &PlayerId,
-            &Id,
-            &Position,
-            &Template,
-            Option<&HeroClass>,
-            &Stats,
-            &Inventory,
-            Option<&BoundMonolith>,
-            &State,
-            Option<&StateDead>,
-            Option<&TrueDeath>,
-        ),
-        With<SubclassHero>,
-    >,
-    villager_query: Query<
-        (
-            &PlayerId,
-            &Id,
-            &State,
-            &Stats,
-            &Inventory,
-            Option<&Assignment>,
-            Option<&StateDead>,
-        ),
-        With<SubclassVillager>,
-    >,
-    structure_query: Query<
-        (
-            &PlayerId,
-            &Id,
-            &Position,
-            &Template,
-            &Subclass,
-            &State,
-            &Stats,
-            &Inventory,
-            Option<&StateDead>,
-        ),
-        With<ClassStructure>,
-    >,
-    monolith_query: Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+    snapshot_queries: CrisisBalanceSnapshotQueries,
 ) {
     // Detailed preparation deltas require a full inventory/unit/structure
     // observation each update. Production keeps this analysis sampler off;
@@ -13318,7 +14179,8 @@ pub(crate) fn crisis_balance_snapshot_system(
     let sample_interval = config.sample_interval_ticks.unwrap_or(1).max(1);
     for (player_id, crisis) in crisis_state.iter() {
         let online = clients.is_player_online(*player_id);
-        let hero_alive = hero_query
+        let hero_alive = snapshot_queries
+            .hero_query
             .iter()
             .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == *player_id)
             .map(|(_, _, _, _, _, stats, _, _, state, dead, true_death)| {
@@ -13378,174 +14240,20 @@ pub(crate) fn crisis_balance_snapshot_system(
         if !should_sample {
             continue;
         }
-        let (mut snapshot, mut current) = crisis_preparation_snapshot(
-            *player_id,
-            crisis,
-            &spawn_positions,
-            &hero_query,
-            &villager_query,
-            &structure_query,
-            &monolith_query,
-        );
+        let (mut snapshot, mut current) =
+            crisis_preparation_snapshot(*player_id, crisis, &spawn_positions, &snapshot_queries);
         snapshot.game_tick = game_tick.0;
         current.tick = game_tick.0;
         current.online = online;
 
         let previous = observation_state.0.remove(player_id);
         let telemetry = telemetry_state.entry(*player_id).or_default();
-        telemetry.latest_near_settlement = current.near_settlement;
-        telemetry.latest_online = current.online;
-
-        if let Some(previous) = previous.as_ref() {
-            if is_preparation_phase(previous.phase)
-                && (is_preparation_phase(current.phase)
-                    || current.phase == Some(CrisisPhase::AssaultActive))
-                && current.online
-                && !is_player_offline_protected(*player_id, &presence)
-            {
-                let elapsed = current
-                    .online_active_ticks
-                    .saturating_sub(previous.online_active_ticks)
-                    .max(0);
-                if current.near_settlement {
-                    telemetry.preparation_actions.online_ticks_near_settlement = telemetry
-                        .preparation_actions
-                        .online_ticks_near_settlement
-                        .saturating_add(elapsed);
-                } else {
-                    telemetry
-                        .preparation_actions
-                        .online_ticks_away_from_settlement = telemetry
-                        .preparation_actions
-                        .online_ticks_away_from_settlement
-                        .saturating_add(elapsed);
-                }
-
-                let structures_built = current
-                    .completed_structure_ids
-                    .difference(&previous.completed_structure_ids)
-                    .count() as i32;
-                let walls_built = current.wall_ids.difference(&previous.wall_ids).count() as i32;
-                telemetry.preparation_actions.structures_built = telemetry
-                    .preparation_actions
-                    .structures_built
-                    .saturating_add(structures_built);
-                telemetry.preparation_actions.walls_built = telemetry
-                    .preparation_actions
-                    .walls_built
-                    .saturating_add(walls_built);
-
-                let repaired = current
-                    .structure_health
-                    .iter()
-                    .filter(|(id, hp)| {
-                        previous.completed_structure_ids.contains(id)
-                            && current.completed_structure_ids.contains(id)
-                            && previous
-                                .structure_health
-                                .get(id)
-                                .map(|previous_hp| **hp > *previous_hp)
-                                .unwrap_or(false)
-                    })
-                    .count() as i32;
-                telemetry.preparation_actions.structures_repaired = telemetry
-                    .preparation_actions
-                    .structures_repaired
-                    .saturating_add(repaired);
-
-                if current.equipped_weapon != previous.equipped_weapon
-                    || current.equipped_armor_count > previous.equipped_armor_count
-                {
-                    telemetry.preparation_actions.equipment_changes = telemetry
-                        .preparation_actions
-                        .equipment_changes
-                        .saturating_add(1);
-                }
-                telemetry.preparation_actions.healing_items_acquired = telemetry
-                    .preparation_actions
-                    .healing_items_acquired
-                    .saturating_add(
-                        current
-                            .healing_items
-                            .saturating_sub(previous.healing_items)
-                            .max(0),
-                    );
-                telemetry.preparation_actions.villagers_recruited = telemetry
-                    .preparation_actions
-                    .villagers_recruited
-                    .saturating_add(
-                        current.villagers.difference(&previous.villagers).count() as i32
-                    );
-                let assignment_changes = current
-                    .villager_assignments
-                    .iter()
-                    .filter(|(id, structure)| {
-                        previous.villager_assignments.get(id) != Some(*structure)
-                    })
-                    .count() as i32;
-                telemetry.preparation_actions.villager_assignments_changed = telemetry
-                    .preparation_actions
-                    .villager_assignments_changed
-                    .saturating_add(assignment_changes);
-                telemetry.preparation_actions.sanctuary_upgrades = telemetry
-                    .preparation_actions
-                    .sanctuary_upgrades
-                    .saturating_add(
-                        current
-                            .sanctuary_level
-                            .saturating_sub(previous.sanctuary_level)
-                            .max(0),
-                    );
-                telemetry.preparation_actions.resource_units_acquired = telemetry
-                    .preparation_actions
-                    .resource_units_acquired
-                    .saturating_add(
-                        current
-                            .total_run_items
-                            .saturating_sub(previous.total_run_items)
-                            .max(0),
-                    );
-                telemetry.preparation_actions.storage_units_added = telemetry
-                    .preparation_actions
-                    .storage_units_added
-                    .saturating_add(
-                        current
-                            .stored_items
-                            .saturating_sub(previous.stored_items)
-                            .max(0),
-                    );
-
-                let action_happened = structures_built > 0
-                    || walls_built > 0
-                    || repaired > 0
-                    || current.equipped_weapon != previous.equipped_weapon
-                    || current.equipped_armor_count > previous.equipped_armor_count
-                    || current.healing_items > previous.healing_items
-                    || current.villagers.len() > previous.villagers.len()
-                    || assignment_changes > 0
-                    || current.sanctuary_level > previous.sanctuary_level
-                    || current.total_run_items > previous.total_run_items
-                    || current.stored_items > previous.stored_items;
-                if action_happened {
-                    telemetry.preparation_actions.mark_action();
-                }
-            }
-
-            // Warning response is observation, not a preparation-phase gate:
-            // a player may receive Signs while away and return during Signs or
-            // Pressure, before the formal Preparing phase begins.
-            let warning_was_away = matches!(telemetry.warnings.signs_near_settlement, Some(false))
-                || matches!(telemetry.warnings.preparing_near_settlement, Some(false))
-                || matches!(
-                    telemetry.warnings.assault_ready_near_settlement,
-                    Some(false)
-                );
-            if warning_was_away && !previous.near_settlement && current.near_settlement {
-                telemetry
-                    .preparation_actions
-                    .returned_to_settlement_after_warning = true;
-            }
-        }
+        record_crisis_preparation_observation(
+            telemetry,
+            previous.as_ref(),
+            &current,
+            is_player_offline_protected(*player_id, &presence),
+        );
 
         match crisis.phase {
             CrisisPhase::Preparing => {
@@ -13562,6 +14270,10 @@ pub(crate) fn crisis_balance_snapshot_system(
             }
             CrisisPhase::AssaultActive => {
                 if telemetry.preparation_snapshots.assault_launch.is_none() {
+                    telemetry.preparation_actions.record_launch_readiness(
+                        snapshot.healing_items,
+                        current.combat_capable_villagers.iter().copied(),
+                    );
                     telemetry.preparation_snapshots.assault_launch = Some(snapshot.clone());
                     telemetry.assault_outcome.villagers_at_launch = snapshot.villagers_alive;
                     telemetry.assault_outcome.structures_at_launch = snapshot.completed_structures;
@@ -13988,6 +14700,8 @@ fn personal_crisis_assault_system(
         mut run_score_state,
         mut crisis_telemetry_state,
         mut balance_telemetry_state,
+        balance_telemetry_config,
+        mut balance_observation_state,
     ): (
         ResMut<Ids>,
         ResMut<EntityObjMap>,
@@ -13997,8 +14711,11 @@ fn personal_crisis_assault_system(
         ResMut<RunScoreState>,
         ResMut<CrisisTelemetryState>,
         ResMut<CrisisBalanceTelemetryState>,
+        Res<CrisisBalanceTelemetryConfig>,
+        ResMut<CrisisBalanceObservationState>,
     ),
     spawn_positions: Res<SpawnPositions>,
+    balance_snapshot_queries: CrisisBalanceSnapshotQueries,
     hero_query: Query<
         (
             &PlayerId,
@@ -14251,6 +14968,32 @@ fn personal_crisis_assault_system(
                     &mut run_spawned_objs,
                 ) {
                     Ok(spawned_ids) => {
+                        // The periodic sampler normally runs after this system
+                        // so it can capture launch readiness and outcomes from
+                        // AssaultActive. Preserve that ordering, but close the
+                        // final Ready interval at the successful launch
+                        // commitment point before changing the phase. This is
+                        // opt-in and runs at most once per committed assault.
+                        if balance_telemetry_config.sample_interval_ticks.is_some() {
+                            let (_, mut current) = crisis_preparation_snapshot(
+                                player_id,
+                                crisis,
+                                &spawn_positions,
+                                &balance_snapshot_queries,
+                            );
+                            current.tick = current_tick;
+                            current.online = online;
+                            let previous = balance_observation_state.0.remove(&player_id);
+                            let telemetry = balance_telemetry_state.entry(player_id).or_default();
+                            record_crisis_preparation_observation(
+                                telemetry,
+                                previous.as_ref(),
+                                &current,
+                                is_player_offline_protected(player_id, &presence),
+                            );
+                            balance_observation_state.0.insert(player_id, current);
+                        }
+
                         crisis.assault_id = Some(assault_id);
                         crisis.assault_started_tick = Some(current_tick);
                         crisis.assault_online_ticks = 0;

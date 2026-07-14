@@ -15,6 +15,20 @@ export type CrisisSeverity =
   | 'crisis'
   | 'resolved';
 
+export type CrisisPreparationState =
+  | 'ready'
+  | 'needs_attention'
+  | 'unavailable';
+
+export interface CrisisPreparationOption {
+  id: string;
+  label: string;
+  state: CrisisPreparationState;
+  detail: string;
+  action_hint: string;
+  [futureField: string]: unknown;
+}
+
 /**
  * Authoritative personal-crisis snapshot sent by the server. Optional values
  * are omitted by serde when they do not apply. The index signature keeps this
@@ -41,6 +55,7 @@ export interface CrisisStatusPacket {
   preparation_seconds_remaining?: number;
   preferred_launch_window?: string;
   continues_while_disconnected: boolean;
+  preparation_options?: CrisisPreparationOption[];
   [futureField: string]: unknown;
 }
 
@@ -97,6 +112,15 @@ export interface CrisisPressureView {
   percent: number;
 }
 
+export interface CrisisPreparationOptionView {
+  id: string;
+  label: string;
+  state: CrisisPreparationState;
+  stateLabel: 'Ready' | 'Needs attention' | 'Unavailable';
+  detail: string;
+  actionHint: string;
+}
+
 export interface CrisisStatusView {
   status: CrisisStatusPacket;
   phase: string;
@@ -113,6 +137,7 @@ export interface CrisisStatusView {
   resolved: boolean;
   pressure: CrisisPressureView | null;
   preparationLabel: string | null;
+  preparationOptions: CrisisPreparationOptionView[];
   attackersLabel: string | null;
   disconnectedWarning: string | null;
 }
@@ -125,6 +150,79 @@ export interface CrisisUiState {
 
 function finiteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+const PREPARATION_STATE_LABELS: Record<
+  CrisisPreparationState,
+  CrisisPreparationOptionView['stateLabel']
+> = {
+  ready: 'Ready',
+  needs_attention: 'Needs attention',
+  unavailable: 'Unavailable',
+};
+
+function knownPreparationState(value: unknown): CrisisPreparationState | null {
+  if (
+    value === 'ready'
+    || value === 'needs_attention'
+    || value === 'unavailable'
+  ) {
+    return value;
+  }
+
+  return null;
+}
+
+/**
+ * Bounds and validates the optional additive preparation payload. Detailed
+ * guidance is deliberately phase-scoped even if a malformed or future server
+ * sends stale rows during another crisis phase.
+ */
+export function crisisPreparationOptionsView(
+  phase?: string,
+  options?: unknown,
+): CrisisPreparationOptionView[] {
+  if (phase !== 'preparing' && phase !== 'assault_ready') {
+    return [];
+  }
+  if (!Array.isArray(options)) {
+    return [];
+  }
+
+  const result: CrisisPreparationOptionView[] = [];
+  const seenIds = new Set<string>();
+
+  // The protocol promises no more than four rows. Bound before parsing so a
+  // malformed packet cannot expand the compact Survival Thread.
+  for (const rawOption of options.slice(0, 4)) {
+    if (!rawOption || typeof rawOption !== 'object') {
+      continue;
+    }
+
+    const option = rawOption as Partial<CrisisPreparationOption>;
+    const id = nonEmptyString(option.id);
+    const label = nonEmptyString(option.label);
+    const state = knownPreparationState(option.state);
+    if (!id || !label || !state || seenIds.has(id)) {
+      continue;
+    }
+
+    seenIds.add(id);
+    result.push({
+      id,
+      label,
+      state,
+      stateLabel: PREPARATION_STATE_LABELS[state],
+      detail: typeof option.detail === 'string' ? option.detail.trim() : '',
+      actionHint: typeof option.action_hint === 'string' ? option.action_hint.trim() : '',
+    });
+  }
+
+  return result;
 }
 
 function knownPhasePresentation(phase?: string): PhasePresentation {
@@ -193,6 +291,10 @@ export function crisisStatusView(
   const assaultActive = status.assault_active === true || phase === 'assault_active';
   const resolved = status.resolved === true || phase === 'resolved';
   const preparationLabel = formatCrisisCountdown(status.preparation_seconds_remaining);
+  const preparationOptions = crisisPreparationOptionsView(
+    phase,
+    status.preparation_options,
+  );
   let attackersLabel: string | null = null;
 
   if (assaultActive && finiteNumber(status.remaining_attackers)) {
@@ -222,6 +324,7 @@ export function crisisStatusView(
     resolved,
     pressure: crisisPressureView(status.pressure, status.pressure_max),
     preparationLabel,
+    preparationOptions,
     attackersLabel,
     disconnectedWarning: assaultActive
       ? 'The assault continues while disconnected.'

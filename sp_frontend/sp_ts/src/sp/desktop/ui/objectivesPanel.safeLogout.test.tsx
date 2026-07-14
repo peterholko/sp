@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import * as React from 'react';
 import { Global } from '../../core/global';
+import { CrisisStatusPacket } from '../../core/crisisStatus';
 import { SafeLogoutStatusPacket } from '../../core/safeLogoutStatus';
 import ObjectivesPanel from './objectivesPanel';
 
@@ -86,6 +87,47 @@ const beginButton = compactNodes.find((node) => node.type === 'button'
   && node.props['aria-label'] === 'Begin Safe Logout countdown');
 assert.ok(beginButton, 'compact layout renders Begin control');
 assert.equal(beginButton.props.type, 'button', 'native button preserves Enter/Space keyboard behavior');
+
+const crisisStatus: CrisisStatusPacket = {
+  packet: 'crisis_status',
+  version: 1,
+  exists: true,
+  phase: 'preparing',
+  warning: true,
+  assault_ready: false,
+  assault_active: false,
+  resolved: false,
+  continues_while_disconnected: false,
+  preparation_options: [{
+    id: 'recovery',
+    label: 'Recovery',
+    state: 'needs_attention',
+    detail: 'Healing supplies are stored away from the hero.',
+    action_hint: 'Carry one healing item before the raid.',
+  }],
+};
+const safeLogoutBeforeCrisis = panel.state.safeLogoutStatus;
+panel.handleCrisisStatus(crisisStatus);
+const coexistenceNodes = descendants(panel.render());
+assert.ok(
+  coexistenceNodes.some((node) => node.props?.['aria-label'] === 'Personal goblin crisis status'),
+  'preparation guidance remains inside the existing crisis card',
+);
+assert.ok(
+  coexistenceNodes.some((node) => node.props?.['aria-label'] === 'Safe Logout status'),
+  'Safe Logout remains visible beside preparation guidance',
+);
+assert.ok(
+  coexistenceNodes.some((node) => node.type === 'button'
+    && node.props['aria-label'] === 'Begin Safe Logout countdown'),
+  'crisis option updates preserve the Safe Logout action',
+);
+assert.deepEqual(
+  panel.state.safeLogoutStatus,
+  safeLogoutBeforeCrisis,
+  'crisis option updates do not mutate Safe Logout state',
+);
+
 beginButton.props.onClick();
 beginButton.props.onClick();
 assert.equal(beginRequests, 1, 'component action lock suppresses duplicate keyboard/click activation');

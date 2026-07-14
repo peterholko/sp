@@ -867,12 +867,28 @@ const SIGNS_WARNING_CSV_FIELDS: &[&str] = &[
     "crisis_warning_signs_to_launch_online_ticks",
 ];
 
+// Checkpoint 3 preparation telemetry is append-only so every earlier CSV
+// consumer continues to see its complete schema as an unchanged prefix.
+const CHECKPOINT3_PREPARATION_CSV_FIELDS: &[&str] = &[
+    "crisis_prep_repairs_started",
+    "crisis_prep_repairs_completed",
+    "crisis_prep_defensive_structures_started",
+    "crisis_prep_defensive_structures_completed",
+    "crisis_prep_healing_items_carried_at_launch",
+    "crisis_prep_healing_items_used_before_launch",
+    "crisis_prep_combat_capable_villagers_at_launch",
+    "crisis_prep_first_preparation_action_tick",
+    "crisis_prep_meaningful_preparation_categories",
+    "crisis_prep_meaningful_preparation_category_count",
+];
+
 fn csv_header_fields() -> Vec<&'static str> {
     PRE_SAFE_LOGOUT_CSV_FIELDS
         .iter()
         .chain(SAFE_LOGOUT_CSV_FIELDS)
         .chain(BALANCE_CSV_FIELDS)
         .chain(SIGNS_WARNING_CSV_FIELDS)
+        .chain(CHECKPOINT3_PREPARATION_CSV_FIELDS)
         .copied()
         .collect()
 }
@@ -1039,6 +1055,17 @@ fn balance_csv_row(m: &RunMetrics) -> Vec<String> {
         optional_bool(warnings.assault_launch_near_settlement),
         optional_tick(m.crisis_warning_signs_to_launch_global_ticks),
         optional_tick(m.crisis_warning_signs_to_launch_online_ticks),
+        actions.repairs_started.to_string(),
+        actions.repairs_completed.to_string(),
+        actions.defensive_structures_started.to_string(),
+        actions.defensive_structures_completed.to_string(),
+        actions.healing_items_carried_at_launch.to_string(),
+        actions.healing_items_used_before_launch.to_string(),
+        actions.combat_capable_villagers_at_launch.to_string(),
+        optional_tick(actions.first_preparation_action_tick),
+        serde_json::to_string(&actions.meaningful_preparation_categories)
+            .unwrap_or_else(|_| "[]".to_string()),
+        actions.meaningful_preparation_category_count.to_string(),
     ]
 }
 
@@ -2540,18 +2567,21 @@ fn print_summary(results: &[RunMetrics]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
-    fn csv_schema_preserves_existing_189_columns_and_appends_signs_warning_fields() {
+    fn csv_schema_preserves_every_existing_column_before_checkpoint3_fields() {
         let header = csv_header_fields();
         let metrics = panic_metrics(7, 12_345, RunnerMode::SafeLogout);
         let row = metrics_csv_row(&metrics);
         let legacy_len = PRE_SAFE_LOGOUT_CSV_FIELDS.len() + SAFE_LOGOUT_CSV_FIELDS.len();
         let existing_len = legacy_len + BALANCE_CSV_FIELDS.len();
+        let pre_checkpoint3_len = existing_len + SIGNS_WARNING_CSV_FIELDS.len();
 
         assert_eq!(PRE_SAFE_LOGOUT_CSV_FIELDS.len(), 48);
         assert_eq!(legacy_len, 73);
         assert_eq!(existing_len, 189);
+        assert_eq!(pre_checkpoint3_len, 191);
         assert_eq!(
             &header[..PRE_SAFE_LOGOUT_CSV_FIELDS.len()],
             PRE_SAFE_LOGOUT_CSV_FIELDS
@@ -2561,14 +2591,89 @@ mod tests {
             SAFE_LOGOUT_CSV_FIELDS
         );
         assert_eq!(&header[legacy_len..existing_len], BALANCE_CSV_FIELDS);
-        assert_eq!(&header[existing_len..], SIGNS_WARNING_CSV_FIELDS);
-        assert_eq!(header.len(), 191);
+        assert_eq!(
+            &header[existing_len..pre_checkpoint3_len],
+            SIGNS_WARNING_CSV_FIELDS
+        );
+        assert_eq!(
+            &header[pre_checkpoint3_len..],
+            CHECKPOINT3_PREPARATION_CSV_FIELDS
+        );
+        assert_eq!(header.len(), 201);
         assert_eq!(header.len(), row.len());
         assert_eq!(header[47], "crisis_invariants_ok");
         assert_eq!(header[48], "safe_logout_scenario_mode");
         assert_eq!(row[48], "safe_logout");
         assert_eq!(header[legacy_len], "crisis_balance_scenario");
         assert_eq!(row[legacy_len + 3], "12345");
+    }
+
+    #[test]
+    fn checkpoint3_preparation_actions_reach_csv_and_nested_json() {
+        let mut metrics = aggregate_fixture(1, "prepared_solo", "Warrior", Some(25));
+        let actions = &mut metrics.crisis_balance.preparation_actions;
+        assert!(actions.record_repair_started(100, 500));
+        assert!(actions.record_repair_completed(100, 550));
+        assert!(actions.record_defensive_structure_started(200, 600));
+        assert!(actions.record_defensive_structure_completed(200, true, 650));
+        assert!(actions.record_equipment_change(300, 700));
+        assert_eq!(actions.observe_healing_items(0, 750), 0);
+        assert_eq!(actions.observe_healing_items(2, 800), 2);
+        assert!(actions.record_healing_item_used_before_launch(Uuid::from_u128(400), 850));
+        assert!(actions.record_villager_recruited(500, 900));
+        assert!(actions.record_launch_readiness(2, [500, 500, 501]));
+
+        let header = csv_header_fields();
+        let row = metrics_csv_row(&metrics);
+        for (name, expected) in [
+            ("crisis_prep_repairs_started", "1"),
+            ("crisis_prep_repairs_completed", "1"),
+            ("crisis_prep_defensive_structures_started", "1"),
+            ("crisis_prep_defensive_structures_completed", "1"),
+            ("crisis_prep_healing_items_carried_at_launch", "2"),
+            ("crisis_prep_healing_items_used_before_launch", "1"),
+            ("crisis_prep_combat_capable_villagers_at_launch", "2"),
+            ("crisis_prep_first_preparation_action_tick", "500"),
+            ("crisis_prep_meaningful_preparation_category_count", "5"),
+        ] {
+            let index = header
+                .iter()
+                .position(|field| *field == name)
+                .expect("Checkpoint 3 preparation column");
+            assert_eq!(row[index], expected);
+        }
+        let categories_index = header
+            .iter()
+            .position(|field| *field == "crisis_prep_meaningful_preparation_categories")
+            .expect("meaningful preparation categories column");
+        assert_eq!(
+            row[categories_index],
+            r#"["defenses","equipment","healing","repair","villager_support"]"#
+        );
+
+        let json = serde_json::to_value(&metrics).expect("serialize runner metrics");
+        let actions_json = &json["crisis_balance"]["preparation_actions"];
+        assert_eq!(actions_json["repairs_started"], 1);
+        assert_eq!(actions_json["repairs_completed"], 1);
+        assert_eq!(actions_json["defensive_structures_started"], 1);
+        assert_eq!(actions_json["defensive_structures_completed"], 1);
+        assert_eq!(actions_json["healing_items_carried_at_launch"], 2);
+        assert_eq!(actions_json["healing_items_used_before_launch"], 1);
+        assert_eq!(actions_json["combat_capable_villagers_at_launch"], 2);
+        assert_eq!(actions_json["first_preparation_action_tick"], 500);
+        assert_eq!(actions_json["meaningful_preparation_category_count"], 5);
+        assert_eq!(
+            actions_json["meaningful_preparation_categories"],
+            serde_json::json!([
+                "defenses",
+                "equipment",
+                "healing",
+                "repair",
+                "villager_support"
+            ])
+        );
+        assert!(actions_json.get("repair_starts").is_none());
+        assert!(actions_json.get("meaningful_category_keys").is_none());
     }
 
     #[test]
