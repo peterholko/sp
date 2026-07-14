@@ -520,7 +520,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
         {crisis.preparationLabel &&
           <div style={statusRowStyle}>
-            <span>Preparation time</span>
+            <span>Minimum warning</span>
             <span>{crisis.preparationLabel}</span>
           </div>}
 

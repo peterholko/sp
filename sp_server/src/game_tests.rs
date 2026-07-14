@@ -2216,8 +2216,12 @@ fn goblin_pressure_is_gated_deterministic_and_capped() {
 
     let first = calculate_goblin_pressure(&developed);
     let second = calculate_goblin_pressure(&developed);
+    let breakdown = calculate_goblin_pressure_breakdown(&developed);
     assert_eq!(first, second);
     assert_eq!(first, GOBLIN_PRESSURE_MAX);
+    assert_eq!(breakdown.contributor_sum(), breakdown.raw_total);
+    assert_eq!(breakdown.raw_total, 110);
+    assert_eq!(breakdown.clamped_total, first);
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
             danger_unlocked: false,
@@ -2226,6 +2230,46 @@ fn goblin_pressure_is_gated_deterministic_and_capped() {
         0,
         "settlement facts cannot bypass the introduction safety gate"
     );
+}
+
+#[test]
+fn goblin_pressure_breakdown_uses_every_authoritative_category_and_snapshot_constants() {
+    let facts = GoblinPressureFacts {
+        danger_unlocked: true,
+        completed_structures: 3,
+        living_villagers: 1,
+        stored_gold: GOBLIN_GOLD_TIER_THREE,
+        sanctuary_level: 5,
+        explore_poi: true,
+        choose_expansion: true,
+        online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
+    };
+    let breakdown = calculate_goblin_pressure_breakdown(&facts);
+
+    assert_eq!(breakdown.danger_unlocked, GOBLIN_DANGER_UNLOCKED_PRESSURE);
+    assert_eq!(breakdown.structures, GOBLIN_THREE_STRUCTURES_PRESSURE);
+    assert_eq!(breakdown.villagers, GOBLIN_VILLAGER_PRESSURE);
+    assert_eq!(breakdown.explore_poi, GOBLIN_EXPLORE_POI_PRESSURE);
+    assert_eq!(breakdown.choose_expansion, GOBLIN_CHOOSE_EXPANSION_PRESSURE);
+    assert_eq!(breakdown.stored_gold, GOBLIN_GOLD_PRESSURE_PER_TIER * 3);
+    assert_eq!(breakdown.sanctuary, GOBLIN_SANCTUARY_PRESSURE_MAX);
+    assert_eq!(breakdown.online_time, GOBLIN_ONLINE_PRESSURE_PER_TIER * 3);
+    assert_eq!(breakdown.contributor_sum(), breakdown.raw_total);
+    assert_eq!(breakdown.clamped_total, calculate_goblin_pressure(&facts));
+
+    let snapshot = goblin_crisis_balance_config_snapshot();
+    assert_eq!(snapshot.pressure_max, GOBLIN_PRESSURE_MAX);
+    assert_eq!(snapshot.signs_threshold, GOBLIN_SIGNS_PRESSURE);
+    assert_eq!(snapshot.pressure_threshold, GOBLIN_PRESSURE_PHASE_PRESSURE);
+    assert_eq!(snapshot.preparing_threshold, GOBLIN_PREPARING_PRESSURE);
+    assert_eq!(
+        snapshot.assault_ready_threshold,
+        GOBLIN_ASSAULT_READY_PRESSURE
+    );
+    assert_eq!(snapshot.game_ticks_per_day, GAME_TICKS_PER_DAY);
+    assert_eq!(snapshot.preferred_launch_start_tick, DUSK);
+    assert_eq!(snapshot.preferred_launch_wrap_end_tick, FIRST_LIGHT);
+    assert_eq!(snapshot.assault_composition, GOBLIN_ASSAULT_COMPOSITION);
 }
 
 #[test]
@@ -2330,16 +2374,20 @@ fn goblin_phase_transitions_are_ordered_timed_and_stop_at_assault_ready() {
         Some((CrisisPhase::Signs, CrisisPhase::Pressure))
     );
 
+    crisis.phase_online_ticks = GOBLIN_PRESSURE_MIN_ONLINE_TICKS - 1;
+    assert!(transition_goblin_crisis(&mut crisis, 50).is_none());
     crisis.phase_online_ticks = GOBLIN_PRESSURE_MIN_ONLINE_TICKS;
     assert_eq!(
-        transition_goblin_crisis(&mut crisis, 50),
+        transition_goblin_crisis(&mut crisis, 51),
         Some((CrisisPhase::Pressure, CrisisPhase::Preparing))
     );
     assert!(crisis.warning_active);
 
+    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS - 1;
+    assert!(transition_goblin_crisis(&mut crisis, 60).is_none());
     crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
     assert_eq!(
-        transition_goblin_crisis(&mut crisis, 60),
+        transition_goblin_crisis(&mut crisis, 61),
         Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
     );
     assert!(crisis.warning_active);
@@ -2384,6 +2432,87 @@ fn goblin_phase_pressure_thresholds_are_enforced() {
         next_goblin_crisis_phase(&crisis),
         Some(CrisisPhase::AssaultReady)
     );
+}
+
+#[test]
+fn goblin_balance_checkpoint2_values_are_exact_and_other_pacing_controls_are_unchanged() {
+    let snapshot = goblin_crisis_balance_config_snapshot();
+
+    assert_eq!(snapshot.pressure_max, 100);
+    assert_eq!(snapshot.danger_unlocked_pressure, 10);
+    assert_eq!(snapshot.three_structures_pressure, 20);
+    assert_eq!(snapshot.villager_pressure, 15);
+    assert_eq!(snapshot.explore_poi_pressure, 10);
+    assert_eq!(snapshot.choose_expansion_pressure, 15);
+    assert_eq!(snapshot.gold_tier_thresholds, [25, 50, 100]);
+    assert_eq!(snapshot.gold_pressure_per_tier, 5);
+    assert_eq!(snapshot.sanctuary_pressure_per_level, 2);
+    assert_eq!(snapshot.sanctuary_pressure_max, 10);
+    assert_eq!(snapshot.online_pressure_tier_ticks, [600, 1_800, 3_600]);
+    assert_eq!(snapshot.online_pressure_per_tier, 5);
+
+    assert_eq!(snapshot.signs_threshold, 20);
+    assert_eq!(snapshot.pressure_threshold, 45);
+    assert_eq!(snapshot.preparing_threshold, 45);
+    assert_eq!(snapshot.assault_ready_threshold, 49);
+    assert_eq!(snapshot.signs_min_online_ticks, 600);
+    assert_eq!(snapshot.pressure_min_online_ticks, 1_200);
+    assert_eq!(snapshot.preparing_min_online_ticks, 1_800);
+    assert_eq!(snapshot.assault_ready_grace_ticks, 300);
+    assert_eq!(snapshot.assault_max_online_wait_ticks, 1_200);
+    assert_eq!(snapshot.preferred_launch_window, "dusk_or_night");
+}
+
+#[test]
+fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_skip_phases() {
+    let passive = GoblinPressureFacts {
+        danger_unlocked: true,
+        online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
+        ..Default::default()
+    };
+    assert_eq!(calculate_goblin_pressure(&passive), 25);
+
+    let developed = GoblinPressureFacts {
+        completed_structures: 3,
+        sanctuary_level: 2,
+        ..passive
+    };
+    let expected = calculate_goblin_pressure_breakdown(&developed);
+    assert_eq!(expected.clamped_total, 49);
+    for _ in 0..3 {
+        assert_eq!(calculate_goblin_pressure_breakdown(&developed), expected);
+    }
+
+    let mut crisis = SettlementCrisis::new(0);
+    crisis.pressure = expected.clamped_total;
+    crisis.phase_online_ticks = i32::MAX;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 1),
+        Some((CrisisPhase::Dormant, CrisisPhase::Signs))
+    );
+    assert!(transition_goblin_crisis(&mut crisis, 1).is_none());
+
+    crisis.phase_online_ticks = GOBLIN_SIGNS_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 2),
+        Some((CrisisPhase::Signs, CrisisPhase::Pressure))
+    );
+    crisis.phase_online_ticks = GOBLIN_PRESSURE_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 3),
+        Some((CrisisPhase::Pressure, CrisisPhase::Preparing))
+    );
+    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_goblin_crisis(&mut crisis, 4),
+        Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
+    );
+
+    let mut below_ready = SettlementCrisis::new(0);
+    below_ready.phase = CrisisPhase::Preparing;
+    below_ready.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    below_ready.pressure = GOBLIN_ASSAULT_READY_PRESSURE - 1;
+    assert!(transition_goblin_crisis(&mut below_ready, 5).is_none());
 }
 
 #[test]
@@ -2611,7 +2740,214 @@ fn personal_crisis_test_app() -> App {
     app.insert_resource(Objectives::default());
     app.insert_resource(SettlementCrisisState::default());
     app.insert_resource(CrisisTelemetryState::default());
+    app.insert_resource(CrisisBalanceTelemetryState::default());
     app
+}
+
+#[test]
+fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
+    let player_id = 77;
+    let hero_id = 7_700;
+    let monolith_id = 7_701;
+    let damaged_wall_id = 7_702;
+    let foundation_id = 7_703;
+    let position = Position { x: 8, y: 8 };
+    let stats = |hp, base_hp, base_damage| Stats {
+        hp,
+        stamina: Some(100),
+        mana: None,
+        base_hp,
+        base_stamina: Some(100),
+        base_mana: None,
+        base_def: 0,
+        damage_range: Some(1),
+        base_damage: Some(base_damage),
+        base_speed: Some(1),
+        base_vision: Some(1),
+    };
+
+    let client_id = Uuid::from_u128(77);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    let clients = Clients::default();
+    clients
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+
+    let mut crises = SettlementCrisisState::default();
+    crises.insert(
+        player_id,
+        SettlementCrisis {
+            phase: CrisisPhase::Preparing,
+            online_active_ticks: 100,
+            ..SettlementCrisis::default()
+        },
+    );
+
+    let mut app = App::new();
+    app.insert_resource(GameTick(100));
+    app.insert_resource(clients);
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(SpawnPositions(HashMap::from([(player_id, position)])));
+    app.insert_resource(crises);
+    app.insert_resource(CrisisBalanceTelemetryConfig {
+        sample_interval_ticks: Some(1),
+    });
+    app.insert_resource(CrisisBalanceTelemetryState::default());
+    app.insert_resource(CrisisBalanceObservationState::default());
+    app.add_systems(Update, crisis_balance_snapshot_system);
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            PlayerId(player_id),
+            Id(hero_id),
+            position,
+            Template("Novice Warrior".to_string()),
+            HeroClass::Warrior,
+            stats(100, 110, 2),
+            Inventory {
+                owner: hero_id,
+                items: Vec::new(),
+            },
+            BoundMonolith {
+                id: monolith_id,
+                pos: position,
+            },
+            State::None,
+            SubclassHero,
+        ))
+        .id();
+    let damaged_wall = app
+        .world_mut()
+        .spawn((
+            PlayerId(player_id),
+            Id(damaged_wall_id),
+            position,
+            Template("Stockade".to_string()),
+            Subclass::Wall,
+            State::None,
+            stats(10, 20, 0),
+            Inventory {
+                owner: damaged_wall_id,
+                items: Vec::new(),
+            },
+            ClassStructure,
+        ))
+        .id();
+    let foundation = app
+        .world_mut()
+        .spawn((
+            PlayerId(player_id),
+            Id(foundation_id),
+            position,
+            Template("Stockade".to_string()),
+            Subclass::Wall,
+            State::Founded,
+            stats(1, 20, 0),
+            Inventory {
+                owner: foundation_id,
+                items: Vec::new(),
+            },
+            ClassStructure,
+        ))
+        .id();
+    let monolith = app
+        .world_mut()
+        .spawn((
+            Id(monolith_id),
+            position,
+            Monolith {
+                soulshards: 0,
+                sanctuary_level: 1,
+            },
+            State::None,
+        ))
+        .id();
+
+    // First sample establishes the authoritative preparation baseline.
+    app.update();
+
+    // The second sample observes real ECS deltas. The sampler must not require
+    // scenario labels or mutate gameplay state to classify these actions.
+    *app.world_mut().get_mut::<State>(foundation).unwrap() = State::None;
+    app.world_mut().get_mut::<Stats>(damaged_wall).unwrap().hp = 20;
+    app.world_mut()
+        .get_mut::<Monolith>(monolith)
+        .unwrap()
+        .sanctuary_level = 2;
+    app.world_mut().spawn((
+        PlayerId(player_id),
+        Id(7_704),
+        State::None,
+        stats(100, 100, 1),
+        Inventory {
+            owner: 7_704,
+            items: Vec::new(),
+        },
+        Assignment {
+            structure_id: damaged_wall_id,
+            structure_name: "Stockade".to_string(),
+            structure_pos: position,
+        },
+        SubclassVillager,
+    ));
+    app.world_mut().resource_mut::<GameTick>().0 = 110;
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .online_active_ticks = 110;
+    app.update();
+
+    let telemetry = app.world().resource::<CrisisBalanceTelemetryState>();
+    let actions = &telemetry.get(&player_id).unwrap().preparation_actions;
+    assert_eq!(actions.structures_built, 1);
+    assert_eq!(actions.walls_built, 1);
+    assert_eq!(actions.structures_repaired, 1);
+    assert_eq!(actions.villagers_recruited, 1);
+    assert_eq!(actions.villager_assignments_changed, 1);
+    assert_eq!(actions.sanctuary_upgrades, 1);
+    assert_eq!(actions.online_ticks_near_settlement, 10);
+    assert_eq!(actions.online_ticks_away_from_settlement, 0);
+    assert!(actions.performed_preparation_action);
+
+    // Returning after an away Signs warning is observable even before the
+    // formal preparation phases. This must not be hidden behind action-count
+    // eligibility for Preparing/AssaultReady.
+    app.world_mut()
+        .resource_mut::<CrisisBalanceTelemetryState>()
+        .get_mut(&player_id)
+        .unwrap()
+        .warnings
+        .record(CrisisPhase::Signs, 120, 110, true, false);
+    *app.world_mut().get_mut::<Position>(hero).unwrap() = Position { x: 0, y: 0 };
+    app.world_mut().resource_mut::<GameTick>().0 = 120;
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&player_id).unwrap();
+        crisis.phase = CrisisPhase::Signs;
+        crisis.online_active_ticks = 120;
+    }
+    app.update();
+
+    *app.world_mut().get_mut::<Position>(hero).unwrap() = position;
+    app.world_mut().resource_mut::<GameTick>().0 = 130;
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&player_id).unwrap();
+        crisis.phase = CrisisPhase::Pressure;
+        crisis.online_active_ticks = 130;
+    }
+    app.update();
+    assert!(
+        app.world()
+            .resource::<CrisisBalanceTelemetryState>()
+            .get(&player_id)
+            .unwrap()
+            .preparation_actions
+            .returned_to_settlement_after_warning
+    );
 }
 
 #[test]
@@ -2679,6 +3015,27 @@ fn personal_crisis_initialization_and_timing_require_a_live_online_human_run() {
         10,
         "repeated evaluation of one GameTick must not double-count"
     );
+    {
+        let crisis = app
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap();
+        let balance = app
+            .world()
+            .resource::<CrisisBalanceTelemetryState>()
+            .get(&player_id)
+            .unwrap();
+        assert_eq!(balance.latest_pressure.clamped_total, crisis.pressure);
+        assert_eq!(
+            balance.latest_pressure.raw_total,
+            balance.latest_pressure.contributor_sum()
+        );
+        assert_eq!(
+            balance.latest_pressure.clamped_total,
+            balance.latest_pressure.raw_total.min(GOBLIN_PRESSURE_MAX)
+        );
+    }
 
     {
         let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
@@ -3551,6 +3908,12 @@ fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
     assert!(ready.assault_ready);
     assert_eq!(ready.preparation_seconds_remaining, Some(23));
     assert_eq!(
+        ready.summary.as_deref(),
+        Some(
+            "The raiders are ready. After the minimum warning, they favor dusk or night but will not wait indefinitely."
+        )
+    );
+    assert_eq!(
         ready.preferred_launch_window.as_deref(),
         Some("dusk_or_night")
     );
@@ -3646,12 +4009,14 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
 
     let clients = Clients(Arc::new(Mutex::new(client_map)));
     let mut app = App::new();
+    app.insert_resource(GameTick(100));
     app.insert_resource(clients.clone());
     app.insert_resource(SurvivalDirectorConfig::default());
     app.insert_resource(crisis_state);
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(telemetry_state);
+    app.insert_resource(CrisisBalanceTelemetryState::default());
     app.insert_resource(ResumeLoginSyncState::default());
     app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);
@@ -3928,12 +4293,14 @@ fn checkpoint4_major_transition_notices_emit_once() {
     login_sync.insert(player_id);
 
     let mut app = App::new();
+    app.insert_resource(GameTick(100));
     app.insert_resource(clients);
     app.insert_resource(SurvivalDirectorConfig::default());
     app.insert_resource(crisis_state);
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(CrisisTelemetryState::default());
+    app.insert_resource(CrisisBalanceTelemetryState::default());
     app.insert_resource(ResumeLoginSyncState::default());
     app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);
@@ -4015,12 +4382,14 @@ fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
     login_sync.insert(player_id);
 
     let mut app = App::new();
+    app.insert_resource(GameTick(100));
     app.insert_resource(clients);
     app.insert_resource(SurvivalDirectorConfig::new(SurvivalDirectorMode::Legacy));
     app.insert_resource(state);
     app.insert_resource(login_sync);
     app.insert_resource(CrisisStatusDeliveryState::default());
     app.insert_resource(CrisisTelemetryState::default());
+    app.insert_resource(CrisisBalanceTelemetryState::default());
     app.insert_resource(ResumeLoginSyncState::default());
     app.insert_resource(SafeLogoutTelemetryState::default());
     app.add_systems(Update, crisis_status_delivery_system);

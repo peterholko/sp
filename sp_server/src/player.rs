@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::common::{Destination, Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
+use crate::crisis_balance::{CrisisBalanceObservationState, CrisisBalanceTelemetryState};
 use crate::encounter::Encounter;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
 use crate::farm::Crops;
@@ -1217,6 +1218,8 @@ fn new_player_system(
         ResMut<SettlementCrisisState>,
         ResMut<PlayerWorldPresenceState>,
         ResMut<SafeLogoutTelemetryState>,
+        ResMut<CrisisBalanceTelemetryState>,
+        ResMut<CrisisBalanceObservationState>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -1309,6 +1312,8 @@ fn new_player_system(
                         // system will deterministically create a new Dormant
                         // entry on the next eligible evaluation.
                         run_intro_state.3.remove(player_id);
+                        run_intro_state.6.remove(player_id);
+                        run_intro_state.7 .0.remove(player_id);
                         initialize_player_presence(
                             *player_id,
                             clients.is_player_online(*player_id),
@@ -2129,6 +2134,7 @@ fn apply_ability_damage(
     damage: i32,
 ) -> i32 {
     let damage = damage.max(1);
+    let target_hp_before = target.stats.hp;
     target.stats.hp -= damage;
     commands
         .entity(target.entity)
@@ -2152,6 +2158,8 @@ fn apply_ability_damage(
             killer: actor.template.0.clone(),
         });
     }
+
+    Combat::emit_crisis_combat_telemetry(commands, actor, target, target_hp_before);
 
     damage
 }

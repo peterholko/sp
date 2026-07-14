@@ -31,6 +31,7 @@ lazy_static! {
 }
 
 pub mod constants;
+pub mod crisis_balance;
 pub mod database;
 pub mod event;
 pub mod game;

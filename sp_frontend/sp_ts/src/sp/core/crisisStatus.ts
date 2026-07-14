@@ -165,6 +165,10 @@ export function formatCrisisCountdown(seconds?: number): string | null {
   }
 
   const wholeSeconds = Math.floor(seconds);
+  if (wholeSeconds === 0) {
+    return 'complete';
+  }
+
   const minutes = Math.floor(wholeSeconds / 60);
   const remainingSeconds = wholeSeconds % 60;
 

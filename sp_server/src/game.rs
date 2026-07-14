@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::{reload, EnvFilter, Registry};
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::{
@@ -41,6 +41,12 @@ use crate::common::{
     Dehydrated, Exhausted, Heat, Hunger, Starving, Target, TaskTarget, Thirst, Tired, Transport,
 };
 use crate::constants::*;
+use crate::crisis_balance::{
+    crisis_combat_telemetry_observer, phase_name as balance_phase_name, CrisisBalanceObservation,
+    CrisisBalanceObservationState, CrisisBalanceTelemetry, CrisisBalanceTelemetryConfig,
+    CrisisBalanceTelemetryState, CrisisPreparationSnapshot, CrisisPressureBreakdown,
+    CrisisPressureSnapshot, GoblinCrisisBalanceConfigSnapshot,
+};
 use crate::database::DatabaseEvent;
 use crate::effect::{self, Effect, Effects};
 use crate::encounter::{Encounter, EncounterMapObj, EncounterProbability};
@@ -64,13 +70,13 @@ use crate::npc::{NPCPlugin, VisibleTarget};
 use crate::obj::{
     is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
-    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker,
-    LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order, PlayerId,
-    Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered,
-    StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
-    StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
-    Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower,
-    WorkEntry, WorkQueue, WorkStatus, WorkType,
+    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, HeroClass, Id,
+    LastAttacker, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order,
+    PlayerId, Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter,
+    Sheltered, StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange,
+    StateDead, StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC,
+    SubclassVillager, Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj,
+    Viewshed, Watchtower, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
@@ -1090,30 +1096,34 @@ fn player_survival_ticks(
 // Provisional personal-goblin-crisis tuning. Pressure is derived from current
 // settlement facts, not accumulated per evaluation, so repeated evaluation is
 // naturally idempotent and global calendar days are irrelevant.
-const GOBLIN_PRESSURE_MAX: i32 = 100;
-const GOBLIN_DANGER_UNLOCKED_PRESSURE: i32 = 10;
-const GOBLIN_THREE_STRUCTURES_PRESSURE: i32 = 20;
-const GOBLIN_VILLAGER_PRESSURE: i32 = 15;
-const GOBLIN_EXPLORE_POI_PRESSURE: i32 = 10;
-const GOBLIN_CHOOSE_EXPANSION_PRESSURE: i32 = 15;
-const GOBLIN_GOLD_TIER_ONE: i32 = 25;
-const GOBLIN_GOLD_TIER_TWO: i32 = 50;
-const GOBLIN_GOLD_TIER_THREE: i32 = 100;
-const GOBLIN_GOLD_PRESSURE_PER_TIER: i32 = 5;
-const GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL: i32 = 2;
-const GOBLIN_SANCTUARY_PRESSURE_MAX: i32 = 10;
-const GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS: i32 = 60 * TICKS_PER_SEC;
-const GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS: i32 = 180 * TICKS_PER_SEC;
-const GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS: i32 = 360 * TICKS_PER_SEC;
-const GOBLIN_ONLINE_PRESSURE_PER_TIER: i32 = 5;
+pub(crate) const GOBLIN_PRESSURE_MAX: i32 = 100;
+pub(crate) const GOBLIN_DANGER_UNLOCKED_PRESSURE: i32 = 10;
+pub(crate) const GOBLIN_THREE_STRUCTURES_PRESSURE: i32 = 20;
+pub(crate) const GOBLIN_VILLAGER_PRESSURE: i32 = 15;
+pub(crate) const GOBLIN_EXPLORE_POI_PRESSURE: i32 = 10;
+pub(crate) const GOBLIN_CHOOSE_EXPANSION_PRESSURE: i32 = 15;
+pub(crate) const GOBLIN_GOLD_TIER_ONE: i32 = 25;
+pub(crate) const GOBLIN_GOLD_TIER_TWO: i32 = 50;
+pub(crate) const GOBLIN_GOLD_TIER_THREE: i32 = 100;
+pub(crate) const GOBLIN_GOLD_PRESSURE_PER_TIER: i32 = 5;
+pub(crate) const GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL: i32 = 2;
+pub(crate) const GOBLIN_SANCTUARY_PRESSURE_MAX: i32 = 10;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS: i32 = 180 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS: i32 = 360 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_PER_TIER: i32 = 5;
 
-const GOBLIN_SIGNS_PRESSURE: i32 = 20;
-const GOBLIN_PRESSURE_PHASE_PRESSURE: i32 = 45;
-const GOBLIN_PREPARING_PRESSURE: i32 = 70;
-const GOBLIN_ASSAULT_READY_PRESSURE: i32 = 90;
-const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
-const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
-const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_SIGNS_PRESSURE: i32 = 20;
+pub(crate) const GOBLIN_PRESSURE_PHASE_PRESSURE: i32 = 45;
+// Checkpoint 2 keeps the existing contributor model and ordered online-time
+// gates, but makes a maintained developed-settlement path reachable. Reaching
+// Pressure at 45 can now mature into Preparing; AssaultReady still requires a
+// further persistent fact (the lowest observed developed-solo path was 49).
+pub(crate) const GOBLIN_PREPARING_PRESSURE: i32 = 45;
+pub(crate) const GOBLIN_ASSAULT_READY_PRESSURE: i32 = 49;
+pub(crate) const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
 
 const CRISIS_STATUS_VERSION: u32 = 1;
 const CRISIS_STATUS_PRESSURE_DELTA: i32 = 5;
@@ -1121,8 +1131,63 @@ const CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS: i32 = 5;
 pub(crate) const ASSAULT_READY_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
 pub(crate) const ASSAULT_MAX_ONLINE_WAIT_TICKS: i32 = 120 * TICKS_PER_SEC;
 const PERSONAL_ASSAULT_VISION: u32 = 14;
+const PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS: i32 = 6;
+const PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS: i32 = 8;
+const PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET: i32 = 1;
+const PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET: i32 = 3;
+const PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE: u32 = 3;
+const PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT: usize = 96;
 pub(crate) const GOBLIN_ASSAULT_COMPOSITION: [&str; 3] =
     ["Wolf Rider", "Wolf Rider", "Goblin Pillager"];
+
+pub fn goblin_crisis_balance_config_snapshot() -> GoblinCrisisBalanceConfigSnapshot {
+    GoblinCrisisBalanceConfigSnapshot {
+        pressure_max: GOBLIN_PRESSURE_MAX,
+        danger_unlocked_pressure: GOBLIN_DANGER_UNLOCKED_PRESSURE,
+        three_structures_pressure: GOBLIN_THREE_STRUCTURES_PRESSURE,
+        villager_pressure: GOBLIN_VILLAGER_PRESSURE,
+        explore_poi_pressure: GOBLIN_EXPLORE_POI_PRESSURE,
+        choose_expansion_pressure: GOBLIN_CHOOSE_EXPANSION_PRESSURE,
+        gold_tier_thresholds: vec![
+            GOBLIN_GOLD_TIER_ONE,
+            GOBLIN_GOLD_TIER_TWO,
+            GOBLIN_GOLD_TIER_THREE,
+        ],
+        gold_pressure_per_tier: GOBLIN_GOLD_PRESSURE_PER_TIER,
+        sanctuary_pressure_per_level: GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL,
+        sanctuary_pressure_max: GOBLIN_SANCTUARY_PRESSURE_MAX,
+        online_pressure_tier_ticks: vec![
+            GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS,
+            GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS,
+            GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
+        ],
+        online_pressure_per_tier: GOBLIN_ONLINE_PRESSURE_PER_TIER,
+        signs_threshold: GOBLIN_SIGNS_PRESSURE,
+        pressure_threshold: GOBLIN_PRESSURE_PHASE_PRESSURE,
+        preparing_threshold: GOBLIN_PREPARING_PRESSURE,
+        assault_ready_threshold: GOBLIN_ASSAULT_READY_PRESSURE,
+        signs_min_online_ticks: GOBLIN_SIGNS_MIN_ONLINE_TICKS,
+        pressure_min_online_ticks: GOBLIN_PRESSURE_MIN_ONLINE_TICKS,
+        preparing_min_online_ticks: GOBLIN_PREPARING_MIN_ONLINE_TICKS,
+        assault_ready_grace_ticks: ASSAULT_READY_GRACE_TICKS,
+        assault_max_online_wait_ticks: ASSAULT_MAX_ONLINE_WAIT_TICKS,
+        preferred_launch_window: "dusk_or_night".to_string(),
+        game_ticks_per_day: GAME_TICKS_PER_DAY,
+        preferred_launch_start_tick: DUSK,
+        preferred_launch_wrap_end_tick: FIRST_LIGHT,
+        assault_composition: GOBLIN_ASSAULT_COMPOSITION
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect(),
+        assault_vision: PERSONAL_ASSAULT_VISION,
+        fallback_spawn_min_distance: PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS,
+        fallback_spawn_max_distance: PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS,
+        sanctuary_spawn_min_offset_from_weak_radius: PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET,
+        sanctuary_spawn_max_offset_from_weak_radius: PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET,
+        neighbouring_structure_exclusion_distance: PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE,
+        spawn_candidate_limit: PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT,
+    }
+}
 
 fn is_assault_preferred_time(game_tick: i32) -> bool {
     let ticks_in_day = game_tick.rem_euclid(GAME_TICKS_PER_DAY);
@@ -1147,27 +1212,31 @@ struct GoblinPressureFacts {
     online_active_ticks: i32,
 }
 
-fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
+fn calculate_goblin_pressure_breakdown(facts: &GoblinPressureFacts) -> CrisisPressureBreakdown {
     if !facts.danger_unlocked {
-        return 0;
+        return CrisisPressureBreakdown::default();
     }
 
-    let mut pressure = GOBLIN_DANGER_UNLOCKED_PRESSURE;
+    let mut breakdown = CrisisPressureBreakdown {
+        danger_unlocked: GOBLIN_DANGER_UNLOCKED_PRESSURE,
+        structures: (facts.completed_structures >= 3)
+            .then_some(GOBLIN_THREE_STRUCTURES_PRESSURE)
+            .unwrap_or(0),
+        villagers: (facts.living_villagers > 0)
+            .then_some(GOBLIN_VILLAGER_PRESSURE)
+            .unwrap_or(0),
+        explore_poi: facts
+            .explore_poi
+            .then_some(GOBLIN_EXPLORE_POI_PRESSURE)
+            .unwrap_or(0),
+        choose_expansion: facts
+            .choose_expansion
+            .then_some(GOBLIN_CHOOSE_EXPANSION_PRESSURE)
+            .unwrap_or(0),
+        ..CrisisPressureBreakdown::default()
+    };
 
-    if facts.completed_structures >= 3 {
-        pressure += GOBLIN_THREE_STRUCTURES_PRESSURE;
-    }
-    if facts.living_villagers > 0 {
-        pressure += GOBLIN_VILLAGER_PRESSURE;
-    }
-    if facts.explore_poi {
-        pressure += GOBLIN_EXPLORE_POI_PRESSURE;
-    }
-    if facts.choose_expansion {
-        pressure += GOBLIN_CHOOSE_EXPANSION_PRESSURE;
-    }
-
-    pressure += if facts.stored_gold >= GOBLIN_GOLD_TIER_THREE {
+    breakdown.stored_gold = if facts.stored_gold >= GOBLIN_GOLD_TIER_THREE {
         GOBLIN_GOLD_PRESSURE_PER_TIER * 3
     } else if facts.stored_gold >= GOBLIN_GOLD_TIER_TWO {
         GOBLIN_GOLD_PRESSURE_PER_TIER * 2
@@ -1177,10 +1246,11 @@ fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
         0
     };
 
-    pressure += (facts.sanctuary_level.max(0) * GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL)
+    breakdown.sanctuary = (facts.sanctuary_level.max(0) * GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL)
         .min(GOBLIN_SANCTUARY_PRESSURE_MAX);
 
-    pressure += if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS {
+    breakdown.online_time = if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS
+    {
         GOBLIN_ONLINE_PRESSURE_PER_TIER * 3
     } else if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS {
         GOBLIN_ONLINE_PRESSURE_PER_TIER * 2
@@ -1190,7 +1260,13 @@ fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
         0
     };
 
-    pressure.min(GOBLIN_PRESSURE_MAX)
+    breakdown.raw_total = breakdown.contributor_sum();
+    breakdown.clamped_total = breakdown.raw_total.min(GOBLIN_PRESSURE_MAX);
+    breakdown
+}
+
+fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
+    calculate_goblin_pressure_breakdown(facts).clamped_total
 }
 
 fn next_goblin_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
@@ -1301,7 +1377,7 @@ fn crisis_phase_presentation(
         ),
         CrisisPhase::AssaultReady => (
             "Goblin Raid Imminent",
-            "The raiders are ready and may attack during darkness or when the preparation window expires.",
+            "The raiders are ready. After the minimum warning, they favor dusk or night but will not wait indefinitely.",
             "Return to your settlement and prepare for the assault.",
             "crisis",
         ),
@@ -1454,12 +1530,14 @@ fn crisis_transition_notice(phase: CrisisPhase) -> Option<&'static str> {
 }
 
 fn crisis_status_delivery_system(
+    game_tick: Res<GameTick>,
     clients: Res<Clients>,
     director: Res<SurvivalDirectorConfig>,
     crisis_state: Res<SettlementCrisisState>,
     mut login_sync: ResMut<CrisisStatusLoginSync>,
     mut delivery: ResMut<CrisisStatusDeliveryState>,
     mut telemetry_state: ResMut<CrisisTelemetryState>,
+    mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
     mut resume_login_sync: ResMut<ResumeLoginSyncState>,
     mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
 ) {
@@ -1582,6 +1660,16 @@ fn crisis_status_delivery_system(
                         telemetry.login_snapshots_sent =
                             telemetry.login_snapshots_sent.saturating_add(1);
                     }
+                }
+                if let Some(crisis) = crisis_state.get(player_id) {
+                    let balance = balance_telemetry_state.entry(*player_id).or_default();
+                    balance.warnings.record(
+                        crisis.phase,
+                        game_tick.0,
+                        crisis.online_active_ticks,
+                        true,
+                        balance.latest_near_settlement,
+                    );
                 }
                 if let Some(progress) = resume_login_sync.get_mut(player_id) {
                     if progress.connection_id == *client_id {
@@ -2394,6 +2482,9 @@ impl Plugin for GamePlugin {
         app.init_resource::<SettlementCrisisState>();
         app.init_resource::<NextCrisisAssaultId>();
         app.init_resource::<CrisisTelemetryState>();
+        app.init_resource::<CrisisBalanceTelemetryState>();
+        app.init_resource::<CrisisBalanceTelemetryConfig>();
+        app.init_resource::<CrisisBalanceObservationState>();
         app.init_resource::<CrisisStatusLoginSync>();
         app.init_resource::<CrisisStatusDeliveryState>();
         app.init_resource::<ResumeLoginSyncState>();
@@ -2655,6 +2746,15 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                crisis_balance_snapshot_system
+                    .after(personal_crisis_assault_system)
+                    .after(game_event_system)
+                    .before(crisis_status_delivery_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
                 crisis_status_delivery_system
                     .after(game_event_system)
                     .after(personal_crisis_system)
@@ -2743,7 +2843,8 @@ impl Plugin for GamePlugin {
             .add_observer(cancel_events_observer)
             .add_observer(update_obj_observer)
             .add_observer(add_light_effect_system)
-            .add_observer(remove_light_effect_system);
+            .add_observer(remove_light_effect_system)
+            .add_observer(crisis_combat_telemetry_observer);
     }
 }
 
@@ -12701,6 +12802,7 @@ fn personal_crisis_system(
     objectives: Res<Objectives>,
     mut settlement_crisis_state: ResMut<SettlementCrisisState>,
     mut crisis_telemetry_state: ResMut<CrisisTelemetryState>,
+    mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
     hero_query: Query<
         (
             &PlayerId,
@@ -12792,6 +12894,14 @@ fn personal_crisis_system(
             Entry::Vacant(entry) => {
                 entry.insert(SettlementCrisis::new(current_tick));
                 crisis_telemetry_state.insert(*player_id, CrisisTelemetry::new(current_tick));
+                let balance = balance_telemetry_state.entry(*player_id).or_default();
+                balance.record_pressure(
+                    CrisisPhase::Dormant,
+                    current_tick,
+                    0,
+                    CrisisPressureBreakdown::default(),
+                );
+                balance.record_phase(CrisisPhase::Dormant, current_tick, 0);
                 info!(
                     "personal_crisis_created player_id={} kind={:?} phase={:?} pressure=0 game_tick={} online={}",
                     player_id,
@@ -12811,7 +12921,7 @@ fn personal_crisis_system(
         advance_online_crisis_time(crisis, current_tick, count_online_time);
 
         let objective = objectives.get(player_id);
-        crisis.pressure = calculate_goblin_pressure(&GoblinPressureFacts {
+        let pressure_breakdown = calculate_goblin_pressure_breakdown(&GoblinPressureFacts {
             danger_unlocked: intro.danger_unlocked,
             completed_structures: completed_structures.get(player_id).copied().unwrap_or(0),
             living_villagers: living_villagers.get(player_id).copied().unwrap_or(0),
@@ -12825,6 +12935,16 @@ fn personal_crisis_system(
                 .unwrap_or(false),
             online_active_ticks: crisis.online_active_ticks,
         });
+        crisis.pressure = pressure_breakdown.clamped_total;
+        balance_telemetry_state
+            .entry(*player_id)
+            .or_default()
+            .record_pressure(
+                crisis.phase,
+                current_tick,
+                crisis.online_active_ticks,
+                pressure_breakdown,
+            );
 
         if count_online_time {
             if let Some((old_phase, new_phase)) = transition_goblin_crisis(crisis, current_tick) {
@@ -12832,6 +12952,10 @@ fn personal_crisis_system(
                     .entry(*player_id)
                     .or_insert_with(|| CrisisTelemetry::new(crisis.phase_started_tick))
                     .observe_phase(new_phase, current_tick);
+                balance_telemetry_state
+                    .entry(*player_id)
+                    .or_default()
+                    .record_phase(new_phase, current_tick, crisis.online_active_ticks);
                 info!(
                     "personal_crisis_transition player_id={} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
                     player_id, old_phase, new_phase, crisis.pressure, current_tick
@@ -12848,6 +12972,646 @@ fn personal_crisis_system(
         {
             advance_online_crisis_time(crisis, current_tick, false);
         }
+    }
+}
+
+fn crisis_preparation_snapshot(
+    player_id: i32,
+    crisis: &SettlementCrisis,
+    spawn_positions: &SpawnPositions,
+    hero_query: &Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Template,
+            Option<&HeroClass>,
+            &Stats,
+            &Inventory,
+            Option<&BoundMonolith>,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: &Query<
+        (
+            &PlayerId,
+            &Id,
+            &State,
+            &Stats,
+            &Inventory,
+            Option<&Assignment>,
+            Option<&StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: &Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Template,
+            &Subclass,
+            &State,
+            &Stats,
+            &Inventory,
+            Option<&StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: &Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+) -> (CrisisPreparationSnapshot, CrisisBalanceObservation) {
+    let hero = hero_query
+        .iter()
+        .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == player_id);
+    let hero_is_alive = hero
+        .map(|(_, _, _, _, _, stats, _, _, state, dead, true_death)| {
+            state.is_alive() && stats.hp > 0 && dead.is_none() && true_death.is_none()
+        })
+        .unwrap_or(false);
+
+    let mut snapshot = CrisisPreparationSnapshot {
+        game_tick: crisis.last_evaluated_tick,
+        phase: balance_phase_name(crisis.phase).to_string(),
+        ..CrisisPreparationSnapshot::default()
+    };
+    let mut observation = CrisisBalanceObservation {
+        tick: crisis.last_evaluated_tick,
+        online_active_ticks: crisis.online_active_ticks,
+        phase: Some(crisis.phase),
+        ..CrisisBalanceObservation::default()
+    };
+
+    let mut hero_info = None;
+    let mut bound_monolith_id = None;
+    let mut hero_pos = None;
+    if let Some((_, id, pos, template, hero_class, stats, inventory, bound, _, _, _)) = hero {
+        bound_monolith_id = bound.map(|bound| bound.id);
+        if hero_is_alive {
+            hero_pos = Some(*pos);
+            hero_info = Some(AssaultHeroInfo {
+                id: id.0,
+                pos: *pos,
+                bound_monolith_id,
+                valid_run: spawn_positions.contains_key(&player_id),
+            });
+        }
+        snapshot.hero_class = hero_class
+            .map(|class| class.to_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        snapshot.hero_template = template.0.clone();
+        snapshot.hero_health = stats.hp;
+        snapshot.hero_max_health = stats.base_hp;
+        snapshot.equipped_weapon = inventory
+            .items
+            .iter()
+            .find(|item| item.equipped && item.class == WEAPON)
+            .map(|item| item.name.clone());
+        snapshot.equipped_armor_count = inventory
+            .items
+            .iter()
+            .filter(|item| item.equipped && item.class == ARMOR)
+            .count() as i32;
+        snapshot.healing_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.attrs.contains_key(&AttrKey::Healing))
+            .map(|item| item.quantity.max(0))
+            .sum();
+        snapshot.food_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.class == FOOD)
+            .map(|item| item.quantity.max(0))
+            .sum();
+        snapshot.drink_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.class == DRINK)
+            .map(|item| item.quantity.max(0))
+            .sum();
+        observation.total_run_items = inventory
+            .items
+            .iter()
+            .map(|item| item.quantity.max(0))
+            .sum();
+        observation.equipped_weapon = snapshot.equipped_weapon.clone();
+        observation.equipped_armor_count = snapshot.equipped_armor_count;
+        observation.healing_items = snapshot.healing_items;
+    }
+
+    let mut assault_structures = Vec::new();
+    for (owner, id, pos, template, subclass, state, stats, inventory, dead) in
+        structure_query.iter()
+    {
+        if owner.0 != player_id || dead.is_some() {
+            continue;
+        }
+        observation.total_run_items = observation.total_run_items.saturating_add(
+            inventory
+                .items
+                .iter()
+                .map(|item| item.quantity.max(0))
+                .sum::<i32>(),
+        );
+        if Structure::is_built(*state) {
+            snapshot.completed_structures = snapshot.completed_structures.saturating_add(1);
+            observation.completed_structure_ids.insert(id.0);
+            observation.structure_health.insert(id.0, stats.hp);
+            assault_structures.push(AssaultStructureInfo {
+                id: id.0,
+                owner_player_id: owner.0,
+                pos: *pos,
+                subclass: *subclass,
+            });
+            if *subclass == Subclass::Wall {
+                snapshot.wall_segments = snapshot.wall_segments.saturating_add(1);
+                snapshot.wall_total_health =
+                    snapshot.wall_total_health.saturating_add(stats.hp.max(0));
+                snapshot.wall_total_max_health = snapshot
+                    .wall_total_max_health
+                    .saturating_add(stats.base_hp.max(0));
+                observation.wall_ids.insert(id.0);
+                match template.0.as_str() {
+                    "Stockade" => snapshot.stockades = snapshot.stockades.saturating_add(1),
+                    "Palisade" => snapshot.palisades = snapshot.palisades.saturating_add(1),
+                    _ => {}
+                }
+            }
+            if *subclass == Subclass::Watchtower {
+                snapshot.watchtowers = snapshot.watchtowers.saturating_add(1);
+            }
+            if *subclass == Subclass::Storage {
+                let stored = inventory
+                    .items
+                    .iter()
+                    .map(|item| item.quantity.max(0))
+                    .sum::<i32>();
+                observation.stored_items = observation.stored_items.saturating_add(stored);
+                snapshot.stored_resources_total =
+                    snapshot.stored_resources_total.saturating_add(stored);
+                snapshot.stored_gold = snapshot
+                    .stored_gold
+                    .saturating_add(inventory.get_total_gold());
+                snapshot.stored_food = snapshot.stored_food.saturating_add(
+                    inventory
+                        .items
+                        .iter()
+                        .filter(|item| item.class == FOOD)
+                        .map(|item| item.quantity.max(0))
+                        .sum::<i32>(),
+                );
+            }
+        } else {
+            snapshot.foundations = snapshot.foundations.saturating_add(1);
+        }
+    }
+
+    let mut living_villager_ids = BTreeSet::new();
+    for (owner, id, state, stats, inventory, assignment, dead) in villager_query.iter() {
+        if owner.0 != player_id || !state.is_alive() || dead.is_some() || stats.hp <= 0 {
+            continue;
+        }
+        snapshot.villagers_alive = snapshot.villagers_alive.saturating_add(1);
+        living_villager_ids.insert(id.0);
+        if stats.base_damage.unwrap_or(0) > 0
+            || inventory
+                .items
+                .iter()
+                .any(|item| item.equipped && item.class == WEAPON)
+        {
+            snapshot.villagers_combat_capable = snapshot.villagers_combat_capable.saturating_add(1);
+        }
+        observation.total_run_items = observation.total_run_items.saturating_add(
+            inventory
+                .items
+                .iter()
+                .map(|item| item.quantity.max(0))
+                .sum::<i32>(),
+        );
+        if let Some(assignment) = assignment {
+            observation
+                .villager_assignments
+                .insert(id.0, assignment.structure_id);
+        }
+    }
+    observation.villagers = living_villager_ids;
+
+    let assault_monoliths = monolith_query
+        .iter()
+        .filter(|(_, _, _, state, dead)| Structure::is_built(**state) && dead.is_none())
+        .map(|(id, pos, monolith, _, _)| {
+            (
+                id.0,
+                AssaultMonolithInfo {
+                    pos: *pos,
+                    sanctuary_level: monolith.sanctuary_level,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if let Some(level) = bound_monolith_id
+        .and_then(|id| assault_monoliths.get(&id))
+        .map(|monolith| monolith.sanctuary_level)
+    {
+        snapshot.sanctuary_level = level;
+        observation.sanctuary_level = level;
+    }
+    let settlement_anchor = hero_info
+        .and_then(|hero| {
+            select_personal_assault_anchor(
+                player_id,
+                hero,
+                spawn_positions,
+                &assault_structures,
+                &assault_monoliths,
+            )
+        })
+        .map(|anchor| {
+            (
+                anchor.pos,
+                anchor
+                    .sanctuary_level
+                    .map(sanctuary_full_radius)
+                    .unwrap_or(WEAK_SANCTUARY_RANGE),
+            )
+        });
+    snapshot.hero_near_settlement = hero_pos
+        .zip(settlement_anchor)
+        .map(|(hero, (anchor, radius))| Map::dist(hero, anchor) < radius)
+        .unwrap_or(false);
+    observation.near_settlement = snapshot.hero_near_settlement;
+
+    (snapshot, observation)
+}
+
+fn is_preparation_phase(phase: Option<CrisisPhase>) -> bool {
+    matches!(
+        phase,
+        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+    )
+}
+
+/// Samples authoritative state after crisis evaluation. It writes only the
+/// runtime telemetry resources and never feeds a value back into gameplay.
+pub(crate) fn crisis_balance_snapshot_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
+    spawn_positions: Res<SpawnPositions>,
+    crisis_state: Res<SettlementCrisisState>,
+    config: Res<CrisisBalanceTelemetryConfig>,
+    mut telemetry_state: ResMut<CrisisBalanceTelemetryState>,
+    mut observation_state: ResMut<CrisisBalanceObservationState>,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Template,
+            Option<&HeroClass>,
+            &Stats,
+            &Inventory,
+            Option<&BoundMonolith>,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &State,
+            &Stats,
+            &Inventory,
+            Option<&Assignment>,
+            Option<&StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Template,
+            &Subclass,
+            &State,
+            &Stats,
+            &Inventory,
+            Option<&StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+) {
+    // Detailed preparation deltas require a full inventory/unit/structure
+    // observation each update. Production keeps this analysis sampler off;
+    // explicit headless balance runs opt in with a bounded sample interval.
+    if config.sample_interval_ticks.is_none() {
+        return;
+    }
+    let sample_interval = config.sample_interval_ticks.unwrap_or(1).max(1);
+    for (player_id, crisis) in crisis_state.iter() {
+        let online = clients.is_player_online(*player_id);
+        let hero_alive = hero_query
+            .iter()
+            .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == *player_id)
+            .map(|(_, _, _, _, _, stats, _, _, state, dead, true_death)| {
+                state.is_alive() && stats.hp > 0 && dead.is_none() && true_death.is_none()
+            })
+            .unwrap_or(false);
+        {
+            let telemetry = telemetry_state.entry(*player_id).or_default();
+            let previous_phase = telemetry.latest_phase;
+            if let (Some(previous_phase), Some(previous_alive)) =
+                (previous_phase, telemetry.latest_hero_alive)
+            {
+                telemetry.assault_outcome.record_hero_lifecycle_transition(
+                    Some(previous_phase),
+                    Some(crisis.phase),
+                    previous_alive,
+                    hero_alive,
+                );
+            }
+            telemetry.latest_phase = Some(crisis.phase);
+            telemetry.latest_hero_alive = Some(hero_alive);
+            if crisis.phase == CrisisPhase::Resolved
+                && telemetry.assault_outcome.hero_alive_at_resolution.is_none()
+            {
+                telemetry.assault_outcome.hero_alive_at_resolution = Some(hero_alive);
+            }
+            if is_player_offline_protected(*player_id, &presence)
+                && crisis.phase < CrisisPhase::AssaultActive
+            {
+                telemetry.assault_outcome.safe_logout_before_assault = true;
+            }
+            if telemetry.latest_online
+                && !online
+                && (crisis.phase == CrisisPhase::AssaultActive
+                    || previous_phase == Some(CrisisPhase::AssaultActive))
+            {
+                telemetry.assault_outcome.ordinary_disconnect_during_assault = true;
+            }
+            if crisis.phase == CrisisPhase::AssaultActive
+                && !telemetry.latest_online
+                && online
+                && telemetry.assault_outcome.ordinary_disconnect_during_assault
+            {
+                telemetry.assault_outcome.reconnected_during_assault = true;
+            }
+            telemetry.latest_online = online;
+        }
+
+        let should_sample = observation_state
+            .0
+            .get(player_id)
+            .map(|previous| {
+                previous.phase != Some(crisis.phase)
+                    || game_tick.0.saturating_sub(previous.tick) >= sample_interval
+            })
+            .unwrap_or(true);
+        if !should_sample {
+            continue;
+        }
+        let (mut snapshot, mut current) = crisis_preparation_snapshot(
+            *player_id,
+            crisis,
+            &spawn_positions,
+            &hero_query,
+            &villager_query,
+            &structure_query,
+            &monolith_query,
+        );
+        snapshot.game_tick = game_tick.0;
+        current.tick = game_tick.0;
+        current.online = online;
+
+        let previous = observation_state.0.remove(player_id);
+        let telemetry = telemetry_state.entry(*player_id).or_default();
+        telemetry.latest_near_settlement = current.near_settlement;
+        telemetry.latest_online = current.online;
+
+        if let Some(previous) = previous.as_ref() {
+            if is_preparation_phase(previous.phase)
+                && (is_preparation_phase(current.phase)
+                    || current.phase == Some(CrisisPhase::AssaultActive))
+                && current.online
+                && !is_player_offline_protected(*player_id, &presence)
+            {
+                let elapsed = current
+                    .online_active_ticks
+                    .saturating_sub(previous.online_active_ticks)
+                    .max(0);
+                if current.near_settlement {
+                    telemetry.preparation_actions.online_ticks_near_settlement = telemetry
+                        .preparation_actions
+                        .online_ticks_near_settlement
+                        .saturating_add(elapsed);
+                } else {
+                    telemetry
+                        .preparation_actions
+                        .online_ticks_away_from_settlement = telemetry
+                        .preparation_actions
+                        .online_ticks_away_from_settlement
+                        .saturating_add(elapsed);
+                }
+
+                let structures_built = current
+                    .completed_structure_ids
+                    .difference(&previous.completed_structure_ids)
+                    .count() as i32;
+                let walls_built = current.wall_ids.difference(&previous.wall_ids).count() as i32;
+                telemetry.preparation_actions.structures_built = telemetry
+                    .preparation_actions
+                    .structures_built
+                    .saturating_add(structures_built);
+                telemetry.preparation_actions.walls_built = telemetry
+                    .preparation_actions
+                    .walls_built
+                    .saturating_add(walls_built);
+
+                let repaired = current
+                    .structure_health
+                    .iter()
+                    .filter(|(id, hp)| {
+                        previous.completed_structure_ids.contains(id)
+                            && current.completed_structure_ids.contains(id)
+                            && previous
+                                .structure_health
+                                .get(id)
+                                .map(|previous_hp| **hp > *previous_hp)
+                                .unwrap_or(false)
+                    })
+                    .count() as i32;
+                telemetry.preparation_actions.structures_repaired = telemetry
+                    .preparation_actions
+                    .structures_repaired
+                    .saturating_add(repaired);
+
+                if current.equipped_weapon != previous.equipped_weapon
+                    || current.equipped_armor_count > previous.equipped_armor_count
+                {
+                    telemetry.preparation_actions.equipment_changes = telemetry
+                        .preparation_actions
+                        .equipment_changes
+                        .saturating_add(1);
+                }
+                telemetry.preparation_actions.healing_items_acquired = telemetry
+                    .preparation_actions
+                    .healing_items_acquired
+                    .saturating_add(
+                        current
+                            .healing_items
+                            .saturating_sub(previous.healing_items)
+                            .max(0),
+                    );
+                telemetry.preparation_actions.villagers_recruited = telemetry
+                    .preparation_actions
+                    .villagers_recruited
+                    .saturating_add(
+                        current.villagers.difference(&previous.villagers).count() as i32
+                    );
+                let assignment_changes = current
+                    .villager_assignments
+                    .iter()
+                    .filter(|(id, structure)| {
+                        previous.villager_assignments.get(id) != Some(*structure)
+                    })
+                    .count() as i32;
+                telemetry.preparation_actions.villager_assignments_changed = telemetry
+                    .preparation_actions
+                    .villager_assignments_changed
+                    .saturating_add(assignment_changes);
+                telemetry.preparation_actions.sanctuary_upgrades = telemetry
+                    .preparation_actions
+                    .sanctuary_upgrades
+                    .saturating_add(
+                        current
+                            .sanctuary_level
+                            .saturating_sub(previous.sanctuary_level)
+                            .max(0),
+                    );
+                telemetry.preparation_actions.resource_units_acquired = telemetry
+                    .preparation_actions
+                    .resource_units_acquired
+                    .saturating_add(
+                        current
+                            .total_run_items
+                            .saturating_sub(previous.total_run_items)
+                            .max(0),
+                    );
+                telemetry.preparation_actions.storage_units_added = telemetry
+                    .preparation_actions
+                    .storage_units_added
+                    .saturating_add(
+                        current
+                            .stored_items
+                            .saturating_sub(previous.stored_items)
+                            .max(0),
+                    );
+
+                let action_happened = structures_built > 0
+                    || walls_built > 0
+                    || repaired > 0
+                    || current.equipped_weapon != previous.equipped_weapon
+                    || current.equipped_armor_count > previous.equipped_armor_count
+                    || current.healing_items > previous.healing_items
+                    || current.villagers.len() > previous.villagers.len()
+                    || assignment_changes > 0
+                    || current.sanctuary_level > previous.sanctuary_level
+                    || current.total_run_items > previous.total_run_items
+                    || current.stored_items > previous.stored_items;
+                if action_happened {
+                    telemetry.preparation_actions.mark_action();
+                }
+            }
+
+            // Warning response is observation, not a preparation-phase gate:
+            // a player may receive Signs while away and return during Signs or
+            // Pressure, before the formal Preparing phase begins.
+            let warning_was_away = matches!(telemetry.warnings.signs_near_settlement, Some(false))
+                || matches!(telemetry.warnings.preparing_near_settlement, Some(false))
+                || matches!(
+                    telemetry.warnings.assault_ready_near_settlement,
+                    Some(false)
+                );
+            if warning_was_away && !previous.near_settlement && current.near_settlement {
+                telemetry
+                    .preparation_actions
+                    .returned_to_settlement_after_warning = true;
+            }
+        }
+
+        match crisis.phase {
+            CrisisPhase::Preparing => {
+                telemetry
+                    .preparation_snapshots
+                    .preparing
+                    .get_or_insert_with(|| snapshot.clone());
+            }
+            CrisisPhase::AssaultReady => {
+                telemetry
+                    .preparation_snapshots
+                    .assault_ready
+                    .get_or_insert_with(|| snapshot.clone());
+            }
+            CrisisPhase::AssaultActive => {
+                if telemetry.preparation_snapshots.assault_launch.is_none() {
+                    telemetry.preparation_snapshots.assault_launch = Some(snapshot.clone());
+                    telemetry.assault_outcome.villagers_at_launch = snapshot.villagers_alive;
+                    telemetry.assault_outcome.structures_at_launch = snapshot.completed_structures;
+                    telemetry.assault_outcome.wall_segments_at_launch = snapshot.wall_segments;
+                }
+                telemetry.assault_outcome.assault_units_remaining = crisis
+                    .assault_unit_ids
+                    .len()
+                    .saturating_sub(crisis.assault_defeated_unit_ids.len())
+                    as i32;
+                telemetry.assault_outcome.assault_units_defeated =
+                    crisis.assault_defeated_unit_ids.len() as i32;
+            }
+            CrisisPhase::Resolved => {
+                // Captured below. The first resolved sample replaces the latest
+                // pre-resolution/end-of-run sample and is then preserved.
+            }
+            _ => {}
+        }
+        if telemetry
+            .preparation_snapshots
+            .resolution_or_end
+            .as_ref()
+            .map(|existing| existing.phase.as_str())
+            != Some(balance_phase_name(CrisisPhase::Resolved))
+        {
+            telemetry.preparation_snapshots.resolution_or_end = Some(snapshot);
+        }
+
+        if let Some(interval) = config.sample_interval_ticks.filter(|value| *value > 0) {
+            if telemetry
+                .pressure_snapshots
+                .periodic
+                .last()
+                .map(|sample| game_tick.0.saturating_sub(sample.game_tick) >= interval)
+                .unwrap_or(true)
+            {
+                telemetry
+                    .pressure_snapshots
+                    .periodic
+                    .push(CrisisPressureSnapshot {
+                        game_tick: game_tick.0,
+                        online_active_ticks: crisis.online_active_ticks,
+                        phase: balance_phase_name(crisis.phase).to_string(),
+                        breakdown: telemetry.latest_pressure,
+                    });
+            }
+        }
+
+        observation_state.0.insert(*player_id, current);
     }
 }
 
@@ -12992,10 +13756,16 @@ fn personal_assault_spawn_positions(
 
     let (minimum_radius, maximum_radius) = match anchor.sanctuary_level {
         Some(level) => {
-            let outside = sanctuary_weak_radius(level) as i32 + 1;
-            (outside, outside + 2)
+            let weak_radius = sanctuary_weak_radius(level) as i32;
+            (
+                weak_radius + PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET,
+                weak_radius + PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET,
+            )
         }
-        None => (6, 8),
+        None => (
+            PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS,
+            PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS,
+        ),
     };
 
     let mut candidates = Vec::new();
@@ -13005,7 +13775,10 @@ fn personal_assault_spawn_positions(
     candidates.shuffle(&mut rand::thread_rng());
 
     let mut selected = Vec::with_capacity(count);
-    for (x, y) in candidates.into_iter().take(96) {
+    for (x, y) in candidates
+        .into_iter()
+        .take(PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT)
+    {
         let pos = Position { x, y };
         if !Map::is_valid_pos((x, y))
             || !Map::is_passable(x, y, map)
@@ -13018,7 +13791,8 @@ fn personal_assault_spawn_positions(
         // Avoid putting a personal assault in the immediate footprint of a
         // neighbouring settlement. Helpers can still engage after the spawn.
         if structures.iter().any(|structure| {
-            structure.owner_player_id != owner_player_id && Map::dist(pos, structure.pos) < 3
+            structure.owner_player_id != owner_player_id
+                && Map::dist(pos, structure.pos) < PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE
         }) {
             continue;
         }
@@ -13213,6 +13987,7 @@ fn personal_crisis_assault_system(
         mut run_spawned_objs,
         mut run_score_state,
         mut crisis_telemetry_state,
+        mut balance_telemetry_state,
     ): (
         ResMut<Ids>,
         ResMut<EntityObjMap>,
@@ -13221,6 +13996,7 @@ fn personal_crisis_assault_system(
         ResMut<RunSpawnedObjs>,
         ResMut<RunScoreState>,
         ResMut<CrisisTelemetryState>,
+        ResMut<CrisisBalanceTelemetryState>,
     ),
     spawn_positions: Res<SpawnPositions>,
     hero_query: Query<
@@ -13490,6 +14266,15 @@ fn personal_crisis_assault_system(
                             .entry(player_id)
                             .or_default()
                             .record_launch(current_tick);
+                        let balance = balance_telemetry_state.entry(player_id).or_default();
+                        balance.record_phase(
+                            CrisisPhase::AssaultActive,
+                            current_tick,
+                            crisis.online_active_ticks,
+                        );
+                        balance
+                            .assault_outcome
+                            .record_launch_units(&crisis.assault_unit_ids);
                         info!(
                             "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
                             player_id,
@@ -13633,6 +14418,23 @@ fn personal_crisis_assault_system(
                             .entry(player_id)
                             .or_default()
                             .record_resolution(current_tick);
+                        let balance = balance_telemetry_state.entry(player_id).or_default();
+                        balance.record_phase(
+                            CrisisPhase::Resolved,
+                            current_tick,
+                            crisis.online_active_ticks,
+                        );
+                        balance.assault_outcome.assault_resolved = true;
+                        balance.assault_outcome.assault_units_defeated = crisis
+                            .assault_defeated_unit_ids
+                            .len()
+                            .try_into()
+                            .unwrap_or(i32::MAX);
+                        balance.assault_outcome.assault_units_remaining = 0;
+                        balance.assault_outcome.assault_duration_ticks = crisis
+                            .assault_started_tick
+                            .map(|started| current_tick.saturating_sub(started));
+                        balance.assault_outcome.resolved_while_owner_offline = !online;
                     }
                 }
             }

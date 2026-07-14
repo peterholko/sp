@@ -5,9 +5,10 @@ use big_brain::thinker::ThinkerBuilder;
 use rand::Rng;
 
 use crate::constants::TICKS_PER_SEC;
+use crate::crisis_balance::CrisisCombatTelemetryEvent;
 use crate::effect::{Effect, Effects};
 use crate::event::{MapEvents, Spell, VisibleEvent};
-use crate::game::{Fortified, GameTick};
+use crate::game::{CrisisAssaultUnit, Fortified, GameTick};
 use crate::ids::Ids;
 use crate::item::{self, AttrKey, Inventory, Item};
 use crate::map::Map;
@@ -107,6 +108,7 @@ pub struct CombatQuery {
     pub hero_class: Option<&'static HeroClass>,
     pub combo_tracker: Option<&'static mut ComboTracker>,
     pub last_combat_tick: &'static mut LastCombatTick,
+    pub crisis_assault: Option<&'static CrisisAssaultUnit>,
 }
 
 #[derive(QueryData)]
@@ -125,12 +127,69 @@ pub struct CombatSpellQuery {
     pub effects: &'static mut Effects,
     pub fortified: Option<&'static Fortified>,
     pub last_combat_tick: &'static mut LastCombatTick,
+    pub crisis_assault: Option<&'static CrisisAssaultUnit>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Combat;
 
 impl Combat {
+    pub(crate) fn emit_crisis_combat_telemetry(
+        commands: &mut Commands,
+        attacker: &CombatQueryItem,
+        target: &CombatQueryItem,
+        hp_before: i32,
+    ) {
+        let attacker_crisis = attacker.crisis_assault.copied();
+        let target_crisis = target.crisis_assault.copied();
+        if attacker_crisis.is_none() && target_crisis.is_none() {
+            return;
+        }
+        let effective_damage = hp_before.max(0).saturating_sub(target.stats.hp.max(0));
+        commands.trigger(CrisisCombatTelemetryEvent {
+            entity: target.entity,
+            attacker_id: attacker.id.0,
+            attacker_player_id: attacker.player_id.0,
+            attacker_subclass: *attacker.subclass,
+            attacker_crisis,
+            target_id: target.id.0,
+            target_player_id: target.player_id.0,
+            target_subclass: *target.subclass,
+            target_is_structure: target.class.is_structure(),
+            target_crisis,
+            effective_damage,
+            killed: target.stats.hp <= 0,
+        });
+    }
+
+    pub(crate) fn emit_crisis_spell_telemetry(
+        commands: &mut Commands,
+        attacker: &CombatSpellQueryItem,
+        target: &CombatSpellQueryItem,
+        hp_before: i32,
+    ) {
+        let attacker_crisis = attacker.crisis_assault.copied();
+        let target_crisis = target.crisis_assault.copied();
+        if attacker_crisis.is_none() && target_crisis.is_none() {
+            return;
+        }
+        let effective_damage = hp_before.max(0).saturating_sub(target.stats.hp.max(0));
+        commands.trigger(CrisisCombatTelemetryEvent {
+            entity: target.entity,
+            attacker_id: attacker.id.0,
+            attacker_player_id: attacker.player_id.0,
+            attacker_subclass: *attacker.subclass,
+            attacker_crisis,
+            target_id: target.id.0,
+            target_player_id: target.player_id.0,
+            target_subclass: *target.subclass,
+            target_is_structure: target.class.is_structure(),
+            target_crisis,
+            effective_damage,
+            killed: target.stats.hp <= 0,
+        });
+    }
+
     pub fn class_template_is_attackable(class: &Class, _template: &Template) -> bool {
         !class.is_poi()
     }
@@ -404,6 +463,7 @@ impl Combat {
 
         // 26 Update Hp and check if target is dead
         let dealt_damage = final_damage as i32;
+        let target_hp_before = target.stats.hp;
         target.stats.hp -= dealt_damage;
         if dealt_damage > 0 {
             commands
@@ -480,6 +540,8 @@ impl Combat {
                 });
             }
         }
+
+        Self::emit_crisis_combat_telemetry(commands, attacker, target, target_hp_before);
 
         debug!("Total Damage: {:?}", total_damage);
 
@@ -623,6 +685,7 @@ impl Combat {
 
         // 26 Update Hp and check if target is dead
         let dealt_damage = final_damage as i32;
+        let target_hp_before = target.stats.hp;
         target.stats.hp -= dealt_damage;
         if dealt_damage > 0 {
             commands
@@ -701,6 +764,8 @@ impl Combat {
             }
         }
 
+        Self::emit_crisis_combat_telemetry(commands, attacker, target, target_hp_before);
+
         debug!("Total Damage: {:?}", total_damage);
 
         // Return combo name
@@ -724,6 +789,7 @@ impl Combat {
             Spell::ShadowBolt => 1,
             Spell::ArcaneBolt => 12,
         };
+        let target_hp_before = target.stats.hp;
         target.stats.hp -= damage;
         commands
             .entity(target.entity)
@@ -741,6 +807,8 @@ impl Combat {
                 new_state: State::Dead,
             });
         }
+
+        Self::emit_crisis_spell_telemetry(commands, caster, target, target_hp_before);
 
         return damage;
     }

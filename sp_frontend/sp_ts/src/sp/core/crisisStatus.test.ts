@@ -3,6 +3,7 @@ import {
   CrisisStatusPacket,
   CrisisUiState,
   clearCrisisStatus,
+  formatCrisisCountdown,
   crisisPressureView,
   crisisStatusView,
   receiveCrisisStatus,
@@ -48,6 +49,7 @@ const ready = crisisStatusView(status({
 }));
 assert.equal(ready?.phaseLabel, 'Raid Imminent');
 assert.equal(ready?.preparationLabel, '1m 05s');
+assert.equal(formatCrisisCountdown(0), 'complete');
 
 const active = crisisStatusView(status({
   phase: 'assault_active',
