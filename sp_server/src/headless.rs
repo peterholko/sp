@@ -13,39 +13,47 @@
 
 use std::collections::HashSet;
 
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
+use big_brain::prelude::ThinkerBuilder;
 use crossbeam_channel::{unbounded, Sender as CBSender};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::Transport;
-use crate::common::{Hunger, Thirst, Tired};
+use crate::common::{Heat, Hunger, Thirst, Tired};
 use crate::constants::{
     DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
 };
 use crate::database::DatabaseEvent;
-use crate::effect::Effects;
+use crate::effect::{Effect, Effects};
+use crate::encounter::Encounter;
+use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
+use crate::farm::{CropStages, Crops};
 use crate::game::{
     BoundMonolith, Client, Clients, CrisisAssaultUnit, CrisisPhase, CrisisTelemetryState,
-    DatabaseClient, DatabaseManagers, GameTick, Merchant, MerchantSailState, Monolith,
-    NetworkReceiver, Objectives, PlayerIntroEncounters, PlayerObjectives, PlayerRunScore,
-    PlayerStats, PlayerVictory, RunScoreState, SettlementCrisis, SettlementCrisisState,
-    SurvivalDirectorMode, VictoryState,
+    DatabaseClient, DatabaseManagers, GameTick, LegendaryThreat, LegendaryThreatState, Merchant,
+    MerchantSailState, Monolith, NetworkReceiver, Objectives, PlayerIntroEncounters,
+    PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStats, PlayerVictory, RunScoreState,
+    SettlementCrisis, SettlementCrisisState, SurvivalDirectorMode, VictoryState,
 };
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
 use crate::obj::{
-    Class, ClassStructure, Id, LastCombatTick, LastDamageTick, Misc, Name, Order, PlayerId,
-    Position, State, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
-    Template, TrueDeath,
+    ActiveTask, Assignment, Assignments, BuildUpgradeState, Class, ClassStructure, Id,
+    LastCombatTick, LastDamageTick, Misc, Name, Order, PlayerId, Position, State, StateBuilding,
+    StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager, Template, TrueDeath,
+    Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::resource::Resources;
 use crate::safe_logout::{
     record_player_combat_activity, CancelSafeLogout, PlayerPresenceRecord, PlayerWorldPresence,
-    PlayerWorldPresenceState, RequestSafeLogout, SafeLogoutCancelReason, SafeLogoutRejectionReason,
+    PlayerWorldPresenceState, ProtectedRunKey, RequestSafeLogout, SafeLogoutCancelReason,
+    SafeLogoutRejectionReason,
 };
 use crate::skill::Skills;
+use crate::templates::Templates;
 use crate::{build_headless_app_with_director, AppState, PlayerEvent, ResponsePacket};
 
 // Deterministic player id for the single headless hero. MUST be < MAX_PLAYER_ID
@@ -243,6 +251,79 @@ pub struct StructureView {
     pub inventory: Vec<ItemView>,
 }
 
+/// Owner-scoped hero values used by deterministic offline-protection tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProtectedHeroSnapshot {
+    pub hp: i32,
+    pub stamina: Option<i32>,
+    pub mana: Option<i32>,
+    pub thirst: f32,
+    pub hunger: f32,
+    pub tired: f32,
+    pub heat: f32,
+    pub effects: Vec<(String, i32, i32)>,
+    pub effect_deadlines: Vec<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProtectedVillagerSnapshot {
+    pub id: i32,
+    pub hp: i32,
+    pub pos: Position,
+    pub thirst: f32,
+    pub hunger: f32,
+    pub tired: f32,
+    pub state: State,
+    pub assignment_structure_id: Option<i32>,
+    pub inventory_quantity: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProtectedStructureSnapshot {
+    pub id: i32,
+    pub hp: i32,
+    pub work_done: Option<f32>,
+    pub work_start_tick: Option<i32>,
+    pub queue_entries: usize,
+    pub stored_quantity: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedWorkDeadline {
+    pub event_id: i32,
+    pub kind: String,
+    pub start_tick: i32,
+    pub run_tick: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedCropSnapshot {
+    pub structure_id: i32,
+    pub stage: CropStages,
+    pub quantity: i32,
+    pub stage_start: i32,
+    pub stage_end: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtectedIntroSnapshot {
+    pub start_tick: i32,
+    pub shipwreck_chain_started: bool,
+    pub villager_spawned: bool,
+    pub danger_unlocked: bool,
+    pub rat_ids: Vec<i32>,
+    pub phase1_npc_id: Option<i32>,
+    pub first_rat_spawn_tick: i32,
+    pub second_rat_spawn_tick: i32,
+    pub villager_ready_tick: i32,
+    pub phase1_unlock_tick: i32,
+    pub spider_unlock_tick: i32,
+    pub villager_event_scheduled: bool,
+    pub initial_encounter_completed: bool,
+    pub spider_encounter_completed: bool,
+    pub run_object_ids: Vec<i32>,
+}
+
 #[derive(Clone, Copy)]
 pub struct ResTileView {
     pub pos: Position,
@@ -393,6 +474,10 @@ pub struct HeadlessGame {
     // Crisis packets are sparse because production delivery is deduplicated, so
     // retain them for deterministic scenarios and per-run packet telemetry.
     crisis_packet_history: Vec<String>,
+    // Safe-logout status is likewise sparse and server-deduplicated. Keep a
+    // dedicated history so the ten-second production flow can be asserted
+    // without retaining the high-volume perception/update stream.
+    safe_logout_packet_history: Vec<String>,
     // Full packet capture is opt-in around short scenarios; normal long runner
     // runs do not retain the high-volume perception/update stream.
     capture_packets: bool,
@@ -447,6 +532,7 @@ impl HeadlessGame {
             packet_tx,
             packet_rx,
             crisis_packet_history: Vec::new(),
+            safe_logout_packet_history: Vec::new(),
             capture_packets: false,
             captured_packets: Vec::new(),
             _db_rx: db_rx,
@@ -585,6 +671,9 @@ impl HeadlessGame {
             if packet_has_tag(&packet, "crisis_status") {
                 self.crisis_packet_history.push(packet.clone());
             }
+            if packet_has_tag(&packet, "safe_logout_status") {
+                self.safe_logout_packet_history.push(packet.clone());
+            }
             if self.capture_packets {
                 self.captured_packets.push(packet);
             }
@@ -631,6 +720,15 @@ impl HeadlessGame {
             .collect()
     }
 
+    /// Return and clear retained safe-logout status packets. This follows the
+    /// same sparse capture path as crisis status and leaves full capture off.
+    pub fn take_safe_logout_status_packets(&mut self) -> Vec<ResponsePacket> {
+        std::mem::take(&mut self.safe_logout_packet_history)
+            .into_iter()
+            .filter_map(|packet| serde_json::from_str::<ResponsePacket>(&packet).ok())
+            .collect()
+    }
+
     pub fn world(&self) -> &World {
         self.app.world()
     }
@@ -656,8 +754,9 @@ impl HeadlessGame {
     /// Re-adds the harness's deterministic active client without recreating the
     /// hero or resetting run state.
     pub fn reconnect_player(&mut self) {
+        let reconnect_id = ((self.player_id as u128) << 64) | (self.tick_count as u128 + 1);
         let client = Client {
-            id: Uuid::from_u128(self.player_id as u128),
+            id: Uuid::from_u128(reconnect_id),
             player_id: self.player_id,
             sender: self.packet_tx.clone(),
         };
@@ -691,6 +790,23 @@ impl HeadlessGame {
         });
     }
 
+    /// Enqueue the exact lifecycle event emitted by the authenticated WebSocket
+    /// command handler. Unlike `request_safe_logout`, this exercises the
+    /// production `PlayerEvent` broker and Bevy-message bridge.
+    pub fn request_safe_logout_via_authenticated_ingress(&mut self) {
+        self.inject(PlayerEvent::RequestSafeLogout {
+            player_id: self.player_id,
+        });
+    }
+
+    /// Enqueue the authenticated production cancellation event while retaining
+    /// the direct internal helper above for Checkpoint 1/2 regression tests.
+    pub fn cancel_safe_logout_via_authenticated_ingress(&mut self) {
+        self.inject(PlayerEvent::CancelSafeLogout {
+            player_id: self.player_id,
+        });
+    }
+
     pub fn player_presence_record(&self) -> Option<PlayerPresenceRecord> {
         self.app
             .world()
@@ -717,6 +833,316 @@ impl HeadlessGame {
     pub fn safe_logout_rejection_reason(&self) -> Option<SafeLogoutRejectionReason> {
         self.player_presence_record()
             .and_then(|record| record.rejection_reason)
+    }
+
+    pub fn protected_run_key(&self) -> Option<ProtectedRunKey> {
+        self.player_presence_record()
+            .and_then(|record| record.protected_run_key)
+    }
+
+    /// Drive the real internal Checkpoint 1 request/countdown until the
+    /// authoritative Checkpoint 2 state is active.
+    pub fn complete_valid_safe_logout(&mut self) {
+        self.request_safe_logout();
+        for _ in 0..=(crate::safe_logout::SAFE_LOGOUT_COUNTDOWN_TICKS + 8) {
+            self.tick(1);
+            match self.player_presence() {
+                Some(PlayerWorldPresence::OfflineProtected) => return,
+                Some(PlayerWorldPresence::SafeLogoutPending)
+                | Some(PlayerWorldPresence::Online) => {}
+                state => panic!(
+                    "safe logout did not complete: state={state:?} record={:?}",
+                    self.player_presence_record()
+                ),
+            }
+        }
+        panic!(
+            "safe logout countdown exceeded deterministic bound: {:?}",
+            self.player_presence_record()
+        );
+    }
+
+    pub fn disconnect_after_completed_safe_logout(&mut self) {
+        assert_eq!(
+            self.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        self.disconnect_player();
+        self.tick(1);
+        assert_eq!(
+            self.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    /// Exercise the authenticated reconnect edge and ordered PostUpdate rebase.
+    pub fn reconnect_and_exit_protection(&mut self) {
+        self.reconnect_player_with_login();
+        self.tick(1);
+        assert_eq!(self.player_presence(), Some(PlayerWorldPresence::Online));
+    }
+
+    pub fn protected_hero_snapshot(&mut self) -> ProtectedHeroSnapshot {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let (hero_id, mut snapshot) = {
+            let mut query = world.query_filtered::<(
+                &Id,
+                &PlayerId,
+                &Stats,
+                &Thirst,
+                &Hunger,
+                Option<&Tired>,
+                Option<&Heat>,
+                &Effects,
+            ), With<SubclassHero>>();
+            let (id, _, stats, thirst, hunger, tired, heat, effects) = query
+                .iter(world)
+                .find(|(_, owner, ..)| owner.0 == player_id)
+                .expect("headless hero");
+            let mut effect_values = effects
+                .0
+                .iter()
+                .map(|(effect, (duration, _, stacks))| {
+                    (effect.clone().to_str(), *duration, *stacks)
+                })
+                .collect::<Vec<_>>();
+            effect_values.sort_by(|left, right| left.0.cmp(&right.0));
+            (
+                id.0,
+                ProtectedHeroSnapshot {
+                    hp: stats.hp,
+                    stamina: stats.stamina,
+                    mana: stats.mana,
+                    thirst: thirst.thirst,
+                    hunger: hunger.hunger,
+                    tired: tired.map(|value| value.tired).unwrap_or_default(),
+                    heat: heat.map(|value| value.heat).unwrap_or_default(),
+                    effects: effect_values,
+                    effect_deadlines: Vec::new(),
+                },
+            )
+        };
+        snapshot.effect_deadlines = world
+            .resource::<MapEvents>()
+            .values()
+            .filter(|event| {
+                event.obj_id == hero_id
+                    && matches!(event.event_type, VisibleEvent::EffectExpiredEvent { .. })
+            })
+            .map(|event| event.run_tick)
+            .collect();
+        snapshot.effect_deadlines.sort_unstable();
+        snapshot
+    }
+
+    pub fn protected_villager_snapshots(&mut self) -> Vec<ProtectedVillagerSnapshot> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let mut query = world.query_filtered::<(
+            &Id,
+            &PlayerId,
+            &Position,
+            &Stats,
+            &State,
+            &Inventory,
+            Option<&Thirst>,
+            Option<&Hunger>,
+            Option<&Tired>,
+            Option<&Assignment>,
+        ), With<SubclassVillager>>();
+        let mut snapshots = query
+            .iter(world)
+            .filter(|(_, owner, ..)| owner.0 == player_id)
+            .map(
+                |(id, _, pos, stats, state, inventory, thirst, hunger, tired, assignment)| {
+                    ProtectedVillagerSnapshot {
+                        id: id.0,
+                        hp: stats.hp,
+                        pos: *pos,
+                        thirst: thirst.map(|value| value.thirst).unwrap_or_default(),
+                        hunger: hunger.map(|value| value.hunger).unwrap_or_default(),
+                        tired: tired.map(|value| value.tired).unwrap_or_default(),
+                        state: *state,
+                        assignment_structure_id: assignment.map(|value| value.structure_id),
+                        inventory_quantity: inventory.items.iter().map(|item| item.quantity).sum(),
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| snapshot.id);
+        snapshots
+    }
+
+    pub fn protected_structure_snapshots(&mut self) -> Vec<ProtectedStructureSnapshot> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let mut query = world.query_filtered::<(
+            &Id,
+            &PlayerId,
+            &Stats,
+            &Inventory,
+            Option<&BuildUpgradeState>,
+            Option<&WorkQueue>,
+        ), With<ClassStructure>>();
+        let mut snapshots = query
+            .iter(world)
+            .filter(|(_, owner, ..)| owner.0 == player_id)
+            .map(
+                |(id, _, stats, inventory, progress, queue)| ProtectedStructureSnapshot {
+                    id: id.0,
+                    hp: stats.hp,
+                    work_done: progress.map(|value| value.work_done),
+                    work_start_tick: progress.map(|value| value.start_time),
+                    queue_entries: queue.map(|value| value.0.len()).unwrap_or_default(),
+                    stored_quantity: inventory.items.iter().map(|item| item.quantity).sum(),
+                },
+            )
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|snapshot| snapshot.id);
+        snapshots
+    }
+
+    pub fn protected_work_deadlines(&self) -> Vec<ProtectedWorkDeadline> {
+        let player_id = self.player_id;
+        let ids = self.app.world().resource::<crate::ids::Ids>();
+        let mut deadlines = self
+            .app
+            .world()
+            .resource::<GameEvents>()
+            .values()
+            .filter_map(|event| {
+                let (object_id, kind) = match &event.event_type {
+                    GameEventType::ForageEvent { forager_id } => (*forager_id, "forage"),
+                    GameEventType::GatherEvent { gatherer_id, .. } => (*gatherer_id, "gather"),
+                    GameEventType::RefineEvent { refiner_id, .. } => (*refiner_id, "refine"),
+                    GameEventType::CraftEvent { crafter_id, .. } => (*crafter_id, "craft"),
+                    GameEventType::StructureGatherEvent { structure_id, .. } => {
+                        (*structure_id, "structure_gather")
+                    }
+                    GameEventType::StructureRefineEvent { structure_id, .. } => {
+                        (*structure_id, "structure_refine")
+                    }
+                    GameEventType::StructureCraftEvent { structure_id, .. } => {
+                        (*structure_id, "structure_craft")
+                    }
+                    GameEventType::StructureOperateEvent { structure_id, .. } => {
+                        (*structure_id, "structure_operate")
+                    }
+                    GameEventType::ExperimentEvent { structure_id, .. } => {
+                        (*structure_id, "experiment")
+                    }
+                    _ => return None,
+                };
+                (ids.get_player(object_id) == Some(player_id)).then_some(ProtectedWorkDeadline {
+                    event_id: event.event_id,
+                    kind: kind.to_string(),
+                    start_tick: event.start_tick,
+                    run_tick: event.run_tick,
+                })
+            })
+            .collect::<Vec<_>>();
+        deadlines.sort_by_key(|event| event.event_id);
+        deadlines
+    }
+
+    pub fn protected_crop_snapshots(&self) -> Vec<ProtectedCropSnapshot> {
+        let player_id = self.player_id;
+        let ids = self.app.world().resource::<crate::ids::Ids>();
+        let mut snapshots = self
+            .app
+            .world()
+            .resource::<Crops>()
+            .values()
+            .filter(|crop| ids.get_player(crop.structure) == Some(player_id))
+            .map(|crop| ProtectedCropSnapshot {
+                structure_id: crop.structure,
+                stage: crop.stage.clone(),
+                quantity: crop.quantity,
+                stage_start: crop.stage_start,
+                stage_end: crop.stage_end,
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by_key(|crop| crop.structure_id);
+        snapshots
+    }
+
+    pub fn protected_intro_snapshot(&self) -> ProtectedIntroSnapshot {
+        let player_id = self.player_id;
+        let world = self.app.world();
+        let intro = world
+            .resource::<crate::game::PlayerIntroState>()
+            .get(&player_id)
+            .expect("player intro state");
+        let initial = world
+            .resource::<crate::game::InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter state");
+        let progress = world
+            .resource::<crate::game::IntroEncounterState>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut run_object_ids = world
+            .resource::<crate::player_setup::RunSpawnedObjs>()
+            .get(&player_id)
+            .cloned()
+            .unwrap_or_default();
+        run_object_ids.sort_unstable();
+        ProtectedIntroSnapshot {
+            start_tick: intro.start_tick,
+            shipwreck_chain_started: intro.shipwreck_chain_started,
+            villager_spawned: intro.villager_spawned,
+            danger_unlocked: intro.danger_unlocked,
+            rat_ids: initial.rat_ids.clone(),
+            phase1_npc_id: initial.phase1_npc_id,
+            first_rat_spawn_tick: initial.first_rat_spawn_tick,
+            second_rat_spawn_tick: initial.second_rat_spawn_tick,
+            villager_ready_tick: initial.villager_ready_tick,
+            phase1_unlock_tick: initial.phase1_unlock_tick,
+            spider_unlock_tick: initial.spider_unlock_tick,
+            villager_event_scheduled: initial.villager_event_scheduled,
+            initial_encounter_completed: progress.initial_encounter,
+            spider_encounter_completed: progress.spider_encounter,
+            run_object_ids,
+        }
+    }
+
+    pub fn protected_stored_resource_quantity(&mut self) -> i32 {
+        self.protected_structure_snapshots()
+            .iter()
+            .map(|structure| structure.stored_quantity)
+            .sum()
+    }
+
+    pub fn queue_hostile_spell_damage_for_test(
+        &mut self,
+        hostile_id: i32,
+        delay_ticks: i32,
+    ) -> Uuid {
+        let hero = self.observe().hero.expect("headless hero");
+        let tick = self.game_tick();
+        self.app
+            .world_mut()
+            .resource_mut::<MapEvents>()
+            .new(
+                hostile_id,
+                tick.saturating_add(delay_ticks),
+                VisibleEvent::SpellDamageEvent {
+                    spell: Spell::ShadowBolt,
+                    target_id: hero.id,
+                },
+            )
+            .event_id
+    }
+
+    pub fn attempt_player_mutation_while_protected(&mut self, event: PlayerEvent) {
+        self.inject(event);
+        self.tick(1);
+    }
+
+    pub fn advance_protected_world_ticks(&mut self, ticks: u32) {
+        self.tick(ticks);
     }
 
     /// Put the hero on the Monolith named by its authoritative `BoundMonolith`
@@ -1424,13 +1850,23 @@ impl HeadlessGame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::CrisisStatusSnapshot;
+    use crate::network::{CrisisStatusSnapshot, SafeLogoutStatusSnapshot};
 
     fn crisis_statuses(packets: Vec<ResponsePacket>) -> Vec<CrisisStatusSnapshot> {
         packets
             .into_iter()
             .filter_map(|packet| match packet {
                 ResponsePacket::CrisisStatus { status } => Some(status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn safe_logout_statuses(packets: Vec<ResponsePacket>) -> Vec<SafeLogoutStatusSnapshot> {
+        packets
+            .into_iter()
+            .filter_map(|packet| match packet {
+                ResponsePacket::SafeLogoutStatus { status } => Some(status),
                 _ => None,
             })
             .collect()
@@ -1708,11 +2144,20 @@ mod tests {
         pos: Position,
     ) -> (Entity, i32) {
         use crate::event::{GameEvent, GameEventType, GameEvents};
-        use crate::ids::Ids;
+        use crate::ids::{EntityObjMap, Ids};
         use crate::templates::Templates;
 
-        let current_tick = game.game_tick();
-        {
+        let existing_villager_ids = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&Id, &PlayerId), With<SubclassVillager>>();
+            query
+                .iter(world)
+                .filter(|(_, owner)| owner.0 == owner_player_id)
+                .map(|(id, _)| id.0)
+                .collect::<HashSet<_>>()
+        };
+        if existing_villager_ids.is_empty() {
+            let current_tick = game.game_tick();
             let world = game.app.world_mut();
             let event_id = world.resource_mut::<Ids>().new_map_event_id();
             world.resource_mut::<GameEvents>().insert(
@@ -1727,8 +2172,31 @@ mod tests {
                     },
                 },
             );
+            game.tick(3);
+        } else {
+            game.app
+                .world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          mut ids: ResMut<Ids>,
+                          mut entity_map: ResMut<EntityObjMap>,
+                          templates: Res<Templates>,
+                          game_tick: Res<GameTick>| {
+                        Encounter::spawn_villager(
+                            owner_player_id,
+                            pos,
+                            Vec::new(),
+                            &mut commands,
+                            &mut ids,
+                            &mut entity_map,
+                            &templates,
+                            &game_tick,
+                        )
+                    },
+                )
+                .expect("direct test villager spawn");
+            game.tick(1);
         }
-        game.tick(3);
 
         let (villager_entity, villager_id) = {
             let world = game.app.world_mut();
@@ -1736,7 +2204,9 @@ mod tests {
                 world.query_filtered::<(Entity, &Id, &PlayerId), With<SubclassVillager>>();
             query
                 .iter(world)
-                .find(|(_, _, owner)| owner.0 == owner_player_id)
+                .find(|(_, id, owner)| {
+                    owner.0 == owner_player_id && !existing_villager_ids.contains(&id.0)
+                })
                 .map(|(entity, id, _)| (entity, id.0))
                 .expect("owner villager")
         };
@@ -1786,6 +2256,282 @@ mod tests {
         game.tick(1);
         assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
         (game, sanctuary)
+    }
+
+    fn prepare_checkpoint2_owner_workload(
+        game: &mut HeadlessGame,
+        sanctuary: Position,
+    ) -> (i32, i32, i32, i32, i32) {
+        use crate::event::{GameEvent, GameEvents};
+        use crate::game::SettlementCrisisState;
+        use crate::ids::Ids;
+        use crate::templates::Templates;
+
+        let player_id = game.player_id();
+        let (builder_entity, builder_id) = spawn_armed_owner_villager(game, player_id, sanctuary);
+        let (refiner_entity, refiner_id) = spawn_armed_owner_villager(game, player_id, sanctuary);
+        move_nearby_headless_hostiles_away(game, sanctuary);
+
+        let (hero_id, structure_entity, structure_id, structure_pos, tick) = {
+            let world = game.app.world_mut();
+            let hero_id = world.resource::<Ids>().get_hero(player_id).unwrap();
+            let (structure_entity, structure_id, structure_pos) = {
+                let mut structures = world
+                    .query_filtered::<(Entity, &Id, &PlayerId, &Position), With<ClassStructure>>();
+                structures
+                    .iter(world)
+                    .find(|(_, _, owner, _)| owner.0 == player_id)
+                    .map(|(entity, id, _, pos)| (entity, id.0, *pos))
+                    .expect("owned structure")
+            };
+            (
+                hero_id,
+                structure_entity,
+                structure_id,
+                structure_pos,
+                world.resource::<GameTick>().0,
+            )
+        };
+
+        let refiner_item_id = {
+            let world = game.app.world_mut();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let hero_entity = world
+                .resource::<crate::ids::EntityObjMap>()
+                .get_entity(hero_id)
+                .expect("hero entity");
+            let hero_log_id = world.resource_mut::<Ids>().new_item_id();
+            world
+                .get_mut::<Inventory>(hero_entity)
+                .expect("hero inventory")
+                .new(
+                    hero_log_id,
+                    "Springbranch Maple Log".to_string(),
+                    1,
+                    &item_templates,
+                );
+            *world.get_mut::<State>(hero_entity).expect("hero state") = State::Crafting;
+
+            let refiner_item_id = world.resource_mut::<Ids>().new_item_id();
+            world
+                .get_mut::<Inventory>(structure_entity)
+                .expect("structure inventory")
+                .new(
+                    refiner_item_id,
+                    "Felled Swiftstep Hare".to_string(),
+                    1,
+                    &item_templates,
+                );
+            *world
+                .get_mut::<State>(refiner_entity)
+                .expect("refiner state") = State::Refining;
+            *world
+                .get_mut::<State>(builder_entity)
+                .expect("builder state") = State::Building;
+            *world
+                .get_mut::<Position>(builder_entity)
+                .expect("builder position") = structure_pos;
+            *world
+                .get_mut::<Position>(refiner_entity)
+                .expect("refiner position") = structure_pos;
+            world.entity_mut(builder_entity).insert((
+                Assignment {
+                    structure_id,
+                    structure_name: "Checkpoint 2 construction".to_string(),
+                    structure_pos,
+                },
+                Order::Build,
+                ActiveTask::Building,
+            ));
+            world.entity_mut(refiner_entity).insert((
+                Assignment {
+                    structure_id,
+                    structure_name: "Checkpoint 2 refinery".to_string(),
+                    structure_pos,
+                },
+                Order::WorkQueue,
+                ActiveTask::Refining,
+            ));
+
+            world.entity_mut(structure_entity).insert((
+                StateBuilding,
+                BuildUpgradeState {
+                    build_upgrade_cost: 10_000.0,
+                    work_done: 17.0,
+                    work_per_sec: 1.0,
+                    start_time: tick,
+                },
+            ));
+            world
+                .get_mut::<Assignments>(structure_entity)
+                .expect("structure assignments")
+                .0
+                .push(builder_id);
+            world
+                .get_mut::<Assignments>(structure_entity)
+                .expect("structure assignments")
+                .0
+                .push(refiner_id);
+            let mut work_queue = world
+                .get_mut::<WorkQueue>(structure_entity)
+                .expect("structure work queue");
+            work_queue.0.push(WorkEntry {
+                worker_id: builder_id,
+                work_type: WorkType::Build,
+                work_status: WorkStatus::InProgress,
+                recipe_name: None,
+                recipe_image: None,
+                refine_item_id: None,
+                refine_item_image: None,
+                refine_item_class: None,
+            });
+            work_queue.0.push(WorkEntry {
+                worker_id: refiner_id,
+                work_type: WorkType::Refine,
+                work_status: WorkStatus::InProgress,
+                recipe_name: None,
+                recipe_image: None,
+                refine_item_id: Some(refiner_item_id),
+                refine_item_image: Some("hare".to_string()),
+                refine_item_class: Some("Game Animal".to_string()),
+            });
+            drop(work_queue);
+            world
+                .resource_mut::<Crops>()
+                .plant(tick, structure_id, "Wheat".to_string(), 3);
+            if let Some(crop) = world.resource_mut::<Crops>().get_mut(&structure_id) {
+                crop.stage_end = tick + 500;
+            }
+
+            let event_id = world.resource_mut::<Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                event_id,
+                GameEvent {
+                    event_id,
+                    start_tick: tick,
+                    run_tick: tick + 5_000,
+                    event_type: GameEventType::CraftEvent {
+                        crafter_id: hero_id,
+                        recipe_name: "Firewood".to_string(),
+                    },
+                },
+            );
+
+            let event_id = world.resource_mut::<Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                event_id,
+                GameEvent {
+                    event_id,
+                    start_tick: tick,
+                    run_tick: tick + 5_000,
+                    event_type: GameEventType::StructureRefineEvent {
+                        refiner_id,
+                        structure_id,
+                        item_id: refiner_item_id,
+                    },
+                },
+            );
+
+            let mut crises = world.resource_mut::<SettlementCrisisState>();
+            let crisis = crises.entry(player_id).or_default();
+            crisis.phase = CrisisPhase::Preparing;
+            crisis.pressure = 52;
+            crisis.phase_started_tick = tick;
+            crisis.last_evaluated_tick = tick;
+            crisis.phase_online_ticks = 1;
+            refiner_item_id
+        };
+
+        (
+            hero_id,
+            builder_id,
+            refiner_id,
+            structure_id,
+            refiner_item_id,
+        )
+    }
+
+    fn install_checkpoint2_frozen_hero_state(game: &mut HeadlessGame, hero_id: i32) {
+        use crate::ids::EntityObjMap;
+
+        let tick = game.game_tick();
+        let world = game.app.world_mut();
+        let entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(hero_id)
+            .expect("headless hero entity");
+        {
+            let mut stats = world.get_mut::<Stats>(entity).unwrap();
+            stats.hp = stats.base_hp.saturating_sub(9);
+            stats.stamina = stats.base_stamina.map(|value| value.saturating_sub(11));
+            stats.mana = stats.base_mana.map(|value| value.saturating_sub(7));
+        }
+        world.get_mut::<Thirst>(entity).unwrap().thirst = 41.0;
+        world.get_mut::<Hunger>(entity).unwrap().hunger = 37.0;
+        if let Some(mut tired) = world.get_mut::<Tired>(entity) {
+            tired.tired = 33.0;
+        }
+        if let Some(mut heat) = world.get_mut::<Heat>(entity) {
+            heat.heat = 22.0;
+        }
+        world
+            .get_mut::<Effects>(entity)
+            .unwrap()
+            .0
+            .insert(Effect::Burning, (40, 1.0, 1));
+        world.resource_mut::<MapEvents>().new(
+            hero_id,
+            tick + 40,
+            VisibleEvent::EffectExpiredEvent {
+                effect: Effect::Burning,
+            },
+        );
+    }
+
+    fn checkpoint2_player_hero_item_quantity(
+        game: &mut HeadlessGame,
+        player_id: i32,
+        name: &str,
+    ) -> i32 {
+        let world = game.app.world_mut();
+        let mut query = world.query_filtered::<(&PlayerId, &Inventory), With<SubclassHero>>();
+        query
+            .iter(world)
+            .find(|(owner, _)| owner.0 == player_id)
+            .map(|(_, inventory)| {
+                inventory
+                    .items
+                    .iter()
+                    .filter(|item| item.name == name)
+                    .map(|item| item.quantity)
+                    .sum()
+            })
+            .unwrap_or_default()
+    }
+
+    fn checkpoint2_hero_item_quantity(game: &mut HeadlessGame, name: &str) -> i32 {
+        let player_id = game.player_id();
+        checkpoint2_player_hero_item_quantity(game, player_id, name)
+    }
+
+    fn checkpoint2_player_hero_needs(game: &mut HeadlessGame, player_id: i32) -> (f32, f32, f32) {
+        let world = game.app.world_mut();
+        let mut query =
+            world.query_filtered::<(&PlayerId, &Thirst, &Hunger, &Tired), With<SubclassHero>>();
+        query
+            .iter(world)
+            .find(|(owner, ..)| owner.0 == player_id)
+            .map(|(_, thirst, hunger, tired)| (thirst.thirst, hunger.hunger, tired.tired))
+            .expect("player hero needs")
+    }
+
+    fn checkpoint2_owned_structure_has_item(game: &mut HeadlessGame, item_id: i32) -> bool {
+        let player_id = game.player_id();
+        let world = game.app.world_mut();
+        let mut query = world.query_filtered::<(&PlayerId, &Inventory), With<ClassStructure>>();
+        query.iter(world).any(|(owner, inventory)| {
+            owner.0 == player_id && inventory.items.iter().any(|item| item.id == item_id)
+        })
     }
 
     fn move_nearby_headless_hostiles_away(game: &mut HeadlessGame, hero_pos: Position) {
@@ -1974,6 +2720,23 @@ mod tests {
         );
         assert_eq!(
             gap_game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Disconnected)
+        );
+
+        // Connection identity also closes the async gap before the queued
+        // Login is processed: a replacement socket cannot inherit a pending
+        // countdown from the socket that made the request.
+        let (mut delayed_login_game, _) = safe_logout_fixture("SafeLogoutDelayedLoginSocketGapBot");
+        begin_safe_logout(&mut delayed_login_game);
+        delayed_login_game.disconnect_player();
+        delayed_login_game.reconnect_player();
+        delayed_login_game.tick(1);
+        assert_eq!(
+            delayed_login_game.player_presence(),
+            Some(PlayerWorldPresence::Online)
+        );
+        assert_eq!(
+            delayed_login_game.safe_logout_cancel_reason(),
             Some(SafeLogoutCancelReason::Disconnected)
         );
     }
@@ -2945,6 +3708,1281 @@ mod tests {
                 .collect::<Vec<_>>(),
             unit_ids
         );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_scenario_a_production_flow_is_ordered_and_deduplicated() {
+        use crate::constants::TICKS_PER_SEC;
+        use crate::safe_logout::{SAFE_LOGOUT_COUNTDOWN_TICKS, SAFE_LOGOUT_STATUS_VERSION};
+
+        let (mut game, _) = safe_logout_fixture("SafeLogoutProtocolSuccessBot");
+
+        // A fresh authenticated run receives a current snapshot without first
+        // issuing a command. The fixture has already moved the hero into its
+        // authoritative sanctuary, so its last initial snapshot is eligible.
+        let initial = safe_logout_statuses(game.take_safe_logout_status_packets());
+        let initial = initial.last().expect("fresh-run safe-logout snapshot");
+        assert_eq!(initial.version, SAFE_LOGOUT_STATUS_VERSION);
+        assert_eq!(initial.state, "online");
+        assert!(initial.can_request);
+        assert!(!initial.can_cancel);
+        assert!(initial.in_own_sanctuary);
+        assert!(!initial.protected);
+
+        // Exercise the same PlayerEvent ingress and bridge used by an
+        // authenticated WebSocket command, not the direct internal test hook.
+        game.request_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        let requested_tick = game
+            .safe_logout_start_tick()
+            .expect("authenticated request accepted");
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending)
+        );
+
+        let mut statuses = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(statuses.len(), 1, "acceptance sends one pending snapshot");
+        assert_eq!(statuses[0].state, "pending");
+        assert_eq!(
+            statuses[0].countdown_total_seconds,
+            Some(SAFE_LOGOUT_COUNTDOWN_TICKS / TICKS_PER_SEC)
+        );
+        assert_eq!(
+            statuses[0].countdown_remaining_seconds,
+            Some(SAFE_LOGOUT_COUNTDOWN_TICKS / TICKS_PER_SEC)
+        );
+        assert!(statuses[0].can_cancel);
+        assert!(!statuses[0].can_request);
+        let mut pending_delivery_ticks = vec![game.game_tick()];
+
+        let elapsed = game.game_tick().saturating_sub(requested_tick);
+        assert!(
+            elapsed < SAFE_LOGOUT_COUNTDOWN_TICKS,
+            "accepted request cannot already be complete"
+        );
+        let ticks_to_last_pending = SAFE_LOGOUT_COUNTDOWN_TICKS - 1 - elapsed;
+        for _ in 0..ticks_to_last_pending {
+            game.tick(1);
+            let emitted = safe_logout_statuses(game.take_safe_logout_status_packets());
+            assert!(
+                emitted.len() <= 1,
+                "one connection cannot receive multiple pending snapshots in one update"
+            );
+            if !emitted.is_empty() {
+                pending_delivery_ticks.push(game.game_tick());
+                statuses.extend(emitted);
+            }
+        }
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending),
+            "the authoritative countdown remains pending one tick before completion"
+        );
+
+        let countdown_values = statuses
+            .iter()
+            .map(|status| {
+                assert_eq!(status.state, "pending");
+                assert!(status.can_cancel);
+                status
+                    .countdown_remaining_seconds
+                    .expect("pending countdown value")
+            })
+            .collect::<Vec<_>>();
+        let expected_countdown = (1..=SAFE_LOGOUT_COUNTDOWN_TICKS / TICKS_PER_SEC)
+            .rev()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            countdown_values, expected_countdown,
+            "ceil-rounded delivery emits exactly one restrained packet per countdown second"
+        );
+        assert!(
+            statuses.windows(2).all(|pair| pair[0] != pair[1]),
+            "the per-connection cache suppresses duplicate semantic snapshots"
+        );
+        assert!(
+            pending_delivery_ticks
+                .windows(2)
+                .all(|ticks| ticks[1] - ticks[0] >= TICKS_PER_SEC),
+            "pending delivery is limited to at most one update per server second"
+        );
+
+        // The final packet is drained only after the update has committed the
+        // authoritative transition, proving presentation cannot lead state.
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        let completed = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(completed.len(), 1, "completion sends one terminal snapshot");
+        assert_eq!(completed[0].state, "protected");
+        assert_eq!(completed[0].countdown_remaining_seconds, Some(0));
+        assert!(completed[0].protected);
+        assert!(!completed[0].can_request);
+        assert!(!completed[0].can_cancel);
+        assert!(!statuses.iter().any(|status| status.protected));
+        let packet_order = statuses
+            .iter()
+            .chain(completed.iter())
+            .map(|status| status.state.as_str())
+            .collect::<Vec<_>>();
+        let mut expected_order = vec!["pending"; expected_countdown.len()];
+        expected_order.push("protected");
+        assert_eq!(packet_order, expected_order);
+
+        let protected_before_close = game.protected_hero_snapshot();
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected),
+            "closing after the protected snapshot preserves the completed handoff"
+        );
+        assert!(game.take_safe_logout_status_packets().is_empty());
+
+        game.advance_protected_world_ticks(25);
+        assert_eq!(
+            game.protected_hero_snapshot(),
+            protected_before_close,
+            "Checkpoint 2 protection remains active after the client closes"
+        );
+
+        // A later explicit authenticated login gets a fresh per-connection
+        // status only after the ordered resume has returned the run online.
+        game.reconnect_player_with_login();
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        let resumed = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(
+            resumed.len(),
+            1,
+            "new connection receives one fresh snapshot"
+        );
+        assert_eq!(resumed[0].state, "online");
+        assert!(!resumed[0].protected);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_scenario_b_disconnect_before_completion_stays_unprotected() {
+        use crate::safe_logout::SAFE_LOGOUT_COUNTDOWN_TICKS;
+
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutProtocolDisconnectBot");
+        let _ = game.take_safe_logout_status_packets();
+        let hostile_id = game.spawn_safe_logout_test_hostile(far_map_position(&game, sanctuary));
+
+        game.request_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending)
+        );
+        game.tick((SAFE_LOGOUT_COUNTDOWN_TICKS / 3) as u32);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending)
+        );
+
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Disconnected)
+        );
+        let record = game
+            .player_presence_record()
+            .expect("disconnected presence record");
+        assert_eq!(record.protected_since_tick, None);
+        assert_eq!(record.protected_run_key, None);
+
+        let statuses = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert!(
+            statuses.iter().all(|status| !status.protected),
+            "a socket close before completion never publishes protected state"
+        );
+
+        // Ordinary persistent-world mutation remains live. A hostile spell that
+        // Checkpoint 2 would block is processed against the unprotected run.
+        let hp_before = game.protected_hero_snapshot().hp;
+        game.queue_hostile_spell_damage_for_test(hostile_id, 0);
+        for _ in 0..5 {
+            game.tick(1);
+            if game.protected_hero_snapshot().hp < hp_before {
+                break;
+            }
+        }
+        assert!(
+            game.protected_hero_snapshot().hp < hp_before,
+            "ordinary disconnected simulation must continue without Checkpoint 2 protection"
+        );
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        assert!(game.take_safe_logout_status_packets().is_empty());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_scenario_c_cancel_rerequest_and_manual_cancel_are_idempotent() {
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutProtocolCancelBot");
+        let _ = game.take_safe_logout_status_packets();
+
+        game.request_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        let first_start = game
+            .safe_logout_start_tick()
+            .expect("first authenticated request accepted");
+        let accepted = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].state, "pending");
+
+        game.move_hero_for_test(move_one_tile(sanctuary));
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Moved)
+        );
+        let moved = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(moved.len(), 1, "movement sends one cancellation snapshot");
+        assert_eq!(moved[0].state, "online");
+        assert_eq!(moved[0].reason.as_deref(), Some("moved"));
+        assert!(!moved[0].can_cancel);
+        assert!(!moved[0].protected);
+
+        game.tick(3);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        assert!(
+            game.take_safe_logout_status_packets().is_empty(),
+            "cancellation never schedules an automatic retry"
+        );
+
+        game.place_hero_in_own_bound_sanctuary();
+        game.tick(1);
+        let _ = game.take_safe_logout_status_packets();
+        game.request_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        let second_start = game
+            .safe_logout_start_tick()
+            .expect("explicit re-request accepted after conditions recover");
+        assert!(second_start > first_start);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::SafeLogoutPending)
+        );
+        let second_pending = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(second_pending.len(), 1);
+        assert_eq!(second_pending[0].state, "pending");
+
+        game.cancel_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        assert_eq!(
+            game.safe_logout_cancel_reason(),
+            Some(SafeLogoutCancelReason::Manual)
+        );
+        let cancelled_record = game
+            .player_presence_record()
+            .expect("manual cancellation record");
+        let manual = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(manual.len(), 1);
+        assert_eq!(manual[0].state, "online");
+        assert_eq!(manual[0].reason.as_deref(), Some("manually_cancelled"));
+        assert!(!manual[0].can_cancel);
+
+        game.cancel_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence_record(),
+            Some(cancelled_record),
+            "duplicate manual cancellation is an idempotent no-op"
+        );
+        assert!(game.take_safe_logout_status_packets().is_empty());
+        assert_ne!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_scenario_d_active_assault_rejects_and_continues() {
+        let (mut game, _) = safe_logout_fixture("SafeLogoutProtocolAssaultBot");
+        let _ = game.take_safe_logout_status_packets();
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        advance_ready_clock_to_launch(&mut game, preferred_tick);
+
+        let active_before = game.settlement_crisis().expect("active personal assault");
+        assert_eq!(active_before.phase, CrisisPhase::AssaultActive);
+        let assault_id = active_before.assault_id.expect("committed assault id");
+        let generation = active_before.assault_spawn_generation;
+        let units_before = game.crisis_assault_units();
+        assert!(!units_before.is_empty());
+
+        game.request_safe_logout_via_authenticated_ingress();
+        game.tick(1);
+        assert_eq!(game.player_presence(), Some(PlayerWorldPresence::Online));
+        assert_eq!(
+            game.safe_logout_rejection_reason(),
+            Some(SafeLogoutRejectionReason::AssaultActive)
+        );
+        let statuses = safe_logout_statuses(game.take_safe_logout_status_packets());
+        assert_eq!(
+            statuses.len(),
+            1,
+            "assault transition sends one rejection snapshot and the request is deduplicated"
+        );
+        assert_eq!(statuses[0].state, "online");
+        assert_eq!(statuses[0].reason.as_deref(), Some("assault_active"));
+        assert!(statuses[0].active_assault);
+        assert!(!statuses[0].can_request);
+        assert!(!statuses[0].protected);
+
+        let units_after_request = game.crisis_assault_units();
+        assert_eq!(
+            units_after_request
+                .iter()
+                .map(|unit| (unit.obj_id, unit.assault_id, unit.spawn_generation, unit.hp))
+                .collect::<Vec<_>>(),
+            units_before
+                .iter()
+                .map(|unit| (unit.obj_id, unit.assault_id, unit.spawn_generation, unit.hp))
+                .collect::<Vec<_>>()
+        );
+
+        game.disconnect_player();
+        game.tick(1);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        let disconnected = game
+            .settlement_crisis()
+            .expect("assault survives ordinary disconnect");
+        assert_eq!(disconnected.phase, CrisisPhase::AssaultActive);
+        assert_eq!(disconnected.assault_id, Some(assault_id));
+        assert_eq!(disconnected.assault_spawn_generation, generation);
+        assert_eq!(
+            game.crisis_assault_units()
+                .iter()
+                .map(|unit| (unit.obj_id, unit.assault_id, unit.spawn_generation, unit.hp))
+                .collect::<Vec<_>>(),
+            units_before
+                .iter()
+                .map(|unit| (unit.obj_id, unit.assault_id, unit.spawn_generation, unit.hp))
+                .collect::<Vec<_>>()
+        );
+
+        game.tick(5);
+        assert_eq!(
+            game.settlement_crisis()
+                .expect("offline active assault")
+                .phase,
+            CrisisPhase::AssaultActive
+        );
+        assert!(
+            game.take_safe_logout_status_packets()
+                .into_iter()
+                .all(|packet| !matches!(
+                    packet,
+                    ResponsePacket::SafeLogoutStatus { status } if status.protected
+                )),
+            "active-assault rejection never publishes protected state"
+        );
+        assert_ne!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_long_protection_freezes_owner_and_rebases_on_resume() {
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutProtectedWorldBot");
+        let player_id = game.player_id();
+        let (hero_id, builder_id, refiner_id, structure_id, refiner_item_id) =
+            prepare_checkpoint2_owner_workload(&mut game, sanctuary);
+        let helper_player_id = spawn_connected_helper(&mut game, "SafeLogoutActiveNeighborBot");
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+
+        game.complete_valid_safe_logout();
+        let record = game.player_presence_record().unwrap();
+        let protected_since = record.protected_since_tick.expect("protected start tick");
+        {
+            let world = game.app.world_mut();
+            let entity_map = world.resource::<crate::ids::EntityObjMap>();
+            let builder_entity = entity_map.get_entity(builder_id).expect("builder entity");
+            let refiner_entity = entity_map.get_entity(refiner_id).expect("refiner entity");
+            let structure_entity = entity_map
+                .get_entity(structure_id)
+                .expect("structure entity");
+            let structure_pos = *world
+                .get::<Position>(structure_entity)
+                .expect("structure position");
+            world.entity_mut(builder_entity).remove::<ThinkerBuilder>();
+            world.entity_mut(refiner_entity).remove::<ThinkerBuilder>();
+            world.entity_mut(builder_entity).insert((
+                State::Building,
+                Position {
+                    x: structure_pos.x,
+                    y: structure_pos.y,
+                },
+                Order::Build,
+                ActiveTask::Building,
+            ));
+            world.entity_mut(refiner_entity).insert((
+                State::Refining,
+                Position {
+                    x: structure_pos.x,
+                    y: structure_pos.y,
+                },
+                Order::WorkQueue,
+                ActiveTask::Refining,
+            ));
+            if !world.resource::<GameEvents>().values().any(|event| {
+                matches!(
+                    event.event_type,
+                    GameEventType::StructureRefineEvent {
+                        refiner_id: event_refiner,
+                        structure_id: event_structure,
+                        item_id: event_item,
+                    } if event_refiner == refiner_id
+                        && event_structure == structure_id
+                        && event_item == refiner_item_id
+                )
+            }) {
+                let event_id = world.resource_mut::<crate::ids::Ids>().new_map_event_id();
+                world.resource_mut::<GameEvents>().insert(
+                    event_id,
+                    crate::event::GameEvent {
+                        event_id,
+                        start_tick: protected_since,
+                        run_tick: protected_since + 1,
+                        event_type: GameEventType::StructureRefineEvent {
+                            refiner_id,
+                            structure_id,
+                            item_id: refiner_item_id,
+                        },
+                    },
+                );
+            }
+        }
+        for event in game
+            .app
+            .world_mut()
+            .resource_mut::<GameEvents>()
+            .values_mut()
+        {
+            if matches!(
+                event.event_type,
+                GameEventType::CraftEvent { .. }
+                    | GameEventType::RefineEvent { .. }
+                    | GameEventType::StructureRefineEvent { .. }
+            ) {
+                event.start_tick = protected_since;
+                event.run_tick = protected_since + 1;
+            }
+        }
+        let key = record.protected_run_key.clone().expect("protected run key");
+        game.app
+            .world_mut()
+            .resource_mut::<LegendaryThreatState>()
+            .insert(
+                player_id,
+                LegendaryThreat {
+                    name: "Checkpoint 2 defeated threat".to_string(),
+                    hideout_pos: sanctuary,
+                    hideout_id: None,
+                    boss_id: None,
+                    rumor_sent: true,
+                    active: false,
+                    defeated: true,
+                    hideout_revealed: true,
+                    active_since_tick: Some(protected_since - 50),
+                    defeated_at_tick: Some(protected_since - 20),
+                    next_follower_tick: protected_since + 100,
+                    waves_sent: 1,
+                    follower_waves: Vec::new(),
+                    followers_defeated: 0,
+                    captains_defeated: 0,
+                },
+            );
+        assert_eq!(key.player_id, game.player_id());
+        assert_eq!(key.hero_id, hero_id);
+        assert_eq!(
+            game.world()
+                .resource::<crate::ids::Ids>()
+                .get_hero(game.player_id()),
+            Some(key.hero_id)
+        );
+
+        game.disconnect_after_completed_safe_logout();
+        let disconnected_record = game.player_presence_record().unwrap();
+        game.disconnect_player();
+        game.tick(2);
+        assert_eq!(game.player_presence_record(), Some(disconnected_record));
+
+        // Give a connected neighbor deterministic needs, crisis time, and a
+        // real craft that becomes due during the protected interval. This
+        // distinguishes owner-scoped freezing from a global pause.
+        {
+            let now = game.game_tick();
+            let world = game.app.world_mut();
+            let helper_hero_id = world
+                .resource::<crate::ids::Ids>()
+                .get_hero(helper_player_id)
+                .expect("connected helper hero id");
+            let helper_entity = world
+                .resource::<crate::ids::EntityObjMap>()
+                .get_entity(helper_hero_id)
+                .expect("connected helper hero entity");
+            world
+                .get_mut::<Thirst>(helper_entity)
+                .expect("helper thirst")
+                .thirst = 11.0;
+            world
+                .get_mut::<Hunger>(helper_entity)
+                .expect("helper hunger")
+                .hunger = 13.0;
+            world
+                .get_mut::<Tired>(helper_entity)
+                .expect("helper tiredness")
+                .tired = 17.0;
+            *world.get_mut::<State>(helper_entity).expect("helper state") = State::Crafting;
+
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let log_id = world.resource_mut::<crate::ids::Ids>().new_item_id();
+            world
+                .get_mut::<Inventory>(helper_entity)
+                .expect("helper inventory")
+                .new(
+                    log_id,
+                    "Springbranch Maple Log".to_string(),
+                    1,
+                    &item_templates,
+                );
+            world
+                .resource_mut::<PlayerIntroState>()
+                .get_mut(&helper_player_id)
+                .expect("helper introduction state")
+                .danger_unlocked = true;
+            let event_id = world.resource_mut::<crate::ids::Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                event_id,
+                GameEvent {
+                    event_id,
+                    start_tick: now,
+                    run_tick: now + 50,
+                    event_type: GameEventType::CraftEvent {
+                        crafter_id: helper_hero_id,
+                        recipe_name: "Firewood".to_string(),
+                    },
+                },
+            );
+        }
+
+        install_checkpoint2_frozen_hero_state(&mut game, hero_id);
+        let hero_before = game.protected_hero_snapshot();
+        let villagers_before = game.protected_villager_snapshots();
+        let structures_before = game.protected_structure_snapshots();
+        let work_before = game.protected_work_deadlines();
+        let crops_before = game.protected_crop_snapshots();
+        let intro_before = game.protected_intro_snapshot();
+        let resources_before = game.protected_stored_resource_quantity();
+        let firewood_before = checkpoint2_hero_item_quantity(&mut game, "Firewood");
+        let logs_before = checkpoint2_hero_item_quantity(&mut game, "Springbranch Maple Log");
+        let crisis_before = game.settlement_crisis().expect("personal crisis");
+        let helper_needs_before = checkpoint2_player_hero_needs(&mut game, helper_player_id);
+        let helper_firewood_before =
+            checkpoint2_player_hero_item_quantity(&mut game, helper_player_id, "Firewood");
+        let helper_crisis_before = game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&helper_player_id)
+            .expect("helper personal crisis")
+            .online_active_ticks;
+        assert!(!villagers_before.is_empty());
+        assert!(!structures_before.is_empty());
+        assert!(!work_before.is_empty());
+        assert!(work_before.iter().any(|event| event.kind == "craft"));
+        assert!(
+            work_before
+                .iter()
+                .any(|event| event.kind == "structure_refine"),
+            "expected retained structure-refine deadline, got {work_before:?}"
+        );
+        assert!(!crops_before.is_empty());
+        assert_eq!(logs_before, 1);
+        assert!(checkpoint2_owned_structure_has_item(
+            &mut game,
+            refiner_item_id
+        ));
+
+        let world_tick_before = game.game_tick();
+        game.advance_protected_world_ticks(10_000);
+        assert!(game.game_tick() >= world_tick_before + 10_000);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        assert_eq!(game.protected_hero_snapshot(), hero_before);
+        assert_eq!(game.protected_villager_snapshots(), villagers_before);
+        assert_eq!(game.protected_structure_snapshots(), structures_before);
+        assert_eq!(game.protected_work_deadlines(), work_before);
+        assert_eq!(game.protected_crop_snapshots(), crops_before);
+        assert_eq!(game.protected_intro_snapshot(), intro_before);
+        assert_eq!(game.protected_stored_resource_quantity(), resources_before);
+        assert_eq!(
+            checkpoint2_hero_item_quantity(&mut game, "Firewood"),
+            firewood_before
+        );
+        assert_eq!(
+            checkpoint2_hero_item_quantity(&mut game, "Springbranch Maple Log"),
+            logs_before
+        );
+        assert!(checkpoint2_owned_structure_has_item(
+            &mut game,
+            refiner_item_id
+        ));
+        assert_eq!(game.settlement_crisis(), Some(crisis_before.clone()));
+        assert_ne!(
+            checkpoint2_player_hero_needs(&mut game, helper_player_id),
+            helper_needs_before,
+            "the connected neighbor's needs must continue while this owner is protected"
+        );
+        assert!(
+            checkpoint2_player_hero_item_quantity(&mut game, helper_player_id, "Firewood")
+                > helper_firewood_before,
+            "the connected neighbor's real craft must complete"
+        );
+        assert!(
+            game.world()
+                .resource::<SettlementCrisisState>()
+                .get(&helper_player_id)
+                .expect("continued helper crisis")
+                .online_active_ticks
+                > helper_crisis_before,
+            "the connected neighbor's personal-crisis clock must continue"
+        );
+        assert_eq!(
+            game.world()
+                .resource::<PlayerWorldPresenceState>()
+                .players
+                .get(&helper_player_id)
+                .map(|record| record.state),
+            Some(PlayerWorldPresence::Online)
+        );
+
+        game.reconnect_and_exit_protection();
+        let resumed_record = game.player_presence_record().unwrap();
+        let resumed_tick = resumed_record
+            .last_protection_end_tick
+            .expect("resume boundary tick");
+        let protected_duration = resumed_tick.saturating_sub(protected_since);
+        assert!(protected_duration >= 10_000);
+        assert_eq!(resumed_record.protected_since_tick, None);
+        assert_eq!(resumed_record.protected_run_key, None);
+        let mut expected_intro = intro_before.clone();
+        expected_intro.start_tick = expected_intro.start_tick.saturating_add(protected_duration);
+        expected_intro.first_rat_spawn_tick = expected_intro
+            .first_rat_spawn_tick
+            .saturating_add(protected_duration);
+        expected_intro.second_rat_spawn_tick = expected_intro
+            .second_rat_spawn_tick
+            .saturating_add(protected_duration);
+        expected_intro.villager_ready_tick = expected_intro
+            .villager_ready_tick
+            .saturating_add(protected_duration);
+        expected_intro.phase1_unlock_tick = expected_intro
+            .phase1_unlock_tick
+            .saturating_add(protected_duration);
+        expected_intro.spider_unlock_tick = expected_intro
+            .spider_unlock_tick
+            .saturating_add(protected_duration);
+        assert_eq!(game.protected_intro_snapshot(), expected_intro);
+        let legendary_resumed = game
+            .world()
+            .resource::<LegendaryThreatState>()
+            .get(&player_id)
+            .expect("rebased legendary threat");
+        assert_eq!(
+            legendary_resumed.active_since_tick,
+            Some(protected_since - 50 + protected_duration)
+        );
+        assert_eq!(
+            legendary_resumed.defeated_at_tick,
+            Some(protected_since - 20 + protected_duration)
+        );
+
+        let hero_resumed = game.protected_hero_snapshot();
+        let mut expected_hero = hero_before.clone();
+        for deadline in &mut expected_hero.effect_deadlines {
+            *deadline = deadline.saturating_add(protected_duration);
+        }
+        assert_eq!(hero_resumed, expected_hero);
+        assert_eq!(game.protected_villager_snapshots(), villagers_before);
+
+        let structures_resumed = game.protected_structure_snapshots();
+        assert_eq!(structures_resumed.len(), structures_before.len());
+        for (before, after) in structures_before.iter().zip(&structures_resumed) {
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.hp, before.hp);
+            assert_eq!(after.work_done, before.work_done);
+            assert_eq!(after.queue_entries, before.queue_entries);
+            assert_eq!(after.stored_quantity, before.stored_quantity);
+            assert_eq!(
+                after.work_start_tick,
+                before
+                    .work_start_tick
+                    .map(|tick| tick.saturating_add(protected_duration))
+            );
+        }
+
+        let work_resumed = game.protected_work_deadlines();
+        assert_eq!(work_resumed.len(), work_before.len());
+        for (before, after) in work_before.iter().zip(&work_resumed) {
+            assert_eq!(after.event_id, before.event_id);
+            assert_eq!(after.kind, before.kind);
+            assert_eq!(
+                after.start_tick,
+                before.start_tick.saturating_add(protected_duration)
+            );
+            assert_eq!(
+                after.run_tick,
+                before.run_tick.saturating_add(protected_duration)
+            );
+        }
+
+        let crops_resumed = game.protected_crop_snapshots();
+        assert_eq!(crops_resumed.len(), crops_before.len());
+        for (before, after) in crops_before.iter().zip(&crops_resumed) {
+            assert_eq!(after.structure_id, before.structure_id);
+            assert_eq!(after.stage, before.stage);
+            assert_eq!(after.quantity, before.quantity);
+            assert_eq!(
+                after.stage_start,
+                before.stage_start.saturating_add(protected_duration)
+            );
+            assert_eq!(
+                after.stage_end,
+                before.stage_end.saturating_add(protected_duration)
+            );
+        }
+
+        let crisis_resumed = game.settlement_crisis().expect("resumed crisis");
+        assert_eq!(crisis_resumed.phase, crisis_before.phase);
+        assert_eq!(crisis_resumed.pressure, crisis_before.pressure);
+        assert_eq!(
+            crisis_resumed.online_active_ticks,
+            crisis_before.online_active_ticks
+        );
+        assert_eq!(
+            crisis_resumed.phase_online_ticks,
+            crisis_before.phase_online_ticks
+        );
+        assert_eq!(
+            crisis_resumed.phase_started_tick,
+            crisis_before
+                .phase_started_tick
+                .saturating_add(protected_duration)
+        );
+        assert_eq!(
+            crisis_resumed.last_evaluated_tick,
+            crisis_before
+                .last_evaluated_tick
+                .saturating_add(protected_duration)
+        );
+        assert_ne!(crisis_resumed.phase, CrisisPhase::AssaultActive);
+
+        // The next active interval resumes normal time-driven simulation from
+        // the preserved values instead of processing the protected backlog.
+        game.tick(40);
+        assert!(game.protected_hero_snapshot().hp < hero_resumed.hp);
+        assert!(
+            checkpoint2_hero_item_quantity(&mut game, "Firewood") > firewood_before,
+            "the retained real Firewood craft should complete only after resume"
+        );
+        assert_eq!(
+            checkpoint2_hero_item_quantity(&mut game, "Springbranch Maple Log"),
+            0
+        );
+        let refine_source_consumed =
+            !checkpoint2_owned_structure_has_item(&mut game, refiner_item_id);
+        let remaining_work = game.protected_work_deadlines();
+        let villager_states = game.protected_villager_snapshots();
+        assert!(
+            refine_source_consumed,
+            "the retained real structure refine should consume its source item after resume; remaining_work={remaining_work:?} villagers={villager_states:?}"
+        );
+        let structures_after_active_ticks = game.protected_structure_snapshots();
+        assert!(structures_after_active_ticks
+            .iter()
+            .zip(&structures_resumed)
+            .any(|(after, before)| after.work_done > before.work_done));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_queued_hostile_damage_is_purged_or_blocked() {
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutQueuedDamageBot");
+        let hostile_pos = far_map_position(&game, sanctuary);
+        let hostile_id = game.spawn_safe_logout_test_hostile(hostile_pos);
+        let player_id = game.player_id();
+        let (_villager_entity, villager_id) =
+            spawn_armed_owner_villager(&mut game, player_id, sanctuary);
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+        let (structure_id, structure_pos) = {
+            let player_id = game.player_id();
+            let world = game.app.world_mut();
+            let mut query =
+                world.query_filtered::<(&Id, &PlayerId, &Position), With<ClassStructure>>();
+            query
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == player_id)
+                .map(|(id, _, pos)| (id.0, *pos))
+                .expect("owned structure")
+        };
+        let queued_before_entry = game.queue_hostile_spell_damage_for_test(hostile_id, 300);
+
+        game.complete_valid_safe_logout();
+        assert!(!game
+            .world()
+            .resource::<MapEvents>()
+            .contains_key(&queued_before_entry));
+        game.disconnect_after_completed_safe_logout();
+
+        let hp_before = game.protected_hero_snapshot().hp;
+        let villagers_before = game.protected_villager_snapshots();
+        let structures_before = game.protected_structure_snapshots();
+        let score_before = {
+            let score = game
+                .world()
+                .resource::<RunScoreState>()
+                .get(&game.player_id())
+                .expect("run score");
+            (
+                score.enemies_killed,
+                score.elites_killed,
+                score.captains_killed,
+                score.legendary_kills,
+                score.highest_pressure_level,
+            )
+        };
+        let stale_event = game.queue_hostile_spell_damage_for_test(hostile_id, 0);
+        let now = game.game_tick();
+        let world = game.app.world_mut();
+        world.resource_mut::<MapEvents>().new(
+            hostile_id,
+            now,
+            VisibleEvent::SpellDamageEvent {
+                spell: Spell::ShadowBolt,
+                target_id: villager_id,
+            },
+        );
+        world.resource_mut::<MapEvents>().new(
+            hostile_id,
+            now,
+            VisibleEvent::SpellDamageEvent {
+                spell: Spell::ShadowBolt,
+                target_id: structure_id,
+            },
+        );
+        world.resource_mut::<MapEvents>().new(
+            hostile_id,
+            now,
+            VisibleEvent::StealEvent {
+                target_id: structure_id,
+                target_pos: structure_pos,
+                item_types: vec!["Resource".to_string(), "Food".to_string()],
+            },
+        );
+        world.resource_mut::<MapEvents>().new(
+            hostile_id,
+            now,
+            VisibleEvent::SpoilEvent {
+                target_id: structure_id,
+                target_pos: structure_pos,
+                item_type: "Resource".to_string(),
+            },
+        );
+        world.resource_mut::<MapEvents>().new(
+            hostile_id,
+            now,
+            VisibleEvent::TorchEvent {
+                target_id: structure_id,
+                target_pos: structure_pos,
+            },
+        );
+        game.tick(3);
+        assert_eq!(game.protected_hero_snapshot().hp, hp_before);
+        assert_eq!(game.protected_villager_snapshots(), villagers_before);
+        assert_eq!(game.protected_structure_snapshots(), structures_before);
+        let score_after = {
+            let score = game
+                .world()
+                .resource::<RunScoreState>()
+                .get(&game.player_id())
+                .expect("run score");
+            (
+                score.enemies_killed,
+                score.elites_killed,
+                score.captains_killed,
+                score.legendary_kills,
+                score.highest_pressure_level,
+            )
+        };
+        assert_eq!(score_after, score_before);
+        assert!(!game
+            .world()
+            .resource::<MapEvents>()
+            .contains_key(&stale_event));
+        assert!(game
+            .world()
+            .resource::<crate::ids::EntityObjMap>()
+            .get_entity(hostile_id)
+            .is_some());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_protected_inputs_cannot_move_or_attack() {
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutInputGuardBot");
+        let hostile_id = game.spawn_safe_logout_test_hostile(far_map_position(&game, sanctuary));
+        let player_id = game.player_id();
+        let (_villager_entity, villager_id) =
+            spawn_armed_owner_villager(&mut game, player_id, sanctuary);
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+        let structure_id = {
+            let player_id = game.player_id();
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&Id, &PlayerId), With<ClassStructure>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(id, _)| id.0)
+                .expect("owned structure")
+        };
+        game.complete_valid_safe_logout();
+        assert!(game
+            .world()
+            .resource::<Clients>()
+            .is_player_online(game.player_id()));
+
+        let hero = game.observe().hero.unwrap();
+        let hero_snapshot = game.protected_hero_snapshot();
+        let villager_snapshot = game.protected_villager_snapshots();
+        let structure_snapshot = game.protected_structure_snapshots();
+        let work_snapshot = game.protected_work_deadlines();
+        game.attempt_player_mutation_while_protected(PlayerEvent::Move {
+            player_id,
+            x: move_one_tile(hero.pos).x,
+            y: hero.pos.y,
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Attack {
+            player_id,
+            attack_type: "melee".to_string(),
+            source_id: hero.id,
+            target_id: hostile_id,
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Ability {
+            player_id,
+            ability_id: "Power Attack".to_string(),
+            source_id: hero.id,
+            target_id: Some(hostile_id),
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Combo {
+            player_id,
+            source_id: hero.id,
+            target_id: hostile_id,
+            combo_type: "power".to_string(),
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Craft {
+            player_id,
+            recipe_name: "Firewood".to_string(),
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Refine {
+            player_id,
+            item_id: -1,
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Assign {
+            player_id,
+            worker_id: villager_id,
+            structure_id,
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::Build {
+            player_id,
+            builder_id: villager_id,
+            structure_id,
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::CreateFoundation {
+            player_id,
+            source_id: hero.id,
+            structure_name: "Campfire".to_string(),
+        });
+        game.attempt_player_mutation_while_protected(PlayerEvent::ItemTransfer {
+            player_id,
+            item_id: -1,
+            source_id: hero.id,
+            target_id: structure_id,
+        });
+
+        assert_eq!(game.observe().hero.unwrap().pos, hero.pos);
+        assert_eq!(game.protected_hero_snapshot(), hero_snapshot);
+        assert_eq!(game.protected_villager_snapshots(), villager_snapshot);
+        assert_eq!(game.protected_structure_snapshots(), structure_snapshot);
+        assert_eq!(game.protected_work_deadlines(), work_snapshot);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        assert!(!game.world().resource::<MapEvents>().values().any(|event| {
+            event.obj_id == hero.id && matches!(event.event_type, VisibleEvent::MoveEvent { .. })
+        }));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_global_time_visibility_and_world_packets_continue() {
+        use crate::world::{
+            create_weather_area, get_time_of_day, TimeOfDay, Weather, WeatherAreas,
+        };
+
+        let (mut game, _) = safe_logout_fixture("SafeLogoutEnvironmentBot");
+        game.complete_valid_safe_logout();
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+        let player_id = game.player_id();
+
+        let mut first_light_tick = game.game_tick().div_euclid(GAME_TICKS_PER_DAY)
+            * GAME_TICKS_PER_DAY
+            + crate::constants::FIRST_LIGHT;
+        if first_light_tick <= game.game_tick() {
+            first_light_tick += GAME_TICKS_PER_DAY;
+        }
+        game.app.world_mut().resource_mut::<GameTick>().0 = first_light_tick - 1;
+        let night_range = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&PlayerId, &Viewshed), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .map(|(_, viewshed)| viewshed.range)
+                .unwrap()
+        };
+        assert_eq!(get_time_of_day(game.game_tick()), TimeOfDay::Night);
+
+        game.start_packet_capture();
+        game.tick(3);
+        let packets = game.finish_packet_capture();
+        assert_eq!(get_time_of_day(game.game_tick()), TimeOfDay::FirstLight);
+        let first_light_range = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(&PlayerId, &Viewshed), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .map(|(_, viewshed)| viewshed.range)
+                .unwrap()
+        };
+        assert_ne!(first_light_range, night_range);
+        assert!(packets.into_iter().any(|packet| matches!(
+            packet,
+            ResponsePacket::World {
+                time_of_day,
+                ..
+            } if time_of_day == "First Light"
+        )));
+
+        game.app
+            .world_mut()
+            .resource_mut::<WeatherAreas>()
+            .push(create_weather_area(-999, -999, Weather::HeavyRain));
+        game.app.world_mut().resource_mut::<GameTick>().0 =
+            first_light_tick + (crate::constants::DAWN - crate::constants::FIRST_LIGHT) - 1;
+        game.tick(3);
+        assert!(!game
+            .world()
+            .resource::<WeatherAreas>()
+            .iter()
+            .any(|area| area.center == (-999, -999)));
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::OfflineProtected)
+        );
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_assault_ready_cannot_launch_until_after_reconnect_barrier() {
+        use crate::game::ASSAULT_READY_GRACE_TICKS;
+
+        let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutAssaultReadyBot");
+        let preferred_tick = set_personal_assault_ready(&mut game);
+        let player_id = game.player_id();
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+        game.complete_valid_safe_logout();
+        {
+            let current_tick = game.game_tick();
+            let world = game.app.world_mut();
+            let mut crises = world.resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&player_id).expect("ready crisis");
+            crisis.phase_online_ticks = ASSAULT_READY_GRACE_TICKS - 1;
+            crisis.last_evaluated_tick = current_tick;
+        }
+
+        game.app.world_mut().resource_mut::<GameTick>().0 = preferred_tick - 2;
+        game.tick(2);
+        assert_eq!(
+            game.settlement_crisis()
+                .expect("protected ready crisis")
+                .phase,
+            CrisisPhase::AssaultReady
+        );
+        assert!(game.crisis_assault_units().is_empty());
+
+        game.reconnect_and_exit_protection();
+        assert_eq!(
+            game.settlement_crisis()
+                .expect("reconnect ready crisis")
+                .phase,
+            CrisisPhase::AssaultReady,
+            "the reconnect Update must still observe OfflineProtected"
+        );
+        assert!(game.crisis_assault_units().is_empty());
+
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().expect("post-barrier crisis").phase,
+            CrisisPhase::AssaultActive
+        );
+        assert!(!game.crisis_assault_units().is_empty());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_invalid_active_assault_revokes_protection_without_cleanup() {
+        let (mut game, _) = safe_logout_fixture("SafeLogoutInvariantRecoveryBot");
+        game.complete_valid_safe_logout();
+        game.disconnect_after_completed_safe_logout();
+        let player_id = game.player_id();
+        {
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises.entry(player_id).or_default();
+            crisis.phase = CrisisPhase::AssaultActive;
+            crisis.assault_id = Some(7_777);
+            crisis.assault_spawn_generation = 3;
+            crisis.assault_unit_ids = vec![91, 92];
+        }
+
+        game.app.world_mut().run_schedule(First);
+        assert_eq!(
+            game.player_presence(),
+            Some(PlayerWorldPresence::Disconnected)
+        );
+        let crisis = game.settlement_crisis().expect("preserved corrupt assault");
+        assert_eq!(crisis.phase, CrisisPhase::AssaultActive);
+        assert_eq!(crisis.assault_id, Some(7_777));
+        assert_eq!(crisis.assault_spawn_generation, 3);
+        assert_eq!(crisis.assault_unit_ids, vec![91, 92]);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_stale_run_key_fails_open_before_gameplay() {
+        let (mut game, _) = safe_logout_fixture("SafeLogoutStaleRunKeyBot");
+        game.complete_valid_safe_logout();
+        game.disconnect_after_completed_safe_logout();
+        {
+            let player_id = game.player_id();
+            let mut presence = game
+                .app
+                .world_mut()
+                .resource_mut::<PlayerWorldPresenceState>();
+            let record = presence
+                .players
+                .get_mut(&player_id)
+                .expect("protected presence");
+            record
+                .protected_run_key
+                .as_mut()
+                .expect("protected run key")
+                .hero_id += 10_000;
+        }
+
+        game.app.world_mut().run_schedule(First);
+        let record = game.player_presence_record().expect("recovered presence");
+        assert_eq!(record.state, PlayerWorldPresence::Disconnected);
+        assert_eq!(record.protected_since_tick, None);
+        assert_eq!(record.protected_run_key, None);
+    }
+
+    #[test]
+    fn safe_logout_checkpoint2_bound_monolith_item_expiry_freezes_and_rebases() {
+        use crate::ids::{EntityObjMap, Ids};
+        use crate::templates::Templates;
+
+        let (mut game, _) = safe_logout_fixture("SafeLogoutBoundInventoryBot");
+        game.complete_valid_safe_logout();
+        let protected_record = game.player_presence_record().expect("protected record");
+        let protected_since = protected_record
+            .protected_since_tick
+            .expect("protected start");
+        let bound_monolith_id = protected_record
+            .protected_run_key
+            .expect("protected key")
+            .bound_monolith_id;
+        let item_id = {
+            let world = game.app.world_mut();
+            let monolith_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(bound_monolith_id)
+                .expect("bound monolith entity");
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut inventory = world
+                .get_mut::<Inventory>(monolith_entity)
+                .expect("bound monolith inventory");
+            inventory.new(item_id, "Crude Torch".to_string(), 1, &item_templates);
+            let item = inventory
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .expect("expiring test item");
+            item.start_time = protected_since;
+            item.attrs.insert(AttrKey::Duration, AttrVal::Num(50.0));
+            item_id
+        };
+
+        game.disconnect_after_completed_safe_logout();
+        game.advance_protected_world_ticks(500);
+        let item_still_exists = {
+            let world = game.world();
+            let entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(bound_monolith_id)
+                .unwrap();
+            world
+                .get::<Inventory>(entity)
+                .unwrap()
+                .get_by_id(item_id)
+                .is_some()
+        };
+        assert!(item_still_exists);
+
+        game.reconnect_and_exit_protection();
+        game.tick(60);
+        let item_expired_after_active_time = {
+            let world = game.world();
+            let entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(bound_monolith_id)
+                .unwrap();
+            world
+                .get::<Inventory>(entity)
+                .unwrap()
+                .get_by_id(item_id)
+                .is_none()
+        };
+        assert!(item_expired_after_active_time);
     }
 
     // One short capped game end-to-end. Must run with CWD = sp_server/ so the
@@ -4964,6 +7002,7 @@ mod tests {
 
     #[test]
     fn checkpoint3_true_death_cleanup_isolated_and_idempotent() {
+        use crate::event::GameEvent;
         use crate::ids::{EntityObjMap, Ids};
 
         let mut game = HeadlessGame::new(20_000);
@@ -5065,6 +7104,59 @@ mod tests {
         };
 
         let current_tick = game.game_tick();
+        let (queued_villager_spawn, queued_npc_spawn, queued_actor_event, queued_target_event) = {
+            let world = game.app.world_mut();
+            let queued_villager_spawn = world.resource_mut::<Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                queued_villager_spawn,
+                GameEvent {
+                    event_id: queued_villager_spawn,
+                    start_tick: current_tick,
+                    run_tick: current_tick + 100,
+                    event_type: GameEventType::SpawnVillager {
+                        pos: Position { x: 0, y: 0 },
+                        player_id,
+                    },
+                },
+            );
+            let queued_npc_spawn = world.resource_mut::<Ids>().new_map_event_id();
+            world.resource_mut::<GameEvents>().insert(
+                queued_npc_spawn,
+                GameEvent {
+                    event_id: queued_npc_spawn,
+                    start_tick: current_tick,
+                    run_tick: current_tick + 100,
+                    event_type: GameEventType::SpawnNPC {
+                        npc_type: "Wolf".to_string(),
+                        pos: Position { x: 0, y: 0 },
+                        npc_id: None,
+                        run_owner: Some(player_id),
+                    },
+                },
+            );
+            let queued_actor_event = world.resource_mut::<MapEvents>().new(
+                own_ids[0],
+                current_tick + 100,
+                VisibleEvent::SpellDamageEvent {
+                    spell: Spell::ShadowBolt,
+                    target_id: other_id,
+                },
+            );
+            let queued_target_event = world.resource_mut::<MapEvents>().new(
+                unrelated_id,
+                current_tick + 100,
+                VisibleEvent::SpellDamageEvent {
+                    spell: Spell::ShadowBolt,
+                    target_id: *own_ids.last().unwrap(),
+                },
+            );
+            (
+                queued_villager_spawn,
+                queued_npc_spawn,
+                queued_actor_event.event_id,
+                queued_target_event.event_id,
+            )
+        };
         let hero = {
             let world = game.app.world_mut();
             let mut query = world.query_filtered::<Entity, With<SubclassHero>>();
@@ -5085,6 +7177,22 @@ mod tests {
 
         assert!(game.settlement_crisis().is_none());
         assert_eq!(game.personal_crises_resolved(), 0);
+        assert!(!game
+            .world()
+            .resource::<GameEvents>()
+            .contains_key(&queued_villager_spawn));
+        assert!(!game
+            .world()
+            .resource::<GameEvents>()
+            .contains_key(&queued_npc_spawn));
+        assert!(!game
+            .world()
+            .resource::<MapEvents>()
+            .contains_key(&queued_actor_event));
+        assert!(!game
+            .world()
+            .resource::<MapEvents>()
+            .contains_key(&queued_target_event));
         assert!(own_ids.iter().all(|id| game
             .world()
             .resource::<EntityObjMap>()

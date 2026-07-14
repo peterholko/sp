@@ -11,6 +11,7 @@ use crate::item;
 use crate::item::*;
 use crate::map::Map;
 use crate::obj::{State, *};
+use crate::safe_logout::{is_player_offline_protected, PlayerWorldPresenceState};
 use crate::templates::Templates;
 use crate::{constants::*, AppState};
 
@@ -120,9 +121,19 @@ impl Plugin for TaxCollectorPlugin {
 }
 
 pub fn merchant_scorer_system(
+    collector_query: Query<&TaxCollector>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<MerchantScorer>>,
 ) {
-    for (Actor(_actor), mut score, _span) in &mut query {
+    for (Actor(actor), mut score, _span) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            score.set(0.0);
+            continue;
+        }
         score.set(1.0);
     }
 }
@@ -131,8 +142,12 @@ pub fn merchant_scorer_system(
 pub fn update_tax_collection_system(
     game_tick: ResMut<GameTick>,
     mut collector_query: Query<&mut TaxCollector>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     for mut collector in collector_query.iter_mut() {
+        if is_player_offline_protected(collector.target_player, &presence) {
+            continue;
+        }
         let next_tax_collection = collector.last_collection_time + 1000;
         if next_tax_collection <= game_tick.0 {
             info!("Tax collection time for {:?}", collector.target_player);
@@ -143,11 +158,16 @@ pub fn update_tax_collection_system(
 }
 
 pub fn is_aboard_scorer_system(
-    state_query: Query<&State, With<TaxCollector>>,
+    state_query: Query<(&State, &TaxCollector)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<IsAboard>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
-        if let Ok(state) = state_query.get(*actor) {
+        if let Ok((state, collector)) = state_query.get(*actor) {
+            if is_player_offline_protected(collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if *state == State::Aboard {
                 score.set(0.8);
             } else {
@@ -159,10 +179,15 @@ pub fn is_aboard_scorer_system(
 
 pub fn is_tax_collected_scorer_system(
     tax_collector_query: Query<(&Id, &TaxCollector, &Inventory)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<IsTaxCollected>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
         if let Ok((id, tax_collector, inventory)) = tax_collector_query.get(*actor) {
+            if is_player_offline_protected(tax_collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if let Some(gold) = inventory.get_by_class(GOLD.to_string()) {
                 if gold.quantity >= tax_collector.collection_amount {
                     score.set(1.0);
@@ -178,10 +203,15 @@ pub fn is_tax_collected_scorer_system(
 
 pub fn at_landing_scorer_system(
     collector_query: Query<(&Position, &TaxCollector)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<AtLanding>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
         if let Ok((pos, tax_collector)) = collector_query.get(*actor) {
+            if is_player_offline_protected(tax_collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if Map::is_adjacent_including_source(*pos, tax_collector.landing_pos) {
                 score.set(0.9);
             } else {
@@ -195,6 +225,7 @@ pub fn no_taxes_to_collect_scorer_system(
     entity_map: Res<EntityObjMap>,
     transport_query: Query<(&Transport, &TaxCollectorTransport)>,
     collector_query: Query<(&TaxCollector, &Inventory)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<NoTaxesToCollect>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
@@ -209,6 +240,10 @@ pub fn no_taxes_to_collect_scorer_system(
         };
 
         if let Ok((collector, inventory)) = collector_query.get(collector_entity) {
+            if is_player_offline_protected(collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if let Some(gold) = inventory.get_by_class(GOLD.to_string()) {
                 if gold.quantity >= collector.collection_amount
                     && transport.hauling.contains(&tc_transport.tax_collector_id)
@@ -228,6 +263,7 @@ pub fn taxes_to_collect_scorer_system(
     entity_map: Res<EntityObjMap>,
     transport_query: Query<&TaxCollectorTransport>,
     collector_query: Query<(&TaxCollector, &Inventory)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<TaxesToCollect>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
@@ -242,6 +278,10 @@ pub fn taxes_to_collect_scorer_system(
         };
 
         if let Ok((collector, inventory)) = collector_query.get(collector_entity) {
+            if is_player_offline_protected(collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if let Some(gold) = inventory.get_by_class(GOLD.to_string()) {
                 if gold.quantity < collector.collection_amount {
                     score.set(1.0);
@@ -260,10 +300,15 @@ pub fn taxes_to_collect_scorer_system(
 pub fn overdue_tax_scorer_system(
     game_tick: Res<GameTick>,
     collector_query: Query<(&Id, &TaxCollector, &Inventory)>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<OverdueTaxScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
         if let Ok((_id, collector, inventory)) = collector_query.get(*actor) {
+            if is_player_offline_protected(collector.target_player, &presence) {
+                score.set(0.0);
+                continue;
+            }
             if collector.last_collection_time + 850 < game_tick.0 {
                 if let Some(gold) = inventory.get_by_class(GOLD.to_string()) {
                     if gold.quantity < collector.collection_amount {
@@ -279,9 +324,18 @@ pub fn overdue_tax_scorer_system(
 
 pub fn idle_action_system(
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
+    collector_query: Query<&TaxCollector>,
     mut query: Query<(&Actor, &mut ActionState, &mut Idle, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, mut idle, _span) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 info!("Idle action requested by {:?}", actor);
@@ -309,11 +363,19 @@ pub fn move_to_target_action_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    presence: Res<PlayerWorldPresenceState>,
     mut tax_collector_query: Query<(&PlayerId, &mut TaxCollector), Without<EventInProgress>>,
     mut obj_query: Query<ObjStatQuery>,
     mut query: Query<(&Actor, &mut ActionState, &MoveToTarget)>,
 ) {
     for (Actor(actor), mut state, move_to_target) in &mut query {
+        if tax_collector_query
+            .get(*actor)
+            .map(|(_, collector)| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 info!("MoveToTarget action requested");
@@ -454,11 +516,20 @@ pub fn move_to_target_action_system(
 }
 
 pub fn set_destination_action_system(
+    presence: Res<PlayerWorldPresenceState>,
+    collector_query: Query<&TaxCollector>,
     mut dest_query: Query<&mut Destination>,
     mut transport: Query<&mut Transport>,
     mut query: Query<(&Actor, &mut ActionState, &mut SetDestination, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, mut _set_destination, _span) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 *state = ActionState::Executing;
@@ -496,11 +567,20 @@ pub fn move_to_pos_action_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    presence: Res<PlayerWorldPresenceState>,
+    collector_query: Query<&TaxCollector>,
     mut npc_query: Query<CombatQuery>,
     dest_query: Query<&Destination>,
     mut query: Query<(&Actor, &mut ActionState, &MoveToPos)>,
 ) {
     for (Actor(actor), mut state, _move_to_pos) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 info!("MoveToPos action requested");
@@ -606,10 +686,19 @@ pub fn move_to_empire_action_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    presence: Res<PlayerWorldPresenceState>,
+    collector_query: Query<&TaxCollector>,
     mut npc_query: Query<CombatQuery>,
     mut query: Query<(&Actor, &mut ActionState, &MoveToEmpire)>,
 ) {
     for (Actor(actor), mut state, _move_to_empire) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 *state = ActionState::Executing;
@@ -712,8 +801,16 @@ pub fn forfeiture_action_system(
     mut collector_query: Query<(&Id, &mut TaxCollector)>,
     mut inventory_query: Query<&mut Inventory>,
     mut query: Query<(&Actor, &mut ActionState, &Forfeiture, &ActionSpan)>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     for (Actor(actor), mut state, _forfeiture, _span) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|(_, collector)| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 *state = ActionState::Executing;
@@ -722,6 +819,10 @@ pub fn forfeiture_action_system(
                 let Ok((collector_id, mut collector)) = collector_query.get_mut(*actor) else {
                     continue;
                 };
+
+                if is_player_offline_protected(collector.target_player, &presence) {
+                    continue;
+                }
 
                 // Get hero id from player
                 let Some(hero_id) = ids.get_hero(collector.target_player) else {
@@ -802,11 +903,20 @@ pub fn forfeiture_action_system(
 
 pub fn talk_action_system(
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
+    collector_query: Query<&TaxCollector>,
     id_query: Query<&Id>,
     mut map_events: ResMut<MapEvents>,
     mut query: Query<(&Actor, &mut ActionState, &mut Talk, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, talk, _span) in &mut query {
+        if collector_query
+            .get(*actor)
+            .map(|collector| is_player_offline_protected(collector.target_player, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         match *state {
             ActionState::Requested => {
                 *state = ActionState::Executing;
@@ -832,5 +942,97 @@ pub fn talk_action_system(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use big_brain::actions::spawn_action;
+
+    use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence, PlayerWorldPresenceState};
+
+    #[test]
+    fn checkpoint2_protected_tax_target_freezes_collection_and_forfeiture() {
+        let protected_player = 1;
+        let active_player = 2;
+
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut record = PlayerPresenceRecord::new(false);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        presence.players.insert(protected_player, record);
+
+        let mut app = App::new();
+        app.insert_resource(GameTick(2_000))
+            .insert_resource(EntityObjMap(HashMap::new()))
+            .insert_resource(Ids::default())
+            .insert_resource(MapEvents(HashMap::new()))
+            .insert_resource(Templates::from_obj_templates(Vec::new()))
+            .insert_resource(presence)
+            .add_systems(
+                Update,
+                (update_tax_collection_system, forfeiture_action_system),
+            );
+
+        let protected_collector = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                TaxCollector {
+                    target_player: protected_player,
+                    collection_amount: 7,
+                    debt_amount: 11,
+                    last_collection_time: 0,
+                    ..default()
+                },
+            ))
+            .id();
+        let active_collector = app
+            .world_mut()
+            .spawn(TaxCollector {
+                target_player: active_player,
+                collection_amount: 7,
+                last_collection_time: 0,
+                ..default()
+            })
+            .id();
+
+        let forfeiture_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&Forfeiture, &mut commands, protected_collector)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(forfeiture_action)
+            .get_mut::<ActionState>()
+            .expect("forfeiture action has state") = ActionState::Executing;
+
+        app.update();
+
+        let protected = app
+            .world()
+            .entity(protected_collector)
+            .get::<TaxCollector>()
+            .expect("protected tax collector remains");
+        assert_eq!(protected.collection_amount, 7);
+        assert_eq!(protected.debt_amount, 11);
+        assert_eq!(protected.last_collection_time, 0);
+        assert_eq!(
+            *app.world()
+                .entity(forfeiture_action)
+                .get::<ActionState>()
+                .expect("forfeiture action remains"),
+            ActionState::Executing
+        );
+
+        let active = app
+            .world()
+            .entity(active_collector)
+            .get::<TaxCollector>()
+            .expect("active tax collector remains");
+        assert_eq!(active.collection_amount, 50);
+        assert_eq!(active.last_collection_time, 2_000);
     }
 }

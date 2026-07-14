@@ -1523,6 +1523,7 @@ pub fn new(
                     npc_type: "Skeleton".to_string(),
                     pos: poi_pos,
                     npc_id: None,
+                    run_owner: Some(player_id),
                 },
             };
             game_events.insert(spawn_event.event_id, spawn_event);
@@ -1588,6 +1589,7 @@ pub fn new(
                     npc_type: "Zombie".to_string(),
                     pos: poi_pos,
                     npc_id: None,
+                    run_owner: Some(player_id),
                 },
             };
             game_events.insert(spawn_event.event_id, spawn_event);
@@ -1659,6 +1661,7 @@ pub fn new(
                     npc_type: "Spider".to_string(),
                     pos: poi_pos,
                     npc_id: None,
+                    run_owner: Some(player_id),
                 },
             };
             game_events.insert(spawn_event.event_id, spawn_event);
@@ -1738,6 +1741,7 @@ pub fn new(
                     npc_type,
                     pos: poi_pos,
                     npc_id: None,
+                    run_owner: Some(player_id),
                 },
             };
             game_events.insert(spawn_event.event_id, spawn_event);

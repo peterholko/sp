@@ -103,6 +103,10 @@ enum NetworkPacket {
     },
     #[serde(rename = "recreate_hero")]
     RecreateHero,
+    #[serde(rename = "request_safe_logout")]
+    RequestSafeLogout,
+    #[serde(rename = "cancel_safe_logout")]
+    CancelSafeLogout,
     #[serde(rename = "get_stats")]
     GetStats { id: i32 },
     #[serde(rename = "image_def")]
@@ -328,6 +332,26 @@ enum NetworkPacket {
     GetLogLevels,
 }
 
+fn decode_network_packet(input: &str) -> serde_json::Result<NetworkPacket> {
+    let packet = serde_json::from_str::<NetworkPacket>(input)?;
+    if matches!(
+        &packet,
+        NetworkPacket::RequestSafeLogout | NetworkPacket::CancelSafeLogout
+    ) {
+        let value = serde_json::from_str::<serde_json::Value>(input)?;
+        let exact_command_only = value
+            .as_object()
+            .map(|object| object.len() == 1 && object.contains_key("cmd"))
+            .unwrap_or(false);
+        if !exact_command_only {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "safe-logout commands do not accept client-controlled fields",
+            ));
+        }
+    }
+    Ok(packet)
+}
+
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct StructureList {
     pub result: Vec<Structure>,
@@ -358,6 +382,24 @@ pub struct CrisisStatusSnapshot {
     pub preparation_seconds_remaining: Option<i32>,
     pub preferred_launch_window: Option<String>,
     pub continues_while_disconnected: bool,
+}
+
+/// Versioned, server-authoritative safe-logout presentation. The payload
+/// deliberately contains no player, entity, sanctuary, or protected-run IDs.
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SafeLogoutStatusSnapshot {
+    pub version: u32,
+    pub state: String,
+    pub can_request: bool,
+    pub can_cancel: bool,
+    pub countdown_total_seconds: Option<i32>,
+    pub countdown_remaining_seconds: Option<i32>,
+    pub reason: Option<String>,
+    pub message: String,
+    pub in_own_sanctuary: bool,
+    pub active_assault: bool,
+    pub protected: bool,
 }
 
 #[skip_serializing_none]
@@ -1020,6 +1062,11 @@ pub enum ResponsePacket {
     CrisisStatus {
         #[serde(flatten)]
         status: CrisisStatusSnapshot,
+    },
+    #[serde(rename = "safe_logout_status")]
+    SafeLogoutStatus {
+        #[serde(flatten)]
+        status: SafeLogoutStatusSnapshot,
     },
     #[serde(rename = "threat_state")]
     ThreatState {
@@ -2251,7 +2298,7 @@ async fn handle_connection(
                             //Check if the player is authenticated
                             /*if player_id == -1 {
                                 //Attempt to login
-                                let res_packet: ResponsePacket = match serde_json::from_str(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
                                     Ok(packet) => {
                                         match packet {
                                             /*NetworkPacket::Register{account_name, password} => {
@@ -2302,7 +2349,7 @@ async fn handle_connection(
                             } else {*/
                                 println!("Authenticated packet: {:?}", msg.to_text().unwrap());
 
-                                let res_packet: ResponsePacket = match serde_json::from_str(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
                                     Ok(packet) => {
                                         match packet {
                                             NetworkPacket::SelectedClass{class_name, hero_name} => {
@@ -2316,6 +2363,22 @@ async fn handle_connection(
                                             }
                                             NetworkPacket::RecreateHero => {
                                                 handle_recreate_hero(pool.clone(), player_id).await
+                                            }
+                                            NetworkPacket::RequestSafeLogout => {
+                                                handle_safe_logout_command(
+                                                    client_id,
+                                                    &clients,
+                                                    client_to_game_sender.clone(),
+                                                    false,
+                                                )
+                                            }
+                                            NetworkPacket::CancelSafeLogout => {
+                                                handle_safe_logout_command(
+                                                    client_id,
+                                                    &clients,
+                                                    client_to_game_sender.clone(),
+                                                    true,
+                                                )
                                             }
                                             NetworkPacket::GetStats{id} => {
                                                 handle_get_stats(player_id, id, client_to_game_sender.clone())
@@ -2826,6 +2889,46 @@ fn handle_move(
         .expect("Could not send message");
 
     ResponsePacket::Ok
+}
+
+/// Resolve the player solely from the currently active authenticated
+/// connection. The WebSocket task's local `player_id` is intentionally not an
+/// argument: a removed, replaced, malformed, or closed client record must not
+/// retain authority to start or cancel safe logout.
+fn authenticated_player_for_connection(client_id: Uuid, clients: &Clients) -> Option<i32> {
+    let clients = clients.lock().ok()?;
+    let client = clients.get(&client_id)?;
+    (client.id == client_id && client.player_id >= 0 && !client.sender.is_closed())
+        .then_some(client.player_id)
+}
+
+fn handle_safe_logout_command(
+    client_id: Uuid,
+    clients: &Clients,
+    client_to_game_sender: CBSender<PlayerEvent>,
+    cancel: bool,
+) -> ResponsePacket {
+    let Some(player_id) = authenticated_player_for_connection(client_id, clients) else {
+        return ResponsePacket::Error {
+            errmsg: "Safe Logout requires an authenticated connection.".to_string(),
+        };
+    };
+
+    let event = if cancel {
+        PlayerEvent::CancelSafeLogout { player_id }
+    } else {
+        PlayerEvent::RequestSafeLogout { player_id }
+    };
+
+    if client_to_game_sender.send(event).is_err() {
+        return ResponsePacket::Error {
+            errmsg: "Safe Logout is temporarily unavailable.".to_string(),
+        };
+    }
+
+    // The authoritative safe-logout status system reports acceptance,
+    // rejection, cancellation, countdown, and completion asynchronously.
+    ResponsePacket::None
 }
 
 fn handle_attack(
@@ -4256,6 +4359,39 @@ mod tests {
         }
     }
 
+    fn safe_logout_status(state: &str) -> SafeLogoutStatusSnapshot {
+        SafeLogoutStatusSnapshot {
+            version: 1,
+            state: state.to_string(),
+            can_request: state == "online",
+            can_cancel: state == "pending",
+            countdown_total_seconds: (state == "pending").then_some(10),
+            countdown_remaining_seconds: (state == "pending").then_some(7),
+            reason: None,
+            message: "status".to_string(),
+            in_own_sanctuary: true,
+            active_assault: false,
+            protected: state == "protected",
+        }
+    }
+
+    fn authenticated_client(
+        player_id: i32,
+    ) -> (Clients, Uuid, tokio::sync::mpsc::Receiver<String>) {
+        let clients = Clients::default();
+        let client_id = Uuid::new_v4();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        clients.lock().unwrap().insert(
+            client_id,
+            Client {
+                id: client_id,
+                player_id,
+                sender,
+            },
+        );
+        (clients, client_id, receiver)
+    }
+
     #[test]
     fn test_is_inappropriate() {
         let hero_name = "Fuck";
@@ -4307,5 +4443,135 @@ mod tests {
         assert!(value.get("phase").is_none());
         assert!(value.get("pressure").is_none());
         assert!(value.get("remaining_attackers").is_none());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_request_commands_use_stable_tags_without_player_ids() {
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"request_safe_logout"}"#).unwrap(),
+            NetworkPacket::RequestSafeLogout
+        ));
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"cancel_safe_logout"}"#).unwrap(),
+            NetworkPacket::CancelSafeLogout
+        ));
+
+        let request = serde_json::to_value(NetworkPacket::RequestSafeLogout).unwrap();
+        let cancel = serde_json::to_value(NetworkPacket::CancelSafeLogout).unwrap();
+        assert_eq!(request, serde_json::json!({"cmd": "request_safe_logout"}));
+        assert_eq!(cancel, serde_json::json!({"cmd": "cancel_safe_logout"}));
+        assert!(request.get("player_id").is_none());
+        assert!(cancel.get("player_id").is_none());
+        assert!(decode_network_packet(r#"{"cmd":"request_safe_logout","player_id":999}"#).is_err());
+        assert!(decode_network_packet(r#"{"cmd":"cancel_safe_logout","player_id":999}"#).is_err());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_status_is_flat_versioned_and_omits_optional_fields() {
+        let value = serde_json::to_value(ResponsePacket::SafeLogoutStatus {
+            status: safe_logout_status("online"),
+        })
+        .unwrap();
+
+        assert_eq!(value["packet"], "safe_logout_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["state"], "online");
+        assert_eq!(value["can_request"], true);
+        assert_eq!(value["protected"], false);
+        assert!(value.get("status").is_none());
+        assert!(value.get("countdown_total_seconds").is_none());
+        assert!(value.get("countdown_remaining_seconds").is_none());
+        assert!(value.get("reason").is_none());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_all_stable_states_serialize() {
+        for state in ["online", "pending", "protected", "disconnected"] {
+            let value = serde_json::to_value(ResponsePacket::SafeLogoutStatus {
+                status: safe_logout_status(state),
+            })
+            .unwrap();
+            assert_eq!(value["state"], state);
+        }
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_authenticated_routing_uses_connection_owner_only() {
+        let authenticated_player = 41;
+        let (clients, client_id, _client_receiver) = authenticated_client(authenticated_player);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+
+        assert_eq!(
+            handle_safe_logout_command(client_id, &clients, sender, false),
+            ResponsePacket::None
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            PlayerEvent::RequestSafeLogout { player_id } if player_id == authenticated_player
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_cancel_is_owner_scoped() {
+        let authenticated_player = 52;
+        let (clients, client_id, _client_receiver) = authenticated_client(authenticated_player);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+
+        assert_eq!(
+            handle_safe_logout_command(client_id, &clients, sender, true),
+            ResponsePacket::None
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            PlayerEvent::CancelSafeLogout { player_id } if player_id == authenticated_player
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_unauthenticated_and_stale_mappings_fail_closed() {
+        let clients = Clients::default();
+        let missing_id = Uuid::new_v4();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        assert!(matches!(
+            handle_safe_logout_command(missing_id, &clients, sender, false),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let map_key = Uuid::new_v4();
+        let mismatched_id = Uuid::new_v4();
+        let (client_sender, _client_receiver) = tokio::sync::mpsc::channel(1);
+        clients.lock().unwrap().insert(
+            map_key,
+            Client {
+                id: mismatched_id,
+                player_id: 12,
+                sender: client_sender,
+            },
+        );
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        assert!(matches!(
+            handle_safe_logout_command(map_key, &clients, sender, true),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let closed_id = Uuid::new_v4();
+        let (closed_sender, closed_receiver) = tokio::sync::mpsc::channel(1);
+        drop(closed_receiver);
+        clients.lock().unwrap().insert(
+            closed_id,
+            Client {
+                id: closed_id,
+                player_id: 13,
+                sender: closed_sender,
+            },
+        );
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        assert!(matches!(
+            handle_safe_logout_command(closed_id, &clients, sender, false),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 }

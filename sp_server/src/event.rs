@@ -466,6 +466,11 @@ pub enum GameEventType {
         npc_type: String,
         pos: Position,
         npc_id: Option<i32>,
+        /// Exact player run whose delayed spawn belongs to. Ambient and
+        /// globally owned spawns use `None`; run-attributed setup/encounter
+        /// spawns use `Some(player_id)` so offline protection can pause them
+        /// without inferring ownership from position or NPC faction.
+        run_owner: Option<i32>,
     },
     ForageEvent {
         forager_id: i32,

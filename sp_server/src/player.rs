@@ -22,8 +22,8 @@ use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
-    survey_status_for_tile, Clients, CrisisAssaultUnit, DamageRecord, DebugObjs, GameTick,
-    InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
+    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, DamageRecord, DebugObjs,
+    GameTick, InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
     MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
     PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
     SettlementCrisisState, SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
@@ -45,8 +45,9 @@ use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations
 use crate::recipe::Recipes;
 use crate::resource::{Resource, Resources};
 use crate::safe_logout::{
-    initialize_player_presence, mark_player_logged_in, record_player_combat_activity,
-    PlayerWorldPresenceState,
+    initialize_player_presence, is_owner_offline_protected, is_player_offline_protected,
+    mark_player_logged_in, object_belongs_to_protected_run, record_player_combat_activity,
+    CancelSafeLogout, PlayerWorldPresenceState, RequestSafeLogout,
 };
 use crate::skill::{SkillData, Skills, MAX_RANK};
 use crate::skill_defs::Skill;
@@ -109,6 +110,12 @@ pub enum PlayerEvent {
         class_name: String,
     },
     Login {
+        player_id: i32,
+    },
+    RequestSafeLogout {
+        player_id: i32,
+    },
+    CancelSafeLogout {
         player_id: i32,
     },
     Move {
@@ -502,6 +509,280 @@ pub enum PlayerEvent {
     },
 }
 
+impl PlayerEvent {
+    fn player_id(&self) -> i32 {
+        match self {
+            Self::NewPlayer { player_id, .. }
+            | Self::Login { player_id }
+            | Self::RequestSafeLogout { player_id }
+            | Self::CancelSafeLogout { player_id }
+            | Self::Move { player_id, .. }
+            | Self::Attack { player_id, .. }
+            | Self::Ability { player_id, .. }
+            | Self::Combo { player_id, .. }
+            | Self::Block { player_id, .. }
+            | Self::Gather { player_id }
+            | Self::Operate { player_id, .. }
+            | Self::Plant { player_id, .. }
+            | Self::Tend { player_id, .. }
+            | Self::Harvest { player_id, .. }
+            | Self::Refine { player_id, .. }
+            | Self::Craft { player_id, .. }
+            | Self::StructureRefine { player_id, .. }
+            | Self::StructureCraft { player_id, .. }
+            | Self::GetStats { player_id, .. }
+            | Self::InfoObj { player_id, .. }
+            | Self::InfoSkills { player_id, .. }
+            | Self::InfoAttrs { player_id, .. }
+            | Self::InfoAdvance { player_id, .. }
+            | Self::InfoUpgrade { player_id, .. }
+            | Self::InfoTile { player_id, .. }
+            | Self::InfoTileResources { player_id, .. }
+            | Self::InvestigatePOI { player_id, .. }
+            | Self::InfoInventory { player_id, .. }
+            | Self::InfoEquip { player_id, .. }
+            | Self::InfoItem { player_id, .. }
+            | Self::InfoItemByName { player_id, .. }
+            | Self::InfoItemTransfer { player_id, .. }
+            | Self::InfoExit { player_id, .. }
+            | Self::InfoMerchant { player_id, .. }
+            | Self::InfoHire { player_id, .. }
+            | Self::ItemTransfer { player_id, .. }
+            | Self::ItemSplit { player_id, .. }
+            | Self::OrderFollow { player_id, .. }
+            | Self::OrderGather { player_id, .. }
+            | Self::OrderOperate { player_id, .. }
+            | Self::OrderRefine { player_id, .. }
+            | Self::OrderCraft { player_id, .. }
+            | Self::OrderExplore { player_id, .. }
+            | Self::OrderProspect { player_id, .. }
+            | Self::OrderExperiment { player_id, .. }
+            | Self::OrderPlant { player_id, .. }
+            | Self::OrderTend { player_id, .. }
+            | Self::OrderHarvest { player_id, .. }
+            | Self::OrderRepair { player_id, .. }
+            | Self::StructureList { player_id }
+            | Self::CreateFoundation { player_id, .. }
+            | Self::Build { player_id, .. }
+            | Self::Sleep { player_id, .. }
+            | Self::StartUpgrade { player_id, .. }
+            | Self::Upgrade { player_id, .. }
+            | Self::Experiment { player_id, .. }
+            | Self::Activate { player_id, .. }
+            | Self::Survey { player_id, .. }
+            | Self::Prospect { player_id }
+            | Self::Explore { player_id }
+            | Self::NearbyResources { player_id }
+            | Self::Assign { player_id, .. }
+            | Self::RemoveAssign { player_id, .. }
+            | Self::Equip { player_id, .. }
+            | Self::DeleteItem { player_id, .. }
+            | Self::InfoAssign { player_id, .. }
+            | Self::InfoCraft { player_id, .. }
+            | Self::InfoStructureCraft { player_id, .. }
+            | Self::InfoStructureQueue { player_id, .. }
+            | Self::InfoWorkQueueEntry { player_id, .. }
+            | Self::AddCraftingEntry { player_id, .. }
+            | Self::AddRefineEntry { player_id, .. }
+            | Self::RemoveWorkEntry { player_id, .. }
+            | Self::InfoRefine { player_id, .. }
+            | Self::InfoStructureRefine { player_id, .. }
+            | Self::InfoStructureRefineItem { player_id, .. }
+            | Self::Use { player_id, .. }
+            | Self::Remove { player_id, .. }
+            | Self::Advance { player_id, .. }
+            | Self::InfoExperinment { player_id, .. }
+            | Self::SetExperimentItem { player_id, .. }
+            | Self::ResetExperiment { player_id, .. }
+            | Self::Hire { player_id, .. }
+            | Self::UpgradeSanctuary { player_id, .. }
+            | Self::BuyItem { player_id, .. }
+            | Self::SellItem { player_id, .. }
+            | Self::CancelAction { player_id }
+            | Self::DebugObj { player_id, .. }
+            | Self::SetLogLevel { player_id, .. }
+            | Self::GetLogLevels { player_id } => *player_id,
+        }
+    }
+
+    /// Commands that can change gameplay state. Run creation and login remain
+    /// outside this gate because their existing handlers own stale-run and
+    /// reconnect validation respectively.
+    fn is_mutating_gameplay(&self) -> bool {
+        !matches!(
+            self,
+            Self::NewPlayer { .. }
+                | Self::Login { .. }
+                | Self::RequestSafeLogout { .. }
+                | Self::CancelSafeLogout { .. }
+                | Self::GetStats { .. }
+                | Self::InfoObj { .. }
+                | Self::InfoSkills { .. }
+                | Self::InfoAttrs { .. }
+                | Self::InfoAdvance { .. }
+                | Self::InfoUpgrade { .. }
+                | Self::InfoTile { .. }
+                | Self::InfoTileResources { .. }
+                | Self::InfoInventory { .. }
+                | Self::InfoEquip { .. }
+                | Self::InfoItem { .. }
+                | Self::InfoItemByName { .. }
+                | Self::InfoItemTransfer { .. }
+                | Self::InfoExit { .. }
+                | Self::InfoMerchant { .. }
+                | Self::InfoHire { .. }
+                | Self::StructureList { .. }
+                | Self::NearbyResources { .. }
+                | Self::InfoAssign { .. }
+                | Self::InfoCraft { .. }
+                | Self::InfoStructureCraft { .. }
+                | Self::InfoStructureQueue { .. }
+                | Self::InfoWorkQueueEntry { .. }
+                | Self::InfoRefine { .. }
+                | Self::InfoStructureRefine { .. }
+                | Self::InfoStructureRefineItem { .. }
+                | Self::InfoExperinment { .. }
+                | Self::DebugObj { .. }
+                | Self::SetLogLevel { .. }
+                | Self::GetLogLevels { .. }
+        )
+    }
+
+    fn targets_protected_run(&self, ids: &Ids, presence: &PlayerWorldPresenceState) -> bool {
+        let protected = |obj_id: i32| object_belongs_to_protected_run(obj_id, ids, presence);
+
+        match self {
+            Self::Attack {
+                source_id,
+                target_id,
+                ..
+            }
+            | Self::Combo {
+                source_id,
+                target_id,
+                ..
+            } => protected(*source_id) || protected(*target_id),
+            Self::Ability {
+                source_id,
+                target_id,
+                ..
+            } => protected(*source_id) || target_id.map(protected).unwrap_or(false),
+            Self::Block { source_id, .. }
+            | Self::OrderFollow { source_id, .. }
+            | Self::OrderGather { source_id, .. }
+            | Self::CreateFoundation { source_id, .. }
+            | Self::Survey { source_id, .. } => protected(*source_id),
+            Self::Operate { structure_id, .. }
+            | Self::Plant { structure_id, .. }
+            | Self::Tend { structure_id, .. }
+            | Self::Harvest { structure_id, .. }
+            | Self::StructureRefine { structure_id, .. }
+            | Self::StructureCraft { structure_id, .. }
+            | Self::Sleep { structure_id, .. }
+            | Self::StartUpgrade { structure_id, .. }
+            | Self::Experiment { structure_id, .. }
+            | Self::Activate { structure_id, .. }
+            | Self::AddCraftingEntry { structure_id, .. }
+            | Self::AddRefineEntry { structure_id, .. }
+            | Self::RemoveWorkEntry { structure_id, .. }
+            | Self::Remove { structure_id, .. }
+            | Self::SetExperimentItem { structure_id, .. }
+            | Self::ResetExperiment { structure_id, .. }
+            | Self::UpgradeSanctuary {
+                monolith_id: structure_id,
+                ..
+            } => protected(*structure_id),
+            Self::InvestigatePOI { target_id, .. } => protected(*target_id),
+            Self::ItemTransfer {
+                source_id,
+                target_id,
+                ..
+            } => protected(*source_id) || protected(*target_id),
+            Self::ItemSplit { owner_id, .. } => protected(*owner_id),
+            Self::OrderOperate {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderRefine {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderCraft {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderExperiment {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderPlant {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderTend {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::OrderHarvest {
+                villager_id,
+                structure_id,
+                ..
+            }
+            | Self::Assign {
+                worker_id: villager_id,
+                structure_id,
+                ..
+            }
+            | Self::RemoveAssign {
+                worker_id: villager_id,
+                structure_id,
+                ..
+            } => protected(*villager_id) || protected(*structure_id),
+            Self::OrderExplore { villager_id, .. }
+            | Self::OrderProspect { villager_id, .. }
+            | Self::OrderRepair { villager_id, .. } => protected(*villager_id),
+            Self::Build {
+                builder_id,
+                structure_id,
+                ..
+            }
+            | Self::Upgrade {
+                builder_id,
+                structure_id,
+                ..
+            } => protected(*builder_id) || protected(*structure_id),
+            Self::Equip { obj_id, .. }
+            | Self::DeleteItem { obj_id, .. }
+            | Self::Use { obj_id, .. }
+            | Self::Advance { id: obj_id, .. } => protected(*obj_id),
+            Self::Hire {
+                merchant_id,
+                target_id,
+                ..
+            } => protected(*merchant_id) || protected(*target_id),
+            Self::BuyItem { seller_id, .. } => protected(*seller_id),
+            Self::SellItem { target_id, .. } => protected(*target_id),
+            _ => false,
+        }
+    }
+}
+
+fn protected_player_event_mutation(
+    event: &PlayerEvent,
+    ids: &Ids,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    event.is_mutating_gameplay()
+        && (is_player_offline_protected(event.player_id(), presence)
+            || event.targets_protected_run(ids, presence))
+}
+
 pub type ActiveInfoPlayerId = i32;
 pub type ActiveInfoObjId = i32;
 
@@ -640,6 +921,13 @@ struct VillagerQuery {
     misc: &'static Misc,
 }
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PlayerInputSet {
+    Collect,
+    ProtectionGuard,
+    Handle,
+}
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
@@ -655,15 +943,37 @@ impl Plugin for PlayerPlugin {
         // Give each start location a distinct random team color (hero + villagers).
         crate::player_setup::assign_start_location_colors(&mut start_locations.0);
 
-        app.add_systems(
+        app.configure_sets(
             Update,
             (
-                message_broker_system,
+                PlayerInputSet::Collect,
+                PlayerInputSet::ProtectionGuard,
+                PlayerInputSet::Handle,
+            )
+                .chain(),
+        )
+        .add_systems(
+            Update,
+            message_broker_system
+                .in_set(PlayerInputSet::Collect)
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            protected_player_event_guard_system
+                .in_set(PlayerInputSet::ProtectionGuard)
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
+                safe_logout_command_bridge_system,
                 new_player_system,
                 login_system,
                 move_system,
                 attack_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -675,6 +985,7 @@ impl Plugin for PlayerPlugin {
                 info_attrs_system,
                 info_advance_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -696,6 +1007,7 @@ impl Plugin for PlayerPlugin {
                 order_farm_system,
                 order_repair_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -721,6 +1033,7 @@ impl Plugin for PlayerPlugin {
                 buy_sell_system,
                 activate_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -731,6 +1044,7 @@ impl Plugin for PlayerPlugin {
                 investigate_system,
                 order_prospect_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -746,11 +1060,14 @@ impl Plugin for PlayerPlugin {
                 set_log_level_system,
                 get_log_levels_system,
             )
+                .in_set(PlayerInputSet::Handle)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
             Update,
-            (info_obj_system,).run_if(in_state(AppState::Running)),
+            (info_obj_system,)
+                .in_set(PlayerInputSet::Handle)
+                .run_if(in_state(AppState::Running)),
         )
         .add_observer(info_hero_system)
         .add_observer(info_villager_system)
@@ -779,6 +1096,62 @@ fn message_broker_system(
         player_events.insert(ids.player_event, evt.clone());
 
         ids.player_event += 1;
+    }
+}
+
+fn protected_player_event_guard_system(
+    mut player_events: ResMut<PlayerEvents>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+) {
+    let mut rejected = Vec::new();
+
+    for (event_id, event) in player_events.iter() {
+        if protected_player_event_mutation(event, &ids, &presence) {
+            info!(
+                "safe_logout_protected_input_rejected player_id={} event_id={} event={:?}",
+                event.player_id(),
+                event_id,
+                event
+            );
+            rejected.push(*event_id);
+        }
+    }
+
+    for event_id in rejected {
+        player_events.remove(&event_id);
+    }
+}
+
+/// Convert authenticated network ingress into the existing internal
+/// safe-logout messages. This bridge deliberately owns no validation or
+/// presence transition; the Checkpoint 1 systems remain the sole authority.
+fn safe_logout_command_bridge_system(
+    mut player_events: ResMut<PlayerEvents>,
+    mut requests: MessageWriter<RequestSafeLogout>,
+    mut cancellations: MessageWriter<CancelSafeLogout>,
+) {
+    let command_ids = player_events
+        .iter()
+        .filter_map(|(event_id, event)| {
+            matches!(
+                event,
+                PlayerEvent::RequestSafeLogout { .. } | PlayerEvent::CancelSafeLogout { .. }
+            )
+            .then_some(*event_id)
+        })
+        .collect::<Vec<_>>();
+
+    for event_id in command_ids {
+        match player_events.remove(&event_id) {
+            Some(PlayerEvent::RequestSafeLogout { player_id }) => {
+                requests.write(RequestSafeLogout { player_id });
+            }
+            Some(PlayerEvent::CancelSafeLogout { player_id }) => {
+                cancellations.write(CancelSafeLogout { player_id });
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1907,6 +2280,15 @@ fn attack_system(
                     continue;
                 }
 
+                // Final authoritative mutation boundary. Keep this check next
+                // to stamina/HP/combat-state mutation even though the ordered
+                // input guard normally rejected the event earlier.
+                if object_belongs_to_protected_run(attacker.id.0, &ids, &presence)
+                    || object_belongs_to_protected_run(target.id.0, &ids, &presence)
+                {
+                    continue;
+                }
+
                 let mut attack_history = attacker
                     .combo_tracker
                     .as_ref()
@@ -2101,6 +2483,10 @@ fn attack_system(
                         continue;
                     }
 
+                    if object_belongs_to_protected_run(attacker.id.0, &ids, &presence) {
+                        continue;
+                    }
+
                     let ability_cost = ability_effective_cost(ability, &attacker);
                     spend_ability_cost(&mut attacker, ability, ability_cost);
                     match ability.effect {
@@ -2206,6 +2592,15 @@ fn attack_system(
                 if let Some(reason) = ability_disabled_reason(ability, &attacker, Some(&target)) {
                     let packet = ResponsePacket::Error { errmsg: reason };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                // Final boundary before ability cost, effects, movement, or
+                // HP mutation. This includes neutral run objects and the bound
+                // monolith exception through the canonical object helper.
+                if object_belongs_to_protected_run(attacker.id.0, &ids, &presence)
+                    || object_belongs_to_protected_run(target.id.0, &ids, &presence)
+                {
                     continue;
                 }
 
@@ -2486,6 +2881,12 @@ fn attack_system(
                         errmsg: "No combo is ready.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if object_belongs_to_protected_run(attacker.id.0, &ids, &presence)
+                    || object_belongs_to_protected_run(target.id.0, &ids, &presence)
+                {
                     continue;
                 }
 
@@ -2835,6 +3236,7 @@ fn gather_farm_refine_craft_system(
     active_infos: ResMut<ActiveInfos>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<StructureQuery, With<ClassStructure>>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -2873,6 +3275,10 @@ fn gather_farm_refine_craft_system(
             } => {
                 debug!("PlayerEvent::Plant");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -2952,6 +3358,10 @@ fn gather_farm_refine_craft_system(
                 debug!("PlayerEvent::Harvest");
                 events_to_remove.push(*event_id);
 
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
+
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
                     continue;
@@ -3030,6 +3440,10 @@ fn gather_farm_refine_craft_system(
             } => {
                 debug!("PlayerEvent::Operate");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -3353,6 +3767,7 @@ fn structure_refine_system(
         Option<&LastCombatTick>,
     )>,
     skills_query: Query<&mut Skills>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -3365,6 +3780,10 @@ fn structure_refine_system(
             } => {
                 debug!("PlayerEvent::StructureRefine");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -3507,6 +3926,10 @@ fn structure_refine_system(
             } => {
                 debug!("PlayerEvent::StructureCraft");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -4109,6 +4532,7 @@ fn info_monolith_system(
     mut queries: ParamSet<(Query<CoreQuery>, Query<&mut Inventory, With<SubclassHero>>)>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
+    presence: Res<PlayerWorldPresenceState>,
     mut monolith_investigation: ResMut<MonolithInvestigation>,
 ) {
     // First pass: read monolith info via CoreQuery
@@ -4152,6 +4576,13 @@ fn info_monolith_system(
     };
 
     send_to_client(info_monolith_event.player_id, response_packet, &clients);
+
+    // The info packet is read-only and remains available, but this legacy
+    // "info" observer also advances a quest and consumes items. Freeze that
+    // hidden mutation while the requesting run is protected.
+    if is_player_offline_protected(info_monolith_event.player_id, &presence) {
+        return;
+    }
 
     // Monolith investigation chain
     let progress = monolith_investigation
@@ -5223,6 +5654,7 @@ fn item_transfer_system(
     selected_upgrade_query: Query<&SelectedUpgrade>,
     game_tick: Res<GameTick>,
     mut game_events: ResMut<GameEvents>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -5235,6 +5667,10 @@ fn item_transfer_system(
                 item_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(owner_entity) = entity_map.get_entity(*source_id) else {
                     error!("Cannot find owner entity from id: {:?}", source_id);
@@ -5252,6 +5688,14 @@ fn item_transfer_system(
                     error!("Cannot find owner or target from entities {:?}", entities);
                     continue;
                 };
+
+                if is_owner_offline_protected(owner.player_id, &presence)
+                    || is_owner_offline_protected(target.player_id, &presence)
+                    || object_belongs_to_protected_run(owner.id.0, &ids, &presence)
+                    || object_belongs_to_protected_run(target.id.0, &ids, &presence)
+                {
+                    continue;
+                }
 
                 let Some(item) = owner.inventory.get_by_id(*item_id) else {
                     error!("Cannot find item for {:?}", item_id);
@@ -5890,6 +6334,7 @@ fn item_split_system(
     clients: Res<Clients>,
     templates: Res<Templates>,
     mut query: Query<&mut Inventory>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -5902,6 +6347,10 @@ fn item_split_system(
                 quantity,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 // Check if quantity is zero
                 if *quantity == 0 {
@@ -6054,7 +6503,7 @@ fn info_merchant_system(
     clients: Res<Clients>,
     entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
-    mut query: Query<&mut Merchant>, // Renamed parameter to `query` and added type
+    query: Query<&Merchant>,
     prices: ResMut<Prices>,
     template_inventory_query: Query<(&Template, &Inventory)>,
 ) {
@@ -6079,7 +6528,7 @@ fn info_merchant_system(
                     continue;
                 };
 
-                let Ok(mut merchant) = query.get_mut(merchant_entity) else {
+                let Ok(merchant) = query.get(merchant_entity) else {
                     error!("Cannot find merchant for {:?}", merchant_entity);
                     continue;
                 };
@@ -6120,8 +6569,11 @@ fn info_merchant_system(
                     items: merchant_items,
                 };
 
-                // Set prices and quantity of wanted items
-                for wanted_item in merchant.wanted_items.iter_mut() {
+                // Price discovery is read-only inspection. Build an ephemeral
+                // packet view rather than mutating the player-associated
+                // merchant cache (important while its run is protected).
+                let mut wanted_items = merchant.wanted_items.clone();
+                for wanted_item in wanted_items.iter_mut() {
                     let Some(price) = prices.get_buy_price(wanted_item.get_identifier()) else {
                         error!("Cannot find price for {:?}", wanted_item.get_identifier());
                         continue;
@@ -6145,7 +6597,7 @@ fn info_merchant_system(
                     inventory: source_inventory,
                     merchant_id: *merchant_id,
                     merchant_inventory: merchant_inventory,
-                    merchant_wanted_items: merchant.wanted_items.clone(),
+                    merchant_wanted_items: wanted_items,
                 };
 
                 send_to_client(*player_id, info_merchant, &clients);
@@ -6249,6 +6701,7 @@ fn order_follow_system(
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
     query: Query<ObjQuery>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6259,6 +6712,10 @@ fn order_follow_system(
                 source_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -6287,13 +6744,26 @@ fn order_follow_system(
                     continue;
                 }
 
-                // Add OrderFollow component to source and set hero_entity as target
+                // Add OrderFollow component to source and set hero_entity as target.
+                // This is a final ownership boundary because source_id is
+                // supplied by the client.
+                let mut ordered = false;
                 for q in &query {
                     if q.id.0 == *source_id {
+                        if q.player_id.0 != *player_id
+                            || is_owner_offline_protected(q.player_id, &presence)
+                        {
+                            continue;
+                        }
                         commands.entity(q.entity).insert(Order::Follow {
                             target: hero_entity,
                         });
+                        ordered = true;
                     }
+                }
+
+                if !ordered {
+                    continue;
                 }
 
                 Obj::add_speech_event(
@@ -6324,9 +6794,10 @@ fn order_gather_system(
     templates: Res<Templates>,
     query: Query<CoreQuery>,
     structure_query: Query<
-        (&Id, &Position, &Subclass, &Template, &Inventory),
+        (&Id, &PlayerId, &Position, &Subclass, &Template, &Inventory),
         With<ClassStructure>,
     >,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6338,6 +6809,10 @@ fn order_gather_system(
                 res_type,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(entity) = entity_map.get_entity(*source_id) else {
                     error!("Cannot find entity for {:?}", source_id);
@@ -6386,7 +6861,10 @@ fn order_gather_system(
                 let mut storage_structure_pos = None;
                 let mut storage_structure_id = None;
 
-                for (id, pos, subclass, template, inventory) in structure_query.iter() {
+                for (id, owner, pos, subclass, template, inventory) in structure_query.iter() {
+                    if owner.0 != *player_id || is_owner_offline_protected(owner, &presence) {
+                        continue;
+                    }
                     let capacity = Obj::get_capacity(&template.0, &templates.obj_templates);
                     let total_weight = inventory.get_total_weight();
 
@@ -6487,6 +6965,7 @@ fn create_foundation_system(
     templates: Res<Templates>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<(&Position, &Subclass), With<ClassStructure>>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6499,6 +6978,10 @@ fn create_foundation_system(
             } => {
                 debug!("CreateFoundation");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 // Validation checks and get hero entity
                 let Some(hero_entity) = entity_map.get_entity(*source_id) else {
@@ -6658,6 +7141,7 @@ fn build_system(
     templates: Res<Templates>,
     builder_query: Query<(&Position, &State, Option<&LastCombatTick>)>,
     mut structure_query: Query<(&Name, &Position, &State, &Inventory, &mut Assignments)>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6670,6 +7154,10 @@ fn build_system(
             } => {
                 debug!("PlayerEvent::Build");
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 // Validation checks and get builder and structure entities
                 let Some(builder_entity) = entity_map.get_entity(*builder_id) else {
@@ -6807,6 +7295,7 @@ fn start_upgrade_system(
         ),
         With<ClassStructure>,
     >,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6818,6 +7307,10 @@ fn start_upgrade_system(
                 selected_upgrade,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -6945,6 +7438,7 @@ fn upgrade_system(
         ),
         With<ClassStructure>,
     >,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -6956,6 +7450,10 @@ fn upgrade_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 debug!("PlayerEvent::Upgrade");
                 events_to_remove.push(*event_id);
@@ -7131,6 +7629,7 @@ fn activate_system(
     templates: Res<Templates>,
     mut query: Query<(&PlayerId, &Position, &Template, &State, &mut Inventory)>,
     campfire_query: Query<&Campfire>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -7141,6 +7640,10 @@ fn activate_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -7659,6 +8162,7 @@ fn assign_system(
         With<ClassStructure>,
     >,
     assignment_query: Query<(&PlayerId, &Id, &Name, &Subclass, &Misc)>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -7670,6 +8174,10 @@ fn assign_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 // Get hero id from player id
                 let Some(hero_id) = ids.get_hero(*player_id) else {
@@ -7811,6 +8319,10 @@ fn assign_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 // Validation checks get source entity
                 let Some(worker_entity) = entity_map.get_entity(*worker_id) else {
@@ -8676,6 +9188,8 @@ fn order_operate_system(
     clients: Res<Clients>,
     mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
     structure_query: Query<StructureQuery, With<ClassStructure>>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -8687,6 +9201,10 @@ fn order_operate_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(villager_entity) = entity_map.get_entity(*villager_id) else {
                     error!("Cannot find villager entity for {:?}", villager_id);
@@ -8765,6 +9283,8 @@ fn structure_queue_system(
     mut active_infos: ResMut<ActiveInfos>,
     villager_query: Query<VillagerQuery, With<SubclassVillager>>,
     mut structure_query: Query<StructureQuery, With<ClassStructure>>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -8776,6 +9296,10 @@ fn structure_queue_system(
                 recipe_name,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 /*let Some(villager_entity) = entity_map.get_entity(*source_id) else {
                     error!("Cannot find villager entity for {:?}", source_id);
@@ -8932,6 +9456,9 @@ fn structure_queue_system(
                 refine_item_id,
             } => {
                 events_to_remove.push(*event_id);
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
                 let Some(structure_entity) = entity_map.get_entity(*structure_id) else {
                     error!("Cannot find structure entity for {:?}", structure_id);
                     continue;
@@ -9038,6 +9565,10 @@ fn structure_queue_system(
                 index,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(structure_entity) = entity_map.get_entity(*structure_id) else {
                     error!("Cannot find structure entity for {:?}", structure_id);
@@ -9219,6 +9750,8 @@ fn order_prospect_system(
     mut map_events: ResMut<MapEvents>,
     clients: Res<Clients>,
     query: Query<ObjQuery>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9233,6 +9766,10 @@ fn order_prospect_system(
                 villager_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(entity) = entity_map.get_entity(*villager_id) else {
                     error!("Cannot find entity for {:?}", villager_id);
@@ -9287,6 +9824,8 @@ fn order_experiment_system(
     active_infos: Res<ActiveInfos>,
     clients: Res<Clients>,
     villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9298,6 +9837,10 @@ fn order_experiment_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 /*let mut villager = None;
 
@@ -9375,6 +9918,8 @@ fn order_farm_system(
     clients: Res<Clients>,
     mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
     structure_query: Query<StructureQuery, With<ClassStructure>>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9396,6 +9941,10 @@ fn order_farm_system(
                 structure_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(villager_entity) = entity_map.get_entity(*villager_id) else {
                     error!("Cannot find villager entity for {:?}", villager_id);
@@ -9478,6 +10027,8 @@ fn order_repair_system(
     mut events: ResMut<PlayerEvents>,
     mut map_events: ResMut<MapEvents>,
     villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9488,6 +10039,10 @@ fn order_repair_system(
                 villager_id,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(entity) = entity_map.get_entity(*villager_id) else {
                     error!("Cannot find villager entity for {:?}", villager_id);
@@ -9533,6 +10088,7 @@ fn use_item_system(
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
     mut query: Query<(&PlayerId, &State, &mut Inventory, Option<&LastCombatTick>)>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9556,6 +10112,12 @@ fn use_item_system(
                     error!("Query failed to find entity {:?}", owner_entity);
                     continue;
                 };
+
+                if is_player_offline_protected(*player_id, &presence)
+                    || is_owner_offline_protected(owner_player_id, &presence)
+                {
+                    continue;
+                }
 
                 if Obj::is_dead(owner_state) {
                     let packet = ResponsePacket::Error {
@@ -9616,6 +10178,12 @@ fn use_item_system(
                     error!("Query failed to find entity {:?}", owner_entity);
                     continue;
                 };
+
+                if is_player_offline_protected(*player_id, &presence)
+                    || is_owner_offline_protected(owner_player_id, &presence)
+                {
+                    continue;
+                }
 
                 if Obj::is_dead(owner_state) {
                     let packet = ResponsePacket::Error {
@@ -9736,6 +10304,7 @@ fn remove_system(
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
     query: Query<ObjQuery>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9756,6 +10325,12 @@ fn remove_system(
                     error!("Cannot find obj for {:?}", entity);
                     continue;
                 };
+
+                if is_player_offline_protected(*player_id, &presence)
+                    || is_owner_offline_protected(obj.player_id, &presence)
+                {
+                    continue;
+                }
 
                 // Check if entity is owned by player
                 if obj.player_id.0 != *player_id {
@@ -9966,6 +10541,7 @@ fn hire_system(
     mut transport_query: Query<&mut Transport, With<Merchant>>,
     pos_query: Query<&Position>,
     mut inventory_query: Query<&mut Inventory>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -9979,6 +10555,10 @@ fn hire_system(
             continue;
         };
         events_to_remove.push(*event_id);
+
+        if protected_player_event_mutation(event, &ids, &presence) {
+            continue;
+        }
 
         // Resolve the hero, merchant, and the cargo villager being hired.
         let Some(hero_id) = ids.get_hero(*player_id) else {
@@ -10105,6 +10685,7 @@ fn upgrade_sanctuary_system(
     pos_query: Query<&Position>,
     mut hero_inv_query: Query<&mut Inventory, With<SubclassHero>>,
     mut monolith_query: Query<&mut Monolith>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -10117,6 +10698,10 @@ fn upgrade_sanctuary_system(
             continue;
         };
         events_to_remove.push(*event_id);
+
+        if protected_player_event_mutation(event, &ids, &presence) {
+            continue;
+        }
 
         let Some(hero_id) = ids.get_hero(*player_id) else {
             continue;
@@ -10214,6 +10799,7 @@ fn buy_sell_system(
     templates: Res<Templates>,
     mut query: Query<(&mut Position, &mut Inventory)>,
     mut merchant_query: Query<&mut Merchant>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -10226,6 +10812,10 @@ fn buy_sell_system(
                 quantity,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let Some(hero_id) = ids.get_hero(*player_id) else {
                     error!("Cannot find hero for player {:?}", *player_id);
@@ -10345,6 +10935,10 @@ fn buy_sell_system(
                 quantity,
             } => {
                 events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
 
                 let merchant_id = *target_id;
 
@@ -10818,6 +11412,7 @@ pub fn is_player(player_id: i32) -> bool {
 mod tests {
     use super::*;
     use crate::game::Fortified;
+    use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence};
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
 
@@ -11288,5 +11883,179 @@ mod tests {
                         if *effect == Effect::WeakSanctuary
                 )
         }));
+    }
+
+    fn protected_presence(player_id: i32) -> PlayerWorldPresenceState {
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut record = PlayerPresenceRecord::new(false);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        presence.players.insert(player_id, record);
+        presence
+    }
+
+    #[test]
+    fn checkpoint2_player_event_classifier_keeps_read_only_and_lifecycle_events() {
+        assert!(!PlayerEvent::Login { player_id: 1 }.is_mutating_gameplay());
+        assert!(!PlayerEvent::RequestSafeLogout { player_id: 1 }.is_mutating_gameplay());
+        assert!(!PlayerEvent::CancelSafeLogout { player_id: 1 }.is_mutating_gameplay());
+        assert!(!PlayerEvent::NewPlayer {
+            player_id: 1,
+            hero_name: "Test".to_string(),
+            class_name: "Warrior".to_string(),
+        }
+        .is_mutating_gameplay());
+        assert!(!PlayerEvent::InfoInventory {
+            player_id: 1,
+            id: 100,
+        }
+        .is_mutating_gameplay());
+        assert!(!PlayerEvent::DebugObj {
+            player_id: 1,
+            obj_id: 100,
+        }
+        .is_mutating_gameplay());
+
+        assert!(PlayerEvent::Move {
+            player_id: 1,
+            x: 2,
+            y: 3,
+        }
+        .is_mutating_gameplay());
+        assert!(PlayerEvent::Craft {
+            player_id: 1,
+            recipe_name: "Firewood".to_string(),
+        }
+        .is_mutating_gameplay());
+        assert!(PlayerEvent::AddCraftingEntry {
+            player_id: 1,
+            structure_id: 100,
+            recipe_name: "Firewood".to_string(),
+        }
+        .is_mutating_gameplay());
+        assert!(PlayerEvent::CancelAction { player_id: 1 }.is_mutating_gameplay());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_bridge_consumes_only_safe_logout_commands() {
+        let mut app = App::new();
+        app.add_message::<RequestSafeLogout>()
+            .add_message::<CancelSafeLogout>()
+            .insert_resource(PlayerEvents(HashMap::from([
+                (1, PlayerEvent::RequestSafeLogout { player_id: 11 }),
+                (2, PlayerEvent::CancelSafeLogout { player_id: 12 }),
+                (
+                    3,
+                    PlayerEvent::InfoInventory {
+                        player_id: 13,
+                        id: 130,
+                    },
+                ),
+            ])))
+            .add_systems(Update, safe_logout_command_bridge_system);
+
+        app.update();
+
+        let events = app.world().resource::<PlayerEvents>();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events.get(&3),
+            Some(PlayerEvent::InfoInventory {
+                player_id: 13,
+                id: 130
+            })
+        ));
+
+        let mut request_cursor = app
+            .world()
+            .resource::<Messages<RequestSafeLogout>>()
+            .get_cursor();
+        let requests = app.world().resource::<Messages<RequestSafeLogout>>();
+        assert_eq!(
+            request_cursor
+                .read(requests)
+                .map(|request| request.player_id)
+                .collect::<Vec<_>>(),
+            vec![11]
+        );
+
+        let mut cancel_cursor = app
+            .world()
+            .resource::<Messages<CancelSafeLogout>>()
+            .get_cursor();
+        let cancellations = app.world().resource::<Messages<CancelSafeLogout>>();
+        assert_eq!(
+            cancel_cursor
+                .read(cancellations)
+                .map(|request| request.player_id)
+                .collect::<Vec<_>>(),
+            vec![12]
+        );
+    }
+
+    #[test]
+    fn checkpoint2_guard_rejects_protected_source_and_other_player_target() {
+        let protected_player = 1;
+        let active_player = 2;
+        let protected_storage = 100;
+        let active_hero = 200;
+
+        let mut ids = Ids::default();
+        ids.new_obj(protected_storage, protected_player);
+        ids.new_obj(active_hero, active_player);
+
+        let events = PlayerEvents(HashMap::from([
+            (
+                1,
+                PlayerEvent::Move {
+                    player_id: protected_player,
+                    x: 1,
+                    y: 1,
+                },
+            ),
+            (
+                2,
+                PlayerEvent::ItemTransfer {
+                    player_id: active_player,
+                    item_id: 10,
+                    source_id: active_hero,
+                    target_id: protected_storage,
+                },
+            ),
+            (
+                3,
+                PlayerEvent::InfoInventory {
+                    player_id: protected_player,
+                    id: protected_storage,
+                },
+            ),
+            (
+                4,
+                PlayerEvent::Login {
+                    player_id: protected_player,
+                },
+            ),
+            (
+                5,
+                PlayerEvent::Move {
+                    player_id: active_player,
+                    x: 2,
+                    y: 2,
+                },
+            ),
+        ]));
+
+        let mut app = App::new();
+        app.insert_resource(events)
+            .insert_resource(ids)
+            .insert_resource(protected_presence(protected_player))
+            .add_systems(Update, protected_player_event_guard_system);
+        app.update();
+
+        let remaining = app.world().resource::<PlayerEvents>();
+        assert!(!remaining.contains_key(&1), "protected source mutation");
+        assert!(!remaining.contains_key(&2), "protected target mutation");
+        assert!(remaining.contains_key(&3), "read-only inspection");
+        assert!(remaining.contains_key(&4), "login lifecycle event");
+        assert!(remaining.contains_key(&5), "other player mutation");
     }
 }

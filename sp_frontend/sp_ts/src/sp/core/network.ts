@@ -7,8 +7,19 @@ import { GameEvent } from './gameEvent';
 import { DEAD, NONE } from "./config";
 import { WeatherState } from './weatherState';
 import type { CrisisStatusPacket } from './crisisStatus';
+import {
+  SAFE_LOGOUT_COMPLETION_MESSAGE,
+  SafeLogoutCloseGuard,
+  SafeLogoutStatusPacket,
+  cancelSafeLogoutPacket,
+  clearSafeLogoutReconnectSuppression,
+  dispatchSafeLogoutStatus,
+  rememberSafeLogoutCompletion,
+  requestSafeLogoutPacket,
+} from './safeLogoutStatus';
 
 export type { CrisisStatusPacket } from './crisisStatus';
+export type { SafeLogoutStatusPacket } from './safeLogoutStatus';
 
 export type NetworkPacket =
   | { cmd: 'select_class'; class_name: string; hero_name: string }
@@ -97,6 +108,8 @@ export type NetworkPacket =
   | { cmd: 'buy_item'; seller_id: number; item_id: number; quantity: number }
   | { cmd: 'sell_item'; item_id: number; target_id: number; quantity: number }
   | { cmd: 'cancel_action' }
+  | { cmd: 'request_safe_logout' }
+  | { cmd: 'cancel_safe_logout' }
   | { cmd: 'debug_obj'; obj_id: number }
   | { cmd: 'set_log_level'; target: string; level: string }
   | { cmd: 'get_log_levels' };
@@ -195,6 +208,7 @@ export type ResponsePacket =
   | { packet: 'objective_state'; version: number; current_id: string; objectives: ObjectiveProgress[] }
   | { packet: 'threat_state'; version: number; day: number; phase: string; pressure_level: string; next_night_warning: string; known_risks: ThreatRisk[]; legendary_threats: LegendaryThreat[] }
   | CrisisStatusPacket
+  | SafeLogoutStatusPacket
   | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
   | { packet: 'discovery_event'; version: number; discovery_type: string; title: string; unlock_source: string; location?: string; result: string };
 
@@ -623,6 +637,8 @@ export class Network {
   private websocket;
   private networkErrorTimeoutId: number | null = null;
   private readonly networkErrorGraceMs = 1500;
+  private readonly safeLogoutCloseGuard = new SafeLogoutCloseGuard();
+  private reloadAfterSafeLogoutClose = false;
 
   private clearNetworkErrorTimeout() {
     if (this.networkErrorTimeoutId !== null) {
@@ -1526,6 +1542,36 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
+  public sendRequestSafeLogout(): boolean {
+    if (!this.isConnected()) {
+      return false;
+    }
+
+    const packet: NetworkPacket = requestSafeLogoutPacket();
+    try {
+      this.sendMessage(JSON.stringify(packet));
+      return true;
+    } catch (error) {
+      console.warn('Unable to send Safe Logout request', error);
+      return false;
+    }
+  }
+
+  public sendCancelSafeLogout(): boolean {
+    if (!this.isConnected()) {
+      return false;
+    }
+
+    const packet: NetworkPacket = cancelSafeLogoutPacket();
+    try {
+      this.sendMessage(JSON.stringify(packet));
+      return true;
+    } catch (error) {
+      console.warn('Unable to send Safe Logout cancellation', error);
+      return false;
+    }
+  }
+
   /**
    * Send DebugObj command (admin only)
    * Toggles debug logging for a specific object ID
@@ -1602,12 +1648,45 @@ export class Network {
     console.log('[Admin] To reset log levels, restart the server or set each module to "OFF"');
   }
 
+  private completeSafeLogout(packet: SafeLogoutStatusPacket) {
+    if (!this.safeLogoutCloseGuard.acceptProtectedStatus(packet)) {
+      return;
+    }
+
+    this.clearNetworkErrorTimeout();
+    Global.connected = false;
+    this.reloadAfterSafeLogoutClose = false;
+
+    try {
+      rememberSafeLogoutCompletion(window.sessionStorage);
+      this.reloadAfterSafeLogoutClose = true;
+    } catch (error) {
+      console.warn('Unable to persist Safe Logout completion for reload', error);
+    }
+
+    Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_COMPLETE, {
+      message: SAFE_LOGOUT_COMPLETION_MESSAGE,
+    });
+
+    if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+      this.websocket.close(1000, 'Safe Logout complete');
+    }
+  }
+
   constructor() { }
 
   public connect() {
     const url: string = "wss://" + window.location.hostname + ":8443";
 
     this.clearNetworkErrorTimeout();
+    this.safeLogoutCloseGuard.resetForLogin();
+    this.reloadAfterSafeLogoutClose = false;
+    try {
+      clearSafeLogoutReconnectSuppression(window.sessionStorage);
+    } catch (error) {
+      console.warn('Unable to clear Safe Logout reconnect suppression', error);
+    }
+    Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
     this.websocket = new WebSocket(url);
     const websocket = this.websocket;
 
@@ -1630,6 +1709,14 @@ export class Network {
       }
 
       console.log('Websocket Closing...');
+      if (this.safeLogoutCloseGuard.suppressConnectionFailure()) {
+        this.clearNetworkErrorTimeout();
+        Global.connected = false;
+        if (this.reloadAfterSafeLogoutClose) {
+          window.location.reload();
+        }
+        return;
+      }
       this.scheduleServerOffline(websocket);
     }
 
@@ -1639,6 +1726,9 @@ export class Network {
       }
 
       console.log('Websocket Error...');
+      if (this.safeLogoutCloseGuard.suppressConnectionFailure()) {
+        return;
+      }
       this.scheduleNetworkError(websocket);
     }
 
@@ -1891,6 +1981,15 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.THREAT_STATE, jsonData);
       } else if (jsonData.packet == 'crisis_status') {
         Global.gameEmitter.emit(NetworkEvent.CRISIS_STATUS, jsonData);
+      } else if (jsonData.packet == 'safe_logout_status') {
+        const safeLogoutStatus = jsonData as SafeLogoutStatusPacket;
+        // UI observers receive the authoritative protected snapshot before the
+        // one-shot transport reaction closes the gameplay socket.
+        dispatchSafeLogoutStatus(
+          safeLogoutStatus,
+          (status) => Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_STATUS, status),
+          (status) => this.completeSafeLogout(status),
+        );
       } else if (jsonData.packet == 'combat_state') {
         Global.combatState = jsonData;
         Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);

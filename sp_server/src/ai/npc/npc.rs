@@ -28,6 +28,9 @@ use crate::obj::{
 use crate::obj::{BaseQueryEffects, ClassStructure};
 use crate::player;
 use crate::player::Player;
+use crate::safe_logout::{
+    is_owner_offline_protected, object_belongs_to_protected_run, PlayerWorldPresenceState,
+};
 use crate::templates::Templates;
 use crate::AppState;
 use crate::{constants::*, ids};
@@ -100,6 +103,184 @@ impl VisibleTarget {
     }
 }
 
+#[derive(Debug, Component)]
+pub struct ProtectedTargetInvalidated {
+    /// The target whose protection caused invalidation. The hold remains until
+    /// this exact target is no longer protected, preventing the hostile from
+    /// redirecting to another player merely as a fallback.
+    target_id: i32,
+}
+
+#[derive(SystemParam)]
+pub struct NpcProtection<'w, 's> {
+    presence: Option<Res<'w, PlayerWorldPresenceState>>,
+    actor_ids: Query<'w, 's, &'static Id>,
+}
+
+impl NpcProtection<'_, '_> {
+    fn owner_is_protected(&self, owner: &PlayerId) -> bool {
+        self.presence
+            .as_deref()
+            .map(|presence| is_owner_offline_protected(owner, presence))
+            .unwrap_or(false)
+    }
+
+    fn object_is_protected(&self, object_id: i32, ids: &Ids) -> bool {
+        self.presence
+            .as_deref()
+            .map(|presence| object_belongs_to_protected_run(object_id, ids, presence))
+            .unwrap_or(false)
+    }
+
+    fn object_is_protected_if_ids(&self, object_id: i32, ids: Option<&Ids>) -> bool {
+        ids.map(|ids| self.object_is_protected(object_id, ids))
+            .unwrap_or(false)
+    }
+
+    /// Actor-side protection is based on the NPC's own object id, not its
+    /// faction `PlayerId`. Introduction and other run-attributed NPCs commonly
+    /// retain a neutral/NPC owner and are associated through `RunSpawnedObjs`.
+    fn actor_is_protected(&self, actor: Entity, ids: &Ids) -> bool {
+        self.actor_ids
+            .get(actor)
+            .map(|id| self.object_is_protected(id.0, ids))
+            .unwrap_or(false)
+    }
+
+    fn actor_is_protected_if_ids(&self, actor: Entity, ids: Option<&Ids>) -> bool {
+        ids.map(|ids| self.actor_is_protected(actor, ids))
+            .unwrap_or(false)
+    }
+}
+
+fn queued_event_targets_protected_run(
+    event: &VisibleEvent,
+    ids: &Ids,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    let target_id = match event {
+        VisibleEvent::SpellDamageEvent { target_id, .. }
+        | VisibleEvent::SpoilEvent { target_id, .. }
+        | VisibleEvent::StealEvent { target_id, .. }
+        | VisibleEvent::TorchEvent { target_id, .. } => Some(*target_id),
+        VisibleEvent::SpellRaiseDeadEvent { corpse_id } => Some(*corpse_id),
+        _ => None,
+    };
+
+    target_id
+        .map(|target_id| object_belongs_to_protected_run(target_id, ids, presence))
+        .unwrap_or(false)
+}
+
+pub fn protected_target_invalidation_system(
+    mut commands: Commands,
+    ids: Res<Ids>,
+    protection: NpcProtection,
+    mut map_events: ResMut<MapEvents>,
+    mut npc_query: Query<
+        (
+            Entity,
+            &Id,
+            &mut State,
+            &mut VisibleTarget,
+            Option<&mut TaskTarget>,
+            Option<&Target>,
+            &mut EventExecuting,
+        ),
+        With<SubclassNPC>,
+    >,
+) {
+    for (entity, npc_id, mut state, mut visible, task, installed, mut event_executing) in
+        &mut npc_query
+    {
+        if protection.actor_is_protected(entity, &ids) {
+            continue;
+        }
+
+        let lost_protected_target = [
+            visible.target,
+            task.as_ref().map(|task| task.target).unwrap_or(NO_TARGET),
+            installed.map(|target| target.id).unwrap_or(NO_TARGET),
+        ]
+        .into_iter()
+        .find(|target_id| {
+            *target_id != NO_TARGET && protection.object_is_protected(*target_id, &ids)
+        });
+
+        let Some(lost_protected_target) = lost_protected_target else {
+            continue;
+        };
+
+        visible.target = NO_TARGET;
+        if let Some(mut task) = task {
+            task.target = NO_TARGET;
+        }
+        commands
+            .entity(entity)
+            .try_remove::<Target>()
+            .try_remove::<AnimalFallback>()
+            .try_remove::<EventInProgress>()
+            .try_insert(ProtectedTargetInvalidated {
+                target_id: lost_protected_target,
+            });
+        event_executing.state = EventExecutingState::None;
+
+        if matches!(*state, State::Moving | State::Casting) {
+            *state = State::None;
+            commands.trigger(StateChange {
+                entity,
+                new_state: State::None,
+            });
+        }
+
+        let event_ids = map_events
+            .iter()
+            .filter_map(|(event_id, event)| {
+                if event.obj_id != npc_id.0 {
+                    return None;
+                }
+
+                (matches!(&event.event_type, VisibleEvent::MoveEvent { .. })
+                    || protection
+                        .presence
+                        .as_deref()
+                        .map(|presence| {
+                            queued_event_targets_protected_run(&event.event_type, &ids, presence)
+                        })
+                        .unwrap_or(false))
+                .then_some(*event_id)
+            })
+            .collect::<Vec<_>>();
+
+        for event_id in event_ids {
+            map_events.remove(&event_id);
+        }
+    }
+}
+
+pub fn clear_protected_target_invalidation_system(
+    mut commands: Commands,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    invalidated_query: Query<(Entity, &ProtectedTargetInvalidated)>,
+) {
+    for (entity, invalidated) in &invalidated_query {
+        if protection.actor_is_protected_if_ids(entity, ids.as_deref()) {
+            continue;
+        }
+
+        let still_protected = ids
+            .as_deref()
+            .map(|ids| protection.object_is_protected(invalidated.target_id, ids))
+            .unwrap_or(false);
+        if !still_protected {
+            commands
+                .entity(entity)
+                .try_remove::<ProtectedTargetInvalidated>();
+        }
+    }
+}
+
 fn personal_assault_allows_target_owner(
     assault: Option<&CrisisAssaultUnit>,
     target_owner: Option<i32>,
@@ -113,6 +294,7 @@ fn personal_assault_allows_target_owner(
 mod tests {
     use super::*;
     use bevy::prelude::App;
+    use big_brain::actions::spawn_action;
     use big_brain::prelude::Score;
     use big_brain::scorers::spawn_scorer;
     use big_brain::BigBrainPlugin;
@@ -125,6 +307,7 @@ mod tests {
     use crate::event::{EventExecuting, EventExecutingState};
     use crate::map::{TileInfo, TileType, HEIGHT, WIDTH};
     use crate::obj::{Misc, Name};
+    use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence, ProtectedRunKey};
     use crate::templates::ObjTemplate;
 
     fn test_stats() -> Stats {
@@ -1403,6 +1586,243 @@ mod tests {
             .expect("scripted necromancer should schedule a move");
         assert_ne!(move_event, old_necromancer_pos);
     }
+
+    #[test]
+    fn checkpoint2_protected_target_is_invalidated_without_retargeting_another_player() {
+        let mut app = App::new();
+        app.add_systems(
+            Update,
+            (
+                protected_target_invalidation_system,
+                target_scorer_system,
+                clear_protected_target_invalidation_system,
+            )
+                .chain(),
+        );
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(minimal_templates());
+        app.world_mut().insert_resource(flat_test_map());
+
+        let mut protected_record = PlayerPresenceRecord::new(false);
+        protected_record.state = PlayerWorldPresence::OfflineProtected;
+        let mut presence = PlayerWorldPresenceState::default();
+        presence.players.insert(1, protected_record);
+        app.world_mut().insert_resource(presence);
+
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        app.world_mut().entity_mut(npc_entity).insert((
+            Id(100),
+            State::Moving,
+            TaskTarget::new(1),
+            Target { id: 1 },
+        ));
+
+        let protected_target = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                Position { x: 1, y: 0 },
+                State::None,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::from_str("soldier"),
+                empty_effects(),
+                test_stats(),
+            ))
+            .id();
+        let other_player_target = app
+            .world_mut()
+            .spawn((
+                Id(2),
+                PlayerId(2),
+                Position { x: 2, y: 0 },
+                State::None,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::from_str("soldier"),
+                empty_effects(),
+                test_stats(),
+            ))
+            .id();
+
+        {
+            let mut ids = app.world_mut().resource_mut::<Ids>();
+            ids.new_obj(100, NPC_PLAYER_ID);
+            ids.new_obj(1, 1);
+            ids.new_obj(2, 2);
+        }
+        {
+            let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+            entity_map.new_obj(100, npc_entity);
+            entity_map.new_obj(1, protected_target);
+            entity_map.new_obj(2, other_player_target);
+        }
+        app.world_mut().resource_mut::<MapEvents>().new(
+            100,
+            TICKS_PER_SEC + 10,
+            VisibleEvent::MoveEvent {
+                src: Position { x: 0, y: 0 },
+                dst: Position { x: 1, y: 0 },
+            },
+        );
+
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let npc = app.world().entity(npc_entity);
+        assert_eq!(npc.get::<VisibleTarget>().unwrap().target, NO_TARGET);
+        assert_eq!(npc.get::<TaskTarget>().unwrap().target, NO_TARGET);
+        assert_eq!(*npc.get::<State>().unwrap(), State::None);
+        assert!(npc.get::<Target>().is_none());
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.0
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
+        assert!(npc.get::<ProtectedTargetInvalidated>().is_some());
+
+        app.world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .get_mut(&1)
+            .unwrap()
+            .state = PlayerWorldPresence::Online;
+        app.update();
+        assert!(app
+            .world()
+            .entity(npc_entity)
+            .get::<ProtectedTargetInvalidated>()
+            .is_none());
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .unwrap()
+                .target,
+            1
+        );
+    }
+
+    #[test]
+    fn checkpoint2_protected_run_npc_scorer_and_action_pause_while_ambient_npc_continues() {
+        let mut app = App::new();
+        app.add_systems(Update, (no_target_scorer_system, hide_action_system));
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(MapEvents::default());
+
+        let mut ids = Ids::default();
+        for object_id in [100, 101, 200, 201] {
+            ids.new_obj(object_id, NPC_PLAYER_ID);
+        }
+        app.world_mut().insert_resource(ids);
+
+        let mut protected_record = PlayerPresenceRecord::new(false);
+        protected_record.state = PlayerWorldPresence::OfflineProtected;
+        protected_record.protected_run_key = Some(ProtectedRunKey {
+            player_id: 1,
+            hero_id: 1,
+            start_location_name: "test_start".to_string(),
+            bound_monolith_id: 2,
+            run_object_ids: vec![100, 101],
+        });
+        let mut presence = PlayerWorldPresenceState::default();
+        presence.players.insert(1, protected_record);
+        app.world_mut().insert_resource(presence);
+
+        let protected_scorer_actor = app
+            .world_mut()
+            .spawn((Id(100), SubclassNPC, VisibleTarget::new(NO_TARGET)))
+            .id();
+        let protected_action_actor = app.world_mut().spawn((Id(101), SubclassNPC)).id();
+        let ambient_scorer_actor = app
+            .world_mut()
+            .spawn((Id(200), SubclassNPC, VisibleTarget::new(NO_TARGET)))
+            .id();
+        let ambient_action_actor = app.world_mut().spawn((Id(201), SubclassNPC)).id();
+
+        let protected_scorer = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&NoTargetScorer, &mut commands, protected_scorer_actor)
+        };
+        let ambient_scorer = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&NoTargetScorer, &mut commands, ambient_scorer_actor)
+        };
+        let protected_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&Hide, &mut commands, protected_action_actor)
+        };
+        let ambient_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&Hide, &mut commands, ambient_action_actor)
+        };
+        app.world_mut().flush();
+
+        for scorer in [protected_scorer, ambient_scorer] {
+            app.world_mut()
+                .entity_mut(scorer)
+                .get_mut::<Score>()
+                .unwrap()
+                .set(0.37);
+        }
+        for action in [protected_action, ambient_action] {
+            *app.world_mut()
+                .entity_mut(action)
+                .get_mut::<ActionState>()
+                .unwrap() = ActionState::Requested;
+        }
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(protected_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.37
+        );
+        assert_eq!(
+            *app.world()
+                .entity(protected_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Requested
+        );
+        assert_eq!(
+            app.world()
+                .entity(ambient_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            0.9
+        );
+        assert_eq!(
+            *app.world()
+                .entity(ambient_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Success
+        );
+
+        let event_actors = app
+            .world()
+            .resource::<MapEvents>()
+            .iter()
+            .map(|(_, event)| event.obj_id)
+            .collect::<Vec<_>>();
+        assert_eq!(event_actors, vec![201]);
+    }
 }
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
@@ -1505,6 +1925,13 @@ impl Plugin for NPCPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
+            protected_target_invalidation_system
+                .before(BigBrainSet::Scorers)
+                .before(BigBrainSet::Actions)
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
             (
                 set_attack_target_system.in_set(BigBrainSet::Actions),
                 attack_target_system.in_set(BigBrainSet::Actions),
@@ -1549,6 +1976,13 @@ impl Plugin for NPCPlugin {
                 torch_target_scorer_system.in_set(BigBrainSet::Scorers),
             )
                 .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            clear_protected_target_invalidation_system
+                .after(BigBrainSet::Scorers)
+                .after(BigBrainSet::Actions)
+                .run_if(in_state(AppState::Running)),
         );
     }
 }
@@ -1558,9 +1992,11 @@ impl Plugin for NPCPlugin {
 pub fn target_scorer_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     map: Res<Map>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
+    protection: NpcProtection,
     mut npc_query: Query<
         (
             &PlayerId,
@@ -1572,6 +2008,7 @@ pub fn target_scorer_system(
             &Stats,
             &EventExecuting,
             Option<&CrisisAssaultUnit>,
+            Option<&ProtectedTargetInvalidated>,
         ),
         With<SubclassNPC>,
     >,
@@ -1594,6 +2031,10 @@ pub fn target_scorer_system(
     }
 
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         let Ok((
             npc_player_id,
@@ -1605,6 +2046,7 @@ pub fn target_scorer_system(
             npc_stats,
             event_executing,
             crisis_assault,
+            protected_target_invalidated,
         )) = npc_query.get_mut(*actor)
         else {
             span.span().in_scope(|| {
@@ -1612,6 +2054,35 @@ pub fn target_scorer_system(
             });
             continue;
         };
+
+        let protected_target_id = [
+            npc_visible_target.target,
+            npc_task_target
+                .as_ref()
+                .map(|target| target.target)
+                .unwrap_or(NO_TARGET),
+        ]
+        .into_iter()
+        .find(|target_id| {
+            *target_id != NO_TARGET
+                && protection.object_is_protected_if_ids(*target_id, ids.as_deref())
+        });
+
+        if protected_target_invalidated.is_some() || protected_target_id.is_some() {
+            npc_visible_target.target = NO_TARGET;
+            if let Some(mut task_target) = npc_task_target {
+                task_target.target = NO_TARGET;
+            }
+            let mut entity_commands = commands.entity(*actor);
+            entity_commands.try_remove::<Target>();
+            if protected_target_invalidated.is_none() {
+                entity_commands.try_insert(ProtectedTargetInvalidated {
+                    target_id: protected_target_id.expect("protected target was checked"),
+                });
+            }
+            score.set(0.0);
+            continue;
+        }
 
         if event_executing.state == EventExecutingState::Executing {
             span.span().in_scope(|| {
@@ -1657,6 +2128,7 @@ pub fn target_scorer_system(
                     target_stats,
                 )| {
                     if !player::is_player(target_player.0)
+                        || protection.owner_is_protected(target_player)
                         || !personal_assault_allows_target_owner(
                             crisis_assault,
                             Some(target_player.0),
@@ -1719,6 +2191,10 @@ pub fn target_scorer_system(
             });
 
             if !player::is_player(target_player.0) {
+                continue;
+            }
+
+            if protection.owner_is_protected(target_player) {
                 continue;
             }
 
@@ -1940,8 +2416,15 @@ pub fn target_scorer_system(
             let fortifier_owner = entity_map
                 .get_entity(fortifier.id)
                 .and_then(|entity| target_query.get(entity).ok())
-                .map(|(_, player_id, ..)| player_id.0);
-            if !personal_assault_allows_target_owner(crisis_assault, fortifier_owner) {
+                .map(|(_, player_id, ..)| (player_id.0, protection.owner_is_protected(player_id)));
+            if fortifier_owner
+                .map(|(_, protected)| protected)
+                .unwrap_or(false)
+                || !personal_assault_allows_target_owner(
+                    crisis_assault,
+                    fortifier_owner.map(|(owner, _)| owner),
+                )
+            {
                 span.span().in_scope(|| {
                     npc_warn!(
                         *actor,
@@ -1949,7 +2432,7 @@ pub fn target_scorer_system(
                         Some(npc_template_name.0.as_str()),
                         "Rejecting personal-assault fortification id={} owner={:?} expected_owner={:?}",
                         fortifier.id,
-                        fortifier_owner,
+                        fortifier_owner.map(|(owner, _)| owner),
                         crisis_assault.map(|assault| assault.owner_player_id)
                     );
                 });
@@ -1993,7 +2476,10 @@ pub fn target_scorer_system(
 
 pub fn spoil_target_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     map: Res<Map>,
+    protection: NpcProtection,
+    invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
         (&PlayerId, &Position, &Inventory, &mut TaskTarget),
         (With<SubclassNPC>, Without<EventExecuting>),
@@ -2010,11 +2496,24 @@ pub fn spoil_target_scorer_system(
     }
 
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((npc_player_id, npc_pos, npc_inventory, mut npc_task_target)) =
             npc_query.get_mut(*actor)
         else {
             continue;
         };
+
+        if invalidated_query.contains(*actor)
+            || (npc_task_target.target != NO_TARGET
+                && protection.object_is_protected_if_ids(npc_task_target.target, ids.as_deref()))
+        {
+            npc_task_target.target = NO_TARGET;
+            score.set(0.0);
+            continue;
+        }
 
         let mut selected_target = NPCTarget {
             id: NO_TARGET,
@@ -2027,6 +2526,10 @@ pub fn spoil_target_scorer_system(
         for (target_id, target_player, target_pos, target_state, target_effects) in
             structure_query.iter()
         {
+            if protection.owner_is_protected(target_player) {
+                continue;
+            }
+
             // Print all target attributes
             info!("Target attributes: {:?}", target_id.0);
             info!("Target player: {:?}", target_player.0);
@@ -2079,6 +2582,7 @@ pub fn spoil_target_scorer_system(
                 true,
             ) {
                 let mut blocked = false;
+                let mut protected_blocker = false;
 
                 let (path, _c) = path_result;
                 let next_pos = &path[1];
@@ -2088,10 +2592,20 @@ pub fn spoil_target_scorer_system(
                         && obj.pos.y == next_pos.1
                         && obj.id.0 != selected_target.id
                     {
+                        if protection.owner_is_protected(&obj.player_id) {
+                            protected_blocker = true;
+                            break;
+                        }
                         info!("Target is blocked by {:?}", obj.id);
                         blocked = true;
                         selected_target.id = obj.id.0;
                     }
+                }
+
+                if protected_blocker {
+                    npc_task_target.target = NO_TARGET;
+                    score.set(0.0);
+                    continue;
                 }
 
                 if !blocked {
@@ -2126,7 +2640,10 @@ pub fn spoil_target_scorer_system(
 
 pub fn steal_target_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     map: Res<Map>,
+    protection: NpcProtection,
+    invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
         (&PlayerId, &Position, &Inventory, &mut TaskTarget),
         (With<SubclassNPC>, Without<EventExecuting>),
@@ -2144,11 +2661,24 @@ pub fn steal_target_scorer_system(
     }
 
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((npc_player_id, npc_pos, npc_inventory, mut npc_task_target)) =
             npc_query.get_mut(*actor)
         else {
             continue;
         };
+
+        if invalidated_query.contains(*actor)
+            || (npc_task_target.target != NO_TARGET
+                && protection.object_is_protected_if_ids(npc_task_target.target, ids.as_deref()))
+        {
+            npc_task_target.target = NO_TARGET;
+            score.set(0.0);
+            continue;
+        }
 
         let mut selected_target = NPCTarget {
             id: NO_TARGET,
@@ -2161,6 +2691,10 @@ pub fn steal_target_scorer_system(
         for (target_id, target_player, target_pos, target_state, target_effects) in
             structure_query.iter()
         {
+            if protection.owner_is_protected(target_player) {
+                continue;
+            }
+
             // Print all target attributes
             info!("Target attributes: {:?}", target_id.0);
             info!("Target player: {:?}", target_player.0);
@@ -2217,6 +2751,7 @@ pub fn steal_target_scorer_system(
                 true,
             ) {
                 let mut blocked = false;
+                let mut protected_blocker = false;
 
                 let (path, _c) = path_result;
                 let next_pos = &path[1];
@@ -2226,10 +2761,20 @@ pub fn steal_target_scorer_system(
                         && obj.pos.y == next_pos.1
                         && obj.id.0 != selected_target.id
                     {
+                        if protection.owner_is_protected(&obj.player_id) {
+                            protected_blocker = true;
+                            break;
+                        }
                         info!("Target is blocked by {:?}", obj.id);
                         blocked = true;
                         selected_target.id = obj.id.0;
                     }
+                }
+
+                if protected_blocker {
+                    npc_task_target.target = NO_TARGET;
+                    score.set(0.0);
+                    continue;
                 }
 
                 if !blocked {
@@ -2264,7 +2809,10 @@ pub fn steal_target_scorer_system(
 
 pub fn torch_target_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     map: Res<Map>,
+    protection: NpcProtection,
+    invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
         (&PlayerId, &Position, &mut TaskTarget),
         (With<SubclassNPC>, Without<EventExecuting>),
@@ -2281,9 +2829,22 @@ pub fn torch_target_scorer_system(
     }
 
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((npc_player_id, npc_pos, mut npc_task_target)) = npc_query.get_mut(*actor) else {
             continue;
         };
+
+        if invalidated_query.contains(*actor)
+            || (npc_task_target.target != NO_TARGET
+                && protection.object_is_protected_if_ids(npc_task_target.target, ids.as_deref()))
+        {
+            npc_task_target.target = NO_TARGET;
+            score.set(0.0);
+            continue;
+        }
 
         let mut selected_target = NPCTarget {
             id: NO_TARGET,
@@ -2296,6 +2857,10 @@ pub fn torch_target_scorer_system(
         for (target_id, target_player, target_pos, target_state, target_effects) in
             structure_query.iter()
         {
+            if protection.owner_is_protected(target_player) {
+                continue;
+            }
+
             // Print all target attributes
             info!("Target attributes: {:?}", target_id.0);
             info!("Target player: {:?}", target_player.0);
@@ -2345,6 +2910,7 @@ pub fn torch_target_scorer_system(
                 true,
             ) {
                 let mut blocked = false;
+                let mut protected_blocker = false;
 
                 let (path, _c) = path_result;
                 let next_pos = &path[1];
@@ -2354,10 +2920,20 @@ pub fn torch_target_scorer_system(
                         && obj.pos.y == next_pos.1
                         && obj.id.0 != selected_target.id
                     {
+                        if protection.owner_is_protected(&obj.player_id) {
+                            protected_blocker = true;
+                            break;
+                        }
                         info!("Target is blocked by {:?}", obj.id);
                         blocked = true;
                         selected_target.id = obj.id.0;
                     }
+                }
+
+                if protected_blocker {
+                    npc_task_target.target = NO_TARGET;
+                    score.set(0.0);
+                    continue;
                 }
 
                 if !blocked {
@@ -2392,6 +2968,9 @@ pub fn torch_target_scorer_system(
 
 pub fn nearby_corpses_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
         (&Position, &Viewshed, &mut TaskTarget, &EventExecuting),
         With<SubclassNPC>,
@@ -2401,6 +2980,10 @@ pub fn nearby_corpses_scorer_system(
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
         for (Actor(actor), mut score, _span) in &mut query {
+            if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+                continue;
+            }
+
             let Ok((npc_pos, npc_viewshed, mut npc_task_target, event_executing)) =
                 npc_query.get_mut(*actor)
             else {
@@ -2410,6 +2993,16 @@ pub fn nearby_corpses_scorer_system(
                 );
                 continue;
             };
+
+            if invalidated_query.contains(*actor)
+                || (npc_task_target.target != NO_TARGET
+                    && protection
+                        .object_is_protected_if_ids(npc_task_target.target, ids.as_deref()))
+            {
+                npc_task_target.target = NO_TARGET;
+                score.set(0.0);
+                continue;
+            }
 
             // Skip if currently executing an event
             if event_executing.state == EventExecutingState::Executing {
@@ -2421,6 +3014,10 @@ pub fn nearby_corpses_scorer_system(
             let mut corpse_id = NO_TARGET;
 
             for target in target_query.iter() {
+                if protection.owner_is_protected(target.player_id) {
+                    continue;
+                }
+
                 if target.class.0 == CLASS_CORPSE.to_string() {
                     let distance = Map::dist(*npc_pos, *target.pos);
 
@@ -2447,7 +3044,10 @@ pub fn nearby_corpses_scorer_system(
 
 pub fn scripted_corpse_hunt_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     map: Res<Map>,
+    protection: NpcProtection,
+    invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
         (
             &PlayerId,
@@ -2467,12 +3067,25 @@ pub fn scripted_corpse_hunt_scorer_system(
     }
 
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((npc_player_id, npc_pos, mut npc_task_target, event_executing, corpse_hunt)) =
             npc_query.get_mut(*actor)
         else {
             score.set(0.0);
             continue;
         };
+
+        if invalidated_query.contains(*actor)
+            || (npc_task_target.target != NO_TARGET
+                && protection.object_is_protected_if_ids(npc_task_target.target, ids.as_deref()))
+        {
+            npc_task_target.target = NO_TARGET;
+            score.set(0.0);
+            continue;
+        }
 
         if event_executing.state == EventExecutingState::Executing {
             score.set(0.0);
@@ -2484,6 +3097,10 @@ pub fn scripted_corpse_hunt_scorer_system(
         let mut selected_distance = u32::MAX;
 
         for target in target_query.iter() {
+            if protection.owner_is_protected(target.player_id) {
+                continue;
+            }
+
             if target.class.0.as_str() != CLASS_CORPSE
                 || target.template.0.as_str() != "Human Corpse"
             {
@@ -2553,6 +3170,8 @@ fn scripted_corpse_hunt_target_reachable(
 
 pub fn flee_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     minions_query: Query<&Minions>,
     state_query: Query<&State>,
     entity_map: Res<EntityObjMap>,
@@ -2560,6 +3179,10 @@ pub fn flee_scorer_system(
 ) {
     if game_tick.0 % (TICKS_PER_SEC * 5) == 0 {
         for (Actor(actor), mut score, _span) in &mut query {
+            if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+                continue;
+            }
+
             if let Ok(minions) = minions_query.get(*actor) {
                 let mut minions_dead = true;
 
@@ -2586,10 +3209,16 @@ pub fn flee_scorer_system(
 }
 
 pub fn no_target_scorer_system(
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     target_query: Query<&VisibleTarget>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<NoTargetScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         if let Ok(target) = target_query.get(*actor) {
             if target.target == NO_TARGET {
                 score.set(0.9);
@@ -2601,6 +3230,8 @@ pub fn no_target_scorer_system(
 }
 
 pub fn rat_blocked_wander_scorer_system(
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     npc_query: Query<
         (
             &AnimalFallback,
@@ -2613,6 +3244,10 @@ pub fn rat_blocked_wander_scorer_system(
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<RatBlockedWanderScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((fallback, visible_target, npc_state, wandering)) = npc_query.get(*actor) else {
             score.set(0.0);
             continue;
@@ -2654,6 +3289,8 @@ fn wants_to_hide(kind: AnimalFallbackKind, wandering: Option<&WanderingBehavior>
 }
 
 pub fn wolf_blocked_hide_scorer_system(
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     npc_query: Query<
         (
             &AnimalFallback,
@@ -2666,6 +3303,10 @@ pub fn wolf_blocked_hide_scorer_system(
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<WolfBlockedHideScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         let Ok((fallback, visible_target, state, wandering)) = npc_query.get(*actor) else {
             score.set(0.0);
             continue;
@@ -2688,6 +3329,7 @@ pub fn set_attack_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     ids: Res<Ids>,
+    protection: NpcProtection,
     mut map_events: ResMut<MapEvents>,
     mut visible_target_query: Query<(&mut VisibleTarget, &Id), With<SubclassNPC>>,
     crisis_assault_query: Query<&CrisisAssaultUnit>,
@@ -2696,18 +3338,33 @@ pub fn set_attack_target_system(
 ) {
     // Clear alert state for any NPC that has lost its target since last tick
     alerted_npcs.retain(|entity| {
-        visible_target_query
-            .get(*entity)
-            .map_or(false, |(vt, _)| vt.target != NO_TARGET)
+        protection.actor_is_protected(*entity, &ids)
+            || visible_target_query
+                .get(*entity)
+                .map_or(false, |(vt, _)| vt.target != NO_TARGET)
     });
 
     for (Actor(actor), mut state, _set_attack_destination) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting attack target...");
                 let Ok((mut visible_target, npc_id)) = visible_target_query.get_mut(*actor) else {
                     continue;
                 };
+
+                if visible_target.target != NO_TARGET
+                    && protection.object_is_protected(visible_target.target, &ids)
+                {
+                    visible_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    alerted_npcs.remove(actor);
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let assault = crisis_assault_query.get(*actor).ok();
                 if !personal_assault_allows_target_owner(
@@ -2775,18 +3432,33 @@ pub fn set_attack_target_system(
 
 pub fn set_torch_target_system(
     mut commands: Commands,
-    task_target_query: Query<&mut TaskTarget>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut query: Query<(&Actor, &mut ActionState, &SetTorchTarget)>,
 ) {
     for (Actor(actor), mut state, _set_attack_destination) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting torch target...");
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected_if_ids(task_target.target, ids.as_deref())
+                {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
@@ -2812,18 +3484,33 @@ pub fn set_torch_target_system(
 
 pub fn set_spoil_target_system(
     mut commands: Commands,
-    task_target_query: Query<&mut TaskTarget>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut query: Query<(&Actor, &mut ActionState, &SetSpoilTarget)>,
 ) {
     for (Actor(actor), mut state, _set_spoil_target) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting spoil target...");
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected_if_ids(task_target.target, ids.as_deref())
+                {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
@@ -2849,18 +3536,33 @@ pub fn set_spoil_target_system(
 
 pub fn set_steal_target_system(
     mut commands: Commands,
-    task_target_query: Query<&mut TaskTarget>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut query: Query<(&Actor, &mut ActionState, &SetStealTarget)>,
 ) {
     for (Actor(actor), mut state, _set_steal_target) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting steal target...");
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected_if_ids(task_target.target, ids.as_deref())
+                {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
@@ -2886,18 +3588,33 @@ pub fn set_steal_target_system(
 
 pub fn set_corpse_target_system(
     mut commands: Commands,
-    task_target_query: Query<&mut TaskTarget>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut query: Query<(&Actor, &mut ActionState, &SetCorpseTarget)>,
 ) {
     for (Actor(actor), mut state, _set_corpse_target) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting corpse target...");
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, None, None, "Query failed to find entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected_if_ids(task_target.target, ids.as_deref())
+                {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 commands.entity(*actor).try_insert(Target {
                     id: task_target.target,
@@ -2924,11 +3641,17 @@ pub fn set_corpse_target_system(
 pub fn set_home_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     mut map_events: ResMut<MapEvents>,
     home_query: Query<(&Id, &Home)>,
     mut query: Query<(&Actor, &mut ActionState, &SetHome)>,
 ) {
     for (Actor(actor), mut state, _set_home) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 npc_info!(*actor, None, None, "Setting home destination...");
@@ -2973,6 +3696,7 @@ pub fn random_wander_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -2984,6 +3708,10 @@ pub fn random_wander_action_system(
     mut query: Query<(&Actor, &mut ActionState, &RandomWander, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _random_wander, span) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3100,6 +3828,7 @@ pub fn move_to_forest_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -3111,6 +3840,10 @@ pub fn move_to_forest_action_system(
     mut query: Query<(&Actor, &mut ActionState, &MoveToForest, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _move_to_forest, span) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3328,6 +4061,7 @@ pub fn move_to_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -3340,6 +4074,10 @@ pub fn move_to_system(
     mut action_query: Query<(&Actor, &mut ActionState, &NpcMoveTo, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _move_to, span) in &mut action_query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3635,6 +4373,7 @@ pub fn move_to_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -3647,6 +4386,22 @@ pub fn move_to_target_system(
     mut query: Query<(&Actor, &mut ActionState, &NpcMoveToTarget, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _move_to_target, span) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
+        if let Ok(target) = target_query.get(*actor) {
+            if target.id != NO_TARGET && protection.object_is_protected(target.id, &ids) {
+                commands.entity(*actor).try_remove::<Target>().try_insert(
+                    ProtectedTargetInvalidated {
+                        target_id: target.id,
+                    },
+                );
+                *state = ActionState::Failure;
+                continue;
+            }
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3992,6 +4747,7 @@ pub fn move_near_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -4003,6 +4759,22 @@ pub fn move_near_target_system(
     mut query: Query<(&Actor, &mut ActionState, &NpcMoveNearTarget)>,
 ) {
     for (Actor(actor), mut state, move_near_target) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
+        if let Ok(target) = target_query.get(*actor) {
+            if target.id != NO_TARGET && protection.object_is_protected(target.id, &ids) {
+                commands.entity(*actor).try_remove::<Target>().try_insert(
+                    ProtectedTargetInvalidated {
+                        target_id: target.id,
+                    },
+                );
+                *state = ActionState::Failure;
+                continue;
+            }
+        }
+
         match *state {
             ActionState::Requested => {
                 let obj_id = entity_map.get_obj_by_entity(*actor);
@@ -4507,6 +5279,7 @@ pub struct TelegraphState<'w, 's> {
     clients: Res<'w, Clients>,
     crisis_assault_units: Query<'w, 's, &'static CrisisAssaultUnit>,
     next_attacks: Local<'s, std::collections::HashMap<i32, AttackType>>,
+    protection: NpcProtection<'w, 's>,
 }
 
 pub fn attack_target_system(
@@ -4528,6 +5301,10 @@ pub fn attack_target_system(
     mut telegraph: TelegraphState,
 ) {
     for (Actor(actor), mut state, _chase_attack) in &mut query {
+        if telegraph.protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
@@ -4544,6 +5321,27 @@ pub fn attack_target_system(
                 let Ok(mut visible_target) = visible_target_query.get_mut(*actor) else {
                     continue;
                 };
+
+                if visible_target.target != NO_TARGET
+                    && telegraph
+                        .protection
+                        .presence
+                        .as_deref()
+                        .map(|presence| {
+                            object_belongs_to_protected_run(visible_target.target, &ids, presence)
+                        })
+                        .unwrap_or(false)
+                {
+                    let protected_target_id = visible_target.target;
+                    visible_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: protected_target_id,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let Some(target_entity) = entity_map.get_entity(visible_target.target) else {
                     npc_error!(
@@ -4614,10 +5412,19 @@ pub fn attack_target_system(
                 // Check if target is fortified
                 if target.effects.has(Effect::Fortified) {
                     if let Ok(fortification) = fortified_query.get(target.entity) {
-                        if !personal_assault_allows_target_owner(
-                            assault,
-                            ids.get_player(fortification.id),
-                        ) {
+                        if telegraph
+                            .protection
+                            .presence
+                            .as_deref()
+                            .map(|presence| {
+                                object_belongs_to_protected_run(fortification.id, &ids, presence)
+                            })
+                            .unwrap_or(false)
+                            || !personal_assault_allows_target_owner(
+                                assault,
+                                ids.get_player(fortification.id),
+                            )
+                        {
                             npc_warn!(
                                 *actor,
                                 obj_id,
@@ -4681,6 +5488,26 @@ pub fn attack_target_system(
                     .get(&npc.id.0)
                     .cloned()
                     .unwrap_or(AttackType::Quick);
+
+                if telegraph
+                    .protection
+                    .presence
+                    .as_deref()
+                    .map(|presence| {
+                        object_belongs_to_protected_run(target.id.0, &ids, presence)
+                            || is_owner_offline_protected(target.player_id, presence)
+                    })
+                    .unwrap_or(false)
+                {
+                    visible_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: target.id.0,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let (damage, combo, _skill_gain, countered) = Combat::process_attack(
                     current_attack.clone(),
@@ -4833,6 +5660,7 @@ pub fn cast_target_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     ids: ResMut<Ids>,
+    protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
@@ -4843,6 +5671,10 @@ pub fn cast_target_system(
     mut query: Query<(&Actor, &mut ActionState, &mut ChaseAndCast)>,
 ) {
     for (Actor(actor), mut state, mut chase_and_cast) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         let Ok((npc_player_id, mut visible_target)) = visible_target_query.get_mut(*actor) else {
             continue;
         };
@@ -4853,6 +5685,17 @@ pub fn cast_target_system(
             }
             ActionState::Executing => {
                 let target_id = visible_target.target;
+
+                if target_id != NO_TARGET && protection.object_is_protected(target_id, &ids) {
+                    visible_target.target = NO_TARGET;
+                    commands
+                        .entity(*actor)
+                        .try_remove::<Target>()
+                        .try_remove::<EventInProgress>()
+                        .try_insert(ProtectedTargetInvalidated { target_id });
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let blockinglist = Obj::blocking_list_combatquery(npc_player_id.0, &target_query);
 
@@ -4887,6 +5730,17 @@ pub fn cast_target_system(
                     let Ok(target) = target_query.get_mut(target_entity) else {
                         continue;
                     };
+
+                    if protection.owner_is_protected(target.player_id) {
+                        visible_target.target = NO_TARGET;
+                        commands
+                            .entity(*actor)
+                            .try_remove::<Target>()
+                            .try_remove::<EventInProgress>()
+                            .try_insert(ProtectedTargetInvalidated { target_id });
+                        *state = ActionState::Failure;
+                        continue;
+                    }
 
                     if let Some(errmsg) =
                         Combat::fortified_outbound_attack_error_from_combat(&npc, &target, true)
@@ -5102,6 +5956,7 @@ pub fn raise_dead_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     completed_query: Query<&EventCompleted>,
@@ -5111,6 +5966,22 @@ pub fn raise_dead_system(
     mut query: Query<(&Actor, &mut ActionState, &mut RaiseDead)>,
 ) {
     for (Actor(actor), mut state, raise_dead) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
+        if let Ok(target) = target_query.get(*actor) {
+            if target.id != NO_TARGET && protection.object_is_protected(target.id, &ids) {
+                commands.entity(*actor).try_remove::<Target>().try_insert(
+                    ProtectedTargetInvalidated {
+                        target_id: target.id,
+                    },
+                );
+                *state = ActionState::Failure;
+                continue;
+            }
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
@@ -5176,6 +6047,16 @@ pub fn raise_dead_system(
                     );
                     continue;
                 };
+
+                if protection.owner_is_protected(corpse.player_id) {
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: corpse.id.0,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 npc_info!(*actor, obj_id, npc_name, "Corpse: {:?}", corpse);
 
@@ -5382,11 +6263,17 @@ pub fn raise_dead_system(
 
 pub fn hide_action_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
+    protection: NpcProtection,
     mut map_events: ResMut<MapEvents>,
     obj_query: Query<&Id>,
     mut query: Query<(&Actor, &mut ActionState, &mut Hide, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _hide, _span) in &mut query {
+        if protection.actor_is_protected_if_ids(*actor, ids.as_deref()) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(obj_id) = obj_query.get(*actor) else {
@@ -5418,15 +6305,20 @@ pub fn spoil_target_action_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     completed_query: Query<&EventCompleted>,
-    task_target_query: Query<&mut TaskTarget>,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut npc_query: Query<BaseQueryEffects, With<SubclassNPC>>,
     obj_query: Query<BaseQuery, Without<SubclassNPC>>, // Without required to prevent disjointed queries
     mut query: Query<(&Actor, &mut ActionState, &SpoilTarget)>,
 ) {
     for (Actor(actor), mut state, _spoil_target_action) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(npc) = npc_query.get_mut(*actor) else {
@@ -5455,11 +6347,25 @@ pub fn spoil_target_action_system(
                     continue;
                 }
 
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected(task_target.target, &ids)
+                {
+                    let protected_target_id = task_target.target;
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: protected_target_id,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 // Get target entity
                 npc_info!(
@@ -5520,6 +6426,17 @@ pub fn spoil_target_action_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if protection.owner_is_protected(target.player_id) {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: target.id.0,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let spoil_event = VisibleEvent::SpoilEvent {
                     target_id: target.id.0,
@@ -5589,16 +6506,21 @@ pub fn steal_target_action_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     completed_query: Query<&EventCompleted>,
-    task_target_query: Query<&mut TaskTarget>,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut npc_query: Query<BaseQueryEffects, With<SubclassNPC>>,
     obj_query: Query<BaseQuery, Without<SubclassNPC>>, // Without required to prevent disjointed queries
     items_to_steal_query: Query<&ItemsToSteal>,
     mut query: Query<(&Actor, &mut ActionState, &StealTarget)>,
 ) {
     for (Actor(actor), mut state, _steal_target_action) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(npc) = npc_query.get_mut(*actor) else {
@@ -5627,11 +6549,25 @@ pub fn steal_target_action_system(
                     continue;
                 }
 
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected(task_target.target, &ids)
+                {
+                    let protected_target_id = task_target.target;
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: protected_target_id,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 // Get target entity
                 npc_info!(
@@ -5688,6 +6624,17 @@ pub fn steal_target_action_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if protection.owner_is_protected(target.player_id) {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: target.id.0,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 let steal_event = VisibleEvent::StealEvent {
                     target_id: target.id.0,
@@ -5764,15 +6711,20 @@ pub fn torch_target_action_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     completed_query: Query<&EventCompleted>,
-    task_target_query: Query<&mut TaskTarget>,
+    mut task_target_query: Query<&mut TaskTarget>,
     mut npc_query: Query<BaseQueryEffects, With<SubclassNPC>>,
     obj_query: Query<BaseQuery, Without<SubclassNPC>>, // Without required to prevent disjointed queries
     mut query: Query<(&Actor, &mut ActionState, &TorchTarget)>,
 ) {
     for (Actor(actor), mut state, _rat_crisis_action) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(npc) = npc_query.get_mut(*actor) else {
@@ -5801,11 +6753,25 @@ pub fn torch_target_action_system(
                     continue;
                 }
 
-                let Ok(task_target) = task_target_query.get(*actor) else {
+                let Ok(mut task_target) = task_target_query.get_mut(*actor) else {
                     npc_error!(*actor, obj_id, None, "Query failed to find target entity");
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if task_target.target != NO_TARGET
+                    && protection.object_is_protected(task_target.target, &ids)
+                {
+                    let protected_target_id = task_target.target;
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: protected_target_id,
+                        },
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 // Get target entity
                 npc_info!(
@@ -5847,6 +6813,17 @@ pub fn torch_target_action_system(
                         obj_id,
                         None,
                         "Target is not adjacent to npc, torch event failed."
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                if protection.owner_is_protected(target.player_id) {
+                    task_target.target = NO_TARGET;
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: target.id.0,
+                        },
                     );
                     *state = ActionState::Failure;
                     continue;
@@ -5919,6 +6896,7 @@ pub fn cast_spell_target_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    protection: NpcProtection,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     completed_query: Query<&EventCompleted>,
@@ -5929,6 +6907,22 @@ pub fn cast_spell_target_system(
     mut query: Query<(&Actor, &mut ActionState, &CastSpellTarget)>,
 ) {
     for (Actor(actor), mut state, _cast_spell_target) in &mut query {
+        if protection.actor_is_protected(*actor, &ids) {
+            continue;
+        }
+
+        if let Ok(target) = target_query.get(*actor) {
+            if target.id != NO_TARGET && protection.object_is_protected(target.id, &ids) {
+                commands.entity(*actor).try_remove::<Target>().try_insert(
+                    ProtectedTargetInvalidated {
+                        target_id: target.id,
+                    },
+                );
+                *state = ActionState::Failure;
+                continue;
+            }
+        }
+
         match *state {
             ActionState::Requested => {
                 let Ok(mut npc) = npc_query.get_mut(*actor) else {
@@ -6015,6 +7009,16 @@ pub fn cast_spell_target_system(
                         obj_id,
                         npc_name,
                         "Target is not within range, cast spell failed."
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                if protection.owner_is_protected(target.player_id) {
+                    commands.entity(*actor).try_remove::<Target>().try_insert(
+                        ProtectedTargetInvalidated {
+                            target_id: target.id.0,
+                        },
                     );
                     *state = ActionState::Failure;
                     continue;

@@ -7,6 +7,7 @@ use crate::{
     ids::Ids,
     network::{self, ResponsePacket},
     player::{self, ActiveInfoType, ActiveInfos},
+    safe_logout::{object_belongs_to_protected_run, PlayerWorldPresenceState},
     AppState,
 };
 
@@ -113,9 +114,14 @@ fn crop_system(
     ids: Res<Ids>,
     active_infos: Res<ActiveInfos>,
     mut crops: ResMut<Crops>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     // Iterate through crops and check if start end is greater or equal to game tick
     for (_structure, crop) in crops.iter_mut() {
+        if object_belongs_to_protected_run(crop.structure, &ids, &presence) {
+            continue;
+        }
+
         if crop.stage_end <= game_tick.0 {
             info!("Crop {:?} has reached stage end.", crop);
             match crop.stage {
@@ -142,8 +148,10 @@ fn crop_system(
                 }
             }
 
-            // Every object must have a player_id so safe to unwrap
-            let player_id = ids.get_player(crop.structure).unwrap();
+            let Some(player_id) = ids.get_player(crop.structure) else {
+                error!("Cannot resolve crop owner for structure {}", crop.structure);
+                continue;
+            };
 
             // Check if crop is being observed
             if let Some(_active_info) =
@@ -173,5 +181,76 @@ impl Plugin for FarmPlugin {
         app.insert_resource(crops);
 
         app.add_systems(Update, crop_system.run_if(in_state(AppState::Running)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence, PlayerWorldPresenceState};
+
+    #[test]
+    fn checkpoint2_protected_crop_freezes_while_other_crop_advances() {
+        let protected_player = 1;
+        let active_player = 2;
+        let protected_structure = 10;
+        let active_structure = 20;
+
+        let mut ids = Ids::default();
+        ids.new_obj(protected_structure, protected_player);
+        ids.new_obj(active_structure, active_player);
+
+        let mut presence = PlayerWorldPresenceState::default();
+        let mut record = PlayerPresenceRecord::new(false);
+        record.state = PlayerWorldPresence::OfflineProtected;
+        presence.players.insert(protected_player, record);
+
+        let crops = Crops(HashMap::from([
+            (
+                protected_structure,
+                Crop {
+                    structure: protected_structure,
+                    crop_type: "Protected Wheat".to_string(),
+                    quantity: 2,
+                    stage: CropStages::Seed,
+                    stage_start: 0,
+                    stage_end: 100,
+                },
+            ),
+            (
+                active_structure,
+                Crop {
+                    structure: active_structure,
+                    crop_type: "Active Wheat".to_string(),
+                    quantity: 2,
+                    stage: CropStages::Seed,
+                    stage_start: 0,
+                    stage_end: 100,
+                },
+            ),
+        ]));
+
+        let mut app = App::new();
+        app.insert_resource(GameTick(200))
+            .insert_resource(Clients::default())
+            .insert_resource(ids)
+            .insert_resource(ActiveInfos(HashMap::new()))
+            .insert_resource(crops)
+            .insert_resource(presence)
+            .add_systems(Update, crop_system);
+        app.update();
+
+        let crops = app.world().resource::<Crops>();
+        let protected = crops
+            .get(&protected_structure)
+            .expect("protected crop remains");
+        assert_eq!(protected.stage, CropStages::Seed);
+        assert_eq!(protected.stage_start, 0);
+        assert_eq!(protected.stage_end, 100);
+
+        let active = crops.get(&active_structure).expect("active crop remains");
+        assert_eq!(active.stage, CropStages::Sprout);
+        assert_eq!(active.stage_start, 200);
+        assert_eq!(active.stage_end, 400);
     }
 }

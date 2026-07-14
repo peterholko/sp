@@ -25,7 +25,7 @@ use std::io::Write;
 use std::{
     collections::HashSet,
     hash::Hash,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use uuid::Uuid;
@@ -77,12 +77,14 @@ use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
 use crate::safe_logout::{
-    remove_player_presence_for_run_cleanup, PlayerWorldPresenceState, SafeLogoutPlugin,
+    entity_belongs_to_protected_run, is_owner_offline_protected, is_player_offline_protected,
+    object_belongs_to_protected_run, remove_player_presence_for_run_cleanup,
+    PlayerWorldPresenceState, SafeLogoutPlugin,
 };
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
 use crate::skill_defs::Skill;
 use crate::structure::{Plans, Structure, StructurePlugin};
-use crate::tax_collector::TaxCollectorPlugin;
+use crate::tax_collector::{TaxCollector, TaxCollectorPlugin};
 use crate::templates::{self, ObjTemplate, ResTemplates, Templates, TemplatesPlugin};
 use crate::terrain_feature::{TerrainFeature, TerrainFeaturePlugin, TerrainFeatures};
 use crate::trade::{Prices, TradePorts, WantedItem};
@@ -95,9 +97,7 @@ pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
 
 impl Clients {
     fn client_is_active(client_id: &Uuid, client: &Client, player_id: i32) -> bool {
-        *client_id == client.id
-            && client.player_id == player_id
-            && !client.sender.is_closed()
+        *client_id == client.id && client.player_id == player_id && !client.sender.is_closed()
     }
 
     /// Returns whether at least one active network client belongs to `player_id`.
@@ -121,8 +121,7 @@ impl Clients {
                 let mut ids = clients
                     .iter()
                     .filter_map(|(client_id, client)| {
-                        Self::client_is_active(client_id, client, player_id)
-                            .then_some(*client_id)
+                        Self::client_is_active(client_id, client, player_id).then_some(*client_id)
                     })
                     .collect::<Vec<_>>();
                 ids.sort_unstable();
@@ -167,6 +166,27 @@ impl NetworkReceiver {
 #[derive(Resource, Deref, DerefMut, Reflect, Debug)]
 #[reflect(Resource)]
 pub struct GameTick(pub i32);
+
+/// Test-friendly view of the safe-logout resource. Production always installs
+/// `PlayerWorldPresenceState` through `SafeLogoutPlugin`; isolated legacy unit
+/// tests that register one gameplay system directly should retain their old
+/// unprotected behavior rather than failing system-parameter validation.
+#[derive(SystemParam)]
+pub struct OptionalPlayerWorldPresence<'w> {
+    value: Option<Res<'w, PlayerWorldPresenceState>>,
+}
+
+static EMPTY_PLAYER_WORLD_PRESENCE: OnceLock<PlayerWorldPresenceState> = OnceLock::new();
+
+impl std::ops::Deref for OptionalPlayerWorldPresence<'_> {
+    type Target = PlayerWorldPresenceState;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+            .as_deref()
+            .unwrap_or_else(|| EMPTY_PLAYER_WORLD_PRESENCE.get_or_init(Default::default))
+    }
+}
 
 // custom implementation for unusual values
 impl Default for GameTick {
@@ -1796,6 +1816,8 @@ pub struct GameEventExtras<'w, 's> {
     pub crisis_status_login_sync: ResMut<'w, CrisisStatusLoginSync>,
     // Used to give a spawned villager its player's start-location team color.
     pub assigned_start_locations: Res<'w, AssignedStartLocations>,
+    pub run_spawned_objs: ResMut<'w, RunSpawnedObjs>,
+    pub presence: Res<'w, PlayerWorldPresenceState>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -1877,6 +1899,13 @@ pub struct WeakSanctuary {
 pub struct EffectAdded {
     pub effect: Effect,
 }
+
+/// Marks the one-shot stat modifier for an [`EffectAdded`] payload as applied.
+/// Keeping the payload pending while its owner is protected lets the modifier
+/// resume exactly once instead of being lost with Bevy's one-update `Added`
+/// filter.
+#[derive(Debug, Component)]
+struct EffectAddedProcessed;
 
 #[derive(Debug, Component)]
 pub struct Monolith {
@@ -2970,6 +2999,231 @@ fn init_objs(
     }
 }
 
+fn initial_encounter_object_owner(
+    object_id: i32,
+    encounters: &InitialEncounterState,
+) -> Option<i32> {
+    encounters.iter().find_map(|(player_id, entry)| {
+        (entry.merchant_id == object_id
+            || entry.necromancer_id == object_id
+            || entry.mausoleum_id == object_id
+            || entry.rat_ids.contains(&object_id)
+            || entry.phase1_npc_id == Some(object_id))
+        .then_some(*player_id)
+    })
+}
+
+fn initial_encounter_object_is_protected(
+    object_id: i32,
+    encounters: &InitialEncounterState,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    initial_encounter_object_owner(object_id, encounters)
+        .map(|player_id| is_player_offline_protected(player_id, presence))
+        .unwrap_or(false)
+}
+
+fn attributed_threat_owner(
+    legendary_follower: Option<&LegendaryFollower>,
+    legendary_boss: Option<&LegendaryBoss>,
+    sanctuary_hunter: Option<&SanctuaryHunter>,
+) -> Option<i32> {
+    legendary_follower
+        .map(|follower| follower.player_id)
+        .or_else(|| legendary_boss.map(|boss| boss.player_id))
+        .or_else(|| sanctuary_hunter.map(|hunter| hunter.player_id))
+}
+
+fn game_event_belongs_to_protected_run(
+    event_type: &GameEventType,
+    ids: &Ids,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    let object_is_protected = |obj_id| object_belongs_to_protected_run(obj_id, ids, presence);
+
+    match event_type {
+        // Login is part of the reconnect/rebase protocol and must never be
+        // parked behind the protection state it is responsible for leaving.
+        GameEventType::Login { .. } => false,
+        GameEventType::PlayerNotice { player_id, .. }
+        | GameEventType::MerchantArrival { player_id, .. }
+        | GameEventType::MerchantLeavingSoon { player_id, .. }
+        | GameEventType::MerchantDeparture { player_id, .. }
+        | GameEventType::SpawnVillager { player_id, .. }
+        | GameEventType::AddEffectOnTile { player_id, .. }
+        | GameEventType::RemoveEffectOnTile { player_id, .. } => {
+            is_player_offline_protected(*player_id, presence)
+        }
+        GameEventType::ForageEvent { forager_id } => object_is_protected(*forager_id),
+        GameEventType::GatherEvent { gatherer_id, .. } => object_is_protected(*gatherer_id),
+        GameEventType::StructureGatherEvent {
+            operator_id,
+            structure_id,
+        }
+        | GameEventType::StructureOperateEvent {
+            operator_id,
+            structure_id,
+        } => object_is_protected(*operator_id) || object_is_protected(*structure_id),
+        GameEventType::RefineEvent { refiner_id, .. } => object_is_protected(*refiner_id),
+        GameEventType::CraftEvent { crafter_id, .. } => object_is_protected(*crafter_id),
+        GameEventType::StructureRefineEvent {
+            refiner_id,
+            structure_id,
+            ..
+        } => object_is_protected(*refiner_id) || object_is_protected(*structure_id),
+        GameEventType::StructureCraftEvent {
+            crafter_id,
+            structure_id,
+            ..
+        } => object_is_protected(*crafter_id) || object_is_protected(*structure_id),
+        GameEventType::ExperimentEvent {
+            experimenter_id,
+            structure_id,
+        } => object_is_protected(*experimenter_id) || object_is_protected(*structure_id),
+        GameEventType::UpdatePos { obj_id, .. }
+        | GameEventType::DespawnObj { obj_id }
+        | GameEventType::CancelRefineEvent { obj_id }
+        | GameEventType::CancelAllMapEvents { obj_id }
+        | GameEventType::CancelAllowedMapEvents { obj_id } => object_is_protected(*obj_id),
+        GameEventType::NecroEvent {
+            necromancer_id,
+            mausoleum_id,
+            ..
+        } => {
+            necromancer_id.is_some_and(|id| object_is_protected(id))
+                || mausoleum_id.is_some_and(|id| object_is_protected(id))
+        }
+        GameEventType::SpawnNPC { run_owner, .. } => run_owner
+            .map(|player_id| is_player_offline_protected(player_id, presence))
+            .unwrap_or(false),
+        GameEventType::RemoveEntity { .. } | GameEventType::CancelMapEventsById { .. } => false,
+    }
+}
+
+fn visible_event_references_ended_run(
+    event: &VisibleEvent,
+    ended_object_ids: &HashSet<i32>,
+) -> bool {
+    let referenced = match event {
+        VisibleEvent::EmbarkEvent { transport_id } => Some(*transport_id),
+        VisibleEvent::DamageEvent { target_id, .. }
+        | VisibleEvent::StealEvent { target_id, .. }
+        | VisibleEvent::BroadcastStealEvent { target_id, .. }
+        | VisibleEvent::SpoilEvent { target_id, .. }
+        | VisibleEvent::BroadcastSpoilEvent { target_id, .. }
+        | VisibleEvent::TorchEvent { target_id, .. }
+        | VisibleEvent::BroadcastTorchEvent { target_id, .. }
+        | VisibleEvent::InvestigateEvent { target_id }
+        | VisibleEvent::SpellDamageEvent { target_id, .. } => Some(*target_id),
+        VisibleEvent::ActivateEvent { structure_id }
+        | VisibleEvent::OperateEvent { structure_id }
+        | VisibleEvent::RefineEvent { structure_id }
+        | VisibleEvent::CraftEvent { structure_id, .. }
+        | VisibleEvent::ExperimentEvent { structure_id }
+        | VisibleEvent::PlantEvent { structure_id }
+        | VisibleEvent::TendEvent { structure_id }
+        | VisibleEvent::HarvestEvent { structure_id }
+        | VisibleEvent::RepairEvent { structure_id } => Some(*structure_id),
+        VisibleEvent::UseItemEvent { item_owner_id, .. } => Some(*item_owner_id),
+        VisibleEvent::FindDrinkEvent { obj_id }
+        | VisibleEvent::DrinkEvent { obj_id, .. }
+        | VisibleEvent::FindFoodEvent { obj_id }
+        | VisibleEvent::EatEvent { obj_id, .. }
+        | VisibleEvent::FindShelterEvent { obj_id }
+        | VisibleEvent::SleepEvent { obj_id }
+        | VisibleEvent::FishingEvent { obj_id } => Some(*obj_id),
+        VisibleEvent::SpellRaiseDeadEvent { corpse_id } => Some(*corpse_id),
+        _ => None,
+    };
+    referenced
+        .map(|object_id| ended_object_ids.contains(&object_id))
+        .unwrap_or(false)
+}
+
+fn game_event_belongs_to_ended_run(
+    event_type: &GameEventType,
+    player_id: i32,
+    ended_object_ids: &HashSet<i32>,
+    entity_map: &EntityObjMap,
+    map_events: &MapEvents,
+) -> bool {
+    let ended = |object_id: i32| ended_object_ids.contains(&object_id);
+    match event_type {
+        GameEventType::Login { player_id: owner }
+        | GameEventType::PlayerNotice {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantArrival {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantLeavingSoon {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantDeparture {
+            player_id: owner, ..
+        }
+        | GameEventType::SpawnVillager {
+            player_id: owner, ..
+        }
+        | GameEventType::AddEffectOnTile {
+            player_id: owner, ..
+        }
+        | GameEventType::RemoveEffectOnTile {
+            player_id: owner, ..
+        } => *owner == player_id,
+        GameEventType::SpawnNPC { run_owner, .. } => *run_owner == Some(player_id),
+        GameEventType::ForageEvent { forager_id } => ended(*forager_id),
+        GameEventType::GatherEvent { gatherer_id, .. } => ended(*gatherer_id),
+        GameEventType::StructureGatherEvent {
+            operator_id,
+            structure_id,
+        }
+        | GameEventType::StructureOperateEvent {
+            operator_id,
+            structure_id,
+        } => ended(*operator_id) || ended(*structure_id),
+        GameEventType::RefineEvent { refiner_id, .. } => ended(*refiner_id),
+        GameEventType::CraftEvent { crafter_id, .. } => ended(*crafter_id),
+        GameEventType::StructureRefineEvent {
+            refiner_id,
+            structure_id,
+            ..
+        } => ended(*refiner_id) || ended(*structure_id),
+        GameEventType::StructureCraftEvent {
+            crafter_id,
+            structure_id,
+            ..
+        } => ended(*crafter_id) || ended(*structure_id),
+        GameEventType::ExperimentEvent {
+            experimenter_id,
+            structure_id,
+        } => ended(*experimenter_id) || ended(*structure_id),
+        GameEventType::UpdatePos { obj_id, .. }
+        | GameEventType::DespawnObj { obj_id }
+        | GameEventType::CancelRefineEvent { obj_id }
+        | GameEventType::CancelAllMapEvents { obj_id }
+        | GameEventType::CancelAllowedMapEvents { obj_id } => ended(*obj_id),
+        GameEventType::NecroEvent {
+            necromancer_id,
+            mausoleum_id,
+            ..
+        } => necromancer_id.map(ended).unwrap_or(false) || mausoleum_id.map(ended).unwrap_or(false),
+        GameEventType::RemoveEntity { entity } => entity_map
+            .get_obj_by_entity(*entity)
+            .map(ended)
+            .unwrap_or(false),
+        GameEventType::CancelMapEventsById { event_ids } => event_ids.iter().any(|event_id| {
+            map_events
+                .get(event_id)
+                .map(|event| {
+                    ended(event.obj_id)
+                        || visible_event_references_ended_run(&event.event_type, ended_object_ids)
+                })
+                .unwrap_or(false)
+        }),
+    }
+}
+
 fn move_event_system(
     mut commands: Commands,
     entity_map: ResMut<EntityObjMap>,
@@ -2977,6 +3231,15 @@ fn move_event_system(
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    threat_attribution_query: Query<(
+        Option<&LegendaryFollower>,
+        Option<&LegendaryBoss>,
+        Option<&SanctuaryHunter>,
+        Option<&CrisisAssaultUnit>,
+        Option<&TaxCollector>,
+    )>,
     mut set: ParamSet<(
         Query<(&mut Position, &mut State)>, // for the chosen entity (mutable)
         Query<(&PlayerId, &Id, &Position, &Class, &Subclass, &State)>, // for all entities (read-only)
@@ -2987,6 +3250,33 @@ fn move_event_system(
 
     for (map_event_id, map_event) in map_events.iter() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence)
+                || initial_encounter_object_is_protected(
+                    map_event.obj_id,
+                    &initial_encounter_state,
+                    &presence,
+                )
+            {
+                continue;
+            }
+            if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                if let Ok((follower, boss, hunter, assault, collector)) =
+                    threat_attribution_query.get(entity)
+                {
+                    let attributed_owner_is_protected = assault.is_none()
+                        && attributed_threat_owner(follower, boss, hunter)
+                            .map(|player_id| is_player_offline_protected(player_id, &presence))
+                            .unwrap_or(false);
+                    let collector_target_is_protected = collector
+                        .map(|collector| {
+                            is_player_offline_protected(collector.target_player, &presence)
+                        })
+                        .unwrap_or(false);
+                    if attributed_owner_is_protected || collector_target_is_protected {
+                        continue;
+                    }
+                }
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::MoveEvent { src: _, dst } => {
@@ -3308,8 +3598,10 @@ fn move_event_completed_system(
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
     player_intro_state: Res<PlayerIntroState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     mut sanctuary_excursions: ResMut<SanctuaryExcursions>,
     sanctuary_zones: Res<SanctuaryZones>,
+    presence: Res<PlayerWorldPresenceState>,
     (
         mover_query,
         map_obj_query,
@@ -3323,7 +3615,21 @@ fn move_event_completed_system(
         hero_power_query,
         inventory_query,
     ): (
-        Query<(Entity, &Id, &PlayerId, &Position, &Subclass, &Viewshed), With<MoveEventCompleted>>,
+        Query<
+            (
+                Entity,
+                &Id,
+                &PlayerId,
+                &Position,
+                &Subclass,
+                &Viewshed,
+                Option<&LegendaryFollower>,
+                Option<&LegendaryBoss>,
+                Option<&SanctuaryHunter>,
+                Option<&CrisisAssaultUnit>,
+            ),
+            With<MoveEventCompleted>,
+        >,
         Query<MapObjQuery>,
         Query<&mut Effects>,
         Query<&Sanctuary>,
@@ -3336,9 +3642,32 @@ fn move_event_completed_system(
         Query<(&PlayerId, &Inventory)>,
     ),
 ) {
-    for (mover_entity, mover_id, mover_player_id, mover_pos, mover_subclass, mover_viewshed) in
-        mover_query.iter()
+    for (
+        mover_entity,
+        mover_id,
+        mover_player_id,
+        mover_pos,
+        mover_subclass,
+        mover_viewshed,
+        legendary_follower,
+        legendary_boss,
+        sanctuary_hunter,
+        crisis_assault,
+    ) in mover_query.iter()
     {
+        if object_belongs_to_protected_run(mover_id.0, &ids, &presence)
+            || initial_encounter_object_is_protected(
+                mover_id.0,
+                &initial_encounter_state,
+                &presence,
+            )
+            || (crisis_assault.is_none()
+                && attributed_threat_owner(legendary_follower, legendary_boss, sanctuary_hunter)
+                    .map(|player_id| is_player_offline_protected(player_id, &presence))
+                    .unwrap_or(false))
+        {
+            continue;
+        }
         info!("MoveEventCompletedSystem - {:?}", mover_pos);
         commands.entity(mover_entity).remove::<MoveEventCompleted>();
 
@@ -3440,6 +3769,7 @@ fn move_event_completed_system(
                         npc_type: npc_type,
                         pos: encounter_pos,
                         npc_id: Some(wolf_id),
+                        run_owner: mover_player_id.is_human().then_some(mover_player_id.0),
                     };
 
                     let event_id = ids.new_map_event_id();
@@ -3857,6 +4187,8 @@ fn move_event_completed_system(
 
 fn hide_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -3866,6 +4198,9 @@ fn hide_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::HideEvent => {
@@ -3899,6 +4234,7 @@ fn hide_event_system(
 fn update_obj_event_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
@@ -3911,6 +4247,9 @@ fn update_obj_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::UpdateObjEvent { attrs } => {
@@ -4009,6 +4348,7 @@ fn update_obj_event_system(
 fn activate_event_system(
     mut commands: Commands,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -4022,9 +4362,15 @@ fn activate_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::ActivateEvent { structure_id } => {
+                    if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                        continue;
+                    }
                     debug!(
                         "Processing ActivateEvent: structure_id: {:?} ",
                         structure_id
@@ -4104,6 +4450,7 @@ pub fn build_system(
     entity_map: Res<EntityObjMap>,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
+    presence: OptionalPlayerWorldPresence,
     mut structure_query: Query<
         (
             Entity,
@@ -4144,6 +4491,9 @@ pub fn build_system(
         mut structure_work_queue,
     ) in structure_query.iter_mut()
     {
+        if is_owner_offline_protected(structure_player_id, &presence) {
+            continue;
+        }
         debug!("Building system processing structure: {:?}", structure_id);
         debug!("Structure position: {:?}", structure_pos);
         debug!("Structure state: {:?}", structure_state);
@@ -4324,10 +4674,12 @@ pub fn upgrade_system(
     entity_map: Res<EntityObjMap>,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
+    presence: OptionalPlayerWorldPresence,
     mut structure_query: Query<
         (
             Entity,
             &Id,
+            &PlayerId,
             &Position,
             &State,
             &mut Name,
@@ -4355,6 +4707,7 @@ pub fn upgrade_system(
     for (
         structure_entity,
         structure_id,
+        structure_player_id,
         structure_pos,
         structure_state,
         mut structure_name,
@@ -4368,6 +4721,9 @@ pub fn upgrade_system(
         selected_upgrade,
     ) in structure_query.iter_mut()
     {
+        if is_owner_offline_protected(structure_player_id, &presence) {
+            continue;
+        }
         debug!("Upgrading system processing structure: {:?}", structure_id);
         debug!("Structure position: {:?}", structure_pos);
         debug!("Structure state: {:?}", structure_state);
@@ -5007,6 +5363,7 @@ fn forage_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5020,6 +5377,9 @@ fn forage_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::ForageEvent { forager_id } => {
@@ -5117,6 +5477,7 @@ fn gather_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: OptionalPlayerWorldPresence,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5132,6 +5493,9 @@ fn gather_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::GatherEvent {
@@ -5384,6 +5748,7 @@ fn structure_gather_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5400,6 +5765,9 @@ fn structure_gather_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureGatherEvent {
@@ -5618,6 +5986,7 @@ fn refine_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5630,6 +5999,9 @@ fn refine_event_system(
 
     'event_loop: for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::RefineEvent {
@@ -5835,6 +6207,7 @@ fn structure_refine_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5848,6 +6221,9 @@ fn structure_refine_event_system(
 
     'event_loop: for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureRefineEvent {
@@ -6116,6 +6492,7 @@ fn craft_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: OptionalPlayerWorldPresence,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -6129,6 +6506,9 @@ fn craft_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::CraftEvent {
@@ -6260,6 +6640,7 @@ fn structure_craft_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -6274,6 +6655,9 @@ fn structure_craft_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureCraftEvent {
@@ -6453,6 +6837,7 @@ fn structure_operate_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -6473,6 +6858,9 @@ fn structure_operate_event_system(
 
     for (event_id, game_event_type) in game_events.iter() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureOperateEvent {
@@ -6734,6 +7122,7 @@ fn experiment_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -6748,6 +7137,9 @@ fn experiment_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::ExperimentEvent {
@@ -7552,6 +7944,7 @@ fn explore_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
     mut resources: ResMut<Resources>,
@@ -7579,6 +7972,9 @@ fn explore_event_system(
         .collect();
 
     for (map_event_id, map_event) in due_events {
+        if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+            continue;
+        }
         match &map_event.event_type {
             VisibleEvent::SurveyEvent
             | VisibleEvent::ProspectEvent
@@ -7705,6 +8101,7 @@ fn investigate_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
     mut resources: ResMut<Resources>,
@@ -7733,6 +8130,9 @@ fn investigate_event_system(
         .collect();
 
     for (map_event_id, map_event) in due_events {
+        if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+            continue;
+        }
         let VisibleEvent::InvestigateEvent { target_id } = map_event.event_type else {
             continue;
         };
@@ -7890,6 +8290,7 @@ fn farm_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut crops: ResMut<Crops>,
     resources: ResMut<Resources>,
@@ -7902,6 +8303,9 @@ fn farm_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::PlantEvent { structure_id } => {
@@ -8098,6 +8502,8 @@ fn repair_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     crops: ResMut<Crops>,
     resources: ResMut<Resources>,
@@ -8114,9 +8520,15 @@ fn repair_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::RepairEvent { structure_id } => {
+                    if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                        continue;
+                    }
                     info!("Processing RepairEvent");
                     events_to_remove.push(*map_event_id);
 
@@ -8177,6 +8589,8 @@ fn spell_raise_dead_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut entity_map: ResMut<EntityObjMap>,
     pos_query: Query<(&Position, &Template)>,
     mut caster_query: Query<(&mut State, &mut Minions)>,
@@ -8189,9 +8603,27 @@ fn spell_raise_dead_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::SpellRaiseDeadEvent { corpse_id } => {
+                    if object_belongs_to_protected_run(*corpse_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) {
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                            if let Ok(mut event_executing) =
+                                event_executing_query.get_mut(caster_entity)
+                            {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpellRaiseDeadEvent {:?}", corpse_id);
                     events_to_remove.push(*map_event_id);
 
@@ -8248,10 +8680,19 @@ fn spell_raise_dead_event_system(
                         "Zombie".to_string()
                     };
 
+                    let run_owner = ids
+                        .get_player(map_event.obj_id)
+                        .and_then(|owner| PlayerId(owner).is_human().then_some(owner))
+                        .or_else(|| {
+                            run_spawned_objs.iter().find_map(|(player_id, object_ids)| {
+                                object_ids.contains(&map_event.obj_id).then_some(*player_id)
+                            })
+                        });
                     let event_type = GameEventType::SpawnNPC {
                         npc_type: zombie_type,
                         pos: *corpse_pos,
                         npc_id: Some(minion_id),
+                        run_owner,
                     };
 
                     let event_id = ids.new_map_event_id();
@@ -8295,6 +8736,8 @@ fn spell_raise_dead_event_system(
 fn spell_damage_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut query: Query<CombatSpellQuery>,
     mut map_events: ResMut<MapEvents>,
@@ -8306,9 +8749,27 @@ fn spell_damage_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::SpellDamageEvent { spell, target_id } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) {
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                            if let Ok(mut event_executing) =
+                                event_executing_query.get_mut(caster_entity)
+                            {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpellDamageEvent");
                     events_to_remove.push(*map_event_id);
 
@@ -8463,6 +8924,8 @@ fn broadcast_event_system(
 
 fn effect_expired_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut effect_query: Query<&mut Effects>,
@@ -8471,6 +8934,9 @@ fn effect_expired_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::EffectExpiredEvent { effect } => {
@@ -8499,6 +8965,8 @@ fn effect_expired_event_system(
 
 fn cooldown_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut event_executing_query: Query<&mut EventExecuting>,
@@ -8507,6 +8975,9 @@ fn cooldown_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::CooldownEvent { duration } => {
@@ -8546,6 +9017,7 @@ fn use_item_system(
     map: Res<Map>,
     resources: Res<Resources>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut plans: ResMut<Plans>,
     mut visible_events: ResMut<VisibleEvents>,
     mut map_events: ResMut<MapEvents>,
@@ -8566,6 +9038,11 @@ fn use_item_system(
                     item_id,
                     item_owner_id,
                 } => {
+                    if object_belongs_to_protected_run(*item_owner_id, &ids, &presence)
+                        || object_belongs_to_protected_run(map_event.obj_id, &ids, &presence)
+                    {
+                        continue;
+                    }
                     debug!("Processing UseItemEvent {:?}", item_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9103,10 +9580,12 @@ fn hero_auto_consume_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
+    presence: OptionalPlayerWorldPresence,
     mut hero_query: Query<
         (
             Entity,
             &Id,
+            Option<&PlayerId>,
             &State,
             &Inventory,
             &Thirst,
@@ -9118,9 +9597,25 @@ fn hero_auto_consume_system(
         With<SubclassHero>,
     >,
 ) {
-    for (entity, id, state, inventory, thirst, hunger, tired, last_combat_tick, event_executing) in
-        hero_query.iter_mut()
+    for (
+        entity,
+        id,
+        player_id,
+        state,
+        inventory,
+        thirst,
+        hunger,
+        tired,
+        last_combat_tick,
+        event_executing,
+    ) in hero_query.iter_mut()
     {
+        if player_id
+            .map(|player_id| is_owner_offline_protected(player_id, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         if *state != State::None
             || last_combat_tick
                 .map(|last_combat_tick| is_combat_locked(game_tick.0, last_combat_tick))
@@ -9211,6 +9706,7 @@ fn drink_eat_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -9226,6 +9722,9 @@ fn drink_eat_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::FindDrinkEvent { obj_id } => {
@@ -9583,6 +10082,8 @@ fn drink_eat_system(
 fn find_shelter_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut villager_query: Query<
@@ -9599,6 +10100,9 @@ fn find_shelter_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::FindShelterEvent { obj_id } => {
@@ -9674,6 +10178,7 @@ fn steal_spoil_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     clients: Res<Clients>,
     active_infos: Res<ActiveInfos>,
     templates: Res<Templates>,
@@ -9686,12 +10191,27 @@ fn steal_spoil_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             match &map_event.event_type {
                 VisibleEvent::SpoilEvent {
                     target_id,
                     target_pos,
                     item_type,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpoilEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9756,6 +10276,18 @@ fn steal_spoil_event_system(
                     target_pos,
                     item_types,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing StealEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9845,6 +10377,18 @@ fn steal_spoil_event_system(
                     target_id,
                     target_pos,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing TorchEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9953,6 +10497,7 @@ fn fishing_event_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     map: ResMut<Map>,
@@ -9964,6 +10509,9 @@ fn fishing_event_system(
     let mut events_to_remove = Vec::new();
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             match &map_event.event_type {
                 VisibleEvent::FishingEvent { obj_id } => {
                     debug!("Processing FishingEvent {:?}", obj_id);
@@ -10808,6 +11356,7 @@ fn sanctuary_login_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut login_checks: ResMut<SanctuaryLoginChecks>,
     mut hero_query: Query<(Entity, &Id, &PlayerId, &Position, &mut Effects), With<SubclassHero>>,
     monolith_query: Query<(&Id, &Position), With<Monolith>>,
@@ -10822,7 +11371,9 @@ fn sanctuary_login_system(
     let mut pending: Vec<(i32, i32)> = Vec::new();
 
     for (player_id, due_tick) in login_checks.drain(..) {
-        if due_tick <= now {
+        if is_player_offline_protected(player_id, &presence) {
+            pending.push((player_id, now.saturating_add(1)));
+        } else if due_tick <= now {
             due_player_ids.push(player_id);
         } else {
             pending.push((player_id, due_tick));
@@ -10935,6 +11486,32 @@ fn game_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            let protected_intro_event = match &game_event_type.event_type {
+                GameEventType::NecroEvent {
+                    necromancer_id,
+                    mausoleum_id,
+                    ..
+                } => necromancer_id
+                    .iter()
+                    .chain(mausoleum_id.iter())
+                    .any(|object_id| {
+                        initial_encounter_object_is_protected(
+                            *object_id,
+                            &extras.initial_encounter_state,
+                            &extras.presence,
+                        )
+                    }),
+                _ => false,
+            };
+            if protected_intro_event
+                || game_event_belongs_to_protected_run(
+                    &game_event_type.event_type,
+                    &ids,
+                    &extras.presence,
+                )
+            {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::Login { player_id } => {
@@ -11073,6 +11650,7 @@ fn game_event_system(
                     npc_type,
                     pos,
                     npc_id,
+                    run_owner,
                 } => {
                     debug!("Processing SpawnNPC");
                     events_to_remove.push(*event_id);
@@ -11104,6 +11682,14 @@ fn game_event_system(
                     }
 
                     let (entity, npc_id, _player_id, _pos) = result;
+
+                    if let Some(player_id) = run_owner {
+                        extras
+                            .run_spawned_objs
+                            .entry(*player_id)
+                            .or_default()
+                            .push(npc_id.0);
+                    }
 
                     // Create a new object event
                     commands.trigger(NewObj { entity: entity });
@@ -11586,13 +12172,17 @@ fn game_event_system(
 
 fn player_intro_state_system(
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
     }
 
-    for intro_entry in player_intro_state.values_mut() {
+    for (player_id, intro_entry) in player_intro_state.iter_mut() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
         if !intro_entry.danger_unlocked && game_tick.0 >= intro_entry.start_tick + 4800 {
             intro_entry.danger_unlocked = true;
         }
@@ -11609,6 +12199,7 @@ fn rat_event_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
@@ -11620,6 +12211,9 @@ fn rat_event_system(
     let mut food_items_stored = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
+        if object_belongs_to_protected_run(id.0, &ids, &presence) {
+            continue;
+        }
         // Skip players who have already triggered the tier 1 pest crisis
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.rat_spoilage {
@@ -11708,6 +12302,7 @@ fn rat_event_system(
 fn personal_crisis_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: OptionalPlayerWorldPresence,
     player_intro_state: Res<PlayerIntroState>,
     objectives: Res<Objectives>,
     mut settlement_crisis_state: ResMut<SettlementCrisisState>,
@@ -11780,6 +12375,10 @@ fn personal_crisis_system(
     }
 
     for (player_id, (valid_run, bound_monolith_id)) in hero_runs.iter() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
+
         let Some(intro) = player_intro_state.get(player_id) else {
             if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
                 advance_online_crisis_time(crisis, current_tick, false);
@@ -11851,7 +12450,8 @@ fn personal_crisis_system(
     // watermark up without crediting that interval, so a later recreation or
     // ECS repair cannot backfill missing-hero time.
     for (player_id, crisis) in settlement_crisis_state.iter_mut() {
-        if !hero_runs.contains_key(player_id) {
+        if !hero_runs.contains_key(player_id) && !is_player_offline_protected(*player_id, &presence)
+        {
             advance_online_crisis_time(crisis, current_tick, false);
         }
     }
@@ -12208,6 +12808,7 @@ fn personal_crisis_assault_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     map: Res<Map>,
     templates: Res<Templates>,
     (
@@ -12329,6 +12930,16 @@ fn personal_crisis_assault_system(
         let Some(crisis) = crisis_state.get_mut(&player_id) else {
             continue;
         };
+
+        // An active assault is committed world state and deliberately keeps
+        // running after an ordinary disconnect. Protection is only a launch
+        // barrier for the pre-active state; the presence reconciler repairs
+        // the impossible protected+active invariant separately.
+        if crisis.phase != CrisisPhase::AssaultActive
+            && is_player_offline_protected(player_id, &presence)
+        {
+            continue;
+        }
 
         match crisis.phase {
             CrisisPhase::AssaultReady => {
@@ -12648,6 +13259,7 @@ fn initial_encounter_system(
     mut player_intro_state: ResMut<PlayerIntroState>,
     mut intro_encounter_state: ResMut<IntroEncounterState>,
     objectives: Res<Objectives>,
+    presence: Res<PlayerWorldPresenceState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     dead_query: Query<&Id, With<StateDead>>,
     hero_query: Query<
@@ -12672,6 +13284,10 @@ fn initial_encounter_system(
         .collect();
 
     for (player_id, entry) in initial_encounter_state.iter_mut() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
+
         // True Death cleanup and encounter spawning can otherwise share an
         // Update. Since spawns are deferred, a newly queued hostile would not
         // be visible to that cleanup sweep and could survive at a recycled
@@ -12828,6 +13444,7 @@ fn wolf_pack_system(
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
@@ -12836,7 +13453,10 @@ fn wolf_pack_system(
         return;
     }
 
-    for (_id, player_id, pos) in hero_query.iter() {
+    for (id, player_id, pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
             continue;
         }
@@ -12938,6 +13558,7 @@ fn goblin_raid_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
@@ -12949,6 +13570,9 @@ fn goblin_raid_system(
     let mut gold_stored: HashMap<i32, (i32, Position, i32)> = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Skip players who have already triggered goblin raid
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.goblin_raid {
@@ -13027,6 +13651,9 @@ fn goblin_raid_system(
     // Fallback: force the raid if the player never stockpiled enough gold by the
     // deadline. Steal from a storage if the player has one, otherwise the hero.
     for (hero_id, player_id, hero_pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(hero_id, player_id, &presence) {
+            continue;
+        }
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.goblin_raid {
                 continue;
@@ -13120,6 +13747,7 @@ fn undead_incursion_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
@@ -13127,7 +13755,10 @@ fn undead_incursion_system(
         return;
     }
 
-    for (_id, player_id, pos) in hero_query.iter() {
+    for (id, player_id, pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Primary trigger at 3 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
@@ -13231,6 +13862,7 @@ fn goblin_pillager_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
@@ -13242,6 +13874,9 @@ fn goblin_pillager_system(
     let mut player_targets: HashMap<i32, (i32, Position)> = HashMap::new();
 
     for (id, player_id, pos) in storage_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Primary trigger at 5 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
@@ -13334,7 +13969,7 @@ fn nightly_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     clients: Res<Clients>,
-    player_intro_state: Res<PlayerIntroState>,
+    (player_intro_state, presence): (Res<PlayerIntroState>, Res<PlayerWorldPresenceState>),
     objectives: Res<Objectives>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
@@ -13358,6 +13993,9 @@ fn nightly_threat_system(
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
             continue;
         }
@@ -13780,7 +14418,7 @@ fn legendary_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
-    player_intro_state: Res<PlayerIntroState>,
+    (player_intro_state, presence): (Res<PlayerIntroState>, Res<PlayerWorldPresenceState>),
     hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
     structure_query: Query<(&Id, &PlayerId, &Position), With<ClassStructure>>,
     storage_query: Query<(&Id, &PlayerId, &Position, &Inventory), With<Storage>>,
@@ -13796,6 +14434,9 @@ fn legendary_threat_system(
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (_hero_id, player_id, hero_pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
         if player_day < LEGENDARY_RUMOR_DAY {
             continue;
@@ -13978,9 +14619,13 @@ fn legendary_death_tracking_system(
     mut objectives: ResMut<Objectives>,
     mut run_score_state: ResMut<RunScoreState>,
     mut legendary_threat_state: ResMut<LegendaryThreatState>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     for (id, follower, boss) in dead_query.iter() {
         if let Some(follower) = follower {
+            if is_player_offline_protected(follower.player_id, &presence) {
+                continue;
+            }
             let run_score = run_score_state
                 .entry(follower.player_id)
                 .or_insert_with(|| PlayerRunScore {
@@ -14013,6 +14658,9 @@ fn legendary_death_tracking_system(
         }
 
         if let Some(boss) = boss {
+            if is_player_offline_protected(boss.player_id, &presence) {
+                continue;
+            }
             let run_score =
                 run_score_state
                     .entry(boss.player_id)
@@ -14060,6 +14708,7 @@ fn legendary_death_tracking_system(
 fn run_score_kill_tracking_system(
     game_tick: Res<GameTick>,
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     dead_query: Query<
         (&Template, Option<&LastAttacker>),
         (
@@ -14079,6 +14728,9 @@ fn run_score_kill_tracking_system(
             continue;
         };
         if !player::is_player(player_id) {
+            continue;
+        }
+        if is_player_offline_protected(player_id, &presence) {
             continue;
         }
 
@@ -14142,6 +14794,7 @@ fn wildness_regen_system(
 
 fn wildness_reduction_on_enemy_death_system(
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map: ResMut<Map>,
     dead_query: Query<
         (&Position, Option<&LastAttacker>),
@@ -14164,6 +14817,7 @@ fn wildness_reduction_on_enemy_death_system(
             continue;
         };
         if !player::is_player(player_id)
+            || is_player_offline_protected(player_id, &presence)
             || !outside_weak_sanctuary_from_monolith_positions(*pos, &monolith_positions)
         {
             continue;
@@ -14226,6 +14880,7 @@ fn map_event_system(
     clients: Res<Clients>,
     hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut last_event_tick: Local<HashMap<i32, i32>>,
 ) {
     // Check every 100 ticks (10 seconds)
@@ -14236,6 +14891,9 @@ fn map_event_system(
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
 
     for (player_id, _pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let last_tick = last_event_tick.get(&player_id.0).copied().unwrap_or(0);
 
         // Don't send events too frequently — at least 600 ticks (1 minute) between events
@@ -14271,6 +14929,7 @@ fn objectives_system(
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut objectives: ResMut<Objectives>,
     mut run_score_state: ResMut<RunScoreState>,
 ) {
@@ -14282,6 +14941,9 @@ fn objectives_system(
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (player_id, hero_pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
         let player_structures: Vec<String> = structure_query
             .iter()
@@ -14905,6 +15567,8 @@ fn weather_effects_system(
     game_tick: Res<GameTick>,
     weather_areas: Res<WeatherAreas>,
     clients: Res<Clients>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut hero_query: Query<
         (
             Entity,
@@ -14935,6 +15599,9 @@ fn weather_effects_system(
 
     // Process hero weather effects
     for (entity, id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
             continue;
         };
@@ -15014,7 +15681,10 @@ fn weather_effects_system(
     }
 
     // Storm damage to structures
-    for (_id, _player_id, pos, mut stats, _template) in structure_query.iter_mut() {
+    for (id, _player_id, pos, mut stats, _template) in structure_query.iter_mut() {
+        if object_belongs_to_protected_run(id.0, &ids, &presence) {
+            continue;
+        }
         let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
             continue;
         };
@@ -15034,7 +15704,10 @@ fn weather_effects_system(
 
     // Rain boosts crop growth: reduce remaining growth time
     if weather_areas.iter().any(|w| w.weather.is_rainy()) {
-        for (_structure_id, crop) in crops.iter_mut() {
+        for (structure_id, crop) in crops.iter_mut() {
+            if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                continue;
+            }
             // Boost growth by reducing stage_end (effectively 50% faster when checked every 50 ticks)
             if crop.stage != CropStages::Mature && crop.stage != CropStages::Dead {
                 // Shave 25 ticks off remaining time per check (50% boost over natural 50-tick intervals)
@@ -15053,6 +15726,7 @@ fn morale_system(
     templates: Res<Templates>,
     mut map_events: ResMut<MapEvents>,
     weather_areas: Res<WeatherAreas>,
+    presence: Res<PlayerWorldPresenceState>,
     mut villager_query: Query<
         (&Id, &PlayerId, &Position, &mut Morale, Option<&Sheltered>),
         With<SubclassVillager>,
@@ -15069,6 +15743,9 @@ fn morale_system(
     }
 
     for (id, player_id, pos, mut morale, sheltered) in villager_query.iter_mut() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let mut new_morale: f32 = 50.0; // Base morale
 
         // +20 if sheltered
@@ -15197,6 +15874,7 @@ fn victory_check_system(
     objectives: Res<Objectives>,
     monolith_investigation: Res<MonolithInvestigation>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut victory_state: ResMut<VictoryState>,
 ) {
     // Check every 200 ticks (20 seconds)
@@ -15205,6 +15883,9 @@ fn victory_check_system(
     }
 
     for (player_id, _pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let victory = victory_state
             .entry(player_id.0)
             .or_insert_with(PlayerVictory::default);
@@ -15671,13 +16352,21 @@ fn resurrect_system(
 fn state_change_observer(
     state_change: On<StateChange>,
     game_tick: Res<GameTick>,
+    presence: OptionalPlayerWorldPresence,
     mut visible_events: ResMut<VisibleEvents>,
-    mut query: Query<(&Id, &mut State)>,
+    mut query: Query<(&Id, Option<&PlayerId>, &mut State)>,
 ) {
-    let Ok((id, mut state)) = query.get_mut(state_change.entity) else {
+    let Ok((id, player_id, mut state)) = query.get_mut(state_change.entity) else {
         error!("Query failed to find entity {:?}", state_change.entity);
         return;
     };
+
+    if player_id
+        .map(|player_id| is_owner_offline_protected(player_id, &presence))
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     *state = state_change.new_state;
 
@@ -15871,6 +16560,9 @@ fn remove_obj_observer(
     mut commands: Commands,
     mut entity_map: ResMut<EntityObjMap>,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     mut visible_events: ResMut<VisibleEvents>,
     query: Query<(&Id, &Position)>,
 ) {
@@ -15878,6 +16570,12 @@ fn remove_obj_observer(
         error!("Query failed to find entity {:?}", remove_obj.entity);
         return;
     };
+
+    if object_belongs_to_protected_run(id.0, &ids, &presence)
+        || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+    {
+        return;
+    }
 
     // Guard against double-removal: if the obj is already gone from the entity map,
     // a previous RemoveObj observer already processed this entity this frame.
@@ -16018,13 +16716,22 @@ fn start_build_observer(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    mut query: Query<(&Position, &State, &Template, &mut Inventory, &Assignments)>,
+    mut query: Query<(
+        &PlayerId,
+        &Position,
+        &State,
+        &Template,
+        &mut Inventory,
+        &Assignments,
+    )>,
     worker_query: Query<(&Position, &State)>,
 ) {
     info!("Starting build observer");
     let Ok((
+        structure_player_id,
         structure_pos,
         structure_state,
         structure_template_name,
@@ -16035,6 +16742,10 @@ fn start_build_observer(
         info!("Query failed to find entity {:?}", start_build.entity);
         return;
     };
+
+    if is_owner_offline_protected(structure_player_id, &presence) {
+        return;
+    }
 
     let structure_template = templates
         .obj_templates
@@ -16120,11 +16831,13 @@ fn transfer_all_resources_observer(
     commands: Commands,
     clients: Res<Clients>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     templates: Res<Templates>,
-    mut inventory_query: Query<(&Template, &mut Inventory)>,
+    mut inventory_query: Query<(&PlayerId, &Template, &mut Inventory)>,
 ) {
-    let Ok([(_source_template, mut source_inventory), (target_template, mut target_inventory)]) =
-        inventory_query.get_many_mut([event.entity, event.target_entity])
+    let Ok(
+        [(source_player_id, _source_template, mut source_inventory), (target_player_id, target_template, mut target_inventory)],
+    ) = inventory_query.get_many_mut([event.entity, event.target_entity])
     else {
         error!(
             "Query failed to find inventories for entities {:?}",
@@ -16132,6 +16845,12 @@ fn transfer_all_resources_observer(
         );
         return;
     };
+
+    if is_owner_offline_protected(source_player_id, &presence)
+        || is_owner_offline_protected(target_player_id, &presence)
+    {
+        return;
+    }
 
     let target_capacity = templates
         .obj_templates
@@ -16154,6 +16873,7 @@ fn food_poisoning_effect_observer(
     event: On<FoodPoisoningEffect>,
     mut commands: Commands,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&PlayerId, &Id, &Position, &mut Effects)>,
 ) {
     let food_poisoning_value = match event.food_poisoning_attr {
@@ -16167,11 +16887,18 @@ fn food_poisoning_effect_observer(
             return;
         };
 
+        if is_owner_offline_protected(player_id, &presence) {
+            return;
+        }
+
         effects.0.insert(Effect::FoodPoisoning, (10, 1.0, 1));
 
-        commands.entity(event.entity).insert(EffectAdded {
-            effect: Effect::FoodPoisoning,
-        });
+        commands
+            .entity(event.entity)
+            .remove::<EffectAddedProcessed>()
+            .insert(EffectAdded {
+                effect: Effect::FoodPoisoning,
+            });
 
         let response_packet = ResponsePacket::GainedEffect {
             id: id.0,
@@ -16295,9 +17022,11 @@ fn start_upgrade_observer(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut query: Query<(
+        &PlayerId,
         &Position,
         &State,
         &Template,
@@ -16309,6 +17038,7 @@ fn start_upgrade_observer(
 ) {
     info!("Starting upgrade observer");
     let Ok((
+        structure_player_id,
         structure_pos,
         structure_state,
         structure_template_name,
@@ -16320,6 +17050,10 @@ fn start_upgrade_observer(
         info!("Query failed to find entity {:?}", start_upgrade.entity);
         return;
     };
+
+    if is_owner_offline_protected(structure_player_id, &presence) {
+        return;
+    }
 
     let selected_upgrade_structure_template =
         templates.obj_templates.get(selected_upgrade.0.clone());
@@ -16404,6 +17138,7 @@ fn start_work_observer(
     start_work: On<StartWork>,
     mut commands: Commands,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
@@ -16415,6 +17150,12 @@ fn start_work_observer(
     mut active_task_query: Query<&mut ActiveTask>,
 ) {
     info!("Processing StartWork");
+
+    if object_belongs_to_protected_run(start_work.worker_id, &ids, &presence)
+        || object_belongs_to_protected_run(start_work.structure_id, &ids, &presence)
+    {
+        return;
+    }
 
     // Get player id from worker
     let Some(player_worker_id) = ids.get_player(start_work.worker_id) else {
@@ -16755,6 +17496,7 @@ fn remove_worker_from_work_queue_observer(
 
 fn hero_dead_system(
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut player_stats: ResMut<PlayerStats>,
     entity_map: Res<EntityObjMap>,
     hero_query: Query<
@@ -16764,6 +17506,9 @@ fn hero_dead_system(
     monolith_inventory_query: Query<&Inventory, With<Monolith>>,
 ) {
     for (player_id, id, name, skills, bound_monolith) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         info!("Hero dead: {:?}", player_id.0);
         let player_stat = player_stats.entry(player_id.0).or_insert(PlayerStat {
             player_id: player_id.0,
@@ -16813,7 +17558,7 @@ fn true_death_system(
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
     mut explored_map: ResMut<ExploredMap>,
-    mut map_events: ResMut<MapEvents>,
+    (mut map_events, mut game_events): (ResMut<MapEvents>, ResMut<GameEvents>),
     player_stats: Res<PlayerStats>,
     (
         mut crisis_state,
@@ -17088,10 +17833,13 @@ fn true_death_system(
                 );
             }
 
-            // Transfer villagers to merchant player
+            // Transfer villagers to merchant player. Their old-run queued work
+            // is cleared below even though the entities themselves survive.
+            let mut ended_run_villager_ids = Vec::new();
             for (villager_entity, villager_player_id, villager_id, _) in villager_query.iter() {
                 if villager_player_id.0 == player_id.0 {
                     info!("Transferring villager: {:?}", villager_id.0);
+                    ended_run_villager_ids.push(villager_id.0);
 
                     // Add Update Event for Player Id change
                     commands.trigger(UpdateObj {
@@ -17139,12 +17887,29 @@ fn true_death_system(
             // hero) — an in-flight MoveEvent applying to a despawned entity
             // panics when its completion command runs.
             removed_obj_ids.push(id.0);
-            map_events.retain(|_, map_event| !removed_obj_ids.contains(&map_event.obj_id));
-            clear_assault_target_references(
-                &removed_obj_ids.iter().copied().collect::<HashSet<_>>(),
-                &mut commands,
-                &target_query,
-            );
+            let ended_run_object_ids = removed_obj_ids
+                .iter()
+                .copied()
+                .chain(run_objs.iter().copied())
+                .chain(ended_run_villager_ids.iter().copied())
+                .collect::<HashSet<_>>();
+            game_events.retain(|_, event| {
+                !game_event_belongs_to_ended_run(
+                    &event.event_type,
+                    player_id.0,
+                    &ended_run_object_ids,
+                    &entity_map,
+                    &map_events,
+                )
+            });
+            map_events.retain(|_, map_event| {
+                !ended_run_object_ids.contains(&map_event.obj_id)
+                    && !visible_event_references_ended_run(
+                        &map_event.event_type,
+                        &ended_run_object_ids,
+                    )
+            });
+            clear_assault_target_references(&ended_run_object_ids, &mut commands, &target_query);
 
             // The next run bound to this monolith must get the same first-death
             // safety net: restore its Soulshards to the starting amount.
@@ -17208,12 +17973,20 @@ fn state_dead_system(
 fn remove_dead_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     state_dead_query: Query<(Entity, &Id, &Position, &Inventory, &StateDead)>,
     mut map_events: ResMut<MapEvents>,
 ) {
     // Every 10 ticks
     if (game_tick.0 % 10) == 0 {
         for (entity, id, pos, inventory, dead_state) in state_dead_query.iter() {
+            if object_belongs_to_protected_run(id.0, &ids, &presence)
+                || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+            {
+                continue;
+            }
             if (game_tick.0 - dead_state.dead_at) > 500 {
                 // Remove obj observer event
                 commands.trigger(RemoveObj { entity: entity });
@@ -17232,6 +18005,7 @@ fn despawn_wandering_npc_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     wandering_behavior_query: Query<(Entity, &Id, &Position, &WanderingBehavior)>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -17240,6 +18014,9 @@ fn despawn_wandering_npc_system(
     if (game_tick.0 % 100) == 0 {
         trace!("Attempting to despawn NPCs that have been wandering for 10 moves...");
         for (entity, id, pos, wandering_behavior) in wandering_behavior_query.iter() {
+            if object_belongs_to_protected_run(id.0, &ids, &presence) {
+                continue;
+            }
             if wandering_behavior.num_moves > 10 {
                 trace!("Despawning NPC: {:?} due to excess wandering.", id.0);
 
@@ -17317,6 +18094,7 @@ fn update_game_tick(
     clients: Res<Clients>,
     ids: Res<Ids>,
     active_infos: Res<ActiveInfos>,
+    presence: Res<PlayerWorldPresenceState>,
     mut attrs: Query<(Entity, &mut Thirst, &mut Hunger, &mut Tired, &mut Heat)>,
     obj_query: Query<(&Id, &PlayerId, &Position)>,
     dehydrated: Query<&Dehydrated>,
@@ -17333,6 +18111,10 @@ fn update_game_tick(
             error!("No obj found for entity: {:?}", entity);
             continue;
         };
+
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
 
         let current_thirst_level = thirst.num_to_string();
         let current_hunger_level = hunger.num_to_string();
@@ -17501,13 +18283,25 @@ fn update_game_tick(
 
 fn stamina_recovery_system(
     game_tick: Res<GameTick>,
-    mut stats_query: Query<(&mut Stats, &LastCombatTick), Without<StateDead>>,
+    presence: OptionalPlayerWorldPresence,
+    mut stats_query: Query<
+        (Option<&Id>, Option<&PlayerId>, &mut Stats, &LastCombatTick),
+        Without<StateDead>,
+    >,
 ) {
     if game_tick.0 % TICKS_PER_SEC != 0 {
         return;
     }
 
-    for (mut stats, last_combat_tick) in stats_query.iter_mut() {
+    for (id, player_id, mut stats, last_combat_tick) in stats_query.iter_mut() {
+        if id
+            .zip(player_id)
+            .map(|(id, player_id)| entity_belongs_to_protected_run(id, player_id, &presence))
+            .or_else(|| player_id.map(|player_id| is_owner_offline_protected(player_id, &presence)))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
         if let (Some(stamina), Some(base_stamina)) = (stats.stamina, stats.base_stamina) {
             if stamina < base_stamina {
@@ -17573,9 +18367,14 @@ fn merchant_sailing_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant)>,
 ) {
     for (entity, mut obj, merchant) in merchant_query.iter_mut() {
+        if initial_encounter_object_is_protected(obj.id.0, &initial_encounter_state, &presence) {
+            continue;
+        }
         let dest = match merchant.sail_state {
             MerchantSailState::SailingToLanding => merchant.landing_at,
             MerchantSailState::SailingToEmpire => merchant.trade_port,
@@ -17670,6 +18469,7 @@ fn merchant_arrival_system(
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
     initial_encounter_state: Res<InitialEncounterState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut merchant_query: Query<(&Id, &mut Merchant, &Position, &mut Inventory)>,
 ) {
     if game_tick.0 % 10 != 0 {
@@ -17677,6 +18477,9 @@ fn merchant_arrival_system(
     }
 
     for (id, mut merchant, pos, mut inventory) in merchant_query.iter_mut() {
+        if initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence) {
+            continue;
+        }
         match merchant.sail_state {
             MerchantSailState::SailingToLanding if *pos == merchant.landing_at => {
                 merchant.sail_state = MerchantSailState::AtLanding;
@@ -17876,6 +18679,7 @@ fn needs_warning_stage(
 fn hero_needs_warning_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     dehydrated_query: Query<(&PlayerId, &Dehydrated), (With<SubclassHero>, Without<StateDead>)>,
     starving_query: Query<(&PlayerId, &Starving), (With<SubclassHero>, Without<StateDead>)>,
     exhausted_query: Query<(&PlayerId, &Exhausted), (With<SubclassHero>, Without<StateDead>)>,
@@ -17902,6 +18706,9 @@ fn hero_needs_warning_system(
     let mut warnings: Vec<(i32, &str)> = Vec::new();
 
     for (player_id, dehydrated) in dehydrated_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             dehydrated.at_tick,
@@ -17914,6 +18721,9 @@ fn hero_needs_warning_system(
     }
 
     for (player_id, starving) in starving_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             starving.at_tick,
@@ -17926,6 +18736,9 @@ fn hero_needs_warning_system(
     }
 
     for (player_id, exhausted) in exhausted_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             exhausted.at_tick,
@@ -17950,9 +18763,16 @@ fn dehydrated_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut dehydrated_query: Query<(Entity, &Id, &mut State, &Dehydrated), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut dehydrated_query: Query<
+        (Entity, &Id, &PlayerId, &mut State, &Dehydrated),
+        Without<StateDead>,
+    >,
 ) {
-    for (entity, id, mut state, dehydrated) in dehydrated_query.iter_mut() {
+    for (entity, id, player_id, mut state, dehydrated) in dehydrated_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - dehydrated.at_tick > DEHYDRATED_DEATH_AT {
             // Add state dead event
             debug!(
@@ -17985,9 +18805,13 @@ fn starving_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut starving_query: Query<(Entity, &Id, &mut State, &Starving), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut starving_query: Query<(Entity, &Id, &PlayerId, &mut State, &Starving), Without<StateDead>>,
 ) {
-    for (entity, id, mut state, starving) in starving_query.iter_mut() {
+    for (entity, id, player_id, mut state, starving) in starving_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - starving.at_tick > STARVING_DEATH_AT {
             debug!(
                 "Starving: at tick: {:?} Adding state dead event for {:?}",
@@ -18019,9 +18843,16 @@ fn exhausted_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut exhausted_query: Query<(Entity, &Id, &mut State, &Exhausted), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut exhausted_query: Query<
+        (Entity, &Id, &PlayerId, &mut State, &Exhausted),
+        Without<StateDead>,
+    >,
 ) {
-    for (entity, id, mut state, exhausted) in exhausted_query.iter_mut() {
+    for (entity, id, player_id, mut state, exhausted) in exhausted_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - exhausted.at_tick > EXHAUSTED_DEATH_AT {
             debug!(
                 "Exhausted: at tick: {:?} Adding state dead event for {:?}",
@@ -18053,10 +18884,51 @@ fn burning_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut burning_query: Query<(Entity, &Id, &mut State, &mut Stats, &Effects), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    mut burning_query: Query<
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &mut State,
+            &mut Stats,
+            &Effects,
+            Option<&LegendaryFollower>,
+            Option<&LegendaryBoss>,
+            Option<&SanctuaryHunter>,
+            Option<&CrisisAssaultUnit>,
+        ),
+        Without<StateDead>,
+    >,
 ) {
     if game_tick.0 % 10 == 0 {
-        for (entity, id, mut state, mut stats, effects) in burning_query.iter_mut() {
+        for (
+            entity,
+            id,
+            player_id,
+            mut state,
+            mut stats,
+            effects,
+            legendary_follower,
+            legendary_boss,
+            sanctuary_hunter,
+            crisis_assault,
+        ) in burning_query.iter_mut()
+        {
+            if entity_belongs_to_protected_run(id, player_id, &presence)
+                || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+                || (crisis_assault.is_none()
+                    && attributed_threat_owner(
+                        legendary_follower,
+                        legendary_boss,
+                        sanctuary_hunter,
+                    )
+                    .map(|owner| is_player_offline_protected(owner, &presence))
+                    .unwrap_or(false))
+            {
+                continue;
+            }
             if effects.has(Effect::Burning) {
                 stats.hp -= 1;
                 commands
@@ -18130,9 +19002,16 @@ fn effect_added_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
-    mut query: Query<(Entity, &PlayerId, &mut Stats, &EffectAdded), Added<EffectAdded>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut query: Query<
+        (Entity, &Id, &PlayerId, &mut Stats, &EffectAdded),
+        Without<EffectAddedProcessed>,
+    >,
 ) {
-    for (entity, player_id, mut stats, effect_added) in query.iter_mut() {
+    for (entity, id, player_id, mut stats, effect_added) in query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         info!("Effect added: {:?}", player_id.0);
         let effect = effect_added.effect.clone();
 
@@ -18156,6 +19035,8 @@ fn effect_added_system(
             let modifier = 1.0 + stamina_modifier;
             stats.stamina = Some((stats.stamina.unwrap() as f32 * modifier) as i32);
         }
+
+        commands.entity(entity).try_insert(EffectAddedProcessed);
     }
 }
 
@@ -18164,6 +19045,7 @@ pub fn item_duration_system(
     game_tick: ResMut<GameTick>,
     clients: Res<Clients>,
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     active_infos: Res<ActiveInfos>,
     entity_map: Res<EntityObjMap>,
@@ -18171,6 +19053,9 @@ pub fn item_duration_system(
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
         for (player_id, id, mut inventory) in query.iter_mut() {
+            if entity_belongs_to_protected_run(id, player_id, &presence) {
+                continue;
+            }
             let expired_items = inventory.find_expired_items(game_tick.0);
 
             for item in expired_items {
@@ -18216,6 +19101,7 @@ pub fn fuel_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: ResMut<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -18235,6 +19121,9 @@ pub fn fuel_system(
 ) {
     if game_tick.0 % (TICKS_PER_SEC * 10) == 0 {
         for (entity, player_id, id, pos, class, template, mut inventory) in obj_query.iter_mut() {
+            if is_owner_offline_protected(player_id, &presence) {
+                continue;
+            }
             info!("Fueling campfire with fuel");
 
             // Remove wood from tent

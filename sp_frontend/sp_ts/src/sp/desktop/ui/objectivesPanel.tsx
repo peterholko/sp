@@ -12,6 +12,18 @@ import {
   receiveCrisisStatus,
   shouldRenderSurvivalThread,
 } from "../../core/crisisStatus";
+import {
+  SAFE_LOGOUT_CONDITIONS,
+  SafeLogoutStatusPacket,
+  SafeLogoutStatusView,
+  SafeLogoutUiState,
+  beginSafeLogoutCancellation,
+  beginSafeLogoutRequest,
+  clearSafeLogoutStatus,
+  receiveSafeLogoutStatus,
+  safeLogoutStatusView,
+  shouldRenderSafeLogout,
+} from "../../core/safeLogoutStatus";
 
 const COMPACT_DESKTOP_MAX_WIDTH = 1280;
 const DESKTOP_THREAD_BOTTOM = '145px';
@@ -50,7 +62,7 @@ interface LegendaryThreat {
   captains_defeated: number;
 }
 
-interface ObjectivesState extends CrisisUiState {
+interface ObjectivesState extends CrisisUiState, SafeLogoutUiState {
   build_campfire: boolean;
   build_3_structures: boolean;
   recruit_villager: boolean;
@@ -82,6 +94,8 @@ const crisisToneColor: Record<CrisisTone, string> = {
 
 export default class ObjectivesPanel extends React.Component<{}, ObjectivesState> {
   private observedHeroId: string | null = null;
+  private safeLogoutRequestLocked = false;
+  private safeLogoutCancelLocked = false;
 
   constructor(props) {
     super(props);
@@ -96,6 +110,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       discoveryEvent: null,
       crisisStatus: null,
       previousCrisisPhase: null,
+      safeLogoutStatus: null,
+      safeLogoutRequestInFlight: false,
+      safeLogoutCancelInFlight: false,
       viewportWidth: typeof window === 'undefined' ? 0 : window.innerWidth,
       // QW1: start the Survival Thread expanded so the tutorial guidance is
       // visible by default on compact desktops; the player can still collapse it.
@@ -104,6 +121,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     this.handleResize = this.handleResize.bind(this);
     this.toggleCompactExpanded = this.toggleCompactExpanded.bind(this);
+    this.handleBeginSafeLogout = this.handleBeginSafeLogout.bind(this);
+    this.handleCancelSafeLogout = this.handleCancelSafeLogout.bind(this);
   }
 
   componentDidMount() {
@@ -112,6 +131,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.on(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
     Global.gameEmitter.on(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_STATUS, this.handleSafeLogoutStatus, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_RESET, this.handleSafeLogoutReset, this);
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
@@ -128,6 +149,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.off(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
     Global.gameEmitter.off(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_STATUS, this.handleSafeLogoutStatus, this);
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_RESET, this.handleSafeLogoutReset, this);
     Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
@@ -176,9 +199,88 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.setState((state) => receiveCrisisStatus(state, message));
   }
 
+  handleSafeLogoutStatus(message: SafeLogoutStatusPacket) {
+    const view = safeLogoutStatusView(message);
+    const keepRequestLocked = Boolean(
+      this.safeLogoutRequestLocked
+      && view
+      && view.state === 'online'
+      && view.canRequest
+      && !view.reason,
+    );
+    const keepCancelLocked = Boolean(
+      this.safeLogoutCancelLocked
+      && view
+      && view.pending,
+    );
+    this.safeLogoutRequestLocked = keepRequestLocked;
+    this.safeLogoutCancelLocked = keepCancelLocked;
+    const next = {
+      ...receiveSafeLogoutStatus(message),
+      safeLogoutRequestInFlight: keepRequestLocked,
+      safeLogoutCancelInFlight: keepCancelLocked,
+    };
+    this.setState((state) => ({
+      ...next,
+      compactExpanded: Boolean(
+        view
+        && (view.pending || view.protected || view.reason)
+      ) ? true : state.compactExpanded,
+    }));
+  }
+
+  handleSafeLogoutReset() {
+    this.safeLogoutRequestLocked = false;
+    this.safeLogoutCancelLocked = false;
+    this.setState(clearSafeLogoutStatus());
+  }
+
+  handleBeginSafeLogout() {
+    if (this.safeLogoutRequestLocked) {
+      return;
+    }
+
+    const current: SafeLogoutUiState = this.state;
+    const next = beginSafeLogoutRequest(current);
+    if (next === current) {
+      return;
+    }
+
+    this.safeLogoutRequestLocked = true;
+    if (!Global.network || !Global.network.sendRequestSafeLogout()) {
+      this.safeLogoutRequestLocked = false;
+      return;
+    }
+    this.setState(next);
+  }
+
+  handleCancelSafeLogout() {
+    if (this.safeLogoutCancelLocked) {
+      return;
+    }
+
+    const current: SafeLogoutUiState = this.state;
+    const next = beginSafeLogoutCancellation(current);
+    if (next === current) {
+      return;
+    }
+
+    this.safeLogoutCancelLocked = true;
+    if (!Global.network || !Global.network.sendCancelSafeLogout()) {
+      this.safeLogoutCancelLocked = false;
+      return;
+    }
+    this.setState(next);
+  }
+
   handleRunReset() {
     this.observedHeroId = null;
-    this.setState((state) => clearCrisisStatus(state));
+    this.safeLogoutRequestLocked = false;
+    this.safeLogoutCancelLocked = false;
+    this.setState((state) => ({
+      ...clearCrisisStatus(state),
+      ...clearSafeLogoutStatus(),
+    }));
   }
 
   handleHeroInit(heroId) {
@@ -188,7 +290,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     // auto-expansion. A recreated run receives a different hero id and clears
     // any locally retained snapshot while the authoritative packet is resent.
     if (this.observedHeroId !== null && this.observedHeroId !== nextHeroId) {
-      this.setState((state) => clearCrisisStatus(state));
+      this.safeLogoutRequestLocked = false;
+      this.safeLogoutCancelLocked = false;
+      this.setState((state) => ({
+        ...clearCrisisStatus(state),
+        ...clearSafeLogoutStatus(),
+      }));
     }
 
     this.observedHeroId = nextHeroId;
@@ -416,6 +523,134 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     );
   }
 
+  renderSafeLogoutCard(
+    safeLogout: SafeLogoutStatusView,
+    bodyStyle: React.CSSProperties,
+    labelStyle: React.CSSProperties,
+  ) {
+    const pending = safeLogout.pending;
+    const protectedStatus = safeLogout.protected;
+    const accent = protectedStatus ? '#78b978' : pending ? '#e2bd67' : '#8fb7d9';
+    const cardStyle: React.CSSProperties = {
+      border: `1px solid ${accent}`,
+      borderLeft: `3px solid ${accent}`,
+      borderRadius: '3px',
+      background: 'rgba(255,255,255,0.035)',
+      padding: '8px',
+      marginBottom: '8px',
+      boxSizing: 'border-box',
+    };
+    const headingStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '12px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+      marginBottom: '4px',
+    };
+    const countdownStyle: React.CSSProperties = {
+      color: '#f2d27a',
+      fontFamily: 'Verdana',
+      fontSize: '18px',
+      fontWeight: 'bold',
+      lineHeight: 1.25,
+      margin: '6px 0',
+      textAlign: 'center',
+    };
+    const contractStyle: React.CSSProperties = {
+      ...labelStyle,
+      color: '#c9aa71',
+      marginTop: '6px',
+    };
+    const buttonStyle: React.CSSProperties = {
+      width: '100%',
+      minHeight: '32px',
+      marginTop: '7px',
+      padding: '6px 9px',
+      border: `1px solid ${accent}`,
+      borderRadius: '3px',
+      background: 'rgba(20, 24, 28, 0.92)',
+      color: '#f2e7cf',
+      cursor: 'pointer',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      fontWeight: 'bold',
+      whiteSpace: 'normal',
+    };
+    const disabledButtonStyle: React.CSSProperties = {
+      ...buttonStyle,
+      borderColor: '#5c6268',
+      color: '#92979c',
+      cursor: 'not-allowed',
+    };
+    const requestDisabled = !safeLogout.canRequest || this.state.safeLogoutRequestInFlight;
+    const cancelDisabled = !safeLogout.canCancel || this.state.safeLogoutCancelInFlight;
+
+    return (
+      <section
+        style={cardStyle}
+        role="region"
+        aria-label="Safe Logout status"
+        aria-labelledby="safe-logout-title"
+      >
+        <div id="safe-logout-title" style={headingStyle}>
+          {protectedStatus ? 'Settlement Protected' : 'Safe Logout'}
+        </div>
+
+        <div
+          id="safe-logout-message"
+          style={bodyStyle}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {safeLogout.message}
+        </div>
+
+        {safeLogout.state === 'online' && safeLogout.canRequest && (
+          <div style={labelStyle}>Protect your settlement before ending this session.</div>
+        )}
+
+        {pending && (
+          <div style={countdownStyle} aria-live="polite" aria-atomic="true">
+            {safeLogout.countdownLabel || 'Countdown updating…'}
+          </div>
+        )}
+
+        {safeLogout.state === 'online' && !safeLogout.activeAssault && (
+          <div id="safe-logout-conditions" style={contractStyle}>{SAFE_LOGOUT_CONDITIONS}</div>
+        )}
+
+        {safeLogout.state === 'online' && !safeLogout.activeAssault && (
+          <button
+            type="button"
+            style={requestDisabled ? disabledButtonStyle : buttonStyle}
+            onClick={this.handleBeginSafeLogout}
+            disabled={requestDisabled}
+            aria-label="Begin Safe Logout countdown"
+            aria-describedby="safe-logout-message safe-logout-conditions"
+            title={requestDisabled ? safeLogout.message : 'Begin the server-authoritative Safe Logout countdown'}
+          >
+            {this.state.safeLogoutRequestInFlight ? 'Requesting…' : 'Begin Safe Logout'}
+          </button>
+        )}
+
+        {pending && (
+          <button
+            type="button"
+            style={cancelDisabled ? disabledButtonStyle : buttonStyle}
+            onClick={this.handleCancelSafeLogout}
+            disabled={cancelDisabled}
+            aria-label="Cancel Safe Logout countdown"
+            title="Cancel Safe Logout"
+          >
+            {this.state.safeLogoutCancelInFlight ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
+      </section>
+    );
+  }
+
   render() {
     const packetObjectives = this.state.objectiveState && this.state.objectiveState.objectives
       ? this.state.objectiveState.objectives
@@ -423,11 +658,15 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     const objectives: ObjectiveProgress[] = packetObjectives || this.legacyObjectives();
     const activeObjective = this.activeObjective(objectives);
     const crisis = crisisStatusView(this.state.crisisStatus);
+    const safeLogout = safeLogoutStatusView(this.state.safeLogoutStatus);
 
     // Threat Pressure and Discovery sections were intentionally removed from the
     // Survival Thread (too wordy for players). The data still arrives over the
     // wire and the handlers/state remain, so they can be re-added later.
-    if (!shouldRenderSurvivalThread(Boolean(activeObjective), this.state.crisisStatus)) {
+    if (
+      !shouldRenderSurvivalThread(Boolean(activeObjective), this.state.crisisStatus)
+      && !shouldRenderSafeLogout(this.state.safeLogoutStatus)
+    ) {
       return null;
     }
 
@@ -569,13 +808,20 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       flex: '0 0 auto',
     };
 
+    const safeLogoutCompactSummary = safeLogout
+      ? safeLogout.pending
+        ? safeLogout.countdownLabel || 'Safe Logout pending'
+        : safeLogout.inOwnSanctuary
+          ? 'Safe Logout available'
+          : safeLogout.reasonMessage || ''
+      : '';
     const compactSummary = crisis && crisis.urgent
       ? crisis.compactLabel || crisis.phaseLabel
-      : activeObjective
-        ? activeObjective.title
-        : crisis
-          ? crisis.title
-          : '';
+      : safeLogout && safeLogout.pending
+        ? safeLogoutCompactSummary
+        : activeObjective
+          ? activeObjective.title
+          : safeLogoutCompactSummary || (crisis ? crisis.title : '');
 
     const objectiveRowStyle = (state: string): React.CSSProperties => ({
       display: 'flex',
@@ -618,6 +864,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
         {(!compactDesktop || compactExpanded) && crisis &&
           this.renderCrisisCard(crisis, bodyStyle, labelStyle)}
+
+        {(!compactDesktop || compactExpanded) && safeLogout
+          && shouldRenderSafeLogout(this.state.safeLogoutStatus)
+          && this.renderSafeLogoutCard(safeLogout, bodyStyle, labelStyle)}
 
         {(!compactDesktop || compactExpanded) && activeObjective &&
           <div>
