@@ -317,6 +317,25 @@ fn remove_explore_negative_effect_only_clears_present_effect() {
 }
 
 #[test]
+fn successful_healing_consumables_are_removed_exactly_once() {
+    let potion = consumable_item(7, 42, "Health Potion", item::POTION, AttrKey::Healing, 10.0);
+    let mut inventory = Inventory {
+        owner: 42,
+        items: vec![potion],
+    };
+
+    assert!(!consume_successful_healing_item(&mut inventory, 7, false));
+    assert_eq!(inventory.get_by_id(7).map(|item| item.quantity), Some(1));
+
+    assert!(consume_successful_healing_item(&mut inventory, 7, true));
+    assert!(inventory.get_by_id(7).is_none());
+
+    // A duplicate completion cannot consume or recreate an already-used item.
+    assert!(!consume_successful_healing_item(&mut inventory, 7, true));
+    assert!(inventory.items.is_empty());
+}
+
+#[test]
 fn negative_explore_effects_include_panel_display_attrs() {
     let mut templates = Templates::from_obj_templates(vec![]);
     templates.effect_templates.load(vec![
@@ -1109,6 +1128,218 @@ fn idle_rested_hero_with_bedroll_does_not_sleep() {
 }
 
 #[test]
+fn due_consumption_events_fail_closed_without_event_executing() {
+    let mut app = App::new();
+    app.add_systems(Update, drink_eat_system);
+    app.insert_resource(GameTick(11));
+    app.insert_resource(Clients::default());
+    app.insert_resource(Ids::default());
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(Vec::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(ActiveInfos(HashMap::new()));
+
+    let drinker = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::Drinking,
+            Inventory {
+                owner: 1,
+                items: vec![consumable_item(
+                    10,
+                    1,
+                    "Waterskin (Filled)",
+                    DRINK,
+                    AttrKey::Thirst,
+                    40.0,
+                )],
+            },
+            Thirst::new(80.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(0.0, 0.0),
+        ))
+        .id();
+    let eater = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            State::Eating,
+            Inventory {
+                owner: 2,
+                items: vec![consumable_item(
+                    20,
+                    2,
+                    "Salted Meat Strip",
+                    FOOD,
+                    AttrKey::Feed,
+                    40.0,
+                )],
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(80.0, 0.0),
+            Tired::new(0.0, 0.0),
+        ))
+        .id();
+    let sleeper = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            State::Sleeping,
+            Inventory {
+                owner: 3,
+                items: Vec::new(),
+            },
+            Thirst::new(0.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(80.0, 0.0),
+            Stats {
+                hp: 40,
+                stamina: Some(5),
+                mana: Some(2),
+                base_hp: 100,
+                base_stamina: Some(20),
+                base_mana: Some(10),
+                base_def: 0,
+                damage_range: None,
+                base_damage: None,
+                base_speed: None,
+                base_vision: None,
+            },
+        ))
+        .id();
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_obj(2, 1);
+        ids.new_obj(3, 1);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, drinker);
+        entity_map.new_obj(2, eater);
+        entity_map.new_obj(3, sleeper);
+    }
+    {
+        let mut map_events = app.world_mut().resource_mut::<MapEvents>();
+        map_events.new(
+            1,
+            10,
+            VisibleEvent::DrinkEvent {
+                item_id: 10,
+                obj_id: 1,
+            },
+        );
+        map_events.new(
+            2,
+            10,
+            VisibleEvent::EatEvent {
+                item_id: 20,
+                obj_id: 2,
+            },
+        );
+        map_events.new(3, 10, VisibleEvent::SleepEvent { obj_id: 3 });
+    }
+
+    app.update();
+
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert_eq!(
+        app.world().entity(drinker).get::<Thirst>().unwrap().thirst,
+        80.0
+    );
+    let drink_inventory = app.world().entity(drinker).get::<Inventory>().unwrap();
+    assert_eq!(drink_inventory.items.len(), 1);
+    assert_eq!(drink_inventory.items[0].quantity, 1);
+    assert_eq!(
+        app.world().entity(eater).get::<Hunger>().unwrap().hunger,
+        80.0
+    );
+    let food_inventory = app.world().entity(eater).get::<Inventory>().unwrap();
+    assert_eq!(food_inventory.items.len(), 1);
+    assert_eq!(food_inventory.items[0].quantity, 1);
+    assert_eq!(
+        app.world().entity(sleeper).get::<Tired>().unwrap().tired,
+        80.0
+    );
+    let stats = app.world().entity(sleeper).get::<Stats>().unwrap();
+    assert_eq!(stats.hp, 40);
+    assert_eq!(stats.stamina, Some(5));
+    assert_eq!(stats.mana, Some(2));
+}
+
+#[test]
+fn due_find_shelter_event_fails_closed_without_event_executing() {
+    let mut app = App::new();
+    app.add_systems(Update, find_shelter_system);
+    app.insert_resource(GameTick(11));
+    app.insert_resource(Ids::default());
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(MapEvents(HashMap::new()));
+
+    let villager = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            ActiveShelter(NO_SHELTER),
+            SubclassVillager,
+        ))
+        .id();
+    let shelter = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            Position { x: 1, y: 0 },
+            State::None,
+            Shelter {
+                max_residents: 2,
+                residents: Vec::new(),
+            },
+        ))
+        .id();
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_obj(2, 1);
+    }
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(1, villager);
+    app.world_mut().resource_mut::<MapEvents>().new(
+        1,
+        10,
+        VisibleEvent::FindShelterEvent { obj_id: 1 },
+    );
+
+    app.update();
+
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ActiveShelter>()
+            .unwrap()
+            .0,
+        NO_SHELTER
+    );
+    assert!(app
+        .world()
+        .entity(shelter)
+        .get::<Shelter>()
+        .unwrap()
+        .residents
+        .is_empty());
+}
+
+#[test]
 fn sleep_heal_scales_with_tiredness() {
     // Fully exhausted sleeper gets the full fraction of max hp...
     assert_eq!(sleep_heal_amount(110, 1.0), 22);
@@ -1713,6 +1944,13 @@ fn visible_event_move_packets_keep_source_coordinates() {
 
     assert_eq!(move_sources.get(&2), Some(&(3, 4)));
     assert_eq!(move_sources.get(&3), Some(&(6, 7)));
+}
+
+#[test]
+fn queued_move_completion_rejects_dead_actors() {
+    assert!(!move_event_actor_is_dead(State::None, false));
+    assert!(move_event_actor_is_dead(State::Dead, false));
+    assert!(move_event_actor_is_dead(State::Moving, true));
 }
 
 #[test]
@@ -2654,11 +2892,15 @@ fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
         GOBLIN_ASSAULT_COMPOSITION.len(),
         &HashSet::new(),
         &[],
+        &[],
         &land,
     )
     .expect("flat land has valid assault positions");
     assert_eq!(positions.len(), GOBLIN_ASSAULT_COMPOSITION.len());
-    assert_eq!(positions.iter().copied().collect::<HashSet<_>>().len(), 3);
+    assert_eq!(
+        positions.iter().copied().collect::<HashSet<_>>().len(),
+        GOBLIN_ASSAULT_COMPOSITION.len()
+    );
     assert!(positions
         .iter()
         .all(|pos| Map::is_passable(pos.x, pos.y, &land)));
@@ -2676,6 +2918,7 @@ fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
         GOBLIN_ASSAULT_COMPOSITION.len(),
         &occupied,
         &[neighbour],
+        &[],
         &land,
     )
     .expect("other valid ring tiles remain available");
@@ -2683,6 +2926,24 @@ fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
     assert!(constrained
         .iter()
         .all(|pos| Map::dist(*pos, neighbour.pos) >= 3));
+
+    let neighbour_sanctuary = AssaultSanctuaryExclusion {
+        owner_player_id: 2,
+        pos: positions[0],
+    };
+    let sanctuary_constrained = personal_assault_spawn_positions(
+        1,
+        anchor,
+        GOBLIN_ASSAULT_COMPOSITION.len(),
+        &HashSet::new(),
+        &[],
+        &[neighbour_sanctuary],
+        &land,
+    )
+    .expect("other valid ring tiles remain outside the neighbouring sanctuary");
+    assert!(sanctuary_constrained.iter().all(|pos| {
+        Map::dist(*pos, neighbour_sanctuary.pos) >= PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE
+    }));
 
     let every_ring_tile = (6..=8)
         .flat_map(|radius| Map::ring((anchor.pos.x, anchor.pos.y), radius))
@@ -2693,6 +2954,7 @@ fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
         anchor,
         GOBLIN_ASSAULT_COMPOSITION.len(),
         &every_ring_tile,
+        &[],
         &[],
         &land,
     )
@@ -2707,6 +2969,7 @@ fn personal_assault_spawn_requires_passable_reachable_unoccupied_tiles() {
         anchor,
         GOBLIN_ASSAULT_COMPOSITION.len(),
         &HashSet::new(),
+        &[],
         &[],
         &ocean,
     )
@@ -2728,6 +2991,93 @@ fn first_personal_goblin_composition_uses_only_existing_small_elite_templates() 
             .iter()
             .any(|template| template.template == "Goblin"),
         "the repository has no ordinary Goblin template"
+    );
+}
+
+#[test]
+fn checkpoint4_assault_spawn_commits_all_live_attributed_units() {
+    fn spawn_once(
+        mut commands: Commands,
+        mut ids: ResMut<Ids>,
+        mut entity_map: ResMut<EntityObjMap>,
+        templates: Res<Templates>,
+        mut run_spawned_objs: ResMut<RunSpawnedObjs>,
+        mut ran: Local<bool>,
+    ) {
+        if *ran {
+            return;
+        }
+        *ran = true;
+
+        let unit_templates = GOBLIN_ASSAULT_COMPOSITION
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect::<Vec<_>>();
+        let positions = vec![
+            Position { x: 10, y: 10 },
+            Position { x: 11, y: 10 },
+            Position { x: 12, y: 10 },
+        ];
+        let spawned = spawn_goblin_assault(
+            7,
+            42,
+            3,
+            &unit_templates,
+            &positions,
+            &mut commands,
+            &mut ids,
+            &mut entity_map,
+            &templates,
+            &mut run_spawned_objs,
+        )
+        .expect("configured personal assault must spawn atomically");
+        assert_eq!(spawned.len(), GOBLIN_ASSAULT_COMPOSITION.len());
+    }
+
+    let mut app = App::new();
+    app.insert_resource(Ids::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+    app.insert_resource(RunSpawnedObjs::default());
+    app.add_systems(Update, spawn_once);
+
+    app.update();
+
+    let mut query = app
+        .world_mut()
+        .query::<(&Template, &Position, &State, &CrisisAssaultUnit)>();
+    let mut units = query
+        .iter(app.world())
+        .map(|(template, pos, state, attribution)| (template.0.clone(), *pos, *state, *attribution))
+        .collect::<Vec<_>>();
+    units.sort_by_key(|unit| (unit.1.x, unit.1.y));
+
+    assert_eq!(units.len(), 3);
+    assert_eq!(
+        units.iter().map(|unit| unit.0.as_str()).collect::<Vec<_>>(),
+        GOBLIN_ASSAULT_COMPOSITION
+    );
+    assert_eq!(
+        units.iter().map(|unit| unit.1).collect::<Vec<_>>(),
+        [
+            Position { x: 10, y: 10 },
+            Position { x: 11, y: 10 },
+            Position { x: 12, y: 10 },
+        ]
+    );
+    assert!(units.iter().all(|unit| unit.2 == State::None));
+    assert!(units.iter().all(|unit| unit.3
+        == CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 42,
+            spawn_generation: 3,
+        }));
+    assert_eq!(
+        app.world()
+            .resource::<RunSpawnedObjs>()
+            .get(&7)
+            .map(Vec::len),
+        Some(3)
     );
 }
 

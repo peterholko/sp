@@ -10,6 +10,7 @@ use crate::combat::{AttackType, Combat, CombatQuery};
 use crate::common::{
     AttackTarget, Destination, Hide, Idle, MoveTo, SetAttackTarget, Target, TaskTarget,
 };
+use crate::crisis_balance::CrisisAttackTelemetryStage;
 use crate::effect::Effect;
 use crate::effect::Effects;
 use crate::event::{EventCompleted, EventExecuting, EventExecutingState, Spell};
@@ -1387,6 +1388,62 @@ mod tests {
     }
 
     #[test]
+    fn personal_assault_target_scorer_breaches_a_fully_enclosed_owner_target() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 25 }, 40);
+        app.world_mut()
+            .entity_mut(npc_entity)
+            .insert(CrisisAssaultUnit {
+                owner_player_id: 1,
+                assault_id: 11,
+                spawn_generation: 1,
+            });
+
+        let hero_position = Position { x: 10, y: 25 };
+        app.world_mut().spawn((
+            Id(15),
+            PlayerId(1),
+            hero_position,
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Hero,
+            empty_effects(),
+            test_stats(),
+        ));
+        let wall_ids = Map::ring((hero_position.x, hero_position.y), 1)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (x, y))| {
+                let id = 3_000 + index as i32;
+                spawn_stockade_wall(&mut app, id, Position { x, y }, 20);
+                id
+            })
+            .collect::<Vec<_>>();
+
+        app.update();
+
+        let selected = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .expect("visible target")
+            .target;
+        assert!(
+            wall_ids.contains(&selected),
+            "personal attacker should breach the enclosing Stockade ring, selected {selected}"
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .expect("target score")
+                .get(),
+            NORMAL_SCORE / 100.0
+        );
+    }
+
+    #[test]
     fn cunning_target_scorer_uses_open_route_before_battering_stockade() {
         let mut app = setup_target_scorer_app();
         let (npc_entity, scorer_entity) =
@@ -1790,6 +1847,10 @@ mod tests {
                 LastCombatTick(0),
                 VisibleTarget::new(1),
                 SubclassNPC,
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
             ))
             .id();
         let target_entity = app
@@ -1866,6 +1927,207 @@ mod tests {
         assert_eq!(protected.protected_damage_blocks, 1);
         assert_eq!(protected.queued_events_discarded, 0);
         assert_eq!(telemetry.len(), 1);
+    }
+
+    fn npc_attack_boundary_fixture(
+        npc_state: State,
+        target_pos: Position,
+    ) -> (App, Entity, Entity, Entity) {
+        let mut app = App::new();
+        app.add_systems(Update, attack_target_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+        app.world_mut().insert_resource(Clients::default());
+        app.world_mut().insert_resource(PlayerStats::default());
+        app.world_mut().insert_resource(minimal_templates());
+        app.world_mut().insert_resource(flat_test_map());
+
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                Position { x: 0, y: 0 },
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                Template("Goblin".to_string()),
+                npc_state,
+                Misc {
+                    image: "goblin".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(100),
+                LastCombatTick(0),
+                VisibleTarget::new(1),
+                SubclassNPC,
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
+            ))
+            .id();
+        let target_entity = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                target_pos,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                Template("Human".to_string()),
+                State::None,
+                Misc {
+                    image: "hero".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(1),
+                LastCombatTick(0),
+            ))
+            .id();
+        let attack_action = app
+            .world_mut()
+            .spawn((Actor(npc_entity), ActionState::Requested, AttackTarget))
+            .id();
+
+        {
+            let mut ids = app.world_mut().resource_mut::<Ids>();
+            ids.new_obj(100, NPC_PLAYER_ID);
+            ids.new_obj(1, 1);
+        }
+        {
+            let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+            entity_map.new_obj(100, npc_entity);
+            entity_map.new_obj(1, target_entity);
+        }
+
+        if npc_state == State::Dead {
+            app.world_mut()
+                .entity_mut(npc_entity)
+                .insert(crate::obj::StateDead {
+                    dead_at: TICKS_PER_SEC,
+                    killer: "test".to_string(),
+                });
+        }
+
+        (app, npc_entity, target_entity, attack_action)
+    }
+
+    #[test]
+    fn npc_attack_revalidates_adjacency_at_the_damage_boundary() {
+        let (mut app, npc_entity, target_entity, attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 3, y: 0 });
+
+        let hp_before = app.world().entity(target_entity).get::<Stats>().unwrap().hp;
+        app.update();
+
+        assert_eq!(
+            app.world().entity(target_entity).get::<Stats>().unwrap().hp,
+            hp_before,
+            "a stale melee action must not damage a target that moved away"
+        );
+        assert_eq!(
+            *app.world()
+                .entity(attack_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .unwrap()
+                .target,
+            1,
+            "the ordinary chase policy should be allowed to retain the target"
+        );
+    }
+
+    #[test]
+    fn npc_attack_rejects_a_stale_action_from_a_dead_attacker() {
+        let (mut app, _npc_entity, target_entity, attack_action) =
+            npc_attack_boundary_fixture(State::Dead, Position { x: 1, y: 0 });
+        let hp_before = app.world().entity(target_entity).get::<Stats>().unwrap().hp;
+
+        app.update();
+
+        assert_eq!(
+            app.world().entity(target_entity).get::<Stats>().unwrap().hp,
+            hp_before,
+            "a stale action from a dead NPC must not deal damage"
+        );
+        assert_eq!(
+            *app.world()
+                .entity(attack_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+    }
+
+    #[test]
+    fn npc_attack_cooldown_action_fails_safely_after_actor_despawn() {
+        let (mut app, npc_entity, target_entity, attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 1, y: 0 });
+        *app.world_mut()
+            .entity_mut(attack_action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Executing;
+        assert!(app.world_mut().despawn(npc_entity));
+        let hp_before = app.world().entity(target_entity).get::<Stats>().unwrap().hp;
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(attack_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            app.world().entity(target_entity).get::<Stats>().unwrap().hp,
+            hp_before
+        );
+    }
+
+    #[test]
+    fn npc_attack_requested_without_event_boundary_has_no_combat_side_effects() {
+        let (mut app, npc_entity, target_entity, attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 1, y: 0 });
+        app.world_mut()
+            .entity_mut(npc_entity)
+            .remove::<EventExecuting>();
+        let hp_before = app.world().entity(target_entity).get::<Stats>().unwrap().hp;
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(attack_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            app.world().entity(target_entity).get::<Stats>().unwrap().hp,
+            hp_before,
+            "an orphaned Requested action must not damage its target"
+        );
+        assert!(
+            app.world().resource::<MapEvents>().is_empty(),
+            "an orphaned Requested action must not enqueue damage or cooldown events"
+        );
     }
 
     #[test]
@@ -1977,6 +2239,288 @@ mod tests {
             .map(|(_, event)| event.obj_id)
             .collect::<Vec<_>>();
         assert_eq!(event_actors, vec![201]);
+    }
+
+    #[test]
+    fn move_to_target_missing_event_executing_has_no_movement_side_effects() {
+        let mut app = App::new();
+        app.add_systems(Update, move_to_target_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+        app.world_mut().insert_resource(minimal_templates());
+
+        let npc_pos = Position { x: 0, y: 0 };
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                Name("Goblin".to_string()),
+                Template("Goblin".to_string()),
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                State::None,
+                Misc {
+                    image: "goblin".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                Target { id: 1 },
+            ))
+            .id();
+        let target_entity = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                Position { x: 3, y: 0 },
+                Name("Hero".to_string()),
+                Template("Human".to_string()),
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                State::None,
+                Misc {
+                    image: "hero".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+            ))
+            .id();
+        register_test_obj(&mut app, 100, NPC_PLAYER_ID, npc_entity);
+        register_test_obj(&mut app, 1, 1, target_entity);
+
+        let move_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&NpcMoveToTarget, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(move_action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Requested;
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(move_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<State>().unwrap(),
+            State::None
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<Position>().unwrap(),
+            npc_pos
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
+        assert!(app
+            .world()
+            .entity(npc_entity)
+            .get::<EventExecuting>()
+            .is_none());
+    }
+
+    fn npc_move_to_missing_event_fixture(action_state: ActionState) -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.add_systems(Update, move_to_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+
+        let npc_pos = Position { x: 0, y: 0 };
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                State::None,
+                test_stats(),
+                empty_effects(),
+                Destination {
+                    pos: Position { x: 3, y: 0 },
+                },
+            ))
+            .id();
+        register_test_obj(&mut app, 100, NPC_PLAYER_ID, npc_entity);
+
+        let move_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&NpcMoveTo, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(move_action)
+            .get_mut::<ActionState>()
+            .unwrap() = action_state;
+
+        (app, npc_entity, move_action)
+    }
+
+    #[test]
+    fn npc_move_to_requested_without_event_boundary_has_no_movement_side_effects() {
+        let (mut app, npc_entity, move_action) =
+            npc_move_to_missing_event_fixture(ActionState::Requested);
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(move_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<State>().unwrap(),
+            State::None
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
+    }
+
+    #[test]
+    fn npc_move_to_executing_without_event_boundary_fails_safely() {
+        let (mut app, npc_entity, move_action) =
+            npc_move_to_missing_event_fixture(ActionState::Executing);
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(move_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<State>().unwrap(),
+            State::None
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
+    }
+
+    fn npc_fallback_movement_fixture() -> (App, Entity) {
+        let mut app = App::new();
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+        app.world_mut().insert_resource(minimal_templates());
+
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                Position { x: 10, y: 10 },
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                Template("Goblin".to_string()),
+                State::None,
+                Misc {
+                    image: "goblin".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                WanderingBehavior { num_moves: 0 },
+                AnimalFallback {
+                    kind: AnimalFallbackKind::HideInForest,
+                    target_id: 1,
+                    last_seen_pos: Position { x: 12, y: 10 },
+                },
+                SubclassNPC,
+            ))
+            .id();
+        register_test_obj(&mut app, 100, NPC_PLAYER_ID, npc_entity);
+
+        (app, npc_entity)
+    }
+
+    #[test]
+    fn random_wander_without_event_boundary_has_no_movement_side_effects() {
+        let (mut app, npc_entity) = npc_fallback_movement_fixture();
+        app.add_systems(Update, random_wander_action_system);
+        let action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&RandomWander, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Requested;
+
+        app.update();
+
+        assert_eq!(
+            *app.world().entity(action).get::<ActionState>().unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<State>().unwrap(),
+            State::None
+        );
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<WanderingBehavior>()
+                .unwrap()
+                .num_moves,
+            0
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
+    }
+
+    #[test]
+    fn move_to_forest_without_event_boundary_has_no_movement_side_effects() {
+        let (mut app, npc_entity) = npc_fallback_movement_fixture();
+        app.add_systems(Update, move_to_forest_action_system);
+        let action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&MoveToForest, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Requested;
+
+        app.update();
+
+        assert_eq!(
+            *app.world().entity(action).get::<ActionState>().unwrap(),
+            ActionState::Failure
+        );
+        assert_eq!(
+            *app.world().entity(npc_entity).get::<State>().unwrap(),
+            State::None
+        );
+        assert!(app.world().resource::<MapEvents>().is_empty());
     }
 }
 
@@ -2445,18 +2989,39 @@ pub fn target_scorer_system(
 
             if npc_viewshed.range >= distance {
                 let blocking_list = Obj::blocking_list_basequery(npc_player_id.0, &blocking_query);
-                let reachable_without_attacking_blockers = Map::find_fast_path(
-                    *npc_pos,
-                    *target_pos,
-                    &map,
-                    npc_player_id.0,
-                    blocking_list.clone(),
-                    true,
-                    false,
-                    false,
-                    true,
-                    false,
-                )
+                // The bounded fast search reports its cap as a terminal path.
+                // That is useful for ordinary approximate scoring, but it can
+                // falsely describe a fully enclosed personal-assault target as
+                // reachable and leave the attacker pressed against a wall
+                // forever. Personal assaults use the complete 50x50-map search
+                // for this reachability decision before selecting a breach.
+                let reachable_without_attacking_blockers = if crisis_assault.is_some() {
+                    Map::find_path(
+                        *npc_pos,
+                        *target_pos,
+                        &map,
+                        npc_player_id.0,
+                        blocking_list.clone(),
+                        true,
+                        false,
+                        false,
+                        true,
+                        false,
+                    )
+                } else {
+                    Map::find_fast_path(
+                        *npc_pos,
+                        *target_pos,
+                        &map,
+                        npc_player_id.0,
+                        blocking_list.clone(),
+                        true,
+                        false,
+                        false,
+                        true,
+                        false,
+                    )
+                }
                 .is_some();
 
                 if !reachable_without_attacking_blockers {
@@ -2488,6 +3053,7 @@ pub fn target_scorer_system(
                             blocking_list,
                             &visible_walls,
                             smart_breach,
+                            crisis_assault.is_some(),
                         ) {
                             if distance < selected_target.distance {
                                 span.span().in_scope(|| {
@@ -3919,6 +4485,14 @@ pub fn random_wander_action_system(
                 let move_duration =
                     npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.75, 1.25);
 
+                // Validate the event boundary before changing actor state,
+                // incrementing the wander cadence, or queuing movement. An
+                // orphaned Big Brain action must fail without gameplay effects.
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 *npc.state = State::Moving;
                 commands.trigger(StateChange {
                     entity: *actor,
@@ -3941,10 +4515,6 @@ pub fn random_wander_action_system(
                     wandering_behavior.num_moves += 1;
                 }
 
-                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
-                    *state = ActionState::Failure;
-                    continue;
-                };
                 event_executing.state = EventExecutingState::Executing;
                 *state = ActionState::Executing;
             }
@@ -4069,6 +4639,11 @@ pub fn move_to_forest_action_system(
                 let move_duration =
                     npc_move_duration(npc.stats.base_speed, &npc.effects, &templates, 0.85, 1.15);
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 *npc.state = State::Moving;
                 commands.trigger(StateChange {
                     entity: *actor,
@@ -4087,29 +4662,23 @@ pub fn move_to_forest_action_system(
                     },
                 );
 
-                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
-                    *state = ActionState::Failure;
-                    continue;
-                };
                 event_executing.state = EventExecutingState::Executing;
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                {
-                    let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
-                        *state = ActionState::Failure;
-                        continue;
-                    };
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
-                    if !event_executing.state.is_finished() {
-                        continue;
-                    }
+                if !event_executing.state.is_finished() {
+                    continue;
+                }
 
-                    if event_executing.state.is_failed() {
-                        npc_debug!(*actor, obj_id, None, "Move to forest failed");
-                        *state = ActionState::Failure;
-                        continue;
-                    }
+                if event_executing.state.is_failed() {
+                    npc_debug!(*actor, obj_id, None, "Move to forest failed");
+                    *state = ActionState::Failure;
+                    continue;
                 }
 
                 let Some(npc_id) = obj_id else {
@@ -4192,10 +4761,6 @@ pub fn move_to_forest_action_system(
                     },
                 );
 
-                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
-                    *state = ActionState::Failure;
-                    continue;
-                };
                 event_executing.state = EventExecutingState::Executing;
             }
             ActionState::Cancelled => {
@@ -4307,6 +4872,16 @@ pub fn move_to_system(
                         let (path, _c) = path_result;
                         let next_pos = &path[1];
 
+                        // Big Brain actions may outlive an actor component
+                        // removal in the same deferred-command cycle. Validate
+                        // the event boundary before changing state or queuing a
+                        // movement event so an orphaned action has no gameplay
+                        // side effects.
+                        let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
                         span.span().in_scope(|| {
                             npc_trace!(
                                 *actor,
@@ -4338,9 +4913,6 @@ pub fn move_to_system(
                             move_event,
                         );
 
-                        let mut event_executing = event_executing_query
-                            .get_mut(*actor)
-                            .expect("Missing EventExecuting component");
                         event_executing.state = EventExecutingState::Executing;
                     } else {
                         span.span().in_scope(|| {
@@ -4356,9 +4928,10 @@ pub fn move_to_system(
                 span.span().in_scope(|| {
                     npc_trace!(*actor, obj_id, None, "MoveTo executing");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 span.span().in_scope(|| {
                     npc_trace!(
@@ -4626,6 +5199,11 @@ pub fn move_to_target_system(
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
                 if !reached_destination {
+                    let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+
                     // Check if NPC is stunned and cannot move
                     if npc.effects.has(Effect::Stunned) {
                         npc_debug!(*actor, obj_id, None, "NPC is stunned");
@@ -4691,9 +5269,6 @@ pub fn move_to_target_system(
 
                     map_events.new(npc.id.0, game_tick.0 + move_duration, move_event);
 
-                    let mut event_executing = event_executing_query
-                        .get_mut(*actor)
-                        .expect("Missing EventExecuting component");
                     event_executing.state = EventExecutingState::Executing;
                 }
 
@@ -4703,9 +5278,10 @@ pub fn move_to_target_system(
                 span.span().in_scope(|| {
                     npc_trace!(*actor, obj_id, None, "MoveToTarget executing");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 span.span().in_scope(|| {
                     npc_trace!(
@@ -5427,6 +6003,10 @@ fn defense_hint_for(attack_type: &AttackType) -> String {
     }
 }
 
+fn melee_target_is_still_adjacent(attacker: Position, target: Position) -> bool {
+    Map::is_adjacent_excluding_source(attacker, target)
+}
+
 // BB-A: bundled so the attack system stays within Bevy's 16-param limit.
 // `next_attacks` remembers each NPC's telegraphed upcoming attack type.
 #[derive(SystemParam)]
@@ -5473,6 +6053,24 @@ pub fn attack_target_system(
                 let npc_name = Some(npc.template.0.as_str());
 
                 npc_info!(*actor, obj_id, npc_name, "AttackTarget action requested");
+
+                // A Thinker can already have spawned this action when another
+                // system kills the NPC. Reject the stale action at the damage
+                // boundary even though lethal combat also removes the thinker.
+                if npc.stats.hp <= 0 || Obj::is_dead(&npc.state) {
+                    npc_debug!(*actor, obj_id, npc_name, "Dead NPC cannot attack");
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
+                // Validate the action's event boundary before target telemetry,
+                // damage, telegraph mutation, or cooldown scheduling. Otherwise
+                // a missing component could let an orphaned Requested action
+                // deal damage and then become retryable as a failed action.
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 let Ok(mut visible_target) = visible_target_query.get_mut(*actor) else {
                     continue;
@@ -5534,6 +6132,14 @@ pub fn attack_target_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Requested,
+                    &npc,
+                    &target,
+                );
 
                 let assault = telegraph.crisis_assault_units.get(*actor).ok();
                 if !personal_assault_allows_target_owner(assault, Some(target.player_id.0)) {
@@ -5641,6 +6247,22 @@ pub fn attack_target_system(
                     continue;
                 }
 
+                // Big-brain selected this action from an earlier world view. The
+                // target can move before the action runs, so the damage boundary
+                // must validate current positions rather than trusting the stale
+                // scorer result. Leave the target selected so the ordinary chase
+                // policy can resume on the next decision.
+                if !melee_target_is_still_adjacent(*npc.pos, *target.pos) {
+                    npc_debug!(
+                        *actor,
+                        obj_id,
+                        npc_name,
+                        "Target moved out of melee range before attack acceptance"
+                    );
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 npc_debug!(*actor, obj_id, npc_name, "Target state={:?}", target.state);
 
                 npc_debug!(
@@ -5694,6 +6316,14 @@ pub fn attack_target_system(
                     *state = ActionState::Failure;
                     continue;
                 }
+
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Accepted,
+                    &npc,
+                    &target,
+                );
 
                 let (damage, combo, _skill_gain, countered) = Combat::process_attack(
                     current_attack.clone(),
@@ -5780,17 +6410,17 @@ pub fn attack_target_system(
 
                 map_events.new(npc.id.0, game_tick.0 + npc_speed, cooldown_event);
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
+                    // A dead actor may be despawned while its cooldown action is
+                    // still executing. This is a normal deferred-command race.
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if !event_executing.state.is_finished() {
                     continue;
@@ -7500,19 +8130,36 @@ fn select_wall_target_from_blocked_path(
     blocking_list: Vec<Blocker>,
     visible_walls: &[WallTargetCandidate],
     smart_breach: bool,
+    complete_search: bool,
 ) -> Option<NPCTarget> {
-    let (path, _cost) = Map::find_fast_path(
-        npc_pos,
-        target_pos,
-        map,
-        npc_player_id,
-        blocking_list.clone(),
-        true,
-        false,
-        false,
-        true,
-        true,
-    )?;
+    let path = if complete_search {
+        Map::find_path(
+            npc_pos,
+            target_pos,
+            map,
+            npc_player_id,
+            blocking_list.clone(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+    } else {
+        Map::find_fast_path(
+            npc_pos,
+            target_pos,
+            map,
+            npc_player_id,
+            blocking_list.clone(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+    }?;
+    let (path, _cost) = path;
 
     let mut path_walls: Vec<(usize, WallTargetCandidate)> = Vec::new();
 

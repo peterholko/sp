@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::Transport;
-use crate::common::{Heat, Hunger, Thirst, Tired};
+use crate::common::{Heat, Hunger, Target, TaskTarget, Thirst, Tired};
 use crate::constants::{
     DATABASE_MANAGER_ID, FOOD, GAME_ANIMAL, GAME_TICKS_PER_DAY, PLANT, SPRING_WATER,
 };
@@ -71,9 +71,10 @@ use crate::{build_headless_app_with_director, AppState, PlayerEvent, ResponsePac
 pub const HEADLESS_PLAYER_ID: i32 = 1;
 
 pub const PREPARATION_PAIR_START_LOCATION: &str = "startpos3";
-pub const PREPARATION_STOCKADE_ANCHOR: Position = Position { x: 15, y: 13 };
+pub const PREPARATION_STOCKADE_ANCHOR: Position = Position { x: 13, y: 13 };
 const PREPARATION_COMMON_STRUCTURE_ANCHOR: Position = Position { x: 16, y: 13 };
 const PREPARATION_STOCKADE_HP: i32 = 20;
+pub const CHECKPOINT4_BLOCKING_STOCKADE_COUNT: i32 = 6;
 
 /// Checkpoint 3's synthetic preparation comparisons. These labels are part of
 /// the versioned runner output; keep them stable for report consumers.
@@ -149,12 +150,95 @@ pub struct PreparationAssaultGeometry {
     pub position: [i32; 2],
 }
 
+/// Exact ECS combat-stat projection. Keeping the optional fields distinguishes
+/// an absent resource from a real zero, and makes the representation Eq-safe.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PreparationCombatStatsFingerprint {
+    pub hp: i32,
+    pub stamina: Option<i32>,
+    pub mana: Option<i32>,
+    pub base_hp: i32,
+    pub base_stamina: Option<i32>,
+    pub base_mana: Option<i32>,
+    pub base_defence: i32,
+    pub damage_range: Option<i32>,
+    pub base_damage: Option<i32>,
+    pub base_speed: Option<i32>,
+    pub base_vision: Option<u32>,
+}
+
+impl PreparationCombatStatsFingerprint {
+    fn from_stats(stats: &Stats) -> Self {
+        Self {
+            hp: stats.hp,
+            stamina: stats.stamina,
+            mana: stats.mana,
+            base_hp: stats.base_hp,
+            base_stamina: stats.base_stamina,
+            base_mana: stats.base_mana,
+            base_defence: stats.base_def,
+            damage_range: stats.damage_range,
+            base_damage: stats.base_damage,
+            base_speed: stats.base_speed,
+            base_vision: stats.base_vision,
+        }
+    }
+}
+
+/// Raw IEEE-754 bits preserve exact need values and rates while allowing Eq.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct PreparationNeedsFingerprint {
+    pub thirst_bits: u32,
+    pub thirst_per_tick_bits: u32,
+    pub hunger_bits: u32,
+    pub hunger_per_tick_bits: u32,
+    pub tired_bits: u32,
+    pub tired_per_tick_bits: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparationEffectFingerprint {
+    pub effect: String,
+    pub duration_or_deadline_tick: i32,
+    pub amplifier_bits: u32,
+    pub stacks: i32,
+}
+
+fn preparation_effect_fingerprints(effects: &Effects) -> Vec<PreparationEffectFingerprint> {
+    let mut fingerprints = effects
+        .0
+        .iter()
+        .map(|(effect, (duration_or_deadline_tick, amplifier, stacks))| {
+            PreparationEffectFingerprint {
+                effect: effect.clone().to_str(),
+                duration_or_deadline_tick: *duration_or_deadline_tick,
+                amplifier_bits: amplifier.to_bits(),
+                stacks: *stacks,
+            }
+        })
+        .collect::<Vec<_>>();
+    fingerprints.sort_by(|left, right| {
+        left.effect
+            .cmp(&right.effect)
+            .then(
+                left.duration_or_deadline_tick
+                    .cmp(&right.duration_or_deadline_tick),
+            )
+            .then(left.amplifier_bits.cmp(&right.amplifier_bits))
+            .then(left.stacks.cmp(&right.stacks))
+    });
+    fingerprints
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PreparationAssaultUnitFingerprint {
     pub template: String,
-    pub position: [i32; 2],
+    // Retained for runner-output compatibility; `combat_stats` is authoritative.
     pub hp: i32,
     pub base_hp: i32,
+    pub combat_stats: PreparationCombatStatsFingerprint,
+    pub effects: Vec<PreparationEffectFingerprint>,
+    pub last_combat_tick: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -191,8 +275,9 @@ pub struct PreparationStructureFingerprint {
 }
 
 /// Selected observed launch fields expected to be identical after normalizing
-/// only the declared synthetic treatment. This is neither a full-ECS nor an RNG
-/// fingerprint.
+/// only the declared synthetic treatment. Assault composition and HP are matched,
+/// while actual per-leg spawn positions are reported separately as geometry.
+/// This is neither a full-ECS nor an RNG fingerprint.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PreparationCommonLaunchFingerprint {
     pub start_location: String,
@@ -203,6 +288,12 @@ pub struct PreparationCommonLaunchFingerprint {
     pub hero_hp: i32,
     pub hero_base_hp: i32,
     pub hero_base_defence: i32,
+    pub hero_combat_stats: PreparationCombatStatsFingerprint,
+    pub hero_needs: PreparationNeedsFingerprint,
+    pub hero_effects: Vec<PreparationEffectFingerprint>,
+    /// Accessible combat-lock state. The true player attack cooldown is system-
+    /// local production state and cannot be projected from the ECS World.
+    pub hero_last_combat_tick: i32,
     pub hero_state: String,
     pub crisis_phase: String,
     pub crisis_pressure: i32,
@@ -340,6 +431,28 @@ pub fn validate_preparation_pair_launches(
     control: &PreparationPairLaunch,
     treatment: &PreparationPairLaunch,
 ) -> Result<PreparationDeclaredDifference, String> {
+    validate_preparation_pair_launches_with_wall_count(comparison, control, treatment, 1)
+}
+
+pub fn validate_checkpoint4_preparation_pair_launches(
+    comparison: PreparationComparison,
+    control: &PreparationPairLaunch,
+    treatment: &PreparationPairLaunch,
+) -> Result<PreparationDeclaredDifference, String> {
+    validate_preparation_pair_launches_with_wall_count(
+        comparison,
+        control,
+        treatment,
+        CHECKPOINT4_BLOCKING_STOCKADE_COUNT,
+    )
+}
+
+fn validate_preparation_pair_launches_with_wall_count(
+    comparison: PreparationComparison,
+    control: &PreparationPairLaunch,
+    treatment: &PreparationPairLaunch,
+    wall_count: i32,
+) -> Result<PreparationDeclaredDifference, String> {
     if control.leg != PreparationPairLeg::Control || treatment.leg != PreparationPairLeg::Treatment
     {
         return Err("preparation pair legs must be control then treatment".to_string());
@@ -351,7 +464,14 @@ pub fn validate_preparation_pair_launches(
         ));
     }
 
-    let expected = PreparationDeclaredDifference::for_comparison(comparison);
+    let expected_wall_count = if comparison.includes_wall() {
+        wall_count
+    } else {
+        0
+    };
+    let mut expected = PreparationDeclaredDifference::for_comparison(comparison);
+    expected.completed_stockade_delta = expected_wall_count;
+    expected.completed_wall_segment_delta = expected_wall_count;
     let actual_stockade_delta = treatment
         .fixture
         .completed_stockades
@@ -364,11 +484,22 @@ pub fn validate_preparation_pair_launches(
         .fixture
         .crude_bandages
         .saturating_sub(control.fixture.crude_bandages);
-    let expected_treatment_stockades = if comparison.includes_wall() {
-        vec![expected_preparation_stockade()]
-    } else {
-        Vec::new()
-    };
+    let treatment_stockades_valid = treatment.fixture.declared_anchor_stockades.len()
+        == expected_wall_count as usize
+        && treatment
+            .fixture
+            .declared_anchor_stockades
+            .iter()
+            .all(|stockade| {
+                stockade.template == "Stockade"
+                    && stockade.subclass == "wall"
+                    && stockade.state == "none"
+                    && stockade.hp == PREPARATION_STOCKADE_HP
+                    && stockade.base_hp == PREPARATION_STOCKADE_HP
+            })
+        && (expected_wall_count != 1
+            || treatment.fixture.declared_anchor_stockades
+                == vec![expected_preparation_stockade()]);
     let expected_treatment_bandages = if comparison.includes_healing() {
         vec![expected_crude_bandage()]
     } else {
@@ -377,7 +508,7 @@ pub fn validate_preparation_pair_launches(
     if actual_stockade_delta != expected.completed_stockade_delta
         || actual_wall_delta != expected.completed_wall_segment_delta
         || !control.fixture.declared_anchor_stockades.is_empty()
-        || treatment.fixture.declared_anchor_stockades != expected_treatment_stockades
+        || !treatment_stockades_valid
         || control.fixture.hide_wraps != 1
         || treatment.fixture.hide_wraps != 1
         || control.fixture.hide_wraps_equipped
@@ -392,8 +523,8 @@ pub fn validate_preparation_pair_launches(
         || control.fixture.crude_bandages != 0
         || !control.fixture.crude_bandage_items.is_empty()
         || treatment.fixture.crude_bandage_items != expected_treatment_bandages
-        || control.fixture.other_healing_items != 0
-        || treatment.fixture.other_healing_items != 0
+        || control.fixture.other_healing_items != 1
+        || treatment.fixture.other_healing_items != 1
         || treatment
             .fixture
             .completed_structures
@@ -418,6 +549,42 @@ pub enum SafeLogoutCompletionOutcome {
     Cancelled(SafeLogoutCancelReason),
     TimedOut,
     Unexpected(Option<PlayerWorldPresence>),
+}
+
+/// Terminal reasons shared by the Checkpoint 4 assault runners. Ordinary hero
+/// death is intentionally absent: the production sanctuary resurrection cycle
+/// can return the hero to the same still-active assault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssaultObservationStopReason {
+    Resolved,
+    HeroTrueDeath,
+    HeroMissing,
+    TickCap,
+}
+
+/// Decide whether a launched-assault observation is terminal without using
+/// policy inactivity, lack of early damage, or an ordinary hero death as an
+/// early-exit condition. This is harness-only; gameplay state remains owned by
+/// the production crisis and resurrection systems.
+pub fn checkpoint4_assault_observation_stop_reason(
+    crisis_phase: Option<CrisisPhase>,
+    hero_present: bool,
+    hero_true_death: bool,
+    observed_assault_ticks: i32,
+    cap_ticks: i32,
+) -> Option<AssaultObservationStopReason> {
+    if crisis_phase == Some(CrisisPhase::Resolved) {
+        Some(AssaultObservationStopReason::Resolved)
+    } else if !hero_present {
+        Some(AssaultObservationStopReason::HeroMissing)
+    } else if hero_true_death {
+        Some(AssaultObservationStopReason::HeroTrueDeath)
+    } else if observed_assault_ticks >= cap_ticks {
+        Some(AssaultObservationStopReason::TickCap)
+    } else {
+        None
+    }
 }
 
 // Bounded tokio channel capacity for captured client packets. `tick()` drains
@@ -470,8 +637,12 @@ impl WorldView {
 pub struct HeroView {
     pub id: i32,
     pub pos: Position,
+    pub hero_class: HeroClass,
     pub hp: i32,
     pub base_hp: i32,
+    pub stamina: Option<i32>,
+    pub mana: Option<i32>,
+    pub vision: u32,
     pub state: State,
     pub dead: bool,
     pub true_death: bool,
@@ -501,6 +672,10 @@ pub struct UnitView {
     pub id: i32,
     pub player_id: i32,
     pub pos: Position,
+    /// Owner of the personal assault that spawned this NPC, when applicable.
+    /// The balance bot uses this only to retain the owning hero's production
+    /// crisis target; ordinary ambient enemies remain un-attributed.
+    pub crisis_owner_player_id: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -513,7 +688,11 @@ pub struct CrisisAssaultUnitView {
     pub hp: i32,
     pub base_hp: i32,
     pub pos: Position,
+    pub vision: u32,
+    pub has_thinker: bool,
     pub visible_target: Option<i32>,
+    pub target: Option<i32>,
+    pub task_target: Option<i32>,
     pub dead: bool,
 }
 
@@ -528,6 +707,7 @@ pub struct ItemView {
     pub is_healing: bool,
     pub is_weapon: bool,
     pub is_hunting: bool, // weapon/tool with a Hunting attr (can take down game)
+    pub attack_range: u32, // 1 for ordinary melee/non-weapons
     pub feed: f32,        // Feed value (0 if not edible)
     pub food_poisoning: bool, // eating it risks food poisoning (raw meat)
 }
@@ -707,6 +887,10 @@ fn to_item_view(item: &crate::item::Item) -> ItemView {
         is_healing: item.attrs.contains_key(&AttrKey::Healing),
         is_weapon: item.class == "Weapon",
         is_hunting: item.attrs.contains_key(&AttrKey::Hunting),
+        attack_range: match item.attrs.get(&AttrKey::AttackRange) {
+            Some(AttrVal::Num(value)) if *value > 1.0 => *value as u32,
+            _ => 1,
+        },
         feed: match item.attrs.get(&AttrKey::Feed) {
             Some(AttrVal::Num(v)) => *v,
             _ => 0.0,
@@ -1074,6 +1258,49 @@ impl HeadlessGame {
         helper_player_id
     }
 
+    /// Add one ordinary owner villager for a multi-player isolation scenario.
+    /// The villager is created through the existing `SpawnVillager` event and
+    /// receives no crisis-only statistics, equipment, or behavior.
+    pub fn spawn_connected_scenario_villager(&mut self, player_id: i32) -> Result<i32, String> {
+        self.spawn_legitimate_villager_near_settlement(player_id, false)
+    }
+
+    /// Turn a newly spawned helper into an established neighbouring player for
+    /// isolation/support tests. This removes only that helper's scripted intro
+    /// chain and ambient intro hostiles; it grants no combat values, resources,
+    /// crisis progress, or protection.
+    pub fn prepare_established_scenario_helper(&mut self, player_id: i32) {
+        use crate::game::{InitialEncounterState, IntroEncounterState};
+
+        if let Some(intro) = self
+            .app
+            .world_mut()
+            .resource_mut::<PlayerIntroState>()
+            .get_mut(&player_id)
+        {
+            intro.shipwreck_chain_started = true;
+            intro.villager_spawned = true;
+            // Keep the helper's own personal crisis locked for this focused
+            // owner-assault scenario.
+            intro.danger_unlocked = false;
+        }
+        self.app
+            .world_mut()
+            .resource_mut::<InitialEncounterState>()
+            .remove(&player_id);
+        self.app
+            .world_mut()
+            .resource_mut::<IntroEncounterState>()
+            .insert(
+                player_id,
+                PlayerIntroEncounters {
+                    initial_encounter: true,
+                    spider_encounter: true,
+                },
+            );
+        self.normalize_preparation_non_crisis_hostiles();
+    }
+
     /// Arrange bounded, existing-game progression facts for the assault-focused
     /// balance scenarios. This is a headless-only analysis fixture: the bot must
     /// still build walls through normal player events, every crisis phase must
@@ -1168,13 +1395,56 @@ impl HeadlessGame {
     }
 
     /// Build one leg of a Checkpoint 3 matched-observation comparison and launch
-    /// the existing production assault. The optional geometry must be the
-    /// control leg's post-launch geometry and is required for treatment legs.
+    /// the existing production assault. Each leg preserves and reports its actual
+    /// production launch geometry; the harness never relocates assault actors.
     pub fn prepare_preparation_pair_launch(
         &mut self,
         comparison: PreparationComparison,
         leg: PreparationPairLeg,
-        control_geometry: Option<&[PreparationAssaultGeometry]>,
+    ) -> Result<PreparationPairLaunch, String> {
+        self.prepare_preparation_launch_internal(comparison, leg, false, false)
+    }
+
+    /// Checkpoint 4 variant of the comparison fixture. Wall-bearing comparisons
+    /// put both legs' heroes at the same clear prelaunch defensive position and
+    /// represent Existing Walls with six ordinary Stockades around that tile.
+    /// This produces a real blocked path without relocating any actor after the
+    /// production assault has launched.
+    pub fn prepare_checkpoint4_preparation_pair_launch(
+        &mut self,
+        comparison: PreparationComparison,
+        leg: PreparationPairLeg,
+    ) -> Result<PreparationPairLaunch, String> {
+        self.prepare_preparation_launch_internal(comparison, leg, false, true)
+    }
+
+    /// The same direct Checkpoint 4 launch fixture with one ordinary owner
+    /// villager equipped with an existing Copper Training Axe before launch.
+    /// No villager stats or item attributes are modified.
+    pub fn prepare_villager_supported_launch(
+        &mut self,
+    ) -> Result<(PreparationPairLaunch, i32), String> {
+        let launch = self.prepare_preparation_launch_internal(
+            PreparationComparison::CombinedPreparation,
+            PreparationPairLeg::Treatment,
+            true,
+            true,
+        )?;
+        let villager_id = self
+            .observe()
+            .villagers
+            .first()
+            .map(|villager| villager.id)
+            .ok_or_else(|| "villager-supported launch has no owner villager".to_string())?;
+        Ok((launch, villager_id))
+    }
+
+    fn prepare_preparation_launch_internal(
+        &mut self,
+        comparison: PreparationComparison,
+        leg: PreparationPairLeg,
+        add_legitimate_villager: bool,
+        blocking_wall_fixture: bool,
     ) -> Result<PreparationPairLaunch, String> {
         use crate::constants::DUSK;
         use crate::game::{
@@ -1185,16 +1455,6 @@ impl HeadlessGame {
         if self.player_id == 0 {
             return Err("spawn_hero must run before preparing a pair leg".to_string());
         }
-        match (leg, control_geometry) {
-            (PreparationPairLeg::Control, Some(_)) => {
-                return Err("control leg must establish, not consume, launch geometry".to_string());
-            }
-            (PreparationPairLeg::Treatment, None) => {
-                return Err("treatment leg requires the control launch geometry".to_string());
-            }
-            _ => {}
-        }
-
         // Reuse the existing bounded developed-settlement facts so production
         // pressure evaluation continues to produce a legitimate ready value.
         self.prepare_crisis_balance_progression_fixture(CrisisBalanceScenario::PreparedSolo);
@@ -1233,8 +1493,17 @@ impl HeadlessGame {
         // Keep the production three-structure pressure contributor identical;
         // otherwise adding the treatment wall would itself add 20 pressure.
         self.spawn_completed_preparation_structure("Cache", PREPARATION_COMMON_STRUCTURE_ANCHOR)?;
+        let declared_stockade_positions = if blocking_wall_fixture && comparison.includes_wall() {
+            self.prepare_checkpoint4_blocking_wall_positions()?
+        } else if comparison.includes_wall() {
+            vec![PREPARATION_STOCKADE_ANCHOR]
+        } else {
+            Vec::new()
+        };
         if leg.receives(comparison.includes_wall()) {
-            self.spawn_completed_preparation_structure("Stockade", PREPARATION_STOCKADE_ANCHOR)?;
+            for position in &declared_stockade_positions {
+                self.spawn_completed_preparation_structure("Stockade", *position)?;
+            }
         }
         if leg.receives(comparison.includes_equipment()) {
             let hero_id = self
@@ -1248,6 +1517,9 @@ impl HeadlessGame {
                 item_id: hide_wraps_id,
                 status: true,
             });
+        }
+        if add_legitimate_villager {
+            self.spawn_legitimate_armed_owner_villager_near_settlement()?;
         }
 
         // Give both legs the same event-processing budget. Only treatment sends
@@ -1298,12 +1570,10 @@ impl HeadlessGame {
         }
 
         self.normalize_preparation_non_crisis_hostiles();
-        if let Some(control_geometry) = control_geometry {
-            self.normalize_preparation_assault_geometry(control_geometry)?;
-        }
         let geometry = self.preparation_assault_geometry()?;
-        let fixture = self.preparation_fixture_state()?;
-        let common_fingerprint = self.preparation_common_launch_fingerprint(comparison)?;
+        let fixture = self.preparation_fixture_state(&declared_stockade_positions)?;
+        let common_fingerprint =
+            self.preparation_common_launch_fingerprint(comparison, &declared_stockade_positions)?;
 
         Ok(PreparationPairLaunch {
             leg,
@@ -1311,6 +1581,168 @@ impl HeadlessGame {
             common_fingerprint,
             fixture,
         })
+    }
+
+    fn prepare_checkpoint4_blocking_wall_positions(&mut self) -> Result<Vec<Position>, String> {
+        let player_id = self.player_id;
+        let world = self.app.world_mut();
+        let (hero_entity, original_position) = {
+            let mut heroes =
+                world.query_filtered::<(Entity, &PlayerId, &Position), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner, _)| owner.0 == player_id)
+                .map(|(entity, _, position)| (entity, *position))
+                .ok_or_else(|| "missing hero for Checkpoint 4 wall fixture".to_string())?
+        };
+        let occupied = {
+            let mut positioned = world.query::<(Entity, &Position)>();
+            positioned
+                .iter(world)
+                .filter(|(entity, _)| *entity != hero_entity)
+                .map(|(_, position)| (position.x, position.y))
+                .collect::<HashSet<_>>()
+        };
+        let map = world.resource::<Map>();
+        let mut candidates = Map::range((original_position.x, original_position.y), 6)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|position| {
+            (
+                Map::dist(original_position, *position),
+                position.x,
+                position.y,
+            )
+        });
+        let (center, mut ring) = candidates
+            .into_iter()
+            .find_map(|center| {
+                if occupied.contains(&(center.x, center.y))
+                    || !Map::is_passable(center.x, center.y, map)
+                {
+                    return None;
+                }
+                let ring = Map::ring((center.x, center.y), 1)
+                    .into_iter()
+                    .map(|(x, y)| Position { x, y })
+                    .collect::<Vec<_>>();
+                (ring.len() == CHECKPOINT4_BLOCKING_STOCKADE_COUNT as usize
+                    && ring.iter().all(|position| {
+                        !occupied.contains(&(position.x, position.y))
+                            && Map::is_passable(position.x, position.y, map)
+                    }))
+                .then_some((center, ring))
+            })
+            .ok_or_else(|| {
+                "no clear six-tile prelaunch defensive ring within six tiles".to_string()
+            })?;
+        ring.sort_by_key(|position| (position.x, position.y));
+        *world
+            .get_mut::<Position>(hero_entity)
+            .ok_or_else(|| "wall fixture hero lost Position".to_string())? = center;
+        Ok(ring)
+    }
+
+    fn spawn_legitimate_armed_owner_villager_near_settlement(&mut self) -> Result<i32, String> {
+        self.spawn_legitimate_villager_near_settlement(self.player_id, true)
+    }
+
+    fn spawn_legitimate_villager_near_settlement(
+        &mut self,
+        player_id: i32,
+        equip_training_axe: bool,
+    ) -> Result<i32, String> {
+        let anchor = self
+            .observe_for_player(player_id)
+            .home()
+            .ok_or_else(|| "villager fixture has no settlement anchor".to_string())?;
+        let occupied = {
+            let world = self.app.world_mut();
+            let mut query = world.query::<(&Position, &State)>();
+            query
+                .iter(world)
+                .filter(|(_, state)| state.is_blocking())
+                .map(|(position, _)| (position.x, position.y))
+                .collect::<HashSet<_>>()
+        };
+        let position = (anchor.x - 2..=anchor.x + 2)
+            .flat_map(|x| (anchor.y - 2..=anchor.y + 2).map(move |y| Position { x, y }))
+            .filter(|position| Map::dist(anchor, *position) <= 2)
+            .find(|position| {
+                !occupied.contains(&(position.x, position.y))
+                    && Map::is_passable_by_obj(
+                        position.x,
+                        position.y,
+                        true,
+                        false,
+                        false,
+                        self.map(),
+                    )
+            })
+            .ok_or_else(|| "no legal settlement tile for villager fixture".to_string())?;
+        let existing_ids = {
+            let world = self.app.world_mut();
+            let mut query = world.query_filtered::<(&Id, &PlayerId), With<SubclassVillager>>();
+            query
+                .iter(world)
+                .filter(|(_, owner)| owner.0 == player_id)
+                .map(|(id, _)| id.0)
+                .collect::<HashSet<_>>()
+        };
+        let current_tick = self.game_tick();
+        let event_id = self
+            .app
+            .world_mut()
+            .resource_mut::<Ids>()
+            .new_map_event_id();
+        self.app.world_mut().resource_mut::<GameEvents>().insert(
+            event_id,
+            GameEvent {
+                event_id,
+                start_tick: current_tick,
+                run_tick: current_tick,
+                event_type: GameEventType::SpawnVillager {
+                    pos: position,
+                    player_id,
+                },
+            },
+        );
+        self.tick(3);
+        let (entity, villager_id) = {
+            let world = self.app.world_mut();
+            let mut query =
+                world.query_filtered::<(Entity, &Id, &PlayerId), With<SubclassVillager>>();
+            query
+                .iter(world)
+                .find(|(_, id, owner)| owner.0 == player_id && !existing_ids.contains(&id.0))
+                .map(|(entity, id, _)| (entity, id.0))
+                .ok_or_else(|| "SpawnVillager did not create an owner villager".to_string())?
+        };
+        let world = self.app.world_mut();
+        if equip_training_axe {
+            let item_id = world.resource_mut::<Ids>().new_item_id();
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let mut inventory = world
+                .get_mut::<Inventory>(entity)
+                .ok_or_else(|| "spawned villager has no inventory".to_string())?;
+            inventory.new(
+                item_id,
+                "Copper Training Axe".to_string(),
+                1,
+                &item_templates,
+            );
+            inventory
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or_else(|| "villager weapon was not created".to_string())?
+                .equipped = true;
+        }
+        *world
+            .get_mut::<Position>(entity)
+            .ok_or_else(|| "spawned villager has no position".to_string())? = position;
+        Ok(villager_id)
     }
 
     /// Return a normal client command for the one treatment bandage only when
@@ -1343,10 +1775,12 @@ impl HeadlessGame {
             .iter_mut(world)
             .find(|(owner, _)| owner.0 == player_id)
             .ok_or_else(|| "missing hero inventory".to_string())?;
-        inventory.items.retain(|item| {
-            !matches!(item.attrs.get(&AttrKey::Healing), Some(AttrVal::Num(value)) if *value > 0.0)
-                && !(item.class == "Medical" && item.subclass == "Bandage")
-        });
+        // Preserve the production one-use starting Health Potion identically in
+        // both legs. Only remove pre-existing bandages so the declared treatment
+        // adds exactly one controlled Crude Bandage.
+        inventory
+            .items
+            .retain(|item| !(item.class == "Medical" && item.subclass == "Bandage"));
         inventory.new(hide_wraps_id, "Hide Wraps".to_string(), 1, &templates);
         if let Some(bandage_id) = bandage_id {
             inventory.new(bandage_id, "Crude Bandage".to_string(), 1, &templates);
@@ -1361,16 +1795,22 @@ impl HeadlessGame {
     ) -> Result<(), String> {
         let player_id = self.player_id;
         let world = self.app.world_mut();
-        let already_exists = {
-            let mut structures =
-                world.query_filtered::<(&PlayerId, &Template, &Position), With<ClassStructure>>();
-            structures.iter(world).any(|(owner, template, position)| {
-                owner.0 == player_id && template.0 == template_name && *position == anchor
-            })
-        };
-        if already_exists {
+        if !Map::is_valid_pos((anchor.x, anchor.y))
+            || !Map::is_passable(anchor.x, anchor.y, world.resource::<Map>())
+        {
             return Err(format!(
-                "preparation {template_name} already exists at its anchor"
+                "preparation {template_name} anchor ({}, {}) is not a valid passable tile",
+                anchor.x, anchor.y
+            ));
+        }
+        let occupied = {
+            let mut positioned = world.query::<&Position>();
+            positioned.iter(world).any(|position| *position == anchor)
+        };
+        if occupied {
+            return Err(format!(
+                "preparation {template_name} anchor ({}, {}) is already occupied",
+                anchor.x, anchor.y
             ));
         }
         let template = world
@@ -1433,29 +1873,32 @@ impl HeadlessGame {
 
     fn normalize_preparation_non_crisis_hostiles(&mut self) {
         let world = self.app.world_mut();
-        let entities = {
+        let actors = {
             let mut hostiles = world.query_filtered::<
-                (Entity, &PlayerId, &State, Option<&CrisisAssaultUnit>),
+                (Entity, &Id, &PlayerId, Option<&CrisisAssaultUnit>),
                 With<SubclassNPC>,
             >();
             hostiles
                 .iter(world)
-                .filter(|(_, owner, state, assault)| {
-                    owner.is_npc() && state.is_alive() && assault.is_none()
-                })
-                .map(|(entity, ..)| entity)
+                .filter(|(_, _, owner, assault)| owner.is_npc() && assault.is_none())
+                .map(|(entity, id, ..)| (entity, id.0))
                 .collect::<Vec<_>>()
         };
-        for entity in entities {
-            if let Some(mut state) = world.get_mut::<State>(entity) {
-                *state = State::Dead;
-            }
-            if let Some(mut stats) = world.get_mut::<Stats>(entity) {
-                stats.hp = 0;
-            }
-            world
-                .entity_mut(entity)
-                .remove::<crate::npc::VisibleTarget>();
+        if actors.is_empty() {
+            return;
+        }
+
+        let actor_ids = actors
+            .iter()
+            .map(|(_, object_id)| *object_id)
+            .collect::<HashSet<_>>();
+        world
+            .resource_mut::<MapEvents>()
+            .retain(|_, event| !actor_ids.contains(&event.obj_id));
+        for (entity, object_id) in actors {
+            world.resource_mut::<Ids>().remove_obj(object_id);
+            world.resource_mut::<EntityObjMap>().remove_obj(object_id);
+            let _ = world.despawn(entity);
         }
     }
 
@@ -1492,48 +1935,10 @@ impl HeadlessGame {
             .collect())
     }
 
-    fn normalize_preparation_assault_geometry(
+    fn preparation_fixture_state(
         &mut self,
-        requested: &[PreparationAssaultGeometry],
-    ) -> Result<(), String> {
-        let actual = self.preparation_assault_geometry()?;
-        let actual_keys = actual
-            .iter()
-            .map(|unit| (unit.template.clone(), unit.template_ordinal))
-            .collect::<Vec<_>>();
-        let requested_keys = requested
-            .iter()
-            .map(|unit| (unit.template.clone(), unit.template_ordinal))
-            .collect::<Vec<_>>();
-        if actual_keys != requested_keys {
-            return Err(format!(
-                "assault composition mismatch before geometry normalization: actual={actual_keys:?}; requested={requested_keys:?}"
-            ));
-        }
-
-        let player_id = self.player_id;
-        let world = self.app.world_mut();
-        let mut entities = {
-            let mut query = world.query::<(Entity, &Id, &Template, &CrisisAssaultUnit)>();
-            query
-                .iter(world)
-                .filter(|(_, _, _, assault)| assault.owner_player_id == player_id)
-                .map(|(entity, id, template, _)| (template.0.clone(), id.0, entity))
-                .collect::<Vec<_>>()
-        };
-        entities.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-        for ((_, _, entity), geometry) in entities.into_iter().zip(requested.iter()) {
-            *world
-                .get_mut::<Position>(entity)
-                .ok_or_else(|| "assault unit missing Position".to_string())? = Position {
-                x: geometry.position[0],
-                y: geometry.position[1],
-            };
-        }
-        Ok(())
-    }
-
-    fn preparation_fixture_state(&mut self) -> Result<PreparationFixtureState, String> {
+        declared_stockade_positions: &[Position],
+    ) -> Result<PreparationFixtureState, String> {
         let player_id = self.player_id;
         let world = self.app.world_mut();
         let (
@@ -1558,7 +1963,7 @@ impl HeadlessGame {
                 }
                 if template.0 == "Stockade" {
                     totals.2 = totals.2.saturating_add(1);
-                    if *position == PREPARATION_STOCKADE_ANCHOR {
+                    if declared_stockade_positions.contains(position) {
                         totals.3.push(PreparationStructureFingerprint {
                             template: template.0.clone(),
                             subclass: subclass.to_string(),
@@ -1673,6 +2078,7 @@ impl HeadlessGame {
     fn preparation_common_launch_fingerprint(
         &mut self,
         comparison: PreparationComparison,
+        declared_stockade_positions: &[Position],
     ) -> Result<PreparationCommonLaunchFingerprint, String> {
         let player_id = self.player_id;
         let world_tick = self.game_tick();
@@ -1684,6 +2090,10 @@ impl HeadlessGame {
             hero_hp,
             hero_base_hp,
             hero_base_defence,
+            hero_combat_stats,
+            hero_needs,
+            hero_effects,
+            hero_last_combat_tick,
             hero_state,
             mut normalized_inventory,
         ) = {
@@ -1695,8 +2105,26 @@ impl HeadlessGame {
                 &Stats,
                 &State,
                 &Inventory,
+                &Thirst,
+                &Hunger,
+                &Tired,
+                &Effects,
+                &LastCombatTick,
             ), With<SubclassHero>>();
-            let (_, hero_class, template, position, stats, state, inventory) = heroes
+            let (
+                _,
+                hero_class,
+                template,
+                position,
+                stats,
+                state,
+                inventory,
+                thirst,
+                hunger,
+                tired,
+                effects,
+                last_combat_tick,
+            ) = heroes
                 .iter(world)
                 .find(|(owner, ..)| owner.0 == player_id)
                 .ok_or_else(|| "missing hero for common launch fingerprint".to_string())?;
@@ -1715,6 +2143,17 @@ impl HeadlessGame {
                 stats.hp,
                 stats.base_hp,
                 stats.base_def,
+                PreparationCombatStatsFingerprint::from_stats(stats),
+                PreparationNeedsFingerprint {
+                    thirst_bits: thirst.thirst.to_bits(),
+                    thirst_per_tick_bits: thirst.per_tick.to_bits(),
+                    hunger_bits: hunger.hunger.to_bits(),
+                    hunger_per_tick_bits: hunger.per_tick.to_bits(),
+                    tired_bits: tired.tired.to_bits(),
+                    tired_per_tick_bits: tired.per_tick.to_bits(),
+                },
+                preparation_effect_fingerprints(effects),
+                last_combat_tick.0,
                 Obj::state_to_str(*state),
                 inventory,
             )
@@ -1744,9 +2183,15 @@ impl HeadlessGame {
                         base_hp: stats.base_hp,
                     }
                 })
-                // Only the declared Stockade at the fixed treatment anchor is
-                // normalized away. Every other Stockade remains comparable.
-                .filter(|structure| !is_declared_stockade_artifact(comparison, structure))
+                // Only the explicitly declared treatment Stockades are
+                // normalized away. Every unrelated Stockade remains comparable.
+                .filter(|structure| {
+                    !(comparison.includes_wall()
+                        && structure.template == "Stockade"
+                        && declared_stockade_positions
+                            .iter()
+                            .any(|position| structure.position == [position.x, position.y]))
+                })
                 .collect::<Vec<_>>()
         };
         normalized_structures.sort_by(|left, right| {
@@ -1768,27 +2213,41 @@ impl HeadlessGame {
                 .count() as i32
         };
         let mut assault_units = {
-            let mut units =
-                world.query::<(&Template, &Position, &Stats, &State, &CrisisAssaultUnit)>();
+            let mut units = world.query::<(
+                &Template,
+                &Stats,
+                &State,
+                &CrisisAssaultUnit,
+                &Effects,
+                &LastCombatTick,
+            )>();
             units
                 .iter(world)
-                .filter(|(_, _, _, state, assault)| {
+                .filter(|(_, _, state, assault, ..)| {
                     assault.owner_player_id == player_id && state.is_alive()
                 })
-                .map(
-                    |(template, position, stats, _, _)| PreparationAssaultUnitFingerprint {
+                .map(|(template, stats, _, _, effects, last_combat_tick)| {
+                    PreparationAssaultUnitFingerprint {
                         template: template.0.clone(),
-                        position: [position.x, position.y],
                         hp: stats.hp,
                         base_hp: stats.base_hp,
-                    },
-                )
+                        combat_stats: PreparationCombatStatsFingerprint::from_stats(stats),
+                        effects: preparation_effect_fingerprints(effects),
+                        last_combat_tick: last_combat_tick.0,
+                    }
+                })
                 .collect::<Vec<_>>()
         };
         assault_units.sort_by(|left, right| {
             left.template
                 .cmp(&right.template)
-                .then(left.position.cmp(&right.position))
+                .then(left.hp.cmp(&right.hp))
+                .then(left.base_hp.cmp(&right.base_hp))
+                .then(
+                    left.combat_stats
+                        .base_damage
+                        .cmp(&right.combat_stats.base_damage),
+                )
         });
         let crisis = world
             .resource::<SettlementCrisisState>()
@@ -1804,6 +2263,10 @@ impl HeadlessGame {
             hero_hp,
             hero_base_hp,
             hero_base_defence,
+            hero_combat_stats,
+            hero_needs,
+            hero_effects,
+            hero_last_combat_tick,
             hero_state,
             crisis_phase: crisis_phase_name(crisis.phase).to_string(),
             crisis_pressure: crisis.pressure,
@@ -1963,6 +2426,12 @@ impl HeadlessGame {
         }
     }
 
+    pub fn disconnect_scenario_player(&mut self, player_id: i32) {
+        if let Some(connection_id) = self.clients.current_connection_id(player_id) {
+            self.clients.remove_if_current(connection_id);
+        }
+    }
+
     /// Re-adds the harness's deterministic active client without recreating the
     /// hero or resetting run state.
     pub fn reconnect_player(&mut self) {
@@ -2094,6 +2563,48 @@ impl HeadlessGame {
             .get(&self.player_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Preserve the headless policy's target-acquisition boundary separately
+    /// from the later production attack request. The target is accepted only
+    /// when it belongs to this player's current live assault generation.
+    pub fn record_observed_crisis_target(&mut self, target_id: i32) -> bool {
+        let player_id = self.player_id;
+        let Some((assault_id, spawn_generation)) = self
+            .app
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .and_then(|crisis| {
+                (crisis.phase == CrisisPhase::AssaultActive)
+                    .then_some((crisis.assault_id?, crisis.assault_spawn_generation))
+            })
+        else {
+            return false;
+        };
+        let valid = {
+            let world = self.app.world_mut();
+            let mut query = world.query::<(&Id, &CrisisAssaultUnit, &State)>();
+            query.iter(world).any(|(id, attribution, state)| {
+                id.0 == target_id
+                    && attribution.owner_player_id == player_id
+                    && attribution.assault_id == assault_id
+                    && attribution.spawn_generation == spawn_generation
+                    && *state != State::Dead
+            })
+        };
+        if !valid {
+            return false;
+        }
+        let game_tick = self.game_tick();
+        self.app
+            .world_mut()
+            .resource_mut::<CrisisBalanceTelemetryState>()
+            .entry(player_id)
+            .or_default()
+            .engagement
+            .record_observed_hero_target(target_id, game_tick);
+        true
     }
 
     pub fn set_crisis_balance_sample_interval(&mut self, interval_ticks: Option<i32>) {
@@ -2565,14 +3076,26 @@ impl HeadlessGame {
             .0
             .saturating_sub(SAFE_LOGOUT_COMBAT_COOLDOWN_TICKS)
             .saturating_sub(1);
-        let hero_entity = {
-            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+        let (hero_entity, hero_id) = {
+            let mut query = world.query_filtered::<(Entity, &Id, &PlayerId), With<SubclassHero>>();
             query
                 .iter(world)
-                .find(|(_, owner)| owner.0 == self.player_id)
-                .map(|(entity, _)| entity)
+                .find(|(_, _, owner)| owner.0 == self.player_id)
+                .map(|(entity, id, _)| (entity, id.0))
                 .expect("headless safe-logout hero")
         };
+        // The balance bot may have queued a normal move on the last tick before
+        // the crisis entered Ready. This fixture deliberately establishes an
+        // eligible, stationary Safe Logout probe, so discard only that hero's
+        // pending map events and restore its idle state before requesting.
+        world
+            .resource_mut::<MapEvents>()
+            .retain(|_, event| event.obj_id != hero_id);
+        if let Some(mut state) = world.get_mut::<State>(hero_entity) {
+            if *state != State::Dead {
+                *state = State::None;
+            }
+        }
         world
             .get_mut::<LastCombatTick>(hero_entity)
             .expect("headless hero combat timestamp")
@@ -2591,6 +3114,7 @@ impl HeadlessGame {
         let active_hostiles = {
             let mut query = world.query_filtered::<(
                 Entity,
+                &Id,
                 &PlayerId,
                 &Subclass,
                 &State,
@@ -2599,20 +3123,33 @@ impl HeadlessGame {
             ), (With<SubclassNPC>, With<VisibleTarget>)>();
             query
                 .iter(world)
-                .filter(|(_, owner, subclass, state, stats, dead)| {
+                .filter(|(_, _, owner, subclass, state, stats, dead)| {
                     owner.is_npc()
                         && **subclass == Subclass::Npc
                         && state.is_alive()
                         && dead.is_none()
                         && stats.hp > 0
                 })
-                .map(|(entity, ..)| entity)
+                .map(|(entity, id, ..)| (entity, id.0))
                 .collect::<Vec<_>>()
         };
-        for entity in active_hostiles {
+        let active_hostile_ids = active_hostiles
+            .iter()
+            .map(|(_, object_id)| *object_id)
+            .collect::<HashSet<_>>();
+        world
+            .resource_mut::<MapEvents>()
+            .retain(|_, event| !active_hostile_ids.contains(&event.obj_id));
+        for (entity, _) in active_hostiles {
             *world
                 .get_mut::<Position>(entity)
                 .expect("headless hostile position") = far;
+            world
+                .get_mut::<VisibleTarget>(entity)
+                .expect("headless hostile visible target")
+                .target = crate::constants::NO_TARGET;
+            world.entity_mut(entity).remove::<Target>();
+            world.entity_mut(entity).remove::<TaskTarget>();
         }
         self.tick(1);
         assert_eq!(self.player_presence(), Some(PlayerWorldPresence::Online));
@@ -2866,6 +3403,30 @@ impl HeadlessGame {
             .cloned()
     }
 
+    /// Resolve the exact Monolith bound to a player's current hero instead of
+    /// inferring sanctuary ownership from nearest-distance presentation data.
+    pub fn bound_monolith_for_player(&mut self, player_id: i32) -> Option<MonolithView> {
+        let world = self.app.world_mut();
+        let bound_monolith_id = {
+            let mut heroes =
+                world.query_filtered::<(&PlayerId, &BoundMonolith), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .map(|(_, bound)| bound.id)?
+        };
+        let entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(bound_monolith_id)?;
+        let position = *world.get::<Position>(entity)?;
+        let monolith = world.get::<Monolith>(entity)?;
+        Some(MonolithView {
+            id: bound_monolith_id,
+            pos: position,
+            level: monolith.sanctuary_level,
+        })
+    }
+
     pub fn crisis_assault_units(&mut self) -> Vec<CrisisAssaultUnitView> {
         let world = self.app.world_mut();
         let mut query = world.query::<(
@@ -2874,13 +3435,29 @@ impl HeadlessGame {
             &CrisisAssaultUnit,
             &Stats,
             &Position,
+            &Viewshed,
+            Option<&ThinkerBuilder>,
             Option<&StateDead>,
             Option<&crate::npc::VisibleTarget>,
+            Option<&Target>,
+            Option<&TaskTarget>,
         )>();
         let mut units = query
             .iter(world)
             .map(
-                |(id, template, assault, stats, pos, dead, visible_target)| CrisisAssaultUnitView {
+                |(
+                    id,
+                    template,
+                    assault,
+                    stats,
+                    pos,
+                    viewshed,
+                    thinker,
+                    dead,
+                    visible_target,
+                    target,
+                    task_target,
+                )| CrisisAssaultUnitView {
                     obj_id: id.0,
                     template: template.0.clone(),
                     owner_player_id: assault.owner_player_id,
@@ -2889,7 +3466,11 @@ impl HeadlessGame {
                     hp: stats.hp,
                     base_hp: stats.base_hp,
                     pos: *pos,
+                    vision: viewshed.range,
+                    has_thinker: thinker.is_some(),
                     visible_target: visible_target.map(|target| target.target),
+                    target: target.map(|target| target.id),
+                    task_target: task_target.map(|target| target.target),
                     dead: dead.is_some(),
                 },
             )
@@ -2952,20 +3533,39 @@ impl HeadlessGame {
                 &PlayerId,
                 &Position,
                 &Stats,
+                &HeroClass,
                 &State,
                 &Inventory,
                 &Thirst,
                 &Hunger,
                 Option<&Tired>,
                 Option<&TrueDeath>,
+                &Viewshed,
             ), With<SubclassHero>>();
             match q.iter(world).find(|(_, p, ..)| p.0 == pid) {
-                Some((id, _p, pos, stats, state, inv, thirst, hunger, tired, td)) => (
+                Some((
+                    id,
+                    _p,
+                    pos,
+                    stats,
+                    hero_class,
+                    state,
+                    inv,
+                    thirst,
+                    hunger,
+                    tired,
+                    td,
+                    viewshed,
+                )) => (
                     Some(HeroView {
                         id: id.0,
                         pos: *pos,
+                        hero_class: *hero_class,
                         hp: stats.hp,
                         base_hp: stats.base_hp,
+                        stamina: stats.stamina,
+                        mana: stats.mana,
+                        vision: viewshed.range,
                         state: *state,
                         dead: *state == State::Dead,
                         true_death: td.is_some(),
@@ -2981,14 +3581,20 @@ impl HeadlessGame {
 
         // Living enemy NPCs.
         let enemies = {
-            let mut q =
-                world.query_filtered::<(&Id, &PlayerId, &Position, &State), With<SubclassNPC>>();
+            let mut q = world.query_filtered::<(
+                &Id,
+                &PlayerId,
+                &Position,
+                &State,
+                Option<&CrisisAssaultUnit>,
+            ), With<SubclassNPC>>();
             q.iter(world)
-                .filter(|(_, _, _, state)| **state != State::Dead)
-                .map(|(id, p, pos, _)| UnitView {
+                .filter(|(_, _, _, state, _)| **state != State::Dead)
+                .map(|(id, p, pos, _, assault)| UnitView {
                     id: id.0,
                     player_id: p.0,
                     pos: *pos,
+                    crisis_owner_player_id: assault.map(|unit| unit.owner_player_id),
                 })
                 .collect::<Vec<_>>()
         };
@@ -3100,10 +3706,15 @@ impl HeadlessGame {
                 .collect::<Vec<_>>()
         };
 
-        // Every positioned object's tile (move-target occupancy avoidance).
+        // Tiles occupied by objects that production movement treats as blocking.
+        // Dead, founded, progressing, stalled, and hiding objects must not become
+        // permanent synthetic obstacles in a bot snapshot.
         let occupied = {
-            let mut q = world.query::<&Position>();
-            q.iter(world).map(|p| (p.x, p.y)).collect::<HashSet<_>>()
+            let mut q = world.query::<(&Position, &State)>();
+            q.iter(world)
+                .filter(|(_, state)| state.is_blocking())
+                .map(|(position, _)| (position.x, position.y))
+                .collect::<HashSet<_>>()
         };
 
         // Resource node tiles (the `Resources` map is keyed by Position). Track
@@ -3161,6 +3772,10 @@ impl HeadlessGame {
 
     pub fn map(&self) -> &Map {
         self.app.world().resource::<Map>()
+    }
+
+    pub fn is_land_passable(&self, position: Position) -> bool {
+        Map::is_passable_by_obj(position.x, position.y, true, false, false, self.map())
     }
 
     // Run is over when capped, the hero permadied (TrueDeath or despawned), or a
@@ -3432,6 +4047,7 @@ impl HeadlessGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::GOBLIN_ASSAULT_COMPOSITION;
     use crate::network::{CrisisStatusSnapshot, SafeLogoutStatusSnapshot};
 
     fn crisis_statuses(packets: Vec<ResponsePacket>) -> Vec<CrisisStatusSnapshot> {
@@ -4229,6 +4845,22 @@ mod tests {
             .expect("map corner")
     }
 
+    fn passable_unoccupied_adjacent_position(
+        game: &mut HeadlessGame,
+        origin: Position,
+    ) -> Position {
+        let occupied = game.observe().occupied;
+        Map::range((origin.x, origin.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                Map::is_adjacent_excluding_source(*position, origin)
+                    && Map::is_passable(position.x, position.y, game.map())
+                    && !occupied.contains(&(position.x, position.y))
+            })
+            .expect("passable unoccupied adjacent test position")
+    }
+
     fn expire_safe_logout_activity_cooldown(game: &mut HeadlessGame) {
         game.app.world_mut().resource_mut::<GameTick>().0 +=
             crate::safe_logout::SAFE_LOGOUT_COMBAT_COOLDOWN_TICKS + 1;
@@ -4918,12 +5550,50 @@ mod tests {
             })
             .expect("valid tile just outside the hostile radius");
         let hostile = game.spawn_safe_logout_test_hostile(just_outside);
+        game.queue_hostile_spell_damage_for_test(hostile, 5);
         game.record_player_combat_for_test();
         game.damage_hero_for_test(1);
         game.tick(1);
 
+        let hero = game.observe().hero.expect("safe-logout hero");
+        let queued_tick = game.game_tick().saturating_add(5);
+        {
+            let world = game.app.world_mut();
+            let hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hero.id)
+                .expect("safe-logout hero entity");
+            *world
+                .get_mut::<State>(hero_entity)
+                .expect("safe-logout hero state") = State::Moving;
+            world.resource_mut::<MapEvents>().new(
+                hero.id,
+                queued_tick,
+                VisibleEvent::MoveEvent {
+                    src: hero.pos,
+                    dst: just_outside,
+                },
+            );
+        }
+
         let prepared_sanctuary = game.prepare_safe_logout_scenario();
         assert_eq!(prepared_sanctuary, sanctuary);
+        assert!(game
+            .world()
+            .resource::<MapEvents>()
+            .values()
+            .all(|event| event.obj_id != hero.id));
+        assert_eq!(
+            game.world()
+                .get::<State>(
+                    game.world()
+                        .resource::<EntityObjMap>()
+                        .get_entity(hero.id)
+                        .expect("prepared hero entity")
+                )
+                .copied(),
+            Some(State::None)
+        );
         let moved_hostile = game
             .observe()
             .enemies
@@ -4954,7 +5624,15 @@ mod tests {
         let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutProductionDamageBot");
         begin_safe_logout(&mut game);
 
-        let hostile_id = game.spawn_safe_logout_test_hostile(sanctuary);
+        let hostile_position = Map::range((sanctuary.x, sanctuary.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                Map::is_adjacent_excluding_source(*position, sanctuary)
+                    && Map::is_passable(position.x, position.y, game.map())
+            })
+            .expect("passable melee tile beside the sanctuary");
+        let hostile_id = game.spawn_safe_logout_test_hostile(hostile_position);
         let (hero_entity, hero_id, hp_before, hostile_entity) = {
             let world = game.app.world_mut();
             let mut heroes = world.query_filtered::<(Entity, &Id, &Stats), With<SubclassHero>>();
@@ -7350,7 +8028,7 @@ mod tests {
         }
         advance_ready_clock_to_launch(&mut game, preferred_tick);
         let launched_units = game.crisis_assault_units();
-        assert_eq!(launched_units.len(), 3);
+        assert_eq!(launched_units.len(), GOBLIN_ASSAULT_COMPOSITION.len());
 
         for unit in launched_units {
             kill_assault_unit_through_normal_combat(&mut game, unit.obj_id);
@@ -7380,9 +8058,11 @@ mod tests {
             .filter(|status| status.assault_active)
             .filter_map(|status| status.remaining_attackers)
             .collect::<Vec<_>>();
-        assert!(remaining.starts_with(&[3]));
+        assert!(remaining.starts_with(&[GOBLIN_ASSAULT_COMPOSITION.len() as i32]));
         assert!(remaining.windows(2).all(|counts| counts[1] <= counts[0]));
-        assert!(remaining.iter().any(|remaining| *remaining < 3));
+        assert!(remaining
+            .iter()
+            .any(|remaining| *remaining < GOBLIN_ASSAULT_COMPOSITION.len() as i32));
         assert_eq!(statuses.iter().filter(|status| status.resolved).count(), 1);
 
         let telemetry = game.crisis_telemetry();
@@ -7412,10 +8092,13 @@ mod tests {
                 .crisis_balance
                 .assault_outcome
                 .assault_units_defeated,
-            3,
+            GOBLIN_ASSAULT_COMPOSITION.len() as i32,
             "normal Combat damage must reach the crisis attribution observer"
         );
-        assert_eq!(metrics.crisis_balance.assault_outcome.player_kills, 3);
+        assert_eq!(
+            metrics.crisis_balance.assault_outcome.player_kills,
+            GOBLIN_ASSAULT_COMPOSITION.len() as i32
+        );
         assert_eq!(metrics.crisis_balance.assault_outcome.helper_kills, 0);
 
         println!(
@@ -7543,7 +8226,10 @@ mod tests {
         assert!(offline_outcome.ordinary_disconnect_during_assault);
         assert!(offline_outcome.resolved_while_owner_offline);
         assert_eq!(offline_outcome.hero_alive_at_resolution, Some(true));
-        assert_eq!(offline_outcome.helper_kills, 3);
+        assert_eq!(
+            offline_outcome.helper_kills,
+            GOBLIN_ASSAULT_COMPOSITION.len() as i32
+        );
 
         game.reconnect_player_with_login();
         game.tick(8);
@@ -7584,7 +8270,10 @@ mod tests {
         let launched = game.settlement_crisis().expect("active assault");
         let assault_id = launched.assault_id.expect("logical assault id");
         assert_eq!(launched.assault_spawn_generation, 1);
-        assert_eq!(launched.assault_unit_ids.len(), 3);
+        assert_eq!(
+            launched.assault_unit_ids.len(),
+            GOBLIN_ASSAULT_COMPOSITION.len()
+        );
         assert!(!launched.resolution_recorded);
 
         let units = game.crisis_assault_units();
@@ -7702,7 +8391,7 @@ mod tests {
                 .iter()
                 .filter(|unit| unit.owner_player_id == player_id)
                 .count(),
-            3
+            GOBLIN_ASSAULT_COMPOSITION.len()
         );
         assert_eq!(
             game.settlement_crisis().unwrap().assault_spawn_generation,
@@ -7803,7 +8492,10 @@ mod tests {
             game.settlement_crisis().unwrap().phase,
             CrisisPhase::AssaultActive
         );
-        assert_eq!(game.crisis_assault_units().len(), 3);
+        assert_eq!(
+            game.crisis_assault_units().len(),
+            GOBLIN_ASSAULT_COMPOSITION.len()
+        );
     }
 
     #[test]
@@ -7920,9 +8612,10 @@ mod tests {
                 unit_entity,
             )
         };
+        let attacker_pos = passable_unoccupied_adjacent_position(&mut game, hero_pos);
         let action_entity = {
             let world = game.app.world_mut();
-            *world.get_mut::<Position>(unit_entity).unwrap() = hero_pos;
+            *world.get_mut::<Position>(unit_entity).unwrap() = attacker_pos;
             world.get_mut::<Stats>(unit_entity).unwrap().base_damage = Some(30);
             world.get_mut::<VisibleTarget>(unit_entity).unwrap().target = hero_id;
             world
@@ -8146,7 +8839,10 @@ mod tests {
         assert_eq!(score_after.elites_killed, score_before.elites_killed);
         assert_eq!(game.personal_crises_resolved(), 0);
         assert!(game.world().get::<StateDead>(target_entity).is_none());
-        assert_eq!(game.crisis_assault_units().len(), 3);
+        assert_eq!(
+            game.crisis_assault_units().len(),
+            GOBLIN_ASSAULT_COMPOSITION.len()
+        );
     }
 
     #[test]
@@ -8238,7 +8934,10 @@ mod tests {
         assert_eq!(score_after.enemies_killed, score_before.enemies_killed);
         assert_eq!(score_after.elites_killed, score_before.elites_killed);
         assert_eq!(game.personal_crises_resolved(), 0);
-        assert_eq!(game.crisis_assault_units().len(), 3);
+        assert_eq!(
+            game.crisis_assault_units().len(),
+            GOBLIN_ASSAULT_COMPOSITION.len()
+        );
     }
 
     #[test]
@@ -8563,7 +9262,7 @@ mod tests {
         let unit_ids_before = units.iter().map(|unit| unit.obj_id).collect::<Vec<_>>();
         let sentinel_id = units[0].obj_id;
         let npc_action_id = units[1].obj_id;
-        let helper_target_id = units[2].obj_id;
+        let helper_target_id = npc_action_id;
         let helper_player_id = spawn_connected_helper(&mut game, "AssaultContinuationHelper");
 
         let foreign_structure_health_before = {
@@ -8590,8 +9289,9 @@ mod tests {
             npc_hp_before,
         ) = {
             let npc_pos = units[1].pos;
+            let villager_pos = passable_unoccupied_adjacent_position(&mut game, npc_pos);
             let (villager_entity, villager_id) =
-                spawn_armed_owner_villager(&mut game, player_id, npc_pos);
+                spawn_armed_owner_villager(&mut game, player_id, villager_pos);
             let world = game.app.world_mut();
             let entity_map = world.resource::<EntityObjMap>();
             let sentinel_entity = entity_map.get_entity(sentinel_id).unwrap();
@@ -10133,6 +10833,7 @@ mod tests {
                 hide_wraps: 1,
                 hide_wraps_items: vec![expected_hide_wraps(false)],
                 tattered_shirt_items: vec![expected_tattered_shirt(true)],
+                other_healing_items: 1,
                 ..PreparationFixtureState::default()
             },
         };
@@ -10161,10 +10862,689 @@ mod tests {
                     .then(expected_crude_bandage)
                     .into_iter()
                     .collect(),
+                other_healing_items: 1,
                 ..PreparationFixtureState::default()
             },
         };
         (control, treatment)
+    }
+
+    #[test]
+    fn preparation_fixture_preserves_one_starting_potion_in_both_legs() {
+        let fixture_for = |add_bandage: bool, name: &str| {
+            let mut game = HeadlessGame::new(100);
+            game.spawn_hero("Warrior", name);
+            {
+                let player_id = game.player_id;
+                let world = game.app.world_mut();
+                let templates = world.resource::<Templates>().item_templates.clone();
+                let bandage_id = world.resource_mut::<Ids>().new_item_id();
+                let mut heroes =
+                    world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
+                let (_, mut inventory) = heroes
+                    .iter_mut(world)
+                    .find(|(owner, _)| owner.0 == player_id)
+                    .expect("hero inventory");
+                inventory.new(bandage_id, "Crude Bandage".to_string(), 2, &templates);
+            }
+            game.install_preparation_inventory(add_bandage)
+                .expect("install preparation inventory");
+            let view = game.observe();
+            assert_eq!(
+                view.inventory
+                    .iter()
+                    .filter(|item| item.name == "Health Potion" && item.quantity > 0)
+                    .map(|item| item.quantity)
+                    .sum::<i32>(),
+                1
+            );
+            game.preparation_fixture_state(&[])
+                .expect("preparation fixture state")
+        };
+
+        let control = fixture_for(false, "PreparationPotionControl");
+        let treatment = fixture_for(true, "PreparationPotionTreatment");
+        assert_eq!(control.other_healing_items, 1);
+        assert_eq!(treatment.other_healing_items, 1);
+        assert_eq!(control.crude_bandages, 0);
+        assert_eq!(treatment.crude_bandages, 1);
+    }
+
+    #[test]
+    fn production_bandage_use_heals_consumes_once_and_records_active_assault_usage() {
+        let mut game = HeadlessGame::new(20_000);
+        game.restrict_to_preparation_pair_start_location()
+            .expect("fixed preparation start");
+        let player_id = game.spawn_hero("Warrior", "Cp4BandageUse");
+        game.set_crisis_balance_sample_interval(Some(1));
+        game.prepare_checkpoint4_preparation_pair_launch(
+            PreparationComparison::HealingPrepared,
+            PreparationPairLeg::Treatment,
+        )
+        .expect("active assault with one treatment bandage");
+
+        {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(&PlayerId, &mut Stats), With<SubclassHero>>();
+            let (_, mut stats) = heroes
+                .iter_mut(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .expect("hero stats");
+            stats.hp = stats.base_hp - 20;
+        }
+        let before = game.observe();
+        let before_hero = before.hero.expect("hero");
+        let bandage = before
+            .inventory
+            .iter()
+            .find(|item| item.name == "Crude Bandage")
+            .expect("treatment bandage");
+        let use_event = PlayerEvent::Use {
+            player_id,
+            obj_id: before_hero.id,
+            item_id: bandage.id,
+        };
+        game.inject(use_event.clone());
+        game.tick(3);
+
+        let after = game.observe();
+        assert_eq!(
+            after.hero.expect("hero after bandage").hp,
+            before_hero.hp + 10
+        );
+        assert_eq!(
+            after
+                .inventory
+                .iter()
+                .filter(|item| item.id == bandage.id)
+                .map(|item| item.quantity)
+                .sum::<i32>(),
+            0
+        );
+        let engagement = game.crisis_balance_telemetry().engagement;
+        assert_eq!(engagement.healing_items_used_during_assault, 1);
+        assert_eq!(engagement.healing_hp_restored_during_assault, 10);
+
+        game.inject(use_event);
+        game.tick(3);
+        let duplicate = game.crisis_balance_telemetry().engagement;
+        assert_eq!(duplicate.healing_items_used_during_assault, 1);
+        assert_eq!(duplicate.healing_hp_restored_during_assault, 10);
+    }
+
+    #[test]
+    fn production_bandage_use_at_full_health_is_a_non_consuming_noop() {
+        let mut game = HeadlessGame::new(20_000);
+        game.restrict_to_preparation_pair_start_location()
+            .expect("fixed preparation start");
+        let player_id = game.spawn_hero("Warrior", "Cp4BandageNoop");
+        game.set_crisis_balance_sample_interval(Some(1));
+        game.prepare_checkpoint4_preparation_pair_launch(
+            PreparationComparison::HealingPrepared,
+            PreparationPairLeg::Treatment,
+        )
+        .expect("active assault with one treatment bandage");
+        let before = game.observe();
+        let hero = before.hero.expect("hero");
+        assert_eq!(hero.hp, hero.base_hp);
+        let bandage = before
+            .inventory
+            .iter()
+            .find(|item| item.name == "Crude Bandage")
+            .expect("treatment bandage");
+
+        game.inject(PlayerEvent::Use {
+            player_id,
+            obj_id: hero.id,
+            item_id: bandage.id,
+        });
+        game.tick(3);
+
+        let after = game.observe();
+        assert_eq!(after.hero.expect("hero after no-op").hp, hero.hp);
+        assert_eq!(
+            after
+                .inventory
+                .iter()
+                .find(|item| item.id == bandage.id)
+                .map(|item| item.quantity),
+            Some(1)
+        );
+        let engagement = game.crisis_balance_telemetry().engagement;
+        assert_eq!(engagement.healing_items_used_during_assault, 0);
+        assert_eq!(engagement.healing_hp_restored_during_assault, 0);
+    }
+
+    #[test]
+    fn production_health_potion_use_consumes_exactly_one_and_duplicate_cannot_overconsume() {
+        let mut game = HeadlessGame::new(100);
+        let player_id = game.spawn_hero("Warrior", "ProductionPotionUse");
+        let (hero_id, potion_id, base_hp) = {
+            let world = game.app.world_mut();
+            let mut heroes = world
+                .query_filtered::<(&PlayerId, &mut Stats, &mut Inventory), With<SubclassHero>>();
+            let (_, mut stats, mut inventory) = heroes
+                .iter_mut(world)
+                .find(|(owner, ..)| owner.0 == player_id)
+                .expect("hero with starting Health Potion");
+            let hero_id = inventory.owner;
+            let potion_id = {
+                let potion = inventory
+                    .items
+                    .iter_mut()
+                    .find(|item| item.name == "Health Potion")
+                    .expect("starting Health Potion");
+                assert_eq!(potion.quantity, 1);
+                potion.quantity = 2;
+                potion.id
+            };
+            stats.hp = stats.base_hp - 10;
+            (hero_id, potion_id, stats.base_hp)
+        };
+        let use_event = PlayerEvent::Use {
+            player_id,
+            obj_id: hero_id,
+            item_id: potion_id,
+        };
+
+        game.start_packet_capture();
+        game.inject(use_event.clone());
+        game.inject(use_event);
+        game.tick(6);
+        let packets = game.finish_packet_capture();
+
+        let after = game.observe();
+        assert_eq!(after.hero.expect("hero after potion").hp, base_hp);
+        assert_eq!(
+            after
+                .inventory
+                .iter()
+                .find(|item| item.id == potion_id)
+                .map(|item| item.quantity),
+            Some(1),
+            "the successful use consumes one, while the duplicate at full health is a no-op"
+        );
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            ResponsePacket::InfoInventory { id, items, .. }
+                if *id == hero_id
+                    && items
+                        .iter()
+                        .any(|item| item.id == potion_id && item.quantity == 1)
+        )));
+    }
+
+    #[test]
+    fn production_health_potion_use_at_full_health_without_sickness_is_non_consuming() {
+        let mut game = HeadlessGame::new(100);
+        let player_id = game.spawn_hero("Warrior", "ProductionPotionNoop");
+        let before = game.observe();
+        let hero = before.hero.expect("hero");
+        let potion = before
+            .inventory
+            .iter()
+            .find(|item| item.name == "Health Potion")
+            .expect("starting Health Potion");
+        assert_eq!(hero.hp, hero.base_hp);
+        {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(&PlayerId, &Effects), With<SubclassHero>>();
+            let (_, effects) = heroes
+                .iter(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .expect("hero effects");
+            assert!(!effects.0.contains_key(&Effect::Sickness));
+        }
+
+        game.start_packet_capture();
+        game.inject(PlayerEvent::Use {
+            player_id,
+            obj_id: hero.id,
+            item_id: potion.id,
+        });
+        game.tick(3);
+        let packets = game.finish_packet_capture();
+
+        let after = game.observe();
+        assert_eq!(after.hero.expect("hero after no-op").hp, hero.hp);
+        assert_eq!(
+            after
+                .inventory
+                .iter()
+                .find(|item| item.id == potion.id)
+                .map(|item| item.quantity),
+            Some(1)
+        );
+        assert!(packets.iter().all(|packet| !matches!(
+            packet,
+            ResponsePacket::InfoInventory { id, .. } if *id == hero.id
+        )));
+    }
+
+    #[test]
+    fn production_herbal_poultice_cures_sickness_and_consumes_once() {
+        let mut game = HeadlessGame::new(100);
+        let player_id = game.spawn_hero("Warrior", "ProductionPoulticeUse");
+        let (hero_id, poultice_id) = {
+            let world = game.app.world_mut();
+            let templates = world.resource::<Templates>().item_templates.clone();
+            let poultice_id = world.resource_mut::<Ids>().new_item_id();
+            let mut heroes = world
+                .query_filtered::<(&PlayerId, &mut Inventory, &mut Effects), With<SubclassHero>>();
+            let (_, mut inventory, mut effects) = heroes
+                .iter_mut(world)
+                .find(|(owner, ..)| owner.0 == player_id)
+                .expect("hero inventory and effects");
+            let poultice = inventory.new(poultice_id, "Herbal Poultice".to_string(), 1, &templates);
+            assert_eq!(poultice.id, poultice_id);
+            effects.0.insert(Effect::Sickness, (100, 1.0, 1));
+            (inventory.owner, poultice_id)
+        };
+
+        game.start_packet_capture();
+        let use_event = PlayerEvent::Use {
+            player_id,
+            obj_id: hero_id,
+            item_id: poultice_id,
+        };
+        game.inject(use_event.clone());
+        game.tick(3);
+        let packets = game.finish_packet_capture();
+
+        let world = game.app.world_mut();
+        let mut heroes =
+            world.query_filtered::<(&PlayerId, &Inventory, &Effects), With<SubclassHero>>();
+        let (_, inventory, effects) = heroes
+            .iter(world)
+            .find(|(owner, ..)| owner.0 == player_id)
+            .expect("hero after poultice");
+        assert!(!effects.0.contains_key(&Effect::Sickness));
+        assert!(inventory.get_by_id(poultice_id).is_none());
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            ResponsePacket::LostEffect { id, effect, .. }
+                if *id == hero_id && effect == &Effect::Sickness.to_str()
+        )));
+        assert!(packets.iter().any(|packet| matches!(
+            packet,
+            ResponsePacket::InfoInventory { id, items, .. }
+                if *id == hero_id && items.iter().all(|item| item.id != poultice_id)
+        )));
+
+        drop(heroes);
+        game.inject(use_event);
+        game.tick(3);
+        assert!(game
+            .observe()
+            .inventory
+            .iter()
+            .all(|item| item.id != poultice_id));
+    }
+
+    #[test]
+    fn preparation_structure_anchor_must_be_free_before_fixture_spawn() {
+        assert_eq!(PREPARATION_STOCKADE_ANCHOR, Position { x: 13, y: 13 });
+        let mut game = HeadlessGame::new(100);
+        game.restrict_to_preparation_pair_start_location()
+            .expect("fixed preparation start");
+        game.spawn_hero("Warrior", "PreparationAnchorBot");
+        let hero_position = game.observe().hero.expect("hero").pos;
+        let error = game
+            .spawn_completed_preparation_structure("Stockade", hero_position)
+            .expect_err("occupied hero tile must reject fixture structure");
+        assert!(error.contains("already occupied"));
+
+        game.spawn_completed_preparation_structure("Stockade", PREPARATION_STOCKADE_ANCHOR)
+            .expect("verified free stockade anchor");
+        assert!(game
+            .spawn_completed_preparation_structure("Stockade", PREPARATION_STOCKADE_ANCHOR,)
+            .unwrap_err()
+            .contains("already occupied"));
+    }
+
+    #[test]
+    fn checkpoint4_existing_walls_fixture_builds_a_matched_blocking_ring() {
+        let launch = |leg, name| {
+            let mut game = HeadlessGame::new(100);
+            game.restrict_to_preparation_pair_start_location()
+                .expect("fixed preparation start");
+            game.spawn_hero("Warrior", name);
+            let launch = game
+                .prepare_checkpoint4_preparation_pair_launch(
+                    PreparationComparison::ExistingWalls,
+                    leg,
+                )
+                .expect("Checkpoint 4 wall launch");
+            let hero_position = game.observe().hero.expect("hero").pos;
+            (launch, hero_position)
+        };
+
+        let (control, control_hero) = launch(PreparationPairLeg::Control, "Cp4WallControl");
+        let (treatment, treatment_hero) = launch(PreparationPairLeg::Treatment, "Cp4WallTreatment");
+
+        assert_eq!(control_hero, treatment_hero);
+        assert_eq!(control.fixture.completed_stockades, 0);
+        assert_eq!(
+            treatment.fixture.completed_stockades,
+            CHECKPOINT4_BLOCKING_STOCKADE_COUNT
+        );
+        assert_eq!(
+            treatment.fixture.declared_anchor_stockades.len(),
+            CHECKPOINT4_BLOCKING_STOCKADE_COUNT as usize
+        );
+        assert!(treatment
+            .fixture
+            .declared_anchor_stockades
+            .iter()
+            .all(|stockade| Map::dist(
+                Position {
+                    x: stockade.position[0],
+                    y: stockade.position[1],
+                },
+                treatment_hero,
+            ) == 1));
+
+        let difference = validate_checkpoint4_preparation_pair_launches(
+            PreparationComparison::ExistingWalls,
+            &control,
+            &treatment,
+        )
+        .expect("only the six declared Stockades may differ");
+        assert_eq!(
+            difference.completed_stockade_delta,
+            CHECKPOINT4_BLOCKING_STOCKADE_COUNT
+        );
+    }
+
+    #[test]
+    fn checkpoint4_normal_and_pair_fixtures_match_declared_production_launch_facts() {
+        let launch = |checkpoint4_normal_fixture: bool, name: &str| {
+            let mut game = HeadlessGame::new(20_000);
+            game.restrict_to_preparation_pair_start_location()
+                .expect("fixed preparation start");
+            game.spawn_hero("Ranger", name);
+            if checkpoint4_normal_fixture {
+                game.prepare_checkpoint4_preparation_pair_launch(
+                    PreparationComparison::EquipmentPrepared,
+                    PreparationPairLeg::Treatment,
+                )
+            } else {
+                game.prepare_preparation_pair_launch(
+                    PreparationComparison::EquipmentPrepared,
+                    PreparationPairLeg::Treatment,
+                )
+            }
+            .expect("production assault launch")
+        };
+
+        // Equipment Prepared has no Checkpoint-4-specific wall geometry, so
+        // both public runner fixtures are configured identically. Entropy may
+        // choose different spawn positions, but every declared production
+        // launch fact (class/state, phase/pressure/timing, inventory,
+        // structures, composition, and unit HP) must be equivalent.
+        let pair_launch = launch(false, "Cp4PairLaunchFacts");
+        let normal_launch = launch(true, "Cp4NormalLaunchFacts");
+        assert_eq!(
+            pair_launch.common_fingerprint,
+            normal_launch.common_fingerprint
+        );
+        assert_eq!(pair_launch.fixture, normal_launch.fixture);
+        assert_eq!(
+            pair_launch
+                .geometry
+                .iter()
+                .map(|unit| (&unit.template, unit.template_ordinal))
+                .collect::<Vec<_>>(),
+            normal_launch
+                .geometry
+                .iter()
+                .map(|unit| (&unit.template, unit.template_ordinal))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn checkpoint4_preparation_harness_preserves_production_hero_and_enemy_combat_stats() {
+        for class_name in ["Warrior", "Ranger", "Mage"] {
+            let mut game = HeadlessGame::new(20_000);
+            game.restrict_to_preparation_pair_start_location()
+                .expect("fixed preparation start");
+            let player_id = game.spawn_hero(
+                class_name,
+                &format!("Cp4ProductionCombatValues{class_name}"),
+            );
+            let production_hero_stats = {
+                let world = game.app.world_mut();
+                let mut heroes = world.query_filtered::<(&PlayerId, &Stats), With<SubclassHero>>();
+                let (_, stats) = heroes
+                    .iter(world)
+                    .find(|(owner, _)| owner.0 == player_id)
+                    .expect("production-spawned hero stats");
+                PreparationCombatStatsFingerprint::from_stats(stats)
+            };
+
+            let launch = game
+                .prepare_checkpoint4_preparation_pair_launch(
+                    PreparationComparison::EquipmentPrepared,
+                    PreparationPairLeg::Control,
+                )
+                .expect("production assault launch");
+            assert_eq!(
+                launch.common_fingerprint.hero_combat_stats, production_hero_stats,
+                "the preparation harness must not rewrite {class_name} combat stats"
+            );
+            assert_eq!(
+                launch.common_fingerprint.hero_hp,
+                launch.common_fingerprint.hero_combat_stats.hp
+            );
+            assert_eq!(
+                launch.common_fingerprint.hero_base_hp,
+                launch.common_fingerprint.hero_combat_stats.base_hp
+            );
+            assert_eq!(
+                launch.common_fingerprint.hero_base_defence,
+                launch.common_fingerprint.hero_combat_stats.base_defence
+            );
+
+            let templates = game.world().resource::<Templates>();
+            for unit in &launch.common_fingerprint.assault_units {
+                let template = templates.obj_templates.get(unit.template.clone());
+                let production_template_stats = PreparationCombatStatsFingerprint {
+                    hp: template.base_hp.expect("production NPC base HP"),
+                    stamina: template.base_stamina,
+                    mana: None,
+                    base_hp: template.base_hp.expect("production NPC base HP"),
+                    base_stamina: template.base_stamina,
+                    base_mana: None,
+                    base_defence: template.base_def.expect("production NPC base defence"),
+                    damage_range: template.dmg_range,
+                    base_damage: template.base_dmg,
+                    base_speed: template.base_speed,
+                    base_vision: template.base_vision,
+                };
+                assert_eq!(
+                    unit.combat_stats, production_template_stats,
+                    "the preparation harness must not rewrite {} combat stats",
+                    unit.template
+                );
+                assert_eq!(unit.hp, unit.combat_stats.hp);
+                assert_eq!(unit.base_hp, unit.combat_stats.base_hp);
+                assert!(unit.effects.is_empty());
+                assert_eq!(unit.last_combat_tick, LastCombatTick::default().0);
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint4_stop_conditions_do_not_end_a_live_assault_before_engagement() {
+        let cap_ticks = 15_000;
+
+        // Launch, perception, movement, and combat can legitimately take more
+        // than one decision. Neither inactivity nor an ordinary first death is
+        // represented in the terminal rule, so both remain observable.
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                false,
+                0,
+                cap_ticks,
+            ),
+            None
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                false,
+                cap_ticks - 1,
+                cap_ticks,
+            ),
+            None,
+            "a still-live scenario must not stop merely because engagement has not happened yet"
+        );
+
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                false,
+                cap_ticks,
+                cap_ticks,
+            ),
+            Some(AssaultObservationStopReason::TickCap)
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::Resolved),
+                true,
+                false,
+                1,
+                cap_ticks,
+            ),
+            Some(AssaultObservationStopReason::Resolved)
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                true,
+                1,
+                cap_ticks,
+            ),
+            Some(AssaultObservationStopReason::HeroTrueDeath)
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                false,
+                false,
+                1,
+                cap_ticks,
+            ),
+            Some(AssaultObservationStopReason::HeroMissing)
+        );
+    }
+
+    #[test]
+    fn preparation_cleanup_despawns_ambient_actor_and_cancels_its_map_events() {
+        let mut game = HeadlessGame::new(100);
+        game.spawn_hero("Warrior", "PreparationCleanupBot");
+        let object_id = {
+            let world = game.app.world_mut();
+            let object_id = world.resource_mut::<Ids>().new_obj_id();
+            let entity = world
+                .spawn((
+                    Id(object_id),
+                    PlayerId(1_000),
+                    Position { x: 1, y: 1 },
+                    State::Moving,
+                    SubclassNPC,
+                ))
+                .id();
+            world.resource_mut::<Ids>().new_obj(object_id, 1_000);
+            world
+                .resource_mut::<EntityObjMap>()
+                .new_obj(object_id, entity);
+            world.resource_mut::<MapEvents>().new(
+                object_id,
+                99,
+                VisibleEvent::MoveEvent {
+                    src: Position { x: 1, y: 1 },
+                    dst: Position { x: 2, y: 1 },
+                },
+            );
+            object_id
+        };
+
+        game.normalize_preparation_non_crisis_hostiles();
+        let world = game.app.world();
+        assert!(world
+            .resource::<EntityObjMap>()
+            .get_entity(object_id)
+            .is_none());
+        assert!(world.resource::<Ids>().get_player(object_id).is_none());
+        assert!(world
+            .resource::<MapEvents>()
+            .values()
+            .all(|event| event.obj_id != object_id));
+    }
+
+    #[test]
+    fn preparation_pair_matches_composition_and_hp_but_keeps_actual_geometry() {
+        let (mut control, mut treatment) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        control.geometry = vec![PreparationAssaultGeometry {
+            template: "Wolf Rider".to_string(),
+            template_ordinal: 0,
+            position: [3, 10],
+        }];
+        treatment.geometry = vec![PreparationAssaultGeometry {
+            template: "Wolf Rider".to_string(),
+            template_ordinal: 0,
+            position: [16, 21],
+        }];
+        let fingerprint = PreparationAssaultUnitFingerprint {
+            template: "Wolf Rider".to_string(),
+            hp: 40,
+            base_hp: 40,
+            combat_stats: PreparationCombatStatsFingerprint {
+                hp: 40,
+                base_hp: 40,
+                ..PreparationCombatStatsFingerprint::default()
+            },
+            effects: Vec::new(),
+            last_combat_tick: -1_000,
+        };
+        control.common_fingerprint.assault_units = vec![fingerprint.clone()];
+        treatment.common_fingerprint.assault_units = vec![fingerprint];
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .is_ok());
+
+        treatment.common_fingerprint.assault_units[0].hp -= 1;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .unwrap_err()
+        .contains("common launch fingerprint mismatch"));
+
+        treatment.common_fingerprint.assault_units[0].hp += 1;
+        treatment.common_fingerprint.assault_units[0]
+            .combat_stats
+            .base_damage = Some(99);
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &treatment,
+        )
+        .unwrap_err()
+        .contains("common launch fingerprint mismatch"));
     }
 
     #[test]
@@ -10197,6 +11577,65 @@ mod tests {
         )
         .unwrap_err()
         .contains("fixture mismatch"));
+
+        let (control, mut missing_starting_potion) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        missing_starting_potion.fixture.other_healing_items = 0;
+        assert!(validate_preparation_pair_launches(
+            PreparationComparison::EquipmentPrepared,
+            &control,
+            &missing_starting_potion,
+        )
+        .unwrap_err()
+        .contains("fixture mismatch"));
+    }
+
+    #[test]
+    fn preparation_pair_validation_rejects_resource_needs_effect_and_combat_state_drift() {
+        let rejects = |treatment: &PreparationPairLaunch| {
+            let (control, _) =
+                valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+            assert!(validate_preparation_pair_launches(
+                PreparationComparison::EquipmentPrepared,
+                &control,
+                treatment,
+            )
+            .unwrap_err()
+            .contains("common launch fingerprint mismatch"));
+        };
+
+        let (_, mut stamina_drift) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        stamina_drift.common_fingerprint.hero_combat_stats.stamina = Some(1);
+        rejects(&stamina_drift);
+
+        let (_, mut mana_drift) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        mana_drift.common_fingerprint.hero_combat_stats.mana = Some(1);
+        rejects(&mana_drift);
+
+        let (_, mut needs_drift) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        needs_drift.common_fingerprint.hero_needs.hunger_bits ^= 1;
+        rejects(&needs_drift);
+
+        let (_, mut effects_drift) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        effects_drift
+            .common_fingerprint
+            .hero_effects
+            .push(PreparationEffectFingerprint {
+                effect: Effect::Bracing.to_str(),
+                duration_or_deadline_tick: 10,
+                amplifier_bits: 1.0_f32.to_bits(),
+                stacks: 1,
+            });
+        rejects(&effects_drift);
+
+        let (_, mut combat_tick_drift) =
+            valid_preparation_test_launches(PreparationComparison::EquipmentPrepared);
+        combat_tick_drift.common_fingerprint.hero_last_combat_tick += 1;
+        rejects(&combat_tick_drift);
     }
 
     #[test]
@@ -10372,5 +11811,29 @@ mod tests {
         )
         .unwrap_err()
         .contains("common launch fingerprint mismatch"));
+    }
+
+    #[test]
+    fn world_view_occupancy_uses_production_blocking_state_semantics() {
+        let mut game = HeadlessGame::new(100);
+        game.spawn_hero("Warrior", "OccupancyProjectionBot");
+        let before = game.observe();
+        let mut open_positions = (0..crate::map::WIDTH)
+            .flat_map(|x| (0..crate::map::HEIGHT).map(move |y| Position { x, y }))
+            .filter(|position| !before.occupied.contains(&(position.x, position.y)));
+        let blocking_position = open_positions.next().expect("first open position");
+        let dead_position = open_positions.next().expect("second open position");
+
+        game.app.world_mut().spawn((blocking_position, State::None));
+        game.app.world_mut().spawn((dead_position, State::Dead));
+
+        let after = game.observe();
+        assert!(after
+            .occupied
+            .contains(&(blocking_position.x, blocking_position.y)));
+        assert!(
+            !after.occupied.contains(&(dead_position.x, dead_position.y)),
+            "dead positioned entities must not become permanent bot path blockers"
+        );
     }
 }

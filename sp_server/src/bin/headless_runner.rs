@@ -361,7 +361,7 @@ fn run_one(run_index: u32, max_ticks: i32, mode: RunnerMode) -> RunMetrics {
         let helper_player_id = game.spawn_connected_scenario_helper("CrisisBalanceHelper");
         Some((
             helper_player_id,
-            Bot::for_helper_support(helper_player_id, owner_anchor),
+            Bot::for_helper_support(helper_player_id, pid, owner_anchor),
         ))
     } else {
         None
@@ -416,6 +416,9 @@ fn run_one(run_index: u32, max_ticks: i32, mode: RunnerMode) -> RunMetrics {
         }
         let view = game.observe();
         let action = bot.step(&view, game.map());
+        if let Some(target_id) = bot.observed_assault_target_id() {
+            game.record_observed_crisis_target(target_id);
+        }
         if let Some(event) = action {
             game.inject(event);
         }
