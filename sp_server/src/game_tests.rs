@@ -2560,7 +2560,7 @@ fn goblin_pressure_uses_named_fact_thresholds_without_double_counting() {
 
 #[test]
 fn online_crisis_time_is_idempotent_and_excludes_inactive_intervals() {
-    let mut crisis = SettlementCrisis::new(100);
+    let mut crisis = SettlementCrisis::new(CrisisKind::Goblin, 100);
 
     assert_eq!(advance_online_crisis_time(&mut crisis, 110, true), 10);
     assert_eq!(crisis.online_active_ticks, 10);
@@ -2588,7 +2588,7 @@ fn online_crisis_time_is_idempotent_and_excludes_inactive_intervals() {
 
 #[test]
 fn goblin_phase_transitions_are_ordered_timed_and_stop_at_assault_ready() {
-    let mut crisis = SettlementCrisis::new(10);
+    let mut crisis = SettlementCrisis::new(CrisisKind::Goblin, 10);
     crisis.pressure = GOBLIN_PRESSURE_MAX;
     crisis.phase_online_ticks = i32::MAX;
 
@@ -2635,7 +2635,7 @@ fn goblin_phase_transitions_are_ordered_timed_and_stop_at_assault_ready() {
 
 #[test]
 fn goblin_phase_pressure_thresholds_are_enforced() {
-    let mut crisis = SettlementCrisis::new(0);
+    let mut crisis = SettlementCrisis::new(CrisisKind::Goblin, 0);
     crisis.pressure = GOBLIN_SIGNS_PRESSURE - 1;
     assert!(next_goblin_crisis_phase(&crisis).is_none());
     crisis.pressure = GOBLIN_SIGNS_PRESSURE;
@@ -2721,7 +2721,7 @@ fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_sk
         assert_eq!(calculate_goblin_pressure_breakdown(&developed), expected);
     }
 
-    let mut crisis = SettlementCrisis::new(0);
+    let mut crisis = SettlementCrisis::new(CrisisKind::Goblin, 0);
     crisis.pressure = expected.clamped_total;
     crisis.phase_online_ticks = i32::MAX;
     assert_eq!(
@@ -2746,7 +2746,7 @@ fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_sk
         Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
     );
 
-    let mut below_ready = SettlementCrisis::new(0);
+    let mut below_ready = SettlementCrisis::new(CrisisKind::Goblin, 0);
     below_ready.phase = CrisisPhase::Preparing;
     below_ready.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
     below_ready.pressure = GOBLIN_ASSAULT_READY_PRESSURE - 1;
@@ -2755,7 +2755,7 @@ fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_sk
 
 #[test]
 fn global_calendar_tick_does_not_change_goblin_phase_eligibility() {
-    let mut early_world = SettlementCrisis::new(0);
+    let mut early_world = SettlementCrisis::new(CrisisKind::Goblin, 0);
     early_world.pressure = GOBLIN_SIGNS_PRESSURE;
     let mut late_world = early_world.clone();
 
@@ -2765,6 +2765,516 @@ fn global_calendar_tick_does_not_change_goblin_phase_eligibility() {
     );
     assert_eq!(early_world.phase, late_world.phase);
     assert_eq!(early_world.pressure, late_world.pressure);
+}
+
+#[test]
+fn undead_crisis_kind_names_sequence_and_explicit_construction_are_stable() {
+    let mut history = PlayerCrisisHistory::default();
+    assert_eq!(crisis_kind_name(CrisisKind::Goblin), "goblin");
+    assert_eq!(crisis_kind_name(CrisisKind::Undead), "undead");
+    assert_eq!(
+        PERSONAL_CRISIS_SEQUENCE,
+        [CrisisKind::Goblin, CrisisKind::Undead]
+    );
+    assert_eq!(
+        next_personal_crisis_kind(&history),
+        Some(CrisisKind::Goblin)
+    );
+
+    // The sequence is authoritative even for malformed out-of-order history.
+    history.completed.insert(CrisisKind::Undead);
+    assert_eq!(
+        next_personal_crisis_kind(&history),
+        Some(CrisisKind::Goblin)
+    );
+    history.completed.insert(CrisisKind::Goblin);
+    assert_eq!(next_personal_crisis_kind(&history), None);
+    history.completed.remove(&CrisisKind::Undead);
+    assert_eq!(
+        next_personal_crisis_kind(&history),
+        Some(CrisisKind::Undead)
+    );
+
+    let goblin = SettlementCrisis::new(CrisisKind::Goblin, 40);
+    let undead = SettlementCrisis::new(CrisisKind::Undead, 50);
+    assert_eq!(goblin.kind, CrisisKind::Goblin);
+    assert_eq!(goblin.phase_started_tick, 40);
+    assert_eq!(undead.kind, CrisisKind::Undead);
+    assert_eq!(undead.phase, CrisisPhase::Dormant);
+    assert_eq!(undead.last_evaluated_tick, 50);
+    assert_eq!(SettlementCrisis::default().kind, CrisisKind::Goblin);
+}
+
+#[test]
+fn undead_crisis_normal_goblin_resolution_records_history_exactly_once() {
+    let player_id = 17;
+    let mut run_scores = RunScoreState::default();
+    let mut history = PersonalCrisisHistory::default();
+    let mut goblin = SettlementCrisis::new(CrisisKind::Goblin, 10);
+    goblin.phase = CrisisPhase::AssaultActive;
+    goblin.assault_id = Some(3);
+
+    assert!(record_personal_assault_resolution(
+        player_id,
+        20,
+        &mut goblin,
+        &mut run_scores,
+        &mut history,
+    ));
+    assert_eq!(goblin.phase, CrisisPhase::Resolved);
+    assert!(goblin.resolution_recorded);
+    assert_eq!(goblin.phase_online_ticks, 0);
+    assert!(history
+        .by_player
+        .get(&player_id)
+        .unwrap()
+        .completed
+        .contains(&CrisisKind::Goblin));
+    assert_eq!(
+        run_scores.get(&player_id).unwrap().personal_crises_resolved,
+        1
+    );
+    assert!(!record_personal_assault_resolution(
+        player_id,
+        21,
+        &mut goblin,
+        &mut run_scores,
+        &mut history,
+    ));
+    assert_eq!(history.by_player[&player_id].completed.len(), 1);
+    assert_eq!(
+        run_scores.get(&player_id).unwrap().personal_crises_resolved,
+        1
+    );
+
+    let mut undead = SettlementCrisis::new(CrisisKind::Undead, 30);
+    undead.phase = CrisisPhase::AssaultActive;
+    assert!(!record_personal_assault_resolution(
+        player_id,
+        40,
+        &mut undead,
+        &mut run_scores,
+        &mut history,
+    ));
+    assert_eq!(undead.phase, CrisisPhase::AssaultActive);
+}
+
+#[test]
+fn undead_crisis_pressure_is_deterministic_named_and_capped() {
+    let full = UndeadPressureFacts {
+        goblin_completed: true,
+        danger_unlocked: true,
+        explore_poi: true,
+        choose_expansion: true,
+        sanctuary_level: 99,
+        hero_deaths: 99,
+        online_active_ticks: UNDEAD_ONLINE_PRESSURE_TIER_THREE_TICKS,
+    };
+    assert_eq!(calculate_undead_pressure(&full), UNDEAD_PRESSURE_MAX);
+    assert_eq!(
+        calculate_undead_pressure(&full),
+        calculate_undead_pressure(&full)
+    );
+
+    assert_eq!(
+        calculate_undead_pressure(&UndeadPressureFacts {
+            goblin_completed: true,
+            ..Default::default()
+        }),
+        UNDEAD_GOBLIN_COMPLETED_PRESSURE
+    );
+    assert_eq!(
+        calculate_undead_pressure(&UndeadPressureFacts {
+            sanctuary_level: 5,
+            hero_deaths: 2,
+            online_active_ticks: UNDEAD_ONLINE_PRESSURE_TIER_TWO_TICKS,
+            ..Default::default()
+        }),
+        UNDEAD_SANCTUARY_PRESSURE_MAX
+            + UNDEAD_HERO_DEATH_PRESSURE_MAX
+            + (UNDEAD_ONLINE_PRESSURE_PER_TIER * 2)
+    );
+    assert_eq!(
+        calculate_undead_pressure(&UndeadPressureFacts {
+            online_active_ticks: UNDEAD_ONLINE_PRESSURE_TIER_ONE_TICKS - 1,
+            ..Default::default()
+        }),
+        0
+    );
+}
+
+#[test]
+fn undead_crisis_phases_are_ordered_timed_and_terminal_at_ready() {
+    let mut crisis = SettlementCrisis::new(CrisisKind::Undead, 0);
+    crisis.pressure = UNDEAD_PRESSURE_MAX;
+    crisis.phase_online_ticks = i32::MAX;
+
+    assert_eq!(
+        transition_undead_crisis(&mut crisis, 1),
+        Some((CrisisPhase::Dormant, CrisisPhase::Signs))
+    );
+    assert!(transition_undead_crisis(&mut crisis, 1).is_none());
+    crisis.phase_online_ticks = UNDEAD_SIGNS_MIN_ONLINE_TICKS - 1;
+    assert!(transition_undead_crisis(&mut crisis, 2).is_none());
+    crisis.phase_online_ticks = UNDEAD_SIGNS_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_undead_crisis(&mut crisis, 3),
+        Some((CrisisPhase::Signs, CrisisPhase::Pressure))
+    );
+    crisis.phase_online_ticks = UNDEAD_PRESSURE_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_undead_crisis(&mut crisis, 4),
+        Some((CrisisPhase::Pressure, CrisisPhase::Preparing))
+    );
+    assert!(crisis.warning_active);
+    crisis.phase_online_ticks = UNDEAD_PREPARING_MIN_ONLINE_TICKS;
+    assert_eq!(
+        transition_undead_crisis(&mut crisis, 5),
+        Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
+    );
+    crisis.phase_online_ticks = i32::MAX;
+    assert!(transition_undead_crisis(&mut crisis, 6).is_none());
+    assert_eq!(crisis.phase, CrisisPhase::AssaultReady);
+
+    let mut goblin = SettlementCrisis::new(CrisisKind::Goblin, 0);
+    goblin.pressure = UNDEAD_PRESSURE_MAX;
+    assert!(transition_undead_crisis(&mut goblin, 1).is_none());
+}
+
+#[test]
+fn undead_crisis_status_is_kind_correct_and_has_no_goblin_launch_fields() {
+    let expected = [
+        (
+            CrisisPhase::Dormant,
+            "The Dead Are Quiet",
+            "Continue strengthening your settlement.",
+        ),
+        (
+            CrisisPhase::Signs,
+            "Restless Dead",
+            "Prepare healing supplies and defenders.",
+        ),
+        (
+            CrisisPhase::Pressure,
+            "Deathly Pressure",
+            "Strengthen defenses and remain near the settlement.",
+        ),
+        (
+            CrisisPhase::Preparing,
+            "Undead Gathering",
+            "Repair defenses, equip defenders, and prepare recovery supplies.",
+        ),
+        (
+            CrisisPhase::AssaultReady,
+            "Undead Incursion Imminent",
+            "Return to the settlement and finish preparing.",
+        ),
+    ];
+
+    for (phase, title, hint) in expected {
+        let mut crisis = SettlementCrisis::new(CrisisKind::Undead, 0);
+        crisis.phase = phase;
+        crisis.pressure = 80;
+        let status = build_crisis_status(Some(&crisis));
+        assert_eq!(status.kind.as_deref(), Some("undead"));
+        assert_eq!(status.title.as_deref(), Some(title));
+        assert_eq!(status.action_hint.as_deref(), Some(hint));
+        assert_eq!(status.pressure_max, Some(UNDEAD_PRESSURE_MAX));
+        assert!(!status
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("goblin"));
+        assert_eq!(status.preparation_seconds_remaining, None);
+        assert_eq!(status.preferred_launch_window, None);
+        assert!(!status.continues_while_disconnected);
+    }
+
+    let goblin_ready =
+        build_crisis_status(Some(&checkpoint4_crisis(CrisisPhase::AssaultReady, 80)));
+    assert_eq!(goblin_ready.kind.as_deref(), Some("goblin"));
+    assert!(goblin_ready.preparation_seconds_remaining.is_some());
+    assert_eq!(
+        goblin_ready.preferred_launch_window.as_deref(),
+        Some("dusk_or_night")
+    );
+}
+
+#[test]
+fn undead_crisis_post_goblin_delay_counts_online_time_and_cannot_bypass_vacancy() {
+    let player_id = 27;
+    let mut app = personal_crisis_test_app();
+    app.world_mut().resource_mut::<PlayerIntroState>().insert(
+        player_id,
+        PlayerIntroEntry {
+            start_tick: 0,
+            shipwreck_chain_started: true,
+            villager_spawned: true,
+            danger_unlocked: true,
+        },
+    );
+    app.world_mut()
+        .spawn((PlayerId(player_id), State::None, SubclassHero));
+    let client_id = Uuid::from_u128(27);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+
+    let mut resolved = SettlementCrisis::new(CrisisKind::Goblin, 100);
+    resolved.phase = CrisisPhase::Resolved;
+    resolved.resolution_recorded = true;
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .insert(player_id, resolved);
+    app.world_mut()
+        .resource_mut::<PersonalCrisisHistory>()
+        .by_player
+        .entry(player_id)
+        .or_default()
+        .completed
+        .insert(CrisisKind::Goblin);
+
+    app.world_mut().resource_mut::<GameTick>().0 = 100 + NEXT_PERSONAL_CRISIS_DELAY_TICKS - 1;
+    app.update();
+    let before = app
+        .world()
+        .resource::<SettlementCrisisState>()
+        .get(&player_id)
+        .unwrap();
+    assert_eq!(before.kind, CrisisKind::Goblin);
+    assert_eq!(before.phase, CrisisPhase::Resolved);
+    assert_eq!(
+        before.phase_online_ticks,
+        NEXT_PERSONAL_CRISIS_DELAY_TICKS - 1
+    );
+
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .remove(&client_id);
+    app.world_mut().resource_mut::<GameTick>().0 += 5_000;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .phase_online_ticks,
+        NEXT_PERSONAL_CRISIS_DELAY_TICKS - 1
+    );
+
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+    app.world_mut().resource_mut::<GameTick>().0 += 1;
+    app.update();
+    let undead = app
+        .world()
+        .resource::<SettlementCrisisState>()
+        .get(&player_id)
+        .unwrap();
+    assert_eq!(undead.kind, CrisisKind::Undead);
+    assert_eq!(undead.phase, CrisisPhase::Dormant);
+    assert_eq!(undead.pressure, 0);
+    assert_eq!(undead.online_active_ticks, 0);
+
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .remove(&player_id);
+    app.world_mut().resource_mut::<GameTick>().0 += 1;
+    app.update();
+    assert!(
+        !app.world()
+            .resource::<SettlementCrisisState>()
+            .contains_key(&player_id),
+        "a vacant slot after Goblin completion must not bypass the handoff holder"
+    );
+}
+
+#[test]
+fn undead_crisis_never_overlaps_and_pauses_for_disconnect_and_resurrection() {
+    let player_id = 31;
+    let mut app = personal_crisis_test_app();
+    app.world_mut().resource_mut::<PlayerIntroState>().insert(
+        player_id,
+        PlayerIntroEntry {
+            start_tick: 0,
+            shipwreck_chain_started: true,
+            villager_spawned: true,
+            danger_unlocked: true,
+        },
+    );
+    app.world_mut().resource_mut::<Objectives>().insert(
+        player_id,
+        PlayerObjectives {
+            explore_poi: true,
+            choose_expansion: true,
+            ..PlayerObjectives::default()
+        },
+    );
+    let hero = app
+        .world_mut()
+        .spawn((PlayerId(player_id), State::None, SubclassHero))
+        .id();
+    let client_id = Uuid::from_u128(31);
+    let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+
+    // Even malformed history cannot replace an occupied, unresolved Goblin
+    // entry with Undead or create a second per-player crisis.
+    let mut active_goblin = SettlementCrisis::new(CrisisKind::Goblin, 100);
+    active_goblin.phase = CrisisPhase::Signs;
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .insert(player_id, active_goblin);
+    app.world_mut()
+        .resource_mut::<PersonalCrisisHistory>()
+        .by_player
+        .entry(player_id)
+        .or_default()
+        .completed
+        .insert(CrisisKind::Goblin);
+    app.world_mut().resource_mut::<GameTick>().0 = 101;
+    app.update();
+    let crises = app.world().resource::<SettlementCrisisState>();
+    assert_eq!(crises.len(), 1);
+    assert_eq!(crises[&player_id].kind, CrisisKind::Goblin);
+
+    // A manually injected out-of-sequence Undead fails closed until normal
+    // Goblin completion exists in current-run history.
+    app.world_mut()
+        .resource_mut::<PersonalCrisisHistory>()
+        .by_player
+        .remove(&player_id);
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .insert(player_id, SettlementCrisis::new(CrisisKind::Undead, 101));
+    app.world_mut().resource_mut::<GameTick>().0 = 200;
+    app.update();
+    let out_of_sequence = &app.world().resource::<SettlementCrisisState>()[&player_id];
+    assert_eq!(out_of_sequence.phase, CrisisPhase::Dormant);
+    assert_eq!(out_of_sequence.pressure, 0);
+    assert_eq!(out_of_sequence.online_active_ticks, 0);
+
+    app.world_mut()
+        .resource_mut::<PersonalCrisisHistory>()
+        .by_player
+        .entry(player_id)
+        .or_default()
+        .completed
+        .insert(CrisisKind::Goblin);
+    {
+        let mut crises = app.world_mut().resource_mut::<SettlementCrisisState>();
+        let undead = crises.get_mut(&player_id).unwrap();
+        undead.phase = CrisisPhase::Signs;
+        undead.phase_online_ticks = UNDEAD_SIGNS_MIN_ONLINE_TICKS - 1;
+        undead.last_evaluated_tick = 200;
+    }
+
+    // Ordinary disconnected time advances only the evaluation watermark. It
+    // cannot satisfy the Undead phase's online-only minimum duration.
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .remove(&client_id);
+    app.world_mut().resource_mut::<GameTick>().0 = 5_200;
+    app.update();
+    let disconnected = &app.world().resource::<SettlementCrisisState>()[&player_id];
+    assert_eq!(disconnected.phase, CrisisPhase::Signs);
+    assert_eq!(
+        disconnected.phase_online_ticks,
+        UNDEAD_SIGNS_MIN_ONLINE_TICKS - 1
+    );
+
+    let (sender, _resumed_receiver) = tokio::sync::mpsc::channel(4);
+    app.world()
+        .resource::<Clients>()
+        .lock()
+        .unwrap()
+        .insert(client_id, test_client(client_id, player_id, sender));
+    app.world_mut().resource_mut::<GameTick>().0 += 1;
+    app.update();
+    assert_eq!(
+        app.world().resource::<SettlementCrisisState>()[&player_id].phase,
+        CrisisPhase::Pressure
+    );
+
+    // Ordinary death/resurrection pauses the same clock and preserves the
+    // current run's completion history.
+    app.world_mut().entity_mut(hero).insert(State::Dead);
+    app.world_mut().resource_mut::<GameTick>().0 += 5_000;
+    app.update();
+    assert!(app
+        .world()
+        .resource::<PersonalCrisisHistory>()
+        .by_player
+        .get(&player_id)
+        .is_some_and(|history| history.completed.contains(&CrisisKind::Goblin)));
+    assert_eq!(
+        app.world().resource::<SettlementCrisisState>()[&player_id].phase_online_ticks,
+        0
+    );
+
+    app.world_mut().entity_mut(hero).insert(State::None);
+    app.world_mut().resource_mut::<GameTick>().0 += 1;
+    app.update();
+    let resumed = &app.world().resource::<SettlementCrisisState>()[&player_id];
+    assert_eq!(resumed.phase, CrisisPhase::Pressure);
+    assert_eq!(resumed.phase_online_ticks, 1);
+    assert!(app
+        .world()
+        .resource::<PersonalCrisisHistory>()
+        .by_player
+        .get(&player_id)
+        .is_some_and(|history| history.completed.contains(&CrisisKind::Goblin)));
+}
+
+#[test]
+fn undead_crisis_does_not_mutate_goblin_balance_sampler() {
+    let player_id = 37;
+    let mut crises = SettlementCrisisState::default();
+    let mut undead = SettlementCrisis::new(CrisisKind::Undead, 100);
+    undead.phase = CrisisPhase::Preparing;
+    undead.pressure = 80;
+    crises.insert(player_id, undead);
+
+    let mut app = App::new();
+    app.insert_resource(GameTick(100));
+    app.insert_resource(Clients::default());
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(SpawnPositions::default());
+    app.insert_resource(crises);
+    app.insert_resource(CrisisBalanceTelemetryConfig {
+        sample_interval_ticks: Some(1),
+    });
+    app.insert_resource(CrisisBalanceTelemetryState::default());
+    app.insert_resource(CrisisBalanceObservationState::default());
+    app.add_systems(Update, crisis_balance_snapshot_system);
+    app.update();
+
+    assert!(app
+        .world()
+        .resource::<CrisisBalanceTelemetryState>()
+        .get(&player_id)
+        .is_none());
+    assert!(!app
+        .world()
+        .resource::<CrisisBalanceObservationState>()
+        .0
+        .contains_key(&player_id));
 }
 
 #[test]
@@ -3088,7 +3598,9 @@ fn personal_crisis_test_app() -> App {
     app.insert_resource(Clients::default());
     app.insert_resource(PlayerIntroState::default());
     app.insert_resource(Objectives::default());
+    app.insert_resource(PlayerStats::default());
     app.insert_resource(SettlementCrisisState::default());
+    app.insert_resource(PersonalCrisisHistory::default());
     app.insert_resource(CrisisTelemetryState::default());
     app.insert_resource(CrisisBalanceTelemetryState::default());
     app
@@ -4300,7 +4812,7 @@ fn legendary_threat_packet_hides_location_until_revealed() {
 }
 
 fn checkpoint4_crisis(phase: CrisisPhase, pressure: i32) -> SettlementCrisis {
-    let mut crisis = SettlementCrisis::new(100);
+    let mut crisis = SettlementCrisis::new(CrisisKind::Goblin, 100);
     crisis.phase = phase;
     crisis.pressure = pressure;
     crisis.warning_active = matches!(
@@ -4928,6 +5440,61 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
         .insert(player_id);
     app.update();
     assert!(reconnect_receiver.try_recv().is_ok());
+
+    let telemetry = app.world().resource::<CrisisTelemetryState>();
+    let telemetry = telemetry.get(&player_id).unwrap();
+    assert_eq!(telemetry.status_packets_sent, 4);
+    assert_eq!(telemetry.login_snapshots_sent, 2);
+
+    // Once this connection observes Undead, neither its live packet nor the
+    // clear and reconnect-clear after removal belong to the retained Goblin
+    // runtime telemetry lifecycle.
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .insert(player_id, SettlementCrisis::new(CrisisKind::Undead, 200));
+    app.update();
+    let undead = reconnect_receiver.try_recv().expect("Undead snapshot");
+    let undead: ResponsePacket = serde_json::from_str(&undead).unwrap();
+    assert!(matches!(
+        undead,
+        ResponsePacket::CrisisStatus {
+            status: CrisisStatusSnapshot {
+                exists: true,
+                kind: Some(kind),
+                ..
+            }
+        } if kind == "undead"
+    ));
+
+    app.world_mut()
+        .resource_mut::<SettlementCrisisState>()
+        .remove(&player_id);
+    app.update();
+    let clear = reconnect_receiver.try_recv().expect("post-Undead clear");
+    let clear: ResponsePacket = serde_json::from_str(&clear).unwrap();
+    assert!(matches!(
+        clear,
+        ResponsePacket::CrisisStatus {
+            status: CrisisStatusSnapshot { exists: false, .. }
+        }
+    ));
+
+    clients.lock().unwrap().remove(&client_id);
+    app.update();
+    let (post_undead_sender, mut post_undead_receiver) = tokio::sync::mpsc::channel(4);
+    clients.lock().unwrap().insert(
+        client_id,
+        Client {
+            id: client_id,
+            player_id,
+            sender: post_undead_sender,
+        },
+    );
+    app.world_mut()
+        .resource_mut::<CrisisStatusLoginSync>()
+        .insert(player_id);
+    app.update();
+    assert!(post_undead_receiver.try_recv().is_ok());
 
     let telemetry = app.world().resource::<CrisisTelemetryState>();
     let telemetry = telemetry.get(&player_id).unwrap();

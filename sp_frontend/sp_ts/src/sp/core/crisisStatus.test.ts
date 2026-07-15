@@ -17,6 +17,7 @@ function status(overrides: Partial<CrisisStatusPacket> = {}): CrisisStatusPacket
     packet: 'crisis_status',
     version: 1,
     exists: true,
+    kind: 'goblin',
     phase: 'dormant',
     warning: false,
     assault_ready: false,
@@ -56,7 +57,18 @@ const preparing = crisisStatusView(status({
 }));
 assert.equal(preparing?.warning, true, 'preparing exposes its warning');
 assert.equal(preparing?.phaseLabel, 'Preparing');
+assert.equal(preparing?.compactLabel, 'Raiders Gathering');
+assert.equal(preparing?.statusAriaLabel, 'Personal goblin crisis status');
+assert.equal(preparing?.pressureLabel, 'Goblin crisis pressure');
 assert.deepEqual(preparing?.preparationOptions, [], 'missing additive rows remain compatible');
+
+const omittedV1Kind = crisisStatusView(status({
+  kind: undefined,
+  phase: 'preparing',
+}));
+assert.equal(omittedV1Kind?.compactLabel, 'Raiders Gathering');
+assert.equal(omittedV1Kind?.statusAriaLabel, 'Personal goblin crisis status');
+assert.equal(omittedV1Kind?.pressureLabel, 'Goblin crisis pressure');
 
 const preparationRows = [
   preparationOption(),
@@ -128,8 +140,29 @@ const ready = crisisStatusView(status({
   preparation_seconds_remaining: 65,
 }));
 assert.equal(ready?.phaseLabel, 'Raid Imminent');
+assert.equal(ready?.compactLabel, 'Raid Imminent');
 assert.equal(ready?.preparationLabel, '1m 05s');
 assert.equal(formatCrisisCountdown(0), 'complete');
+
+const undeadPreparing = crisisStatusView(status({
+  kind: 'undead',
+  phase: 'preparing',
+  title: 'Undead Gathering',
+}));
+assert.equal(undeadPreparing?.phaseLabel, 'Preparing');
+assert.equal(undeadPreparing?.compactLabel, 'Undead Gathering');
+assert.equal(undeadPreparing?.statusAriaLabel, 'Personal undead crisis status');
+assert.equal(undeadPreparing?.pressureLabel, 'Undead crisis pressure');
+
+const undeadReady = crisisStatusView(status({
+  kind: 'undead',
+  phase: 'assault_ready',
+  assault_ready: true,
+  title: 'Undead Incursion Imminent',
+}));
+assert.equal(undeadReady?.phaseLabel, 'Incursion Imminent');
+assert.equal(undeadReady?.compactLabel, 'Undead Incursion Imminent');
+assert.equal(undeadReady?.preparationLabel, null);
 
 const active = crisisStatusView(status({
   phase: 'assault_active',
@@ -203,6 +236,12 @@ assert.equal(shouldRenderSurvivalThread(false, status({ exists: false })), false
 const futurePhase = crisisStatusView(status({ phase: 'future_crisis_phase', future_value: 42 }));
 assert.equal(futurePhase?.tone, 'neutral', 'unknown future phases fail safely');
 assert.equal(futurePhase?.phaseLabel, 'Unknown Status');
+
+const futureKind = crisisStatusView(status({ kind: 'future_crisis', phase: 'assault_ready' }));
+assert.equal(futureKind?.phaseLabel, 'Crisis Imminent');
+assert.equal(futureKind?.compactLabel, 'Crisis Imminent');
+assert.equal(futureKind?.statusAriaLabel, 'Personal crisis status');
+assert.equal(futureKind?.pressureLabel, 'Personal crisis pressure');
 
 const reset = clearCrisisStatus({ ...enteringReady, compactExpanded: false });
 assert.equal(reset.crisisStatus, null);

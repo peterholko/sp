@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::common::{Target, TaskTarget};
 use crate::constants::{NO_TARGET, NPC_PLAYER_ID};
 use crate::effect::{Effect, Effects};
-use crate::game::{CrisisAssaultUnit, CrisisPhase, GameTick, SettlementCrisisState};
+use crate::game::{CrisisAssaultUnit, CrisisKind, CrisisPhase, GameTick, SettlementCrisisState};
 use crate::item::{AttrKey, AttrVal, Inventory};
 use crate::map::Map;
 use crate::npc::VisibleTarget;
@@ -1526,7 +1526,8 @@ fn attribution_is_current(
     crisis_state
         .get(&attribution.owner_player_id)
         .map(|crisis| {
-            crisis.assault_id == Some(attribution.assault_id)
+            crisis.kind == CrisisKind::Goblin
+                && crisis.assault_id == Some(attribution.assault_id)
                 && crisis.assault_spawn_generation == attribution.spawn_generation
                 && matches!(
                     crisis.phase,
@@ -1772,7 +1773,7 @@ pub(crate) fn crisis_true_death_telemetry_system(
         let Some(crisis) = crisis_state.get(&player_id.0) else {
             continue;
         };
-        if crisis.phase != CrisisPhase::AssaultActive {
+        if crisis.kind != CrisisKind::Goblin || crisis.phase != CrisisPhase::AssaultActive {
             continue;
         }
         let tracked = crisis
@@ -1896,7 +1897,7 @@ pub(crate) fn crisis_engagement_snapshot_system(
         .collect::<HashMap<_, _>>();
 
     for (owner_player_id, crisis) in crisis_state.iter() {
-        if crisis.phase != CrisisPhase::AssaultActive {
+        if crisis.kind != CrisisKind::Goblin || crisis.phase != CrisisPhase::AssaultActive {
             continue;
         }
         let Some(assault_id) = crisis.assault_id else {

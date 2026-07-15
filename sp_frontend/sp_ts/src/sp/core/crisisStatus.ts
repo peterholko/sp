@@ -7,6 +7,8 @@ export type KnownCrisisPhase =
   | 'assault_active'
   | 'resolved';
 
+export type KnownCrisisKind = 'goblin' | 'undead';
+
 export type CrisisSeverity =
   | 'quiet'
   | 'low'
@@ -75,6 +77,39 @@ interface PhasePresentation {
   compactLabel?: string;
 }
 
+interface KindPresentation {
+  statusAriaLabel: string;
+  pressureLabel: string;
+  preparingCompactLabel: string;
+  assaultReadyLabel: string;
+  assaultReadyCompactLabel: string;
+}
+
+const KIND_PRESENTATION: Record<KnownCrisisKind, KindPresentation> = {
+  goblin: {
+    statusAriaLabel: 'Personal goblin crisis status',
+    pressureLabel: 'Goblin crisis pressure',
+    preparingCompactLabel: 'Raiders Gathering',
+    assaultReadyLabel: 'Raid Imminent',
+    assaultReadyCompactLabel: 'Raid Imminent',
+  },
+  undead: {
+    statusAriaLabel: 'Personal undead crisis status',
+    pressureLabel: 'Undead crisis pressure',
+    preparingCompactLabel: 'Undead Gathering',
+    assaultReadyLabel: 'Incursion Imminent',
+    assaultReadyCompactLabel: 'Undead Incursion Imminent',
+  },
+};
+
+const UNKNOWN_KIND_PRESENTATION: KindPresentation = {
+  statusAriaLabel: 'Personal crisis status',
+  pressureLabel: 'Personal crisis pressure',
+  preparingCompactLabel: 'Preparing',
+  assaultReadyLabel: 'Crisis Imminent',
+  assaultReadyCompactLabel: 'Crisis Imminent',
+};
+
 const PHASE_PRESENTATION: Record<KnownCrisisPhase, PhasePresentation> = {
   dormant: { label: 'Dormant', tone: 'neutral', urgent: false },
   signs: { label: 'Signs', tone: 'low', urgent: false },
@@ -83,13 +118,11 @@ const PHASE_PRESENTATION: Record<KnownCrisisPhase, PhasePresentation> = {
     label: 'Preparing',
     tone: 'high',
     urgent: true,
-    compactLabel: 'Raiders Gathering',
   },
   assault_ready: {
-    label: 'Raid Imminent',
+    label: 'Crisis Imminent',
     tone: 'imminent',
     urgent: true,
-    compactLabel: 'Raid Imminent',
   },
   assault_active: {
     label: 'Under Attack',
@@ -128,6 +161,8 @@ export interface CrisisStatusView {
   tone: CrisisTone;
   urgent: boolean;
   compactLabel?: string;
+  statusAriaLabel: string;
+  pressureLabel: string;
   title: string;
   summary: string;
   actionHint: string;
@@ -225,12 +260,42 @@ export function crisisPreparationOptionsView(
   return result;
 }
 
-function knownPhasePresentation(phase?: string): PhasePresentation {
+function knownKindPresentation(kind?: string): KindPresentation {
+  // `kind` was optional in the original v1 client contract. Preserve the
+  // existing Goblin presentation for an omitted value while keeping explicit
+  // future kinds neutral instead of silently labelling them as Goblins.
+  if (!kind) {
+    return KIND_PRESENTATION.goblin;
+  }
+  if (!Object.prototype.hasOwnProperty.call(KIND_PRESENTATION, kind)) {
+    return UNKNOWN_KIND_PRESENTATION;
+  }
+
+  return KIND_PRESENTATION[kind as KnownCrisisKind];
+}
+
+function knownPhasePresentation(phase?: string, kind?: string): PhasePresentation {
   if (!phase || !Object.prototype.hasOwnProperty.call(PHASE_PRESENTATION, phase)) {
     return UNKNOWN_PHASE;
   }
 
-  return PHASE_PRESENTATION[phase as KnownCrisisPhase];
+  const presentation = PHASE_PRESENTATION[phase as KnownCrisisPhase];
+  const kindPresentation = knownKindPresentation(kind);
+  if (phase === 'preparing') {
+    return {
+      ...presentation,
+      compactLabel: kindPresentation.preparingCompactLabel,
+    };
+  }
+  if (phase === 'assault_ready') {
+    return {
+      ...presentation,
+      label: kindPresentation.assaultReadyLabel,
+      compactLabel: kindPresentation.assaultReadyCompactLabel,
+    };
+  }
+
+  return presentation;
 }
 
 export function normalizeCrisisStatus(
@@ -286,7 +351,9 @@ export function crisisStatusView(
   }
 
   const phase = typeof status.phase === 'string' ? status.phase : '';
-  const presentation = knownPhasePresentation(phase);
+  const kind = typeof status.kind === 'string' ? status.kind : undefined;
+  const kindPresentation = knownKindPresentation(kind);
+  const presentation = knownPhasePresentation(phase, kind);
   const assaultReady = status.assault_ready === true || phase === 'assault_ready';
   const assaultActive = status.assault_active === true || phase === 'assault_active';
   const resolved = status.resolved === true || phase === 'resolved';
@@ -313,6 +380,8 @@ export function crisisStatusView(
     tone: presentation.tone,
     urgent: presentation.urgent,
     compactLabel: presentation.compactLabel,
+    statusAriaLabel: kindPresentation.statusAriaLabel,
+    pressureLabel: kindPresentation.pressureLabel,
     title: typeof status.title === 'string' && status.title.trim() !== ''
       ? status.title
       : 'Personal Crisis',
@@ -340,7 +409,10 @@ export function receiveCrisisStatus(
   const nextPhase = crisisStatus && typeof crisisStatus.phase === 'string'
     ? crisisStatus.phase
     : null;
-  const presentation = knownPhasePresentation(nextPhase || undefined);
+  const presentation = knownPhasePresentation(
+    nextPhase || undefined,
+    crisisStatus && typeof crisisStatus.kind === 'string' ? crisisStatus.kind : undefined,
+  );
   const enteringUrgentPhase = Boolean(
     crisisStatus
       && presentation.urgent

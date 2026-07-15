@@ -509,7 +509,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       <section
         style={cardStyle}
         role="region"
-        aria-label="Personal goblin crisis status"
+        aria-label={crisis.statusAriaLabel}
         aria-labelledby="personal-crisis-title"
       >
         <div
@@ -536,11 +536,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             <div
               style={pressureRailStyle}
               role="progressbar"
-              aria-label="Goblin crisis pressure"
+              aria-label={crisis.pressureLabel}
               aria-valuemin={0}
               aria-valuemax={crisis.pressure.max}
               aria-valuenow={crisis.pressure.value}
-              title={`Goblin crisis pressure: ${crisis.pressure.value} of ${crisis.pressure.max}`}
+              title={`${crisis.pressureLabel}: ${crisis.pressure.value} of ${crisis.pressure.max}`}
             >
               <div style={{
                 height: '100%',

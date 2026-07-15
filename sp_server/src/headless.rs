@@ -4233,6 +4233,64 @@ mod tests {
         );
     }
 
+    fn resolve_goblin_normally_for_undead_smoke(game: &mut HeadlessGame) -> u64 {
+        use crate::constants::TICKS_PER_SEC;
+        use crate::game::{
+            CrisisKind, CrisisPhase, SettlementCrisisState, ASSAULT_READY_GRACE_TICKS,
+            GOBLIN_PREPARING_MIN_ONLINE_TICKS, GOBLIN_PRESSURE_MIN_ONLINE_TICKS,
+            GOBLIN_SIGNS_MIN_ONLINE_TICKS,
+        };
+
+        prepare_full_crisis_progression_facts(game);
+        game.tick(1);
+        let signs = game.settlement_crisis().expect("Goblin Signs crisis");
+        assert_eq!(signs.kind, CrisisKind::Goblin);
+        assert_eq!(signs.phase, CrisisPhase::Signs);
+
+        for (minimum_ticks, expected_phase) in [
+            (GOBLIN_SIGNS_MIN_ONLINE_TICKS, CrisisPhase::Pressure),
+            (GOBLIN_PRESSURE_MIN_ONLINE_TICKS, CrisisPhase::Preparing),
+            (GOBLIN_PREPARING_MIN_ONLINE_TICKS, CrisisPhase::AssaultReady),
+        ] {
+            game.app.world_mut().resource_mut::<GameTick>().0 += minimum_ticks - 1;
+            game.tick(1);
+            assert_eq!(
+                game.settlement_crisis()
+                    .expect("progressing Goblin crisis")
+                    .phase,
+                expected_phase
+            );
+        }
+
+        let preferred_tick = next_preferred_assault_tick(game.game_tick());
+        {
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises
+                .get_mut(&game.player_id)
+                .expect("Goblin Ready crisis");
+            crisis.phase_online_ticks = 0;
+            crisis.last_evaluated_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+        }
+        advance_ready_clock_to_launch(game, preferred_tick);
+        let active = game.settlement_crisis().expect("active Goblin assault");
+        let assault_id = active.assault_id.expect("Goblin assault identity");
+        let units = game.crisis_assault_units();
+        assert_eq!(units.len(), GOBLIN_ASSAULT_COMPOSITION.len());
+        for unit in units {
+            kill_assault_unit_through_normal_combat(game, unit.obj_id);
+        }
+        game.tick(2);
+        let resolved = game.settlement_crisis().expect("resolved Goblin crisis");
+        assert_eq!(resolved.kind, CrisisKind::Goblin);
+        assert_eq!(resolved.phase, CrisisPhase::Resolved);
+        assert!(resolved.resolution_recorded);
+        assert_eq!(game.personal_crises_resolved(), 1);
+
+        // Keep the helper bounded and make its intended online pacing obvious.
+        assert!(game.game_tick() < preferred_tick + (60 * TICKS_PER_SEC));
+        assault_id
+    }
+
     fn kill_assault_unit_through_normal_combat(
         game: &mut HeadlessGame,
         target_id: i32,
@@ -5259,6 +5317,7 @@ mod tests {
 
     #[test]
     fn safe_logout_checkpoint1_activity_hostility_and_crisis_eligibility() {
+        use crate::game::CrisisKind;
         use crate::ids::EntityObjMap;
 
         let (mut game, sanctuary) = safe_logout_fixture("SafeLogoutEligibilityBot");
@@ -5354,31 +5413,33 @@ mod tests {
         // Requirement 21: every explicit pre-assault phase remains eligible;
         // the safe-logout system must not accidentally narrow this list when
         // crisis phases evolve.
-        for phase in [
-            CrisisPhase::Dormant,
-            CrisisPhase::Signs,
-            CrisisPhase::Pressure,
-            CrisisPhase::Preparing,
-            CrisisPhase::AssaultReady,
-        ] {
-            let current_tick = game.game_tick();
-            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
-            let crisis = crises.get_mut(&game.player_id).expect("personal crisis");
-            crisis.phase = phase;
-            crisis.phase_online_ticks = 0;
-            crisis.last_evaluated_tick = current_tick;
-            begin_safe_logout(&mut game);
-            game.cancel_safe_logout();
-            game.tick(1);
+        for kind in [CrisisKind::Goblin, CrisisKind::Undead] {
+            for phase in [
+                CrisisPhase::Dormant,
+                CrisisPhase::Signs,
+                CrisisPhase::Pressure,
+                CrisisPhase::Preparing,
+                CrisisPhase::AssaultReady,
+            ] {
+                let current_tick = game.game_tick();
+                let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+                let crisis = crises.get_mut(&game.player_id).expect("personal crisis");
+                crisis.kind = kind;
+                crisis.phase = phase;
+                crisis.phase_online_ticks = 0;
+                crisis.last_evaluated_tick = current_tick;
+                begin_safe_logout(&mut game);
+                game.cancel_safe_logout();
+                game.tick(1);
+            }
         }
 
         // Requirement 20: committed assault state always rejects.
-        game.app
-            .world_mut()
-            .resource_mut::<SettlementCrisisState>()
-            .get_mut(&game.player_id)
-            .expect("personal crisis")
-            .phase = CrisisPhase::AssaultActive;
+        let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+        let crisis = crises.get_mut(&game.player_id).expect("personal crisis");
+        crisis.kind = CrisisKind::Undead;
+        crisis.phase = CrisisPhase::AssaultActive;
+        drop(crises);
         game.request_safe_logout();
         game.tick(1);
         assert_eq!(
@@ -8450,6 +8511,327 @@ mod tests {
             units.len(),
             game.personal_crises_resolved(),
             game.metrics().waves_survived
+        );
+    }
+
+    #[test]
+    fn undead_crisis_checkpoint1_smoke_normal_sequence_stops_at_assault_ready() {
+        use crate::game::{
+            CrisisKind, CrisisPhase, CrisisTelemetryState, NextCrisisAssaultId,
+            PersonalCrisisHistory, SettlementCrisisState, NEXT_PERSONAL_CRISIS_DELAY_TICKS,
+            UNDEAD_PREPARING_MIN_ONLINE_TICKS, UNDEAD_PRESSURE_MIN_ONLINE_TICKS,
+            UNDEAD_SIGNS_MIN_ONLINE_TICKS,
+        };
+
+        let mut game = HeadlessGame::new(60_000);
+        let player_id = game.spawn_hero("Warrior", "UndeadSequenceSmokeBot");
+        let goblin_assault_id = resolve_goblin_normally_for_undead_smoke(&mut game);
+        assert!(game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&player_id)
+            .is_some_and(|history| history.completed.contains(&CrisisKind::Goblin)));
+
+        let resolved_online_ticks = game
+            .settlement_crisis()
+            .expect("resolved Goblin clock")
+            .phase_online_ticks;
+        let ticks_to_boundary = NEXT_PERSONAL_CRISIS_DELAY_TICKS - resolved_online_ticks;
+        assert!(ticks_to_boundary >= 2);
+        game.app.world_mut().resource_mut::<GameTick>().0 += ticks_to_boundary - 2;
+        game.tick(1);
+        let before_boundary = game.settlement_crisis().expect("resolved delay holder");
+        assert_eq!(before_boundary.kind, CrisisKind::Goblin);
+        assert_eq!(before_boundary.phase, CrisisPhase::Resolved);
+        assert_eq!(
+            before_boundary.phase_online_ticks,
+            NEXT_PERSONAL_CRISIS_DELAY_TICKS - 1
+        );
+
+        game.tick(1);
+        let dormant = game.settlement_crisis().expect("new Undead crisis");
+        assert_eq!(dormant.kind, CrisisKind::Undead);
+        assert_eq!(dormant.phase, CrisisPhase::Dormant);
+        assert_eq!(dormant.pressure, 0);
+        assert_eq!(dormant.assault_id, None);
+        let next_id_after_goblin = game.world().resource::<NextCrisisAssaultId>().next_value();
+        assert_eq!(next_id_after_goblin, goblin_assault_id + 1);
+        let goblin_runtime_telemetry = game
+            .world()
+            .resource::<CrisisTelemetryState>()
+            .get(&player_id)
+            .cloned()
+            .expect("Goblin runtime telemetry");
+        let goblin_balance_telemetry = game
+            .world()
+            .resource::<CrisisBalanceTelemetryState>()
+            .get(&player_id)
+            .cloned()
+            .expect("Goblin balance telemetry");
+
+        game.tick(1);
+        assert_eq!(game.settlement_crisis().unwrap().phase, CrisisPhase::Signs);
+        for (minimum_ticks, expected_phase) in [
+            (UNDEAD_SIGNS_MIN_ONLINE_TICKS, CrisisPhase::Pressure),
+            (UNDEAD_PRESSURE_MIN_ONLINE_TICKS, CrisisPhase::Preparing),
+            (UNDEAD_PREPARING_MIN_ONLINE_TICKS, CrisisPhase::AssaultReady),
+        ] {
+            game.app.world_mut().resource_mut::<GameTick>().0 += minimum_ticks - 1;
+            game.tick(1);
+            assert_eq!(game.settlement_crisis().unwrap().phase, expected_phase);
+        }
+
+        let ready = game.settlement_crisis().expect("terminal Undead Ready");
+        assert_eq!(ready.kind, CrisisKind::Undead);
+        assert_eq!(ready.phase, CrisisPhase::AssaultReady);
+        assert_eq!(ready.pressure, 80);
+        assert_eq!(ready.assault_id, None);
+        assert_eq!(ready.assault_spawn_generation, 0);
+        assert!(ready.assault_unit_ids.is_empty());
+        assert!(game.crisis_assault_units().is_empty());
+        assert_eq!(
+            game.personal_crises_resolved(),
+            1,
+            "Undead Ready must not grant another crisis completion reward"
+        );
+        assert_eq!(
+            game.world().resource::<NextCrisisAssaultId>().next_value(),
+            next_id_after_goblin,
+            "Undead Ready must not allocate a Goblin assault identity"
+        );
+        assert_eq!(
+            game.world()
+                .resource::<CrisisTelemetryState>()
+                .get(&player_id)
+                .unwrap(),
+            &goblin_runtime_telemetry
+        );
+        assert_eq!(
+            game.world()
+                .resource::<CrisisBalanceTelemetryState>()
+                .get(&player_id)
+                .unwrap(),
+            &goblin_balance_telemetry
+        );
+
+        let statuses = crisis_statuses(game.take_crisis_status_packets());
+        let ready_status = statuses
+            .iter()
+            .find(|status| {
+                status.kind.as_deref() == Some("undead")
+                    && status.phase.as_deref() == Some("assault_ready")
+            })
+            .expect("Undead Ready status packet");
+        assert_eq!(
+            ready_status.title.as_deref(),
+            Some("Undead Incursion Imminent")
+        );
+        assert_eq!(ready_status.preparation_seconds_remaining, None);
+        assert_eq!(ready_status.preferred_launch_window, None);
+        assert!(!ready_status.continues_while_disconnected);
+        assert!(!statuses
+            .iter()
+            .any(|status| status.kind.as_deref() == Some("undead") && status.assault_active));
+    }
+
+    #[test]
+    fn undead_crisis_checkpoint1_smoke_safe_logout_freeze_cleanup_and_fresh_run() {
+        use crate::game::{
+            CrisisKind, CrisisPhase, PersonalCrisisHistory, PlayerCrisisHistory, SettlementCrisis,
+            SettlementCrisisState, NEXT_PERSONAL_CRISIS_DELAY_TICKS,
+        };
+
+        let mut game = HeadlessGame::new(60_000);
+        let player_id = game.spawn_hero("Warrior", "UndeadProtectionSmokeBot");
+        resolve_goblin_normally_for_undead_smoke(&mut game);
+
+        let initial_delay_ticks = game.settlement_crisis().unwrap().phase_online_ticks;
+        game.app.world_mut().resource_mut::<GameTick>().0 += 99;
+        game.tick(1);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase_online_ticks,
+            initial_delay_ticks + 100
+        );
+
+        let sanctuary = place_player_in_own_bound_sanctuary(&mut game, player_id);
+        move_nearby_headless_hostiles_away(&mut game, sanctuary);
+        expire_safe_logout_activity_cooldown(&mut game);
+        game.tick(1);
+        game.complete_valid_safe_logout();
+        let reusable_protection = game
+            .player_presence_record()
+            .expect("production-created protection record");
+        assert_eq!(
+            reusable_protection.state,
+            PlayerWorldPresence::OfflineProtected
+        );
+        let frozen = game.settlement_crisis().expect("protected resolved crisis");
+        assert_eq!(frozen.kind, CrisisKind::Goblin);
+        assert_eq!(frozen.phase, CrisisPhase::Resolved);
+        assert!(frozen.phase_online_ticks < NEXT_PERSONAL_CRISIS_DELAY_TICKS);
+        let frozen_ticks = frozen.phase_online_ticks;
+
+        game.disconnect_after_completed_safe_logout();
+        game.advance_protected_world_ticks(2_000);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase_online_ticks,
+            frozen_ticks,
+            "Offline Protection must freeze the inter-crisis online clock"
+        );
+        game.reconnect_and_exit_protection();
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase_online_ticks,
+            frozen_ticks,
+            "resume rebasing must not backfill protected time"
+        );
+
+        let remaining = NEXT_PERSONAL_CRISIS_DELAY_TICKS - frozen_ticks;
+        assert!(remaining > 0);
+        game.app.world_mut().resource_mut::<GameTick>().0 += remaining - 1;
+        game.tick(1);
+        let undead = game
+            .settlement_crisis()
+            .expect("Undead after resumed delay");
+        assert_eq!(undead.kind, CrisisKind::Undead);
+        assert_eq!(undead.phase, CrisisPhase::Dormant);
+
+        // Reapply the valid protection identity created by the real Safe
+        // Logout above to this same run after Undead exists. The shared
+        // eligibility test separately exercises every pre-assault phase for
+        // both kinds; here the production schedule proves the freeze itself.
+        game.tick(1);
+        game.disconnect_player();
+        let mut undead_protection = reusable_protection;
+        undead_protection.protected_since_tick = Some(game.game_tick());
+        undead_protection.client_connected = false;
+        undead_protection.safe_logout_connection_ids.clear();
+        game.app
+            .world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .insert(player_id, undead_protection);
+        let protected_undead = game
+            .settlement_crisis()
+            .expect("protected pre-assault Undead")
+            .clone();
+        assert_eq!(protected_undead.kind, CrisisKind::Undead);
+        assert!(protected_undead.phase < CrisisPhase::AssaultActive);
+        let protected_history = game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&player_id)
+            .cloned()
+            .expect("protected current-run history");
+
+        game.advance_protected_world_ticks(2_000);
+        let still_protected = game
+            .settlement_crisis()
+            .expect("Undead remains during Offline Protection");
+        assert_eq!(still_protected.kind, protected_undead.kind);
+        assert_eq!(still_protected.phase, protected_undead.phase);
+        assert_eq!(still_protected.pressure, protected_undead.pressure);
+        assert_eq!(
+            still_protected.online_active_ticks,
+            protected_undead.online_active_ticks
+        );
+        assert_eq!(
+            still_protected.phase_online_ticks,
+            protected_undead.phase_online_ticks
+        );
+        assert_eq!(
+            game.world()
+                .resource::<PersonalCrisisHistory>()
+                .by_player
+                .get(&player_id),
+            Some(&protected_history)
+        );
+        game.reconnect_and_exit_protection();
+        let resumed_undead = game
+            .settlement_crisis()
+            .expect("resumed pre-assault Undead");
+        assert_eq!(resumed_undead.phase, protected_undead.phase);
+        assert_eq!(resumed_undead.pressure, protected_undead.pressure);
+        assert_eq!(
+            resumed_undead.online_active_ticks,
+            protected_undead.online_active_ticks
+        );
+        assert_eq!(
+            resumed_undead.phase_online_ticks,
+            protected_undead.phase_online_ticks
+        );
+
+        let neighbor_id = player_id + 1;
+        let mut neighbor_history = PlayerCrisisHistory::default();
+        neighbor_history.completed.insert(CrisisKind::Goblin);
+        game.app
+            .world_mut()
+            .resource_mut::<PersonalCrisisHistory>()
+            .by_player
+            .insert(neighbor_id, neighbor_history.clone());
+        let hero = {
+            let world = game.app.world_mut();
+            let mut query = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            query
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("current hero")
+        };
+        let current_tick = game.game_tick();
+        game.app.world_mut().entity_mut(hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Undead checkpoint cleanup".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+        game.tick(3);
+        assert!(game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .is_none());
+        let history = game.world().resource::<PersonalCrisisHistory>();
+        assert!(!history.by_player.contains_key(&player_id));
+        assert_eq!(history.by_player.get(&neighbor_id), Some(&neighbor_history));
+
+        game.disconnect_player();
+        let mut stale_history = PlayerCrisisHistory::default();
+        stale_history.completed.insert(CrisisKind::Goblin);
+        stale_history.completed.insert(CrisisKind::Undead);
+        game.app
+            .world_mut()
+            .resource_mut::<PersonalCrisisHistory>()
+            .by_player
+            .insert(player_id, stale_history);
+        let mut stale_crisis = SettlementCrisis::new(CrisisKind::Undead, game.game_tick());
+        stale_crisis.phase = CrisisPhase::AssaultReady;
+        game.app
+            .world_mut()
+            .resource_mut::<SettlementCrisisState>()
+            .insert(player_id, stale_crisis);
+        game.spawn_hero("Warrior", "UndeadFreshRunSmokeBot");
+        let fresh = game.settlement_crisis().expect("fresh-run Goblin crisis");
+        assert_eq!(fresh.kind, CrisisKind::Goblin);
+        assert_eq!(fresh.phase, CrisisPhase::Dormant);
+        assert!(game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&player_id)
+            .map(|history| history.completed.is_empty())
+            .unwrap_or(true));
+        assert_eq!(
+            game.world()
+                .resource::<PersonalCrisisHistory>()
+                .by_player
+                .get(&neighbor_id),
+            Some(&neighbor_history)
         );
     }
 

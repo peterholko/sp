@@ -592,9 +592,37 @@ fn personal_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
     config.mode == SurvivalDirectorMode::PersonalCrisis
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CrisisKind {
     Goblin,
+    Undead,
+}
+
+pub(crate) const PERSONAL_CRISIS_SEQUENCE: [CrisisKind; 2] =
+    [CrisisKind::Goblin, CrisisKind::Undead];
+
+fn crisis_kind_name(kind: CrisisKind) -> &'static str {
+    match kind {
+        CrisisKind::Goblin => "goblin",
+        CrisisKind::Undead => "undead",
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlayerCrisisHistory {
+    pub completed: BTreeSet<CrisisKind>,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct PersonalCrisisHistory {
+    pub by_player: HashMap<i32, PlayerCrisisHistory>,
+}
+
+pub(crate) fn next_personal_crisis_kind(history: &PlayerCrisisHistory) -> Option<CrisisKind> {
+    PERSONAL_CRISIS_SEQUENCE
+        .iter()
+        .copied()
+        .find(|kind| !history.completed.contains(kind))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -633,9 +661,9 @@ pub struct SettlementCrisis {
 }
 
 impl SettlementCrisis {
-    fn new(game_tick: i32) -> Self {
+    pub(crate) fn new(kind: CrisisKind, game_tick: i32) -> Self {
         Self {
-            kind: CrisisKind::Goblin,
+            kind,
             phase: CrisisPhase::Dormant,
             pressure: 0,
             phase_started_tick: game_tick,
@@ -661,7 +689,7 @@ impl SettlementCrisis {
 
 impl Default for SettlementCrisis {
     fn default() -> Self {
-        Self::new(0)
+        Self::new(CrisisKind::Goblin, 0)
     }
 }
 
@@ -759,6 +787,9 @@ struct SentCrisisStatus {
 struct CrisisStatusDeliveryState {
     sent: HashMap<Uuid, SentCrisisStatus>,
     observed_phases: HashMap<i32, CrisisPhase>,
+    // Retained across per-run state removal so an Undead clear or reconnect
+    // snapshot cannot be attributed to the older Goblin runtime telemetry.
+    last_personal_crisis_kinds: HashMap<i32, CrisisKind>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1082,6 +1113,11 @@ impl NextCrisisAssaultId {
         let id = self.next;
         self.next = self.next.checked_add(1)?;
         Some(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_value(&self) -> u64 {
+        self.next
     }
 }
 
@@ -1419,6 +1455,31 @@ pub(crate) const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
 pub(crate) const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
 pub(crate) const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
 
+pub(crate) const NEXT_PERSONAL_CRISIS_DELAY_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_PRESSURE_MAX: i32 = 100;
+pub(crate) const UNDEAD_GOBLIN_COMPLETED_PRESSURE: i32 = 20;
+pub(crate) const UNDEAD_DANGER_UNLOCKED_PRESSURE: i32 = 10;
+pub(crate) const UNDEAD_EXPLORE_POI_PRESSURE: i32 = 10;
+pub(crate) const UNDEAD_CHOOSE_EXPANSION_PRESSURE: i32 = 10;
+pub(crate) const UNDEAD_SANCTUARY_PRESSURE_PER_LEVEL: i32 = 3;
+pub(crate) const UNDEAD_SANCTUARY_PRESSURE_MAX: i32 = 15;
+pub(crate) const UNDEAD_HERO_DEATH_PRESSURE_PER_DEATH: i32 = 10;
+pub(crate) const UNDEAD_HERO_DEATH_PRESSURE_MAX: i32 = 20;
+// The initiative specifies three online-time contributions but not their
+// boundaries. Checkpoint 1 deliberately names and freezes the selected
+// 60/180/360-online-second prototype rule independently from Goblin tuning.
+pub(crate) const UNDEAD_ONLINE_PRESSURE_TIER_ONE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_ONLINE_PRESSURE_TIER_TWO_TICKS: i32 = 180 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_ONLINE_PRESSURE_TIER_THREE_TICKS: i32 = 360 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_ONLINE_PRESSURE_PER_TIER: i32 = 5;
+pub(crate) const UNDEAD_SIGNS_PRESSURE: i32 = 20;
+pub(crate) const UNDEAD_PRESSURE_PHASE_PRESSURE: i32 = 40;
+pub(crate) const UNDEAD_PREPARING_PRESSURE: i32 = 60;
+pub(crate) const UNDEAD_ASSAULT_READY_PRESSURE: i32 = 80;
+pub(crate) const UNDEAD_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
+pub(crate) const UNDEAD_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
+
 const CRISIS_STATUS_VERSION: u32 = 1;
 const CRISIS_STATUS_PRESSURE_DELTA: i32 = 5;
 const CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS: i32 = 5;
@@ -1564,6 +1625,9 @@ fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
 }
 
 fn next_goblin_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
+    if crisis.kind != CrisisKind::Goblin {
+        return None;
+    }
     match crisis.phase {
         CrisisPhase::Dormant if crisis.pressure >= GOBLIN_SIGNS_PRESSURE => {
             Some(CrisisPhase::Signs)
@@ -1588,6 +1652,105 @@ fn next_goblin_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UndeadPressureFacts {
+    goblin_completed: bool,
+    danger_unlocked: bool,
+    explore_poi: bool,
+    choose_expansion: bool,
+    sanctuary_level: i32,
+    hero_deaths: u32,
+    online_active_ticks: i32,
+}
+
+fn calculate_undead_pressure(facts: &UndeadPressureFacts) -> i32 {
+    let goblin_completed = facts
+        .goblin_completed
+        .then_some(UNDEAD_GOBLIN_COMPLETED_PRESSURE)
+        .unwrap_or(0);
+    let danger_unlocked = facts
+        .danger_unlocked
+        .then_some(UNDEAD_DANGER_UNLOCKED_PRESSURE)
+        .unwrap_or(0);
+    let explore_poi = facts
+        .explore_poi
+        .then_some(UNDEAD_EXPLORE_POI_PRESSURE)
+        .unwrap_or(0);
+    let choose_expansion = facts
+        .choose_expansion
+        .then_some(UNDEAD_CHOOSE_EXPANSION_PRESSURE)
+        .unwrap_or(0);
+    let sanctuary = (facts.sanctuary_level.max(0) * UNDEAD_SANCTUARY_PRESSURE_PER_LEVEL)
+        .min(UNDEAD_SANCTUARY_PRESSURE_MAX);
+    let hero_deaths = (facts.hero_deaths.min(2) as i32 * UNDEAD_HERO_DEATH_PRESSURE_PER_DEATH)
+        .min(UNDEAD_HERO_DEATH_PRESSURE_MAX);
+    let online_time = if facts.online_active_ticks >= UNDEAD_ONLINE_PRESSURE_TIER_THREE_TICKS {
+        UNDEAD_ONLINE_PRESSURE_PER_TIER * 3
+    } else if facts.online_active_ticks >= UNDEAD_ONLINE_PRESSURE_TIER_TWO_TICKS {
+        UNDEAD_ONLINE_PRESSURE_PER_TIER * 2
+    } else if facts.online_active_ticks >= UNDEAD_ONLINE_PRESSURE_TIER_ONE_TICKS {
+        UNDEAD_ONLINE_PRESSURE_PER_TIER
+    } else {
+        0
+    };
+
+    goblin_completed
+        .saturating_add(danger_unlocked)
+        .saturating_add(explore_poi)
+        .saturating_add(choose_expansion)
+        .saturating_add(sanctuary)
+        .saturating_add(hero_deaths)
+        .saturating_add(online_time)
+        .min(UNDEAD_PRESSURE_MAX)
+}
+
+fn next_undead_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
+    if crisis.kind != CrisisKind::Undead {
+        return None;
+    }
+    match crisis.phase {
+        CrisisPhase::Dormant if crisis.pressure >= UNDEAD_SIGNS_PRESSURE => {
+            Some(CrisisPhase::Signs)
+        }
+        CrisisPhase::Signs
+            if crisis.pressure >= UNDEAD_PRESSURE_PHASE_PRESSURE
+                && crisis.phase_online_ticks >= UNDEAD_SIGNS_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Pressure)
+        }
+        CrisisPhase::Pressure
+            if crisis.pressure >= UNDEAD_PREPARING_PRESSURE
+                && crisis.phase_online_ticks >= UNDEAD_PRESSURE_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Preparing)
+        }
+        CrisisPhase::Preparing
+            if crisis.pressure >= UNDEAD_ASSAULT_READY_PRESSURE
+                && crisis.phase_online_ticks >= UNDEAD_PREPARING_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::AssaultReady)
+        }
+        _ => None,
+    }
+}
+
+fn transition_undead_crisis(
+    crisis: &mut SettlementCrisis,
+    game_tick: i32,
+) -> Option<(CrisisPhase, CrisisPhase)> {
+    let old_phase = crisis.phase;
+    let new_phase = next_undead_crisis_phase(crisis)?;
+
+    crisis.phase = new_phase;
+    crisis.phase_started_tick = game_tick;
+    crisis.phase_online_ticks = 0;
+    if new_phase == CrisisPhase::Preparing {
+        crisis.warning_active = true;
+    }
+
+    Some((old_phase, new_phase))
 }
 
 fn transition_goblin_crisis(
@@ -1641,7 +1804,7 @@ fn crisis_phase_name(phase: CrisisPhase) -> &'static str {
     }
 }
 
-fn crisis_phase_presentation(
+fn goblin_crisis_phase_presentation(
     phase: CrisisPhase,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match phase {
@@ -1687,6 +1850,72 @@ fn crisis_phase_presentation(
             "Recover, repair, and rebuild.",
             "resolved",
         ),
+    }
+}
+
+fn undead_crisis_phase_presentation(
+    phase: CrisisPhase,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match phase {
+        CrisisPhase::Dormant => (
+            "The Dead Are Quiet",
+            "No organized undead threat is moving against your settlement.",
+            "Continue strengthening your settlement.",
+            "quiet",
+        ),
+        CrisisPhase::Signs => (
+            "Restless Dead",
+            "Unnatural stillness and distant movement suggest the dead are stirring.",
+            "Prepare healing supplies and defenders.",
+            "low",
+        ),
+        CrisisPhase::Pressure => (
+            "Deathly Pressure",
+            "The restless dead are pressing closer to the settlement.",
+            "Strengthen defenses and remain near the settlement.",
+            "medium",
+        ),
+        CrisisPhase::Preparing => (
+            "Undead Gathering",
+            "An undead host is gathering against your settlement.",
+            "Repair defenses, equip defenders, and prepare recovery supplies.",
+            "high",
+        ),
+        CrisisPhase::AssaultReady => (
+            "Undead Incursion Imminent",
+            "The undead incursion is poised beyond the settlement.",
+            "Return to the settlement and finish preparing.",
+            "crisis",
+        ),
+        CrisisPhase::AssaultActive => (
+            "Settlement Under Undead Attack",
+            "An undead incursion is attacking your settlement.",
+            "Defeat the remaining attackers.",
+            "crisis",
+        ),
+        CrisisPhase::Resolved => (
+            "Undead Incursion Defeated",
+            "The undead incursion has been defeated.",
+            "Recover, repair, and rebuild.",
+            "resolved",
+        ),
+    }
+}
+
+fn crisis_phase_presentation(
+    kind: CrisisKind,
+    phase: CrisisPhase,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match kind {
+        CrisisKind::Goblin => goblin_crisis_phase_presentation(phase),
+        CrisisKind::Undead => undead_crisis_phase_presentation(phase),
+    }
+}
+
+fn crisis_pressure_max(kind: CrisisKind) -> i32 {
+    match kind {
+        CrisisKind::Goblin => GOBLIN_PRESSURE_MAX,
+        CrisisKind::Undead => UNDEAD_PRESSURE_MAX,
     }
 }
 
@@ -2073,7 +2302,8 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         };
     };
 
-    let (title, summary, action_hint, severity) = crisis_phase_presentation(crisis.phase);
+    let (title, summary, action_hint, severity) =
+        crisis_phase_presentation(crisis.kind, crisis.phase);
     let assault_ready = crisis.phase == CrisisPhase::AssaultReady;
     let assault_active = crisis.phase == CrisisPhase::AssaultActive;
     let resolved = crisis.phase == CrisisPhase::Resolved;
@@ -2098,7 +2328,8 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         (None, None)
     };
 
-    let preparation_seconds_remaining = assault_ready.then(|| {
+    let goblin_assault_ready = crisis.kind == CrisisKind::Goblin && assault_ready;
+    let preparation_seconds_remaining = goblin_assault_ready.then(|| {
         let remaining_ticks = (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
         (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
     });
@@ -2106,12 +2337,10 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
     CrisisStatusSnapshot {
         version: CRISIS_STATUS_VERSION,
         exists: true,
-        kind: Some(match crisis.kind {
-            CrisisKind::Goblin => "goblin".to_string(),
-        }),
+        kind: Some(crisis_kind_name(crisis.kind).to_string()),
         phase: Some(crisis_phase_name(crisis.phase).to_string()),
         pressure: Some(crisis.pressure),
-        pressure_max: Some(GOBLIN_PRESSURE_MAX),
+        pressure_max: Some(crisis_pressure_max(crisis.kind)),
         title: Some(title.to_string()),
         summary: Some(summary.to_string()),
         action_hint: Some(action_hint.to_string()),
@@ -2123,7 +2352,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         remaining_attackers,
         total_attackers,
         preparation_seconds_remaining,
-        preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
+        preferred_launch_window: goblin_assault_ready.then(|| "dusk_or_night".to_string()),
         preparation_options: None,
         continues_while_disconnected: assault_active,
     }
@@ -2186,14 +2415,22 @@ pub(crate) fn crisis_status_changed(
     }
 }
 
-fn crisis_transition_notice(phase: CrisisPhase) -> Option<&'static str> {
-    match phase {
-        CrisisPhase::Preparing => Some("Goblin raiders are gathering. Prepare your settlement."),
-        CrisisPhase::AssaultReady => Some("A goblin raid is imminent."),
-        CrisisPhase::AssaultActive => {
+fn crisis_transition_notice(kind: CrisisKind, phase: CrisisPhase) -> Option<&'static str> {
+    match (kind, phase) {
+        (CrisisKind::Goblin, CrisisPhase::Preparing) => {
+            Some("Goblin raiders are gathering. Prepare your settlement.")
+        }
+        (CrisisKind::Goblin, CrisisPhase::AssaultReady) => Some("A goblin raid is imminent."),
+        (CrisisKind::Goblin, CrisisPhase::AssaultActive) => {
             Some("The goblin assault has begun. It will continue if you disconnect.")
         }
-        CrisisPhase::Resolved => Some("The goblin assault has been defeated."),
+        (CrisisKind::Goblin, CrisisPhase::Resolved) => {
+            Some("The goblin assault has been defeated.")
+        }
+        (CrisisKind::Undead, CrisisPhase::Preparing) => {
+            Some("The undead are gathering. Prepare your settlement.")
+        }
+        (CrisisKind::Undead, CrisisPhase::AssaultReady) => Some("An undead incursion is imminent."),
         _ => None,
     }
 }
@@ -2241,10 +2478,13 @@ fn crisis_status_delivery_system(
             .retain(|player_id, _| current_players.contains(player_id));
 
         for (player_id, crisis) in crisis_state.iter() {
+            delivery
+                .last_personal_crisis_kinds
+                .insert(*player_id, crisis.kind);
             match delivery.observed_phases.insert(*player_id, crisis.phase) {
                 Some(previous) if previous != crisis.phase => {
                     if clients.is_player_online(*player_id) {
-                        if let Some(message) = crisis_transition_notice(crisis.phase) {
+                        if let Some(message) = crisis_transition_notice(crisis.kind, crisis.phase) {
                             send_to_client(
                                 *player_id,
                                 ResponsePacket::Notice {
@@ -2285,6 +2525,10 @@ fn crisis_status_delivery_system(
             build_crisis_status(None)
         };
         let previous = delivery.sent.get(client_id);
+        let status_lifecycle_kind = crisis_state
+            .get(player_id)
+            .map(|crisis| crisis.kind)
+            .or_else(|| delivery.last_personal_crisis_kinds.get(player_id).copied());
         let new_connection = previous.is_none();
         let resume_requires_sync = resume_login_sync
             .get(player_id)
@@ -2335,14 +2579,24 @@ fn crisis_status_delivery_system(
                         status: status.clone(),
                     },
                 );
-                if let Some(telemetry) = telemetry_state.get_mut(player_id) {
-                    telemetry.status_packets_sent = telemetry.status_packets_sent.saturating_add(1);
-                    if new_connection {
-                        telemetry.login_snapshots_sent =
-                            telemetry.login_snapshots_sent.saturating_add(1);
+                let current_crisis = crisis_state.get(player_id);
+                // Preserve the established Goblin lifecycle counter for its
+                // authoritative clear/reconnect snapshots. The retained last
+                // kind also excludes clears sent after an Undead entry has
+                // already been removed by True Death or fresh-run cleanup.
+                if status_lifecycle_kind != Some(CrisisKind::Undead) {
+                    if let Some(telemetry) = telemetry_state.get_mut(player_id) {
+                        telemetry.status_packets_sent =
+                            telemetry.status_packets_sent.saturating_add(1);
+                        if new_connection {
+                            telemetry.login_snapshots_sent =
+                                telemetry.login_snapshots_sent.saturating_add(1);
+                        }
                     }
                 }
-                if let Some(crisis) = crisis_state.get(player_id) {
+                let goblin_crisis =
+                    current_crisis.filter(|crisis| crisis.kind == CrisisKind::Goblin);
+                if let Some(crisis) = goblin_crisis {
                     let balance = balance_telemetry_state.entry(*player_id).or_default();
                     balance.warnings.record(
                         crisis.phase,
@@ -3161,6 +3415,7 @@ impl Plugin for GamePlugin {
         app.init_resource::<InvestigatedPOIs>();
         app.init_resource::<IntroEncounterState>();
         app.init_resource::<SettlementCrisisState>();
+        app.init_resource::<PersonalCrisisHistory>();
         app.init_resource::<NextCrisisAssaultId>();
         app.init_resource::<CrisisTelemetryState>();
         app.init_resource::<CrisisBalanceTelemetryState>();
@@ -5587,13 +5842,16 @@ pub fn build_system(
             structure_stats.hp = structure_stats.base_hp;
 
             if matches!(*structure_subclass, Subclass::Wall | Subclass::Watchtower)
-                && matches!(
-                    crisis_state
-                        .as_ref()
-                        .and_then(|state| state.get(&structure_player_id.0))
-                        .map(|crisis| crisis.phase),
-                    Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
-                )
+                && crisis_state
+                    .as_ref()
+                    .and_then(|state| state.get(&structure_player_id.0))
+                    .is_some_and(|crisis| {
+                        crisis.kind == CrisisKind::Goblin
+                            && matches!(
+                                crisis.phase,
+                                CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                            )
+                    })
             {
                 if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                     telemetry_state
@@ -9588,13 +9846,16 @@ fn repair_event_system(
                     let previous_hp = structure.stats.hp;
                     structure.stats.hp = structure.stats.base_hp;
                     if previous_hp < structure.stats.hp
-                        && matches!(
-                            crisis_state
-                                .as_ref()
-                                .and_then(|state| state.get(&structure.player_id.0))
-                                .map(|crisis| crisis.phase),
-                            Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
-                        )
+                        && crisis_state
+                            .as_ref()
+                            .and_then(|state| state.get(&structure.player_id.0))
+                            .is_some_and(|crisis| {
+                                crisis.kind == CrisisKind::Goblin
+                                    && matches!(
+                                        crisis.phase,
+                                        CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                                    )
+                            })
                     {
                         if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                             telemetry_state
@@ -10616,11 +10877,13 @@ fn use_item_system(
                         _ => {}
                     }
 
-                    let crisis_phase = crisis_state
+                    let crisis = crisis_state
                         .as_ref()
-                        .and_then(|state| state.get(&item_owner.player_id.0))
+                        .and_then(|state| state.get(&item_owner.player_id.0));
+                    let goblin_crisis_phase = crisis
+                        .filter(|crisis| crisis.kind == CrisisKind::Goblin)
                         .map(|crisis| crisis.phase);
-                    if successful_healing_use && is_preparation_phase(crisis_phase) {
+                    if successful_healing_use && is_preparation_phase(goblin_crisis_phase) {
                         if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                             telemetry_state
                                 .entry(item_owner.player_id.0)
@@ -10629,7 +10892,7 @@ fn use_item_system(
                                 .record_healing_item_used_before_launch(*map_event_id, game_tick.0);
                         }
                     } else if successful_healing_use
-                        && crisis_phase == Some(CrisisPhase::AssaultActive)
+                        && goblin_crisis_phase == Some(CrisisPhase::AssaultActive)
                     {
                         if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                             telemetry_state
@@ -13633,16 +13896,18 @@ fn rat_event_system(
     }
 }
 
-/// Evaluates the Checkpoint 2 personal goblin crisis. This system only derives
-/// state and advances ordered phases through `AssaultReady`; it deliberately
-/// has no Commands, combat spawning, client packets, rewards, or database I/O.
+/// Evaluates the ordered personal-crisis sequence. Goblin retains its existing
+/// behavior; Checkpoint 1 advances Undead only through `AssaultReady` and has
+/// no Commands, combat spawning, rewards, or database I/O.
 fn personal_crisis_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     presence: OptionalPlayerWorldPresence,
     player_intro_state: Res<PlayerIntroState>,
     objectives: Res<Objectives>,
+    player_stats: Res<PlayerStats>,
     mut settlement_crisis_state: ResMut<SettlementCrisisState>,
+    personal_crisis_history: Res<PersonalCrisisHistory>,
     mut crisis_telemetry_state: ResMut<CrisisTelemetryState>,
     mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
     hero_query: Query<
@@ -13732,9 +13997,20 @@ fn personal_crisis_system(
         }
 
         let online = clients.is_player_online(*player_id);
+        let next_kind = personal_crisis_history
+            .by_player
+            .get(player_id)
+            .map(next_personal_crisis_kind)
+            .unwrap_or(Some(CrisisKind::Goblin));
         let crisis = match settlement_crisis_state.entry(*player_id) {
             Entry::Vacant(entry) => {
-                entry.insert(SettlementCrisis::new(current_tick));
+                // Undead must replace the intact resolved Goblin after its
+                // online-only delay. A missing runtime entry cannot bypass
+                // that boundary, even if history already contains Goblin.
+                if next_kind != Some(CrisisKind::Goblin) {
+                    continue;
+                }
+                entry.insert(SettlementCrisis::new(CrisisKind::Goblin, current_tick));
                 crisis_telemetry_state.insert(*player_id, CrisisTelemetry::new(current_tick));
                 let balance = balance_telemetry_state.entry(*player_id).or_default();
                 balance.record_pressure(
@@ -13759,49 +14035,136 @@ fn personal_crisis_system(
             Entry::Occupied(entry) => entry.into_mut(),
         };
 
-        let count_online_time = intro.danger_unlocked && online;
-        advance_online_crisis_time(crisis, current_tick, count_online_time);
+        if crisis.kind == CrisisKind::Goblin && crisis.phase == CrisisPhase::Resolved {
+            advance_online_crisis_time(crisis, current_tick, online);
+            let history = personal_crisis_history
+                .by_player
+                .get(player_id)
+                .cloned()
+                .unwrap_or_default();
+            if crisis.resolution_recorded
+                && history.completed.contains(&CrisisKind::Goblin)
+                && next_personal_crisis_kind(&history) == Some(CrisisKind::Undead)
+                && crisis.phase_online_ticks >= NEXT_PERSONAL_CRISIS_DELAY_TICKS
+            {
+                *crisis = SettlementCrisis::new(CrisisKind::Undead, current_tick);
+                info!(
+                    "personal_crisis_created player_id={} kind={:?} phase={:?} pressure=0 game_tick={} online={}",
+                    player_id,
+                    CrisisKind::Undead,
+                    CrisisPhase::Dormant,
+                    current_tick,
+                    online
+                );
+            }
+            // The resolved Goblin and a newly-created Undead are both kept
+            // observably unchanged for this evaluation.
+            continue;
+        }
 
         let objective = objectives.get(player_id);
-        let pressure_breakdown = calculate_goblin_pressure_breakdown(&GoblinPressureFacts {
-            danger_unlocked: intro.danger_unlocked,
-            completed_structures: completed_structures.get(player_id).copied().unwrap_or(0),
-            living_villagers: living_villagers.get(player_id).copied().unwrap_or(0),
-            stored_gold: stored_gold.get(player_id).copied().unwrap_or(0),
-            sanctuary_level: bound_monolith_id
-                .and_then(|id| monolith_levels.get(&id).copied())
-                .unwrap_or(0),
-            explore_poi: objective.map(|value| value.explore_poi).unwrap_or(false),
-            choose_expansion: objective
-                .map(|value| value.choose_expansion)
-                .unwrap_or(false),
-            online_active_ticks: crisis.online_active_ticks,
-        });
-        crisis.pressure = pressure_breakdown.clamped_total;
-        balance_telemetry_state
-            .entry(*player_id)
-            .or_default()
-            .record_pressure(
-                crisis.phase,
-                current_tick,
-                crisis.online_active_ticks,
-                pressure_breakdown,
-            );
+        let sanctuary_level = bound_monolith_id
+            .and_then(|id| monolith_levels.get(&id).copied())
+            .unwrap_or(0);
 
-        if count_online_time {
-            if let Some((old_phase, new_phase)) = transition_goblin_crisis(crisis, current_tick) {
-                crisis_telemetry_state
-                    .entry(*player_id)
-                    .or_insert_with(|| CrisisTelemetry::new(crisis.phase_started_tick))
-                    .observe_phase(new_phase, current_tick);
+        match crisis.kind {
+            CrisisKind::Goblin => {
+                let count_online_time = intro.danger_unlocked && online;
+                advance_online_crisis_time(crisis, current_tick, count_online_time);
+                let pressure_breakdown =
+                    calculate_goblin_pressure_breakdown(&GoblinPressureFacts {
+                        danger_unlocked: intro.danger_unlocked,
+                        completed_structures: completed_structures
+                            .get(player_id)
+                            .copied()
+                            .unwrap_or(0),
+                        living_villagers: living_villagers.get(player_id).copied().unwrap_or(0),
+                        stored_gold: stored_gold.get(player_id).copied().unwrap_or(0),
+                        sanctuary_level,
+                        explore_poi: objective.map(|value| value.explore_poi).unwrap_or(false),
+                        choose_expansion: objective
+                            .map(|value| value.choose_expansion)
+                            .unwrap_or(false),
+                        online_active_ticks: crisis.online_active_ticks,
+                    });
+                crisis.pressure = pressure_breakdown.clamped_total;
                 balance_telemetry_state
                     .entry(*player_id)
                     .or_default()
-                    .record_phase(new_phase, current_tick, crisis.online_active_ticks);
-                info!(
-                    "personal_crisis_transition player_id={} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
-                    player_id, old_phase, new_phase, crisis.pressure, current_tick
-                );
+                    .record_pressure(
+                        crisis.phase,
+                        current_tick,
+                        crisis.online_active_ticks,
+                        pressure_breakdown,
+                    );
+
+                if count_online_time {
+                    if let Some((old_phase, new_phase)) =
+                        transition_goblin_crisis(crisis, current_tick)
+                    {
+                        crisis_telemetry_state
+                            .entry(*player_id)
+                            .or_insert_with(|| CrisisTelemetry::new(crisis.phase_started_tick))
+                            .observe_phase(new_phase, current_tick);
+                        balance_telemetry_state
+                            .entry(*player_id)
+                            .or_default()
+                            .record_phase(new_phase, current_tick, crisis.online_active_ticks);
+                        info!(
+                            "personal_crisis_transition player_id={} kind={:?} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
+                            player_id,
+                            crisis.kind,
+                            old_phase,
+                            new_phase,
+                            crisis.pressure,
+                            current_tick
+                        );
+                    }
+                }
+            }
+            CrisisKind::Undead => {
+                let goblin_completed = personal_crisis_history
+                    .by_player
+                    .get(player_id)
+                    .is_some_and(|history| history.completed.contains(&CrisisKind::Goblin));
+                if !goblin_completed {
+                    // A manually injected or corrupted out-of-sequence Undead
+                    // crisis fails closed and receives no online-time credit.
+                    advance_online_crisis_time(crisis, current_tick, false);
+                    continue;
+                }
+
+                advance_online_crisis_time(crisis, current_tick, online);
+                crisis.pressure = calculate_undead_pressure(&UndeadPressureFacts {
+                    goblin_completed,
+                    danger_unlocked: intro.danger_unlocked,
+                    explore_poi: objective.map(|value| value.explore_poi).unwrap_or(false),
+                    choose_expansion: objective
+                        .map(|value| value.choose_expansion)
+                        .unwrap_or(false),
+                    sanctuary_level,
+                    hero_deaths: player_stats
+                        .get(player_id)
+                        .map(|stats| stats.num_deaths)
+                        .unwrap_or(0),
+                    online_active_ticks: crisis.online_active_ticks,
+                });
+
+                if online {
+                    if let Some((old_phase, new_phase)) =
+                        transition_undead_crisis(crisis, current_tick)
+                    {
+                        info!(
+                            "personal_crisis_transition player_id={} kind={:?} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
+                            player_id,
+                            crisis.kind,
+                            old_phase,
+                            new_phase,
+                            crisis.pressure,
+                            current_tick
+                        );
+                    }
+                }
             }
         }
     }
@@ -14275,6 +14638,9 @@ pub(crate) fn crisis_balance_snapshot_system(
     }
     let sample_interval = config.sample_interval_ticks.unwrap_or(1).max(1);
     for (player_id, crisis) in crisis_state.iter() {
+        if crisis.kind != CrisisKind::Goblin {
+            continue;
+        }
         let online = clients.is_player_online(*player_id);
         let hero_alive = snapshot_queries
             .hero_query
@@ -14752,8 +15118,12 @@ fn record_personal_assault_resolution(
     game_tick: i32,
     crisis: &mut SettlementCrisis,
     run_score_state: &mut RunScoreState,
+    personal_crisis_history: &mut PersonalCrisisHistory,
 ) -> bool {
-    if crisis.resolution_recorded || crisis.phase == CrisisPhase::Resolved {
+    if crisis.kind != CrisisKind::Goblin
+        || crisis.phase != CrisisPhase::AssaultActive
+        || crisis.resolution_recorded
+    {
         return false;
     }
 
@@ -14772,6 +15142,12 @@ fn record_personal_assault_resolution(
             ..PlayerRunScore::default()
         })
         .personal_crises_resolved += 1;
+    personal_crisis_history
+        .by_player
+        .entry(player_id)
+        .or_default()
+        .completed
+        .insert(CrisisKind::Goblin);
 
     info!(
         "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} game_tick={} completion_count={}",
@@ -14805,6 +15181,7 @@ fn personal_crisis_assault_system(
         mut next_assault_id,
         mut run_spawned_objs,
         mut run_score_state,
+        mut personal_crisis_history,
         mut crisis_telemetry_state,
         mut balance_telemetry_state,
         balance_telemetry_config,
@@ -14816,6 +15193,7 @@ fn personal_crisis_assault_system(
         ResMut<NextCrisisAssaultId>,
         ResMut<RunSpawnedObjs>,
         ResMut<RunScoreState>,
+        ResMut<PersonalCrisisHistory>,
         ResMut<CrisisTelemetryState>,
         ResMut<CrisisBalanceTelemetryState>,
         Res<CrisisBalanceTelemetryConfig>,
@@ -14934,6 +15312,14 @@ fn personal_crisis_assault_system(
         let Some(crisis) = crisis_state.get_mut(&player_id) else {
             continue;
         };
+
+        // Checkpoint 1 stops Undead at AssaultReady. This kind gate is the
+        // hard safety boundary preventing Goblin ID allocation, composition,
+        // spawning, recovery, or resolution logic from dispatching on a
+        // shared Undead phase value.
+        if crisis.kind != CrisisKind::Goblin {
+            continue;
+        }
 
         // An active assault is committed world state and deliberately keeps
         // running after an ordinary disconnect. Protection is only a launch
@@ -15274,6 +15660,7 @@ fn personal_crisis_assault_system(
                         current_tick,
                         crisis,
                         &mut run_score_state,
+                        &mut personal_crisis_history,
                     ) {
                         crisis_telemetry_state
                             .entry(player_id)
@@ -19631,7 +20018,7 @@ fn true_death_system(
         mut assigned_start_locations,
         mut run_spawned_objs,
         mut intro_encounter_state,
-        mut settlement_crisis_state,
+        (mut settlement_crisis_state, mut personal_crisis_history),
         mut player_world_presence_state,
         mut safe_logout_telemetry,
     ): (
@@ -19648,7 +20035,7 @@ fn true_death_system(
         ResMut<AssignedStartLocations>,
         ResMut<RunSpawnedObjs>,
         ResMut<IntroEncounterState>,
-        ResMut<SettlementCrisisState>,
+        (ResMut<SettlementCrisisState>, ResMut<PersonalCrisisHistory>),
         ResMut<PlayerWorldPresenceState>,
         ResMut<SafeLogoutTelemetryState>,
     ),
@@ -19875,6 +20262,7 @@ fn true_death_system(
                 }
             }
             settlement_crisis_state.remove(&player_id.0);
+            personal_crisis_history.by_player.remove(&player_id.0);
             remove_player_presence_for_run_cleanup(
                 player_id.0,
                 game_tick.0,

@@ -92,6 +92,7 @@ const crisisStatus: CrisisStatusPacket = {
   packet: 'crisis_status',
   version: 1,
   exists: true,
+  kind: 'goblin',
   phase: 'preparing',
   warning: true,
   assault_ready: false,
