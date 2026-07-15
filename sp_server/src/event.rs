@@ -444,6 +444,9 @@ pub struct GameEvent {
 pub enum GameEventType {
     Login {
         player_id: i32,
+        /// Stored as u128 because this reflected event participates in Bevy's
+        /// runtime metadata while the network registry uses `Uuid`.
+        connection_id: u128,
     },
     PlayerNotice {
         player_id: i32,
@@ -466,6 +469,11 @@ pub enum GameEventType {
         npc_type: String,
         pos: Position,
         npc_id: Option<i32>,
+        /// Exact player run whose delayed spawn belongs to. Ambient and
+        /// globally owned spawns use `None`; run-attributed setup/encounter
+        /// spawns use `Some(player_id)` so offline protection can pause them
+        /// without inferring ownership from position or NPC faction.
+        run_owner: Option<i32>,
     },
     ForageEvent {
         forager_id: i32,

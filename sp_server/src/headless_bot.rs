@@ -21,7 +21,10 @@
 // because the server's MoveEvent only accepts a destination adjacent to the mover.
 
 use crate::constants::{WATERSKIN_EMPTY, WATERSKIN_FILLED};
-use crate::game::{sanctuary_upgrade_cost, sanctuary_weak_radius, SANCTUARY_MAX_LEVEL};
+use crate::crisis_balance::CrisisBalanceScenario;
+use crate::game::{
+    sanctuary_upgrade_cost, sanctuary_weak_radius, CrisisPhase, SANCTUARY_MAX_LEVEL,
+};
 use crate::headless::{HeroView, ItemView, StructureView, UnitView, WorldView};
 use crate::map::{Map, TileType};
 use crate::obj::Position;
@@ -36,8 +39,8 @@ const DANGER_RADIUS: u32 = 3; // an enemy this close counts as a threat for retr
 const SLEEP_SAFE_RADIUS: u32 = 3; // no enemy within this -> clear to rest/eat
 const LOW_HP: f32 = 0.5; // retreat / heal below this HP fraction
 const CRITICAL_HP: f32 = 0.3; // emergency heal below this
-// Yield to the game's auto-consume just under its 75.0 trigger so the hero is
-// already idle when a need crosses the threshold.
+                              // Yield to the game's auto-consume just under its 75.0 trigger so the hero is
+                              // already idle when a need crosses the threshold.
 const CONSUME_AT: f32 = 70.0;
 // Proactively top needs up at every safe window, well before CONSUME_AT, so the
 // hero enters each enemy-pressure window with a big buffer. Sustained combat
@@ -63,15 +66,15 @@ const LOW_FIREWOOD: i32 = 4; // craft Firewood (1 Log -> 5) below this so cookin
 const MAX_WALLS: usize = 6; // cap palisade walls ringed around the base
 const WALL_RING: u32 = 2; // ring radius (leaves the inner tiles free to move)
 const JOB_WATCHDOG_TICKS: i32 = 2400; // abandon a stuck build job after ~1 day
-// Villager economy: hire from the travelling merchant up to the Prosperity goal.
+                                      // Villager economy: hire from the travelling merchant up to the Prosperity goal.
 const HIRE_WAGE: i32 = 25; // Gold Coins charged per hire (matches the server)
 const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
 // Structure recipes the bot builds (req type -> quantity), matching the
 // obj_template.yaml `req` fields. Campfire uses the hero's starting Stick+Resin;
-// Stockade walls use Sticks (foraged abundantly), so a refuge is affordable.
+// Stockade walls use Logs.
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
-const STOCKADE_REQS: &[(&str, i32)] = &[("Stick", 3)];
+const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 3)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
 const PLANT_RES: &str = "Plant";
 
@@ -95,6 +98,112 @@ pub enum Phase {
     Done,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BalanceBotPolicy {
+    passive: bool,
+    build_campfire: bool,
+    max_walls: usize,
+    recruit_shipwreck_villager: bool,
+    hire_villagers: bool,
+    upgrade_sanctuary: bool,
+    stay_near_settlement_after_warning: bool,
+}
+
+impl BalanceBotPolicy {
+    pub const fn for_scenario(scenario: CrisisBalanceScenario) -> Self {
+        match scenario {
+            CrisisBalanceScenario::Passive => Self {
+                passive: true,
+                build_campfire: false,
+                max_walls: 0,
+                recruit_shipwreck_villager: false,
+                hire_villagers: false,
+                upgrade_sanctuary: false,
+                stay_near_settlement_after_warning: false,
+            },
+            CrisisBalanceScenario::BasicSurvival => Self {
+                passive: false,
+                build_campfire: true,
+                max_walls: 0,
+                recruit_shipwreck_villager: false,
+                hire_villagers: false,
+                upgrade_sanctuary: false,
+                stay_near_settlement_after_warning: false,
+            },
+            CrisisBalanceScenario::PreparedSolo | CrisisBalanceScenario::HelperSupported => {
+                Self::prepared_solo()
+            }
+            CrisisBalanceScenario::FortifiedSolo | CrisisBalanceScenario::NoVillagers => Self {
+                passive: false,
+                build_campfire: true,
+                max_walls: MAX_WALLS,
+                recruit_shipwreck_villager: false,
+                hire_villagers: false,
+                upgrade_sanctuary: true,
+                stay_near_settlement_after_warning: true,
+            },
+            CrisisBalanceScenario::VillagerSupported => Self {
+                passive: false,
+                build_campfire: true,
+                max_walls: MAX_WALLS,
+                recruit_shipwreck_villager: true,
+                hire_villagers: true,
+                upgrade_sanctuary: true,
+                stay_near_settlement_after_warning: true,
+            },
+            CrisisBalanceScenario::OrdinaryDisconnect
+            | CrisisBalanceScenario::SafeLogoutBeforeAssault => Self {
+                passive: false,
+                build_campfire: true,
+                max_walls: 3,
+                recruit_shipwreck_villager: false,
+                hire_villagers: false,
+                upgrade_sanctuary: true,
+                stay_near_settlement_after_warning: true,
+            },
+            CrisisBalanceScenario::AdjacentSettlement | CrisisBalanceScenario::Standard => {
+                Self::standard()
+            }
+        }
+    }
+
+    const fn prepared_solo() -> Self {
+        Self {
+            passive: false,
+            build_campfire: true,
+            max_walls: 3,
+            recruit_shipwreck_villager: false,
+            hire_villagers: false,
+            upgrade_sanctuary: true,
+            stay_near_settlement_after_warning: true,
+        }
+    }
+
+    const fn supporting_helper() -> Self {
+        Self {
+            passive: false,
+            build_campfire: false,
+            max_walls: 0,
+            recruit_shipwreck_villager: false,
+            hire_villagers: false,
+            upgrade_sanctuary: false,
+            stay_near_settlement_after_warning: false,
+        }
+    }
+
+    pub const fn standard() -> Self {
+        Self {
+            passive: false,
+            build_campfire: true,
+            max_walls: MAX_WALLS,
+            recruit_shipwreck_villager: true,
+            hire_villagers: true,
+            upgrade_sanctuary: true,
+            stay_near_settlement_after_warning: false,
+        }
+    }
+}
+
 // A multi-step structure build the bot is currently driving.
 struct BuildJob {
     structure_name: String, // "Campfire" / "Stockade"
@@ -102,7 +211,7 @@ struct BuildJob {
     reqs: Vec<(String, i32)>,
     site: Position,
     structure_id: Option<i32>, // discovered once the foundation is placed
-    build_issued: bool,
+    last_build_issue_tick: Option<i32>,
     started_tick: i32,
 }
 
@@ -117,10 +226,29 @@ pub struct Bot {
     upgrade_enabled: bool,   // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
     dbg_last_day: i32,       // last day a FOOD_DEBUG line was emitted
     hunts: u32,              // hunt actions issued (diagnostic)
+    balance_policy: BalanceBotPolicy,
+    // Dedicated multiplayer helper destination. When set, the hero travels by
+    // ordinary Move events until adjacent to the owner's settlement, then holds
+    // there and fights nearby enemies through the normal combat event path.
+    helper_support_anchor: Option<Position>,
 }
 
 impl Bot {
     pub fn new(player_id: i32) -> Self {
+        Self::new_with_policy(player_id, BalanceBotPolicy::standard())
+    }
+
+    pub fn for_balance_scenario(player_id: i32, scenario: CrisisBalanceScenario) -> Self {
+        Self::new_with_policy(player_id, BalanceBotPolicy::for_scenario(scenario))
+    }
+
+    pub fn for_helper_support(player_id: i32, owner_settlement_anchor: Position) -> Self {
+        let mut bot = Self::new_with_policy(player_id, BalanceBotPolicy::supporting_helper());
+        bot.helper_support_anchor = Some(owner_settlement_anchor);
+        bot
+    }
+
+    fn new_with_policy(player_id: i32, balance_policy: BalanceBotPolicy) -> Self {
         Bot {
             player_id,
             phase: Phase::Bootstrap,
@@ -130,9 +258,12 @@ impl Bot {
             walls_attempted: 0,
             recruit_attempted: false,
             // A/B toggle for measuring the sanctuary loop's contribution.
-            upgrade_enabled: std::env::var("BOT_NO_UPGRADE").is_err(),
+            upgrade_enabled: balance_policy.upgrade_sanctuary
+                && std::env::var("BOT_NO_UPGRADE").is_err(),
             dbg_last_day: -1,
             hunts: 0,
+            balance_policy,
+            helper_support_anchor: None,
         }
     }
 
@@ -182,7 +313,10 @@ impl Bot {
                 .map(|i| i.quantity)
                 .sum();
             let hides = count_matching(&view.inventory, "Hide");
-            let has_tent = view.structures.iter().any(|s| s.subclass == "craft" && s.built);
+            let has_tent = view
+                .structures
+                .iter()
+                .any(|s| s.subclass == "craft" && s.built);
             let home = view.home().or(self.anchor).unwrap_or(hero.pos);
             let game_near = view
                 .resource_tiles
@@ -243,7 +377,16 @@ impl Bot {
                 "[vil] t={} villagers={} gold={} merchant={} hireable={} sanc_lvl={} shards={} corpses={}",
                 view.game_tick, view.villagers.len(), hgold, mstate, mhire, sanc, shards, corpses
             );
-            let _ = (idle, with_order, gathering, carried, sfood, plant_nodes, mpos, hdist);
+            let _ = (
+                idle,
+                with_order,
+                gathering,
+                carried,
+                sfood,
+                plant_nodes,
+                mpos,
+                hdist,
+            );
         }
 
         // The hero acts only while idle; a busy hero still lets us command a villager.
@@ -269,7 +412,13 @@ impl Bot {
         }
         self.phase = if !view.has_built("campfire") {
             Phase::Build
-        } else if view.structures.iter().filter(|s| s.subclass == "wall").count() < MAX_WALLS {
+        } else if view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "wall")
+            .count()
+            < self.balance_policy.max_walls
+        {
             Phase::Fortify
         } else {
             Phase::Survive
@@ -438,11 +587,42 @@ impl Bot {
             }
         }
 
+        // A support hero has no synthetic relocation or damage path: it walks
+        // toward the owner's settlement one legal hex at a time, and the combat
+        // branch above supplies its ordinary Move/Attack events when enemies are
+        // close. Stop adjacent because the anchor is normally an occupied
+        // settlement structure tile.
+        if let Some(owner_anchor) = self.helper_support_anchor {
+            if hex_dist(hero.pos, owner_anchor) > 1 {
+                return self.step_toward(hero.pos, owner_anchor, view, map);
+            }
+            return None;
+        }
+
+        let crisis_hold = self.balance_policy.stay_near_settlement_after_warning
+            && matches!(
+                view.crisis_phase,
+                Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+            );
+        if crisis_hold {
+            if let Some(equip) = self.equip_combat_weapon(view) {
+                return Some(equip);
+            }
+            let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+            if hex_dist(hero.pos, home) > 1 {
+                if let Some(mv) = self.step_toward(hero.pos, home, view, map) {
+                    return Some(mv);
+                }
+            }
+        }
+
         // 6. Routine needs while safe: refill water, sleep, idle to auto-eat/drink.
         if safe {
             // Water: prospect a spring + refill so dehydration never sets in.
-            if let Some(action) = self.water_action(&hero, view, map) {
-                return Some(action);
+            if !crisis_hold {
+                if let Some(action) = self.water_action(&hero, view, map) {
+                    return Some(action);
+                }
             }
             // Sleep BEFORE foraging: sleep is a short (30-tick) action, while a
             // forage is ~150 ticks — letting a forage pre-empt sleep is how the
@@ -462,8 +642,10 @@ impl Bot {
             }
             // Food pipeline: butcher carcasses -> cook raw meat -> hunt/forage for
             // more. See food_action.
-            if let Some(action) = self.food_action(&hero, view, map) {
-                return Some(action);
+            if !crisis_hold {
+                if let Some(action) = self.food_action(&hero, view, map) {
+                    return Some(action);
+                }
             }
         }
 
@@ -474,14 +656,23 @@ impl Bot {
         // moderately gated.
         let needs_ok =
             hero.hunger < CONSUME_AT && hero.thirst < CONSUME_AT && hero.tired < CONSUME_AT;
-        let needs_comfortable =
-            hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
+        let needs_comfortable = hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
 
         // 4c. Recruit the shipwreck villager EARLY — before building. It's the
         //     settlement's first farmer (and one-time), so getting it on day 1 is
         //     worth more than rushing the campfire. The wreck sits next to spawn, so
         //     a loose safe + not-critically-needy gate makes this fire reliably.
-        if safe && needs_ok && !self.recruit_attempted && view.villagers.is_empty() {
+        if self.balance_policy.passive {
+            return None;
+        }
+
+        if self.balance_policy.recruit_shipwreck_villager
+            && safe
+            && !crisis_hold
+            && needs_ok
+            && !self.recruit_attempted
+            && view.villagers.is_empty()
+        {
             if let Some(ship) = view.pois.iter().find(|p| p.template == "Shipwreck") {
                 if hex_dist(hero.pos, ship.pos) <= 1 {
                     self.recruit_attempted = true;
@@ -515,7 +706,9 @@ impl Bot {
         //     Prosperity goal. Only when safe + needs comfortable (same as recruit).
         //     The hero pays in Gold Coins, which start in the Burrow, so it first
         //     withdraws gold, then walks to the docked merchant and hires.
-        if safe
+        if self.balance_policy.hire_villagers
+            && safe
+            && !crisis_hold
             && needs_comfortable
             && view.villagers.len() < TARGET_VILLAGERS
             && self.recruit_attempted
@@ -557,6 +750,10 @@ impl Bot {
             }
         }
 
+        if crisis_hold {
+            return None;
+        }
+
         // 8. Forage: gather on a revealed resource tile, else walk to one.
         if let Some(action) = self.forage(view, map) {
             return Some(action);
@@ -575,7 +772,9 @@ impl Bot {
         let home = view.home().or(self.anchor).unwrap_or(hero.pos);
 
         // Campfire first (also a survival objective). Skip if one already exists.
-        if !view.structures.iter().any(|s| s.subclass == "campfire") {
+        if self.balance_policy.build_campfire
+            && !view.structures.iter().any(|s| s.subclass == "campfire")
+        {
             let site = self.anchor.unwrap_or(hero.pos);
             // Only start if we can actually supply it (hero carries Stick+Resin).
             if has_all_reqs(&view.inventory, CAMPFIRE_REQS) {
@@ -597,8 +796,14 @@ impl Bot {
         // log supply (wood gathering) so building doesn't starve cooking.
 
         // Then ring the base with walls.
-        let wall_count = view.structures.iter().filter(|s| s.subclass == "wall").count();
-        if wall_count < MAX_WALLS && self.walls_attempted < MAX_WALLS {
+        let wall_count = view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "wall")
+            .count();
+        if wall_count < self.balance_policy.max_walls
+            && self.walls_attempted < self.balance_policy.max_walls
+        {
             if let Some(site) = self.next_wall_site(view, home, map) {
                 // Only commit if logs are reachable (in hand or in a storage).
                 if has_all_reqs(&view.inventory, STOCKADE_REQS)
@@ -666,7 +871,7 @@ impl Bot {
             .structure_id
             .and_then(|sid| view.structures.iter().find(|s| s.id == sid));
         let foundation_filled = foundation
-            .map(|f| has_all_reqs(&f.inventory, &as_req_slice(&job.reqs)))
+            .map(|f| f.building || has_all_reqs(&f.inventory, &as_req_slice(&job.reqs)))
             .unwrap_or(false);
 
         if !foundation_filled && !has_all_reqs(&view.inventory, &as_req_slice(&job.reqs)) {
@@ -721,12 +926,20 @@ impl Bot {
             }
 
             // Phase E: build it (builder must stand on the foundation).
-            if f.founded {
+            if f.founded || f.building {
                 if hero_pos != f.pos {
                     return self.step_toward(hero_pos, f.pos, view, map);
                 }
-                if !job.build_issued {
-                    job.build_issued = true;
+                // The authoritative handler can reject a build while the hero is
+                // still combat-locked, and combat can interrupt an accepted build.
+                // Retry after a bounded interval while the structure remains
+                // Founded or Building; the production observer resumes a Building
+                // structure without consuming its requirements again.
+                if job
+                    .last_build_issue_tick
+                    .map_or(true, |tick| view.game_tick.saturating_sub(tick) >= 20)
+                {
+                    job.last_build_issue_tick = Some(view.game_tick);
                     return Some(PlayerEvent::Build {
                         player_id: self.player_id,
                         builder_id: hero_id,
@@ -734,7 +947,7 @@ impl Bot {
                     });
                 }
             }
-            // Phase F: building -> wait.
+            // Phase F: wait for completion between bounded resume attempts.
         }
         None
     }
@@ -835,7 +1048,10 @@ impl Bot {
     fn loot_soulshards(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         const LOOT_RADIUS: u32 = 6;
         // No point hoarding once the sanctuary is maxed.
-        if view.monolith.map_or(true, |m| m.level >= SANCTUARY_MAX_LEVEL) {
+        if view
+            .monolith
+            .map_or(true, |m| m.level >= SANCTUARY_MAX_LEVEL)
+        {
             return None;
         }
         let corpse = view
@@ -961,7 +1177,11 @@ impl Bot {
                 .inventory
                 .iter()
                 .filter(|i| i.is_edible())
-                .max_by(|a, b| a.feed.partial_cmp(&b.feed).unwrap_or(std::cmp::Ordering::Equal))
+                .max_by(|a, b| {
+                    a.feed
+                        .partial_cmp(&b.feed)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|i| i.id)
             {
                 return Some(PlayerEvent::Use {
@@ -989,12 +1209,7 @@ impl Bot {
     // Cooked Meat at the campfire (more Feed), and when out of food hunt game
     // (raw meat) or pull from the Burrow / forage. Raw & cooked meat are both
     // `Food`, auto-eaten by the game when the hero is idle and hungry.
-    fn food_action(
-        &mut self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn food_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         // 1. Butcher a carcass (a "Felled X", class "Game Animal") into raw meat.
         if let Some(carcass) = view.inventory.iter().find(|i| i.class == "Game Animal") {
             return Some(PlayerEvent::Refine {
@@ -1187,12 +1402,7 @@ impl Bot {
     // Hunt a Game Animal: equip the Hunting weapon (the starting Sharpened Stick),
     // then gather a revealed game tile (prospect to reveal one — game spawns under
     // grassland/plains hexes near the base). Yields a carcass to butcher in (1).
-    fn hunt_action(
-        &mut self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn hunt_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let equipped_hunting = view.inventory.iter().any(|i| i.equipped && i.is_hunting);
         if !equipped_hunting {
             let id = view.inventory.iter().find(|i| i.is_hunting).map(|i| i.id)?;
@@ -1237,19 +1447,18 @@ impl Bot {
     // into the campfire, StructureCraft, then retrieve the cooked meat. Stateless —
     // each call inspects the campfire's inventory to pick the next step. Returns
     // None if there's no campfire / no firewood (then the raw meat is eaten raw).
-    fn cook_action(
-        &self,
-        hero: &HeroView,
-        view: &WorldView,
-        map: &Map,
-    ) -> Option<PlayerEvent> {
+    fn cook_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let campfire = view
             .structures
             .iter()
             .find(|s| s.subclass == "campfire" && s.built)?;
 
         // Retrieve a finished Cooked Meat from the campfire.
-        if let Some(cooked) = campfire.inventory.iter().find(|i| i.subclass == "Cooked Meat") {
+        if let Some(cooked) = campfire
+            .inventory
+            .iter()
+            .find(|i| i.subclass == "Cooked Meat")
+        {
             if Map::is_adjacent_including_source(hero.pos, campfire.pos) {
                 return Some(PlayerEvent::ItemTransfer {
                     player_id: self.player_id,
@@ -1465,20 +1674,14 @@ impl Bot {
 }
 
 impl BuildJob {
-    fn new(
-        name: &str,
-        subclass: &str,
-        reqs: &[(&str, i32)],
-        site: Position,
-        tick: i32,
-    ) -> Self {
+    fn new(name: &str, subclass: &str, reqs: &[(&str, i32)], site: Position, tick: i32) -> Self {
         BuildJob {
             structure_name: name.to_string(),
             subclass: subclass.to_string(),
             reqs: reqs.iter().map(|(t, q)| (t.to_string(), *q)).collect(),
             site,
             structure_id: None,
-            build_issued: false,
+            last_build_issue_tick: None,
             started_tick: tick,
         }
     }
@@ -1513,7 +1716,11 @@ fn has_class(items: &[ItemView], class: &str) -> bool {
 }
 
 fn count_name(items: &[ItemView], name: &str) -> i32 {
-    items.iter().filter(|i| i.name == name).map(|i| i.quantity).sum()
+    items
+        .iter()
+        .filter(|i| i.name == name)
+        .map(|i| i.quantity)
+        .sum()
 }
 
 fn has_edible(items: &[ItemView]) -> bool {
@@ -1533,8 +1740,7 @@ fn count_matching(items: &[ItemView], req_type: &str) -> i32 {
 }
 
 fn has_all_reqs(items: &[ItemView], reqs: &[(&str, i32)]) -> bool {
-    reqs.iter()
-        .all(|(t, q)| count_matching(items, t) >= *q)
+    reqs.iter().all(|(t, q)| count_matching(items, t) >= *q)
 }
 
 // Find a still-missing requirement that some owned storage holds; return
@@ -1547,7 +1753,11 @@ fn storage_item_for_missing(
         if count_matching(&view.inventory, req_type) >= *need {
             continue;
         }
-        for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        for s in view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "storage" && s.built)
+        {
             if let Some(item) = s.inventory.iter().find(|i| i.matches_req(req_type)) {
                 return Some((s.pos, s.id, item.id));
             }
@@ -1558,8 +1768,16 @@ fn storage_item_for_missing(
 
 // A Food item sitting in an owned storage (e.g. the Burrow's berries) to pull.
 fn storage_food(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
-        if let Some(item) = s.inventory.iter().find(|i| i.class == "Food" && i.quantity > 0) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
+        if let Some(item) = s
+            .inventory
+            .iter()
+            .find(|i| i.class == "Food" && i.quantity > 0)
+        {
             return Some((s.pos, s.id, item.id));
         }
     }
@@ -1630,7 +1848,11 @@ fn campfire_meat_pending(view: &WorldView) -> i32 {
 // An actual Log stack (class "Log" strictly — Timber doesn't smelt into Firewood)
 // sitting in an owned storage. Returns (storage_pos, storage_id, item_id).
 fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
         if let Some(item) = s
             .inventory
             .iter()
@@ -1645,7 +1867,11 @@ fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
 // A Gold Coins stack sitting in an owned storage (the Burrow starts with 50) to
 // withdraw for hiring. Returns (storage_pos, storage_id, item_id).
 fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
-    for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+    for s in view
+        .structures
+        .iter()
+        .filter(|s| s.subclass == "storage" && s.built)
+    {
         if let Some(item) = s
             .inventory
             .iter()
@@ -1659,13 +1885,113 @@ fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
 
 fn storage_with_req(view: &WorldView, reqs: &[(&str, i32)]) -> Option<i32> {
     for (req_type, _) in reqs {
-        for s in view.structures.iter().filter(|s| s.subclass == "storage" && s.built) {
+        for s in view
+            .structures
+            .iter()
+            .filter(|s| s.subclass == "storage" && s.built)
+        {
             if s.inventory.iter().any(|i| i.matches_req(req_type)) {
                 return Some(s.id);
             }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::headless::HeadlessGame;
+    use crate::obj::State;
+
+    #[test]
+    fn helper_supported_primary_policy_matches_prepared_solo() {
+        assert_eq!(
+            BalanceBotPolicy::for_scenario(CrisisBalanceScenario::HelperSupported),
+            BalanceBotPolicy::for_scenario(CrisisBalanceScenario::PreparedSolo)
+        );
+        assert_ne!(
+            BalanceBotPolicy::for_scenario(CrisisBalanceScenario::HelperSupported),
+            BalanceBotPolicy::standard(),
+            "helper support is an additive second hero, not extra primary preparation"
+        );
+    }
+
+    #[test]
+    fn helper_support_bot_emits_normal_move_and_attack_events() {
+        let mut game = HeadlessGame::new(1_000);
+        let owner_player_id = game.spawn_hero("Warrior", "SupportOwnerBot");
+        let owner_anchor = game
+            .observe_for_player(owner_player_id)
+            .home()
+            .expect("owner settlement anchor");
+        let helper_player_id = game.spawn_connected_scenario_helper("SupportHelperBot");
+        let mut view = game.observe_for_player(helper_player_id);
+        let hero = view.hero.as_mut().expect("connected helper hero");
+        hero.state = State::None;
+        hero.hp = hero.base_hp;
+        hero.hunger = 0.0;
+        hero.thirst = 0.0;
+        hero.tired = 0.0;
+        let helper_hero = *hero;
+        assert!(hex_dist(helper_hero.pos, owner_anchor) > 1);
+
+        // Isolate the policy decision from ambient intro enemies and inventory
+        // equipment choices. This mutates only the owned observation snapshot,
+        // never the authoritative game world.
+        view.enemies.clear();
+        view.inventory.clear();
+        view.occupied.clear();
+        view.occupied.insert((helper_hero.pos.x, helper_hero.pos.y));
+        view.occupied.insert((owner_anchor.x, owner_anchor.y));
+
+        let mut bot = Bot::for_helper_support(helper_player_id, owner_anchor);
+        let movement = bot
+            .step(&view, game.map())
+            .expect("helper should travel toward the owner settlement");
+        match movement {
+            PlayerEvent::Move { player_id, x, y } => {
+                let destination = Position { x, y };
+                assert_eq!(player_id, helper_player_id);
+                assert_eq!(hex_dist(helper_hero.pos, destination), 1);
+                assert!(
+                    hex_dist(destination, owner_anchor) < hex_dist(helper_hero.pos, owner_anchor)
+                );
+            }
+            _ => panic!("helper travel must use an ordinary Move event"),
+        }
+
+        let enemy_pos = Map::range((helper_hero.pos.x, helper_hero.pos.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                *position != helper_hero.pos && Map::is_passable(position.x, position.y, game.map())
+            })
+            .expect("passable adjacent enemy tile");
+        const ENEMY_ID: i32 = 9_999_999;
+        view.enemies.push(UnitView {
+            id: ENEMY_ID,
+            player_id: 900_000,
+            pos: enemy_pos,
+        });
+
+        let combat = bot
+            .step(&view, game.map())
+            .expect("helper should fight an adjacent enemy");
+        match combat {
+            PlayerEvent::Attack {
+                player_id,
+                source_id,
+                target_id,
+                ..
+            } => {
+                assert_eq!(player_id, helper_player_id);
+                assert_eq!(source_id, helper_hero.id);
+                assert_eq!(target_id, ENEMY_ID);
+            }
+            _ => panic!("helper combat must use an ordinary Attack event"),
+        }
+    }
 }
 
 // A hero-held item that satisfies a requirement the foundation still needs.

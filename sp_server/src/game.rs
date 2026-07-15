@@ -10,21 +10,22 @@ use bevy::{
 use bevy::{scene, state};
 
 use big_brain::thinker::ThinkerBuilder;
-use big_brain::BigBrainPlugin;
+use big_brain::{BigBrainPlugin, BigBrainSet};
 use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
+use rand::seq::SliceRandom;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::{reload, EnvFilter, Registry};
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::{
     collections::HashSet,
     hash::Hash,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use uuid::Uuid;
@@ -36,8 +37,16 @@ use async_compat::Compat;
 use std::env;
 
 use crate::combat::{Combat, CombatSpellQuery};
-use crate::common::{Dehydrated, Exhausted, Heat, Hunger, Starving, Thirst, Tired, Transport};
+use crate::common::{
+    Dehydrated, Exhausted, Heat, Hunger, Starving, Target, TaskTarget, Thirst, Tired, Transport,
+};
 use crate::constants::*;
+use crate::crisis_balance::{
+    crisis_combat_telemetry_observer, phase_name as balance_phase_name, CrisisBalanceObservation,
+    CrisisBalanceObservationState, CrisisBalanceTelemetry, CrisisBalanceTelemetryConfig,
+    CrisisBalanceTelemetryState, CrisisPreparationSnapshot, CrisisPressureBreakdown,
+    CrisisPressureSnapshot, GoblinCrisisBalanceConfigSnapshot,
+};
 use crate::database::DatabaseEvent;
 use crate::effect::{self, Effect, Effects};
 use crate::encounter::{Encounter, EncounterMapObj, EncounterProbability};
@@ -53,29 +62,36 @@ use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, SOULSHARD};
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
-    self, send_to_client, send_to_database, BroadcastEvents, ObjAttr, RefiningItem,
+    self, send_to_client, send_to_database, BroadcastEvents, CrisisPreparationOption,
+    CrisisStatusSnapshot, ObjAttr, RefiningItem,
 };
 use crate::network::{ResponsePacket, StatsData};
-use crate::npc::NPCPlugin;
+use crate::npc::{NPCPlugin, VisibleTarget};
 use crate::obj::{
     is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
     Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
-    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, Id, LastAttacker,
-    LastCombatTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order, PlayerId, Position,
-    RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter, Sheltered, StartBuild,
-    StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange, StateDead,
-    StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
-    Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj, Viewshed, Watchtower,
-    WorkEntry, WorkQueue, WorkStatus, WorkType,
+    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, HeroClass, Id,
+    LastAttacker, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order,
+    PlayerId, Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter,
+    Sheltered, StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange,
+    StateDead, StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC,
+    SubclassVillager, Template, TemplateChange, TransferAllResources, TrueDeath, UpdateObj,
+    Viewshed, Watchtower, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
 use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
+use crate::safe_logout::{
+    entity_belongs_to_protected_run, is_owner_offline_protected, is_player_offline_protected,
+    mark_player_login_sync_complete, object_belongs_to_protected_run, protected_player_for_object,
+    remove_player_presence_for_run_cleanup, PlayerWorldPresenceState, SafeLogoutPlugin,
+    SafeLogoutTelemetryState,
+};
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
 use crate::skill_defs::Skill;
 use crate::structure::{Plans, Structure, StructurePlugin};
-use crate::tax_collector::TaxCollectorPlugin;
+use crate::tax_collector::{TaxCollector, TaxCollectorPlugin};
 use crate::templates::{self, ObjTemplate, ResTemplates, Templates, TemplatesPlugin};
 use crate::terrain_feature::{TerrainFeature, TerrainFeaturePlugin, TerrainFeatures};
 use crate::trade::{Prices, TradePorts, WantedItem};
@@ -85,6 +101,175 @@ use crate::{villager_util, AppState};
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct Clients(Arc<Mutex<HashMap<Uuid, Client>>>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentConnectionSendError {
+    NotCurrent,
+    Full,
+    Closed,
+    RegistryUnavailable,
+}
+
+impl Clients {
+    fn client_is_active(client_id: &Uuid, client: &Client, player_id: i32) -> bool {
+        *client_id == client.id && client.player_id == player_id && !client.sender.is_closed()
+    }
+
+    /// Returns whether at least one active network client belongs to `player_id`.
+    /// Hero entities persist across disconnects, so the client registry is the
+    /// authoritative source of online presence for personal-crisis timing.
+    pub fn is_player_online(&self, player_id: i32) -> bool {
+        match self.0.lock() {
+            Ok(clients) => clients
+                .iter()
+                .any(|(client_id, client)| Self::client_is_active(client_id, client, player_id)),
+            Err(_) => false,
+        }
+    }
+
+    /// Snapshot the active connection identities for one player. Production
+    /// creates a fresh UUID for every socket, so retaining one of these IDs
+    /// proves that at least one request-time connection remained uninterrupted.
+    pub fn active_connection_ids(&self, player_id: i32) -> Vec<Uuid> {
+        match self.0.lock() {
+            Ok(clients) => {
+                let mut ids = clients
+                    .iter()
+                    .filter_map(|(client_id, client)| {
+                        Self::client_is_active(client_id, client, player_id).then_some(*client_id)
+                    })
+                    .collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Return true only while at least one connection captured at request time
+    /// is still the player's active connection. A replacement connection does
+    /// not erase an intervening ordinary disconnect.
+    pub fn has_active_connection_from(&self, player_id: i32, request_ids: &[Uuid]) -> bool {
+        if request_ids.is_empty() {
+            return false;
+        }
+        match self.0.lock() {
+            Ok(clients) => clients.iter().any(|(client_id, client)| {
+                request_ids.contains(client_id)
+                    && Self::client_is_active(client_id, client, player_id)
+            }),
+            Err(_) => false,
+        }
+    }
+
+    /// Atomically makes `client` the sole authoritative connection for its
+    /// player. Returning the displaced connection ids lets the network layer
+    /// close their streams without granting them any further command authority.
+    pub fn activate(&self, client: Client) -> Vec<Uuid> {
+        let Ok(mut clients) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut displaced = clients
+            .iter()
+            .filter_map(|(client_id, current)| {
+                (current.player_id == client.player_id && *client_id != client.id)
+                    .then_some(*client_id)
+            })
+            .collect::<Vec<_>>();
+        displaced.sort_unstable();
+        for client_id in &displaced {
+            clients.remove(client_id);
+        }
+        clients.insert(client.id, client);
+        displaced
+    }
+
+    /// Exact authority check used at network ingress and delayed-login
+    /// boundaries. Player-level online presence is intentionally insufficient.
+    pub fn is_current_connection(&self, player_id: i32, connection_id: Uuid) -> bool {
+        match self.0.lock() {
+            Ok(clients) => clients
+                .get(&connection_id)
+                .map(|client| {
+                    Self::client_is_active(&connection_id, client, player_id)
+                        && !clients.iter().any(|(other_id, other)| {
+                            *other_id != connection_id
+                                && Self::client_is_active(other_id, other, player_id)
+                        })
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// The sole current connection for `player_id`, if the registry is in its
+    /// authoritative single-session shape.
+    pub fn current_connection_id(&self, player_id: i32) -> Option<Uuid> {
+        let clients = self.0.lock().ok()?;
+        let mut active = clients.iter().filter_map(|(client_id, client)| {
+            Self::client_is_active(client_id, client, player_id).then_some(*client_id)
+        });
+        let connection_id = active.next()?;
+        active.next().is_none().then_some(connection_id)
+    }
+
+    /// Removes only the exact current connection. An obsolete socket cleanup
+    /// cannot erase a replacement connection for the same player.
+    pub fn remove_if_current(&self, connection_id: Uuid) -> Option<Client> {
+        let mut clients = self.0.lock().ok()?;
+        let is_exact = clients
+            .get(&connection_id)
+            .map(|client| client.id == connection_id)
+            .unwrap_or(false);
+        is_exact.then(|| clients.remove(&connection_id)).flatten()
+    }
+
+    /// Atomically validates the sole current connection, reserves capacity for
+    /// the complete ordered bundle, and queues every serialized packet while
+    /// replacement activation is excluded by the same registry mutex.
+    pub fn try_send_current_bundle(
+        &self,
+        player_id: i32,
+        connection_id: Uuid,
+        packets: Vec<String>,
+    ) -> Result<(), CurrentConnectionSendError> {
+        if packets.is_empty() {
+            return Ok(());
+        }
+
+        let clients = self
+            .0
+            .lock()
+            .map_err(|_| CurrentConnectionSendError::RegistryUnavailable)?;
+        let Some(client) = clients.get(&connection_id) else {
+            return Err(CurrentConnectionSendError::NotCurrent);
+        };
+        if !Self::client_is_active(&connection_id, client, player_id)
+            || clients.iter().any(|(other_id, other)| {
+                *other_id != connection_id && Self::client_is_active(other_id, other, player_id)
+            })
+        {
+            return Err(CurrentConnectionSendError::NotCurrent);
+        }
+
+        let permits =
+            client
+                .sender
+                .try_reserve_many(packets.len())
+                .map_err(|error| match error {
+                    tokio::sync::mpsc::error::TrySendError::Full(()) => {
+                        CurrentConnectionSendError::Full
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(()) => {
+                        CurrentConnectionSendError::Closed
+                    }
+                })?;
+        for (permit, packet) in permits.zip(packets) {
+            permit.send(packet);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Resource, Deref, DerefMut, Clone, Debug, Default)]
 pub struct DatabaseManagers(Arc<Mutex<HashMap<i32, DatabaseClient>>>);
@@ -104,6 +289,27 @@ impl NetworkReceiver {
 #[derive(Resource, Deref, DerefMut, Reflect, Debug)]
 #[reflect(Resource)]
 pub struct GameTick(pub i32);
+
+/// Test-friendly view of the safe-logout resource. Production always installs
+/// `PlayerWorldPresenceState` through `SafeLogoutPlugin`; isolated legacy unit
+/// tests that register one gameplay system directly should retain their old
+/// unprotected behavior rather than failing system-parameter validation.
+#[derive(SystemParam)]
+pub struct OptionalPlayerWorldPresence<'w> {
+    value: Option<Res<'w, PlayerWorldPresenceState>>,
+}
+
+static EMPTY_PLAYER_WORLD_PRESENCE: OnceLock<PlayerWorldPresenceState> = OnceLock::new();
+
+impl std::ops::Deref for OptionalPlayerWorldPresence<'_> {
+    type Target = PlayerWorldPresenceState;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+            .as_deref()
+            .unwrap_or_else(|| EMPTY_PLAYER_WORLD_PRESENCE.get_or_init(Default::default))
+    }
+}
 
 // custom implementation for unusual values
 impl Default for GameTick {
@@ -294,11 +500,22 @@ impl Default for LogLevelOverrides {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PerceptionUpdateType {
     InitPerception,
+    ResumeInitPerception(Uuid),
     UpdatePerception,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug)]
 struct PerceptionUpdates(HashSet<(i32, PerceptionUpdateType)>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumeLoginSyncProgress {
+    connection_id: Uuid,
+    crisis_status_queued: bool,
+    perception_queued: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+struct ResumeLoginSyncState(HashMap<i32, ResumeLoginSyncProgress>);
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -332,8 +549,6 @@ pub struct PlayerCrisis {
     pub goblin_raid: bool,
     pub undead_incursion: bool,
     pub goblin_pillager: bool,
-    pub initial_encounter: bool, // boar/crab spawned after opening enemies killed
-    pub spider_encounter: bool,  // spider spawned after boar/crab killed
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -369,6 +584,503 @@ impl SurvivalDirectorConfig {
 
 fn legacy_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
     config.mode == SurvivalDirectorMode::Legacy
+}
+
+fn personal_survival_director(config: Res<SurvivalDirectorConfig>) -> bool {
+    config.mode == SurvivalDirectorMode::PersonalCrisis
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrisisKind {
+    Goblin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CrisisPhase {
+    Dormant,
+    Signs,
+    Pressure,
+    Preparing,
+    AssaultReady,
+    AssaultActive,
+    Resolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementCrisis {
+    pub kind: CrisisKind,
+    pub phase: CrisisPhase,
+    pub pressure: i32,
+    pub phase_started_tick: i32,
+    pub online_active_ticks: i32,
+    pub phase_online_ticks: i32,
+    pub warning_active: bool,
+    pub last_evaluated_tick: i32,
+    pub assault_id: Option<u64>,
+    pub assault_started_tick: Option<i32>,
+    pub assault_online_ticks: i32,
+    pub assault_unit_ids: Vec<i32>,
+    pub assault_defeated_unit_ids: Vec<i32>,
+    pub assault_spawn_generation: u32,
+    pub resolution_recorded: bool,
+    pub resolved_at_tick: Option<i32>,
+    pub assault_recovery_required: bool,
+    pub assault_grace_logged: bool,
+    pub assault_anchor_warning_logged: bool,
+    pub assault_spawn_warning_logged: bool,
+}
+
+impl SettlementCrisis {
+    fn new(game_tick: i32) -> Self {
+        Self {
+            kind: CrisisKind::Goblin,
+            phase: CrisisPhase::Dormant,
+            pressure: 0,
+            phase_started_tick: game_tick,
+            online_active_ticks: 0,
+            phase_online_ticks: 0,
+            warning_active: false,
+            last_evaluated_tick: game_tick,
+            assault_id: None,
+            assault_started_tick: None,
+            assault_online_ticks: 0,
+            assault_unit_ids: Vec::new(),
+            assault_defeated_unit_ids: Vec::new(),
+            assault_spawn_generation: 0,
+            resolution_recorded: false,
+            resolved_at_tick: None,
+            assault_recovery_required: false,
+            assault_grace_logged: false,
+            assault_anchor_warning_logged: false,
+            assault_spawn_warning_logged: false,
+        }
+    }
+}
+
+impl Default for SettlementCrisis {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct SettlementCrisisState(pub HashMap<i32, SettlementCrisis>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrisisTelemetry {
+    pub highest_phase: CrisisPhase,
+    pub dormant_tick: Option<i32>,
+    pub signs_tick: Option<i32>,
+    pub pressure_tick: Option<i32>,
+    pub preparing_tick: Option<i32>,
+    pub assault_ready_tick: Option<i32>,
+    pub assault_active_tick: Option<i32>,
+    pub resolved_tick: Option<i32>,
+    pub assaults_launched: i32,
+    pub assaults_resolved: i32,
+    pub duplicate_assaults: i32,
+    pub status_packets_sent: i32,
+    pub login_snapshots_sent: i32,
+}
+
+impl Default for CrisisTelemetry {
+    fn default() -> Self {
+        Self {
+            highest_phase: CrisisPhase::Dormant,
+            dormant_tick: None,
+            signs_tick: None,
+            pressure_tick: None,
+            preparing_tick: None,
+            assault_ready_tick: None,
+            assault_active_tick: None,
+            resolved_tick: None,
+            assaults_launched: 0,
+            assaults_resolved: 0,
+            duplicate_assaults: 0,
+            status_packets_sent: 0,
+            login_snapshots_sent: 0,
+        }
+    }
+}
+
+impl CrisisTelemetry {
+    fn new(created_tick: i32) -> Self {
+        Self {
+            dormant_tick: Some(created_tick),
+            ..Self::default()
+        }
+    }
+
+    fn observe_phase(&mut self, phase: CrisisPhase, tick: i32) {
+        self.highest_phase = self.highest_phase.max(phase);
+        let phase_tick = match phase {
+            CrisisPhase::Dormant => &mut self.dormant_tick,
+            CrisisPhase::Signs => &mut self.signs_tick,
+            CrisisPhase::Pressure => &mut self.pressure_tick,
+            CrisisPhase::Preparing => &mut self.preparing_tick,
+            CrisisPhase::AssaultReady => &mut self.assault_ready_tick,
+            CrisisPhase::AssaultActive => &mut self.assault_active_tick,
+            CrisisPhase::Resolved => &mut self.resolved_tick,
+        };
+        if phase_tick.is_none() {
+            *phase_tick = Some(tick);
+        }
+    }
+
+    fn record_launch(&mut self, tick: i32) {
+        if self.assaults_launched > 0 {
+            self.duplicate_assaults = self.duplicate_assaults.saturating_add(1);
+        }
+        self.assaults_launched = self.assaults_launched.saturating_add(1);
+        self.observe_phase(CrisisPhase::AssaultActive, tick);
+    }
+
+    fn record_resolution(&mut self, tick: i32) {
+        self.assaults_resolved = self.assaults_resolved.saturating_add(1);
+        self.observe_phase(CrisisPhase::Resolved, tick);
+    }
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct CrisisTelemetryState(pub HashMap<i32, CrisisTelemetry>);
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct CrisisStatusLoginSync(pub HashSet<i32>);
+
+#[derive(Debug, Clone)]
+struct SentCrisisStatus {
+    player_id: i32,
+    status: CrisisStatusSnapshot,
+}
+
+#[derive(Resource, Debug, Default)]
+struct CrisisStatusDeliveryState {
+    sent: HashMap<Uuid, SentCrisisStatus>,
+    observed_phases: HashMap<i32, CrisisPhase>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CrisisPreparationFacts {
+    completed_walls: usize,
+    damaged_walls: usize,
+    current_tile_wall_present: bool,
+    stockade_plan_available: bool,
+    stockade_log_units_carried: usize,
+    can_start_stockade: bool,
+    living_villagers: usize,
+    combat_capable_villagers: usize,
+    villager_held_spare_weapons: usize,
+    actionable_villager_weapons: usize,
+    hero_spare_weapons: usize,
+    live_hero: bool,
+    hero_idle: bool,
+    hero_equipped_weapon: Option<String>,
+    hero_equipped_armor: usize,
+    hero_carried_weapons: usize,
+    hero_carried_armor: usize,
+    hero_carried_healing: usize,
+    stored_weapons: usize,
+    stored_armor: usize,
+    stored_healing: usize,
+    transferable_stored_weapons: usize,
+    transferable_stored_armor: usize,
+    transferable_stored_healing: usize,
+}
+
+#[derive(SystemParam)]
+struct CrisisPreparationCollector<'w, 's> {
+    ids: Option<Res<'w, Ids>>,
+    templates: Option<Res<'w, Templates>>,
+    plans: Option<Res<'w, Plans>>,
+    hero_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+            Option<&'static TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Position,
+            &'static Subclass,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+}
+
+pub(crate) fn is_usable_crisis_healing_item(item: &Item) -> bool {
+    if item.quantity <= 0 {
+        return false;
+    }
+
+    match (item.class.as_str(), item.subclass.as_str()) {
+        // Bandages use a fixed server-side heal and bleed cure rather than a
+        // Healing attribute, so attribute-only detection would omit them.
+        (item::MEDICAL, "Bandage") => true,
+        (item::POTION, item::HEALTH) => matches!(
+            item.attrs.get(&AttrKey::Healing),
+            Some(item::AttrVal::Num(value)) if *value > 0.0
+        ),
+        // Food follows the Eat path. A Healing attribute on food is not a
+        // currently usable crisis heal and must not create a false-ready row.
+        _ => false,
+    }
+}
+
+fn positive_item_units(item: &Item) -> usize {
+    item.quantity.max(0) as usize
+}
+
+fn item_fits_normal_transfer(item: &Item, target_weight: i32, target_capacity: i32) -> bool {
+    let transfer_weight = (item.quantity.max(0) as f32 * item.weight) as i32;
+    item.quantity > 0
+        && target_capacity >= 0
+        && target_weight.saturating_add(transfer_weight) <= target_capacity
+}
+
+impl CrisisPreparationCollector<'_, '_> {
+    fn collect(&self, player_id: i32) -> CrisisPreparationFacts {
+        let mut facts = CrisisPreparationFacts::default();
+        let mapped_hero_id = self.ids.as_ref().and_then(|ids| ids.get_hero(player_id));
+        let hero = self
+            .hero_query
+            .iter()
+            .filter(|(owner, id, _, _, state, stats, _, dead, true_death)| {
+                owner.0 == player_id
+                    && mapped_hero_id.map(|mapped| mapped == id.0).unwrap_or(true)
+                    && state.is_alive()
+                    && stats.hp > 0
+                    && dead.is_none()
+                    && true_death.is_none()
+            })
+            .min_by_key(|(_, id, _, _, _, _, _, _, _)| id.0);
+
+        let mut hero_position = None;
+        let mut hero_inventory_weight = 0;
+        let mut hero_capacity = None;
+        if let Some((_, _, position, template, state, _, inventory, _, _)) = hero {
+            facts.live_hero = true;
+            facts.hero_idle = *state == State::None;
+            hero_position = Some(*position);
+            hero_inventory_weight = inventory.get_total_weight();
+            hero_capacity = self
+                .templates
+                .as_ref()
+                .map(|templates| Obj::get_capacity(&template.0, &templates.obj_templates));
+            facts.hero_equipped_weapon = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && item.equipped && item.class == WEAPON)
+                .map(|item| item.name.clone())
+                .min();
+            facts.hero_equipped_armor = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && item.equipped && item.class == ARMOR)
+                .count();
+            facts.hero_carried_weapons = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == WEAPON)
+                .map(positive_item_units)
+                .sum();
+            facts.hero_carried_armor = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == ARMOR)
+                .map(positive_item_units)
+                .sum();
+            facts.hero_carried_healing = inventory
+                .items
+                .iter()
+                .filter(|item| is_usable_crisis_healing_item(item))
+                .map(positive_item_units)
+                .sum();
+            facts.stockade_log_units_carried = inventory.count_for_build_req(LOG).max(0) as usize;
+        }
+
+        facts.stockade_plan_available = self
+            .plans
+            .as_ref()
+            .zip(self.templates.as_ref())
+            .map(|(plans, templates)| {
+                Structure::available_to_build(player_id, plans.to_vec(), &templates.obj_templates)
+                    .iter()
+                    .any(|structure| structure.template == "Stockade")
+            })
+            .unwrap_or(false);
+        for (owner, state, stats, inventory, dead) in self.villager_query.iter() {
+            if owner.0 != player_id || !state.is_alive() || stats.hp <= 0 || dead.is_some() {
+                continue;
+            }
+            facts.living_villagers = facts.living_villagers.saturating_add(1);
+            let combat_capable = stats.base_damage.unwrap_or(0) > 0
+                || inventory
+                    .items
+                    .iter()
+                    .any(|item| item.quantity > 0 && item.equipped && item.class == WEAPON);
+            if combat_capable {
+                facts.combat_capable_villagers = facts.combat_capable_villagers.saturating_add(1);
+            }
+            let held_spare_weapons = inventory
+                .items
+                .iter()
+                .filter(|item| item.quantity > 0 && !item.equipped && item.class == WEAPON)
+                .map(positive_item_units)
+                .sum::<usize>();
+            facts.villager_held_spare_weapons = facts
+                .villager_held_spare_weapons
+                .saturating_add(held_spare_weapons);
+            if !combat_capable && *state == State::None {
+                facts.actionable_villager_weapons = facts
+                    .actionable_villager_weapons
+                    .saturating_add(held_spare_weapons);
+            }
+        }
+
+        for (owner, position, subclass, state, stats, inventory, dead) in
+            self.structure_query.iter()
+        {
+            // Foundation placement rejects any wall already on the hero's
+            // current tile, including an unfinished or other-player wall. Keep
+            // this owner-agnostic occupancy fact separate from the owner-only
+            // preparation details below so guidance never promises a command
+            // the authoritative placement system will reject.
+            if hero_position.is_some_and(|hero_position| {
+                hero_position == *position && *subclass == Subclass::Wall
+            }) {
+                facts.current_tile_wall_present = true;
+            }
+
+            if owner.0 != player_id || dead.is_some() || !Structure::is_built(*state) {
+                continue;
+            }
+
+            if *subclass == Subclass::Wall {
+                facts.completed_walls = facts.completed_walls.saturating_add(1);
+                if stats.hp < stats.base_hp {
+                    facts.damaged_walls = facts.damaged_walls.saturating_add(1);
+                }
+            }
+
+            if *subclass != Subclass::Storage {
+                continue;
+            }
+
+            let normal_transfer_available = hero_position
+                .map(|hero_position| Map::is_adjacent_including_source(hero_position, *position))
+                .unwrap_or(false);
+
+            for stored_item in inventory.items.iter().filter(|item| item.quantity > 0) {
+                let units = positive_item_units(stored_item);
+                let fits = normal_transfer_available
+                    && hero_capacity
+                        .map(|capacity| {
+                            item_fits_normal_transfer(stored_item, hero_inventory_weight, capacity)
+                        })
+                        .unwrap_or(false);
+
+                if !stored_item.equipped && stored_item.class == WEAPON {
+                    facts.stored_weapons = facts.stored_weapons.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_weapons =
+                            facts.transferable_stored_weapons.saturating_add(units);
+                    }
+                }
+                if !stored_item.equipped && stored_item.class == ARMOR {
+                    facts.stored_armor = facts.stored_armor.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_armor =
+                            facts.transferable_stored_armor.saturating_add(units);
+                    }
+                }
+                if is_usable_crisis_healing_item(stored_item) {
+                    facts.stored_healing = facts.stored_healing.saturating_add(units);
+                    if fits {
+                        facts.transferable_stored_healing =
+                            facts.transferable_stored_healing.saturating_add(units);
+                    }
+                }
+            }
+        }
+
+        facts.can_start_stockade = facts.live_hero
+            && facts.hero_idle
+            && !facts.current_tile_wall_present
+            && facts.stockade_plan_available
+            && facts.stockade_log_units_carried >= 3;
+
+        // A hero without an equipped weapon should retain the first carried
+        // weapon as an equipment option. Hero/storage weapons are observed,
+        // but never presented as immediately equippable by a villager without
+        // the normal adjacent transfer step.
+        facts.hero_spare_weapons = facts.hero_carried_weapons;
+        if facts.live_hero && facts.hero_equipped_weapon.is_none() {
+            facts.hero_spare_weapons = facts.hero_spare_weapons.saturating_sub(1);
+        }
+
+        facts
+    }
+}
+
+/// Explicit ownership for a personal-crisis combatant. NPC faction ownership
+/// remains `NPC_PLAYER_ID`; this component is the authoritative link to the
+/// settlement owner and logical assault.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrisisAssaultUnit {
+    pub owner_player_id: i32,
+    pub assault_id: u64,
+    pub spawn_generation: u32,
+}
+
+/// Monotonic process-local identity source for logical personal assaults.
+/// Checkpoint 2 state is runtime-only under the prototype snapshot path, so the
+/// matching identity source is intentionally runtime-only as well.
+#[derive(Resource, Debug)]
+pub struct NextCrisisAssaultId {
+    next: u64,
+}
+
+impl Default for NextCrisisAssaultId {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl NextCrisisAssaultId {
+    fn allocate(&mut self) -> Option<u64> {
+        let id = self.next;
+        self.next = self.next.checked_add(1)?;
+        Some(id)
+    }
 }
 
 pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
@@ -512,6 +1224,18 @@ pub struct PlayerIntroEntry {
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct PlayerIntroState(pub HashMap<i32, PlayerIntroEntry>);
 
+/// Completion flags for the scripted shipwreck combat chain. These are kept
+/// separate from [`PlayerCrisis`], which now contains only legacy director
+/// progression.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PlayerIntroEncounters {
+    pub initial_encounter: bool,
+    pub spider_encounter: bool,
+}
+
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
+pub struct IntroEncounterState(pub HashMap<i32, PlayerIntroEncounters>);
+
 // Tracks the initial shipwreck encounter chain.
 #[derive(Debug, Clone)]
 pub struct InitialEncounterEntry {
@@ -570,6 +1294,9 @@ pub struct PlayerRunScore {
     pub hideouts_cleared: i32,
     pub repairs: i32,
     pub highest_pressure_level: i32,
+    /// Runtime-only Checkpoint 3 completion record. Tangible crisis rewards and
+    /// final reporting packets remain deferred.
+    pub personal_crises_resolved: i32,
 }
 
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
@@ -656,6 +1383,1015 @@ fn player_survival_ticks(
     intro_age(game_tick, player_id, player_intro_state)
         .unwrap_or_else(|| game_tick.0 - DAWN)
         .max(0)
+}
+
+// Provisional personal-goblin-crisis tuning. Pressure is derived from current
+// settlement facts, not accumulated per evaluation, so repeated evaluation is
+// naturally idempotent and global calendar days are irrelevant.
+pub(crate) const GOBLIN_PRESSURE_MAX: i32 = 100;
+pub(crate) const GOBLIN_DANGER_UNLOCKED_PRESSURE: i32 = 10;
+pub(crate) const GOBLIN_THREE_STRUCTURES_PRESSURE: i32 = 20;
+pub(crate) const GOBLIN_VILLAGER_PRESSURE: i32 = 15;
+pub(crate) const GOBLIN_EXPLORE_POI_PRESSURE: i32 = 10;
+pub(crate) const GOBLIN_CHOOSE_EXPANSION_PRESSURE: i32 = 15;
+pub(crate) const GOBLIN_GOLD_TIER_ONE: i32 = 25;
+pub(crate) const GOBLIN_GOLD_TIER_TWO: i32 = 50;
+pub(crate) const GOBLIN_GOLD_TIER_THREE: i32 = 100;
+pub(crate) const GOBLIN_GOLD_PRESSURE_PER_TIER: i32 = 5;
+pub(crate) const GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL: i32 = 2;
+pub(crate) const GOBLIN_SANCTUARY_PRESSURE_MAX: i32 = 10;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS: i32 = 180 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS: i32 = 360 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_ONLINE_PRESSURE_PER_TIER: i32 = 5;
+
+pub(crate) const GOBLIN_SIGNS_PRESSURE: i32 = 20;
+pub(crate) const GOBLIN_PRESSURE_PHASE_PRESSURE: i32 = 45;
+// Checkpoint 2 keeps the existing contributor model and ordered online-time
+// gates, but makes a maintained developed-settlement path reachable. Reaching
+// Pressure at 45 can now mature into Preparing; AssaultReady still requires a
+// further persistent fact (the lowest observed developed-solo path was 49).
+pub(crate) const GOBLIN_PREPARING_PRESSURE: i32 = 45;
+pub(crate) const GOBLIN_ASSAULT_READY_PRESSURE: i32 = 49;
+pub(crate) const GOBLIN_SIGNS_MIN_ONLINE_TICKS: i32 = 60 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_PRESSURE_MIN_ONLINE_TICKS: i32 = 120 * TICKS_PER_SEC;
+pub(crate) const GOBLIN_PREPARING_MIN_ONLINE_TICKS: i32 = 180 * TICKS_PER_SEC;
+
+const CRISIS_STATUS_VERSION: u32 = 1;
+const CRISIS_STATUS_PRESSURE_DELTA: i32 = 5;
+const CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS: i32 = 5;
+pub(crate) const ASSAULT_READY_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
+pub(crate) const ASSAULT_MAX_ONLINE_WAIT_TICKS: i32 = 120 * TICKS_PER_SEC;
+const PERSONAL_ASSAULT_VISION: u32 = 14;
+const PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS: i32 = 6;
+const PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS: i32 = 8;
+const PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET: i32 = 1;
+const PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET: i32 = 3;
+const PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE: u32 = 3;
+const PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT: usize = 96;
+pub(crate) const GOBLIN_ASSAULT_COMPOSITION: [&str; 3] =
+    ["Wolf Rider", "Wolf Rider", "Goblin Pillager"];
+
+pub fn goblin_crisis_balance_config_snapshot() -> GoblinCrisisBalanceConfigSnapshot {
+    GoblinCrisisBalanceConfigSnapshot {
+        pressure_max: GOBLIN_PRESSURE_MAX,
+        danger_unlocked_pressure: GOBLIN_DANGER_UNLOCKED_PRESSURE,
+        three_structures_pressure: GOBLIN_THREE_STRUCTURES_PRESSURE,
+        villager_pressure: GOBLIN_VILLAGER_PRESSURE,
+        explore_poi_pressure: GOBLIN_EXPLORE_POI_PRESSURE,
+        choose_expansion_pressure: GOBLIN_CHOOSE_EXPANSION_PRESSURE,
+        gold_tier_thresholds: vec![
+            GOBLIN_GOLD_TIER_ONE,
+            GOBLIN_GOLD_TIER_TWO,
+            GOBLIN_GOLD_TIER_THREE,
+        ],
+        gold_pressure_per_tier: GOBLIN_GOLD_PRESSURE_PER_TIER,
+        sanctuary_pressure_per_level: GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL,
+        sanctuary_pressure_max: GOBLIN_SANCTUARY_PRESSURE_MAX,
+        online_pressure_tier_ticks: vec![
+            GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS,
+            GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS,
+            GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
+        ],
+        online_pressure_per_tier: GOBLIN_ONLINE_PRESSURE_PER_TIER,
+        signs_threshold: GOBLIN_SIGNS_PRESSURE,
+        pressure_threshold: GOBLIN_PRESSURE_PHASE_PRESSURE,
+        preparing_threshold: GOBLIN_PREPARING_PRESSURE,
+        assault_ready_threshold: GOBLIN_ASSAULT_READY_PRESSURE,
+        signs_min_online_ticks: GOBLIN_SIGNS_MIN_ONLINE_TICKS,
+        pressure_min_online_ticks: GOBLIN_PRESSURE_MIN_ONLINE_TICKS,
+        preparing_min_online_ticks: GOBLIN_PREPARING_MIN_ONLINE_TICKS,
+        assault_ready_grace_ticks: ASSAULT_READY_GRACE_TICKS,
+        assault_max_online_wait_ticks: ASSAULT_MAX_ONLINE_WAIT_TICKS,
+        preferred_launch_window: "dusk_or_night".to_string(),
+        game_ticks_per_day: GAME_TICKS_PER_DAY,
+        preferred_launch_start_tick: DUSK,
+        preferred_launch_wrap_end_tick: FIRST_LIGHT,
+        assault_composition: GOBLIN_ASSAULT_COMPOSITION
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect(),
+        assault_vision: PERSONAL_ASSAULT_VISION,
+        fallback_spawn_min_distance: PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS,
+        fallback_spawn_max_distance: PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS,
+        sanctuary_spawn_min_offset_from_weak_radius: PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET,
+        sanctuary_spawn_max_offset_from_weak_radius: PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET,
+        neighbouring_structure_exclusion_distance: PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE,
+        spawn_candidate_limit: PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT,
+    }
+}
+
+fn is_assault_preferred_time(game_tick: i32) -> bool {
+    let ticks_in_day = game_tick.rem_euclid(GAME_TICKS_PER_DAY);
+    ticks_in_day >= DUSK || ticks_in_day < FIRST_LIGHT
+}
+
+fn assault_launch_allowed(online_ready_ticks: i32, game_tick: i32) -> bool {
+    online_ready_ticks >= ASSAULT_READY_GRACE_TICKS
+        && (is_assault_preferred_time(game_tick)
+            || online_ready_ticks >= ASSAULT_MAX_ONLINE_WAIT_TICKS)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GoblinPressureFacts {
+    danger_unlocked: bool,
+    completed_structures: usize,
+    living_villagers: usize,
+    stored_gold: i32,
+    sanctuary_level: i32,
+    explore_poi: bool,
+    choose_expansion: bool,
+    online_active_ticks: i32,
+}
+
+fn calculate_goblin_pressure_breakdown(facts: &GoblinPressureFacts) -> CrisisPressureBreakdown {
+    if !facts.danger_unlocked {
+        return CrisisPressureBreakdown::default();
+    }
+
+    let mut breakdown = CrisisPressureBreakdown {
+        danger_unlocked: GOBLIN_DANGER_UNLOCKED_PRESSURE,
+        structures: (facts.completed_structures >= 3)
+            .then_some(GOBLIN_THREE_STRUCTURES_PRESSURE)
+            .unwrap_or(0),
+        villagers: (facts.living_villagers > 0)
+            .then_some(GOBLIN_VILLAGER_PRESSURE)
+            .unwrap_or(0),
+        explore_poi: facts
+            .explore_poi
+            .then_some(GOBLIN_EXPLORE_POI_PRESSURE)
+            .unwrap_or(0),
+        choose_expansion: facts
+            .choose_expansion
+            .then_some(GOBLIN_CHOOSE_EXPANSION_PRESSURE)
+            .unwrap_or(0),
+        ..CrisisPressureBreakdown::default()
+    };
+
+    breakdown.stored_gold = if facts.stored_gold >= GOBLIN_GOLD_TIER_THREE {
+        GOBLIN_GOLD_PRESSURE_PER_TIER * 3
+    } else if facts.stored_gold >= GOBLIN_GOLD_TIER_TWO {
+        GOBLIN_GOLD_PRESSURE_PER_TIER * 2
+    } else if facts.stored_gold >= GOBLIN_GOLD_TIER_ONE {
+        GOBLIN_GOLD_PRESSURE_PER_TIER
+    } else {
+        0
+    };
+
+    breakdown.sanctuary = (facts.sanctuary_level.max(0) * GOBLIN_SANCTUARY_PRESSURE_PER_LEVEL)
+        .min(GOBLIN_SANCTUARY_PRESSURE_MAX);
+
+    breakdown.online_time = if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS
+    {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER * 3
+    } else if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER * 2
+    } else if facts.online_active_ticks >= GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS {
+        GOBLIN_ONLINE_PRESSURE_PER_TIER
+    } else {
+        0
+    };
+
+    breakdown.raw_total = breakdown.contributor_sum();
+    breakdown.clamped_total = breakdown.raw_total.min(GOBLIN_PRESSURE_MAX);
+    breakdown
+}
+
+fn calculate_goblin_pressure(facts: &GoblinPressureFacts) -> i32 {
+    calculate_goblin_pressure_breakdown(facts).clamped_total
+}
+
+fn next_goblin_crisis_phase(crisis: &SettlementCrisis) -> Option<CrisisPhase> {
+    match crisis.phase {
+        CrisisPhase::Dormant if crisis.pressure >= GOBLIN_SIGNS_PRESSURE => {
+            Some(CrisisPhase::Signs)
+        }
+        CrisisPhase::Signs
+            if crisis.pressure >= GOBLIN_PRESSURE_PHASE_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_SIGNS_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Pressure)
+        }
+        CrisisPhase::Pressure
+            if crisis.pressure >= GOBLIN_PREPARING_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_PRESSURE_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::Preparing)
+        }
+        CrisisPhase::Preparing
+            if crisis.pressure >= GOBLIN_ASSAULT_READY_PRESSURE
+                && crisis.phase_online_ticks >= GOBLIN_PREPARING_MIN_ONLINE_TICKS =>
+        {
+            Some(CrisisPhase::AssaultReady)
+        }
+        _ => None,
+    }
+}
+
+fn transition_goblin_crisis(
+    crisis: &mut SettlementCrisis,
+    game_tick: i32,
+) -> Option<(CrisisPhase, CrisisPhase)> {
+    let old_phase = crisis.phase;
+    let new_phase = next_goblin_crisis_phase(crisis)?;
+
+    crisis.phase = new_phase;
+    crisis.phase_started_tick = game_tick;
+    crisis.phase_online_ticks = 0;
+    if new_phase == CrisisPhase::Preparing {
+        crisis.warning_active = true;
+    }
+
+    Some((old_phase, new_phase))
+}
+
+fn advance_online_crisis_time(
+    crisis: &mut SettlementCrisis,
+    game_tick: i32,
+    count_online_time: bool,
+) -> i32 {
+    let elapsed = game_tick.saturating_sub(crisis.last_evaluated_tick).max(0);
+    // Keep the watermark monotonic. A transient tick rollback must not make
+    // already-credited time eligible to be counted again when time catches up.
+    crisis.last_evaluated_tick = crisis.last_evaluated_tick.max(game_tick);
+
+    if count_online_time {
+        crisis.online_active_ticks = crisis.online_active_ticks.saturating_add(elapsed);
+        crisis.phase_online_ticks = crisis.phase_online_ticks.saturating_add(elapsed);
+        if crisis.phase == CrisisPhase::AssaultActive {
+            crisis.assault_online_ticks = crisis.assault_online_ticks.saturating_add(elapsed);
+        }
+        elapsed
+    } else {
+        0
+    }
+}
+
+fn crisis_phase_name(phase: CrisisPhase) -> &'static str {
+    match phase {
+        CrisisPhase::Dormant => "dormant",
+        CrisisPhase::Signs => "signs",
+        CrisisPhase::Pressure => "pressure",
+        CrisisPhase::Preparing => "preparing",
+        CrisisPhase::AssaultReady => "assault_ready",
+        CrisisPhase::AssaultActive => "assault_active",
+        CrisisPhase::Resolved => "resolved",
+    }
+}
+
+fn crisis_phase_presentation(
+    phase: CrisisPhase,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match phase {
+        CrisisPhase::Dormant => (
+            "No Organized Threat",
+            "Your settlement has not yet attracted organized goblin attention.",
+            "Continue establishing your camp.",
+            "quiet",
+        ),
+        CrisisPhase::Signs => (
+            "Goblin Signs",
+            "Tracks and distant movement suggest goblins are watching the settlement.",
+            "Build supplies and improve your defenses.",
+            "low",
+        ),
+        CrisisPhase::Pressure => (
+            "Goblin Pressure",
+            "Goblin raiders are testing the settlement and watching its growth.",
+            "Prepare weapons, healing supplies, walls, and defenders.",
+            "medium",
+        ),
+        CrisisPhase::Preparing => (
+            "Raiders Gathering",
+            "A major goblin raid is being organized against your settlement.",
+            "Finish repairs, equip your defenders, and stock essential supplies.",
+            "high",
+        ),
+        CrisisPhase::AssaultReady => (
+            "Goblin Raid Imminent",
+            "The raiders are ready. After the minimum warning, they favor dusk or night but will not wait indefinitely.",
+            "Return to your settlement and prepare for the assault.",
+            "crisis",
+        ),
+        CrisisPhase::AssaultActive => (
+            "Settlement Under Attack",
+            "Goblin raiders are attacking your settlement.",
+            "Defeat the remaining attackers. This assault continues if you disconnect.",
+            "crisis",
+        ),
+        CrisisPhase::Resolved => (
+            "Goblin Raid Defeated",
+            "The organized goblin assault has been defeated.",
+            "Recover, repair, and rebuild.",
+            "resolved",
+        ),
+    }
+}
+
+fn crisis_preparation_option(
+    id: &str,
+    label: &str,
+    state: &str,
+    detail: String,
+    action_hint: &str,
+) -> CrisisPreparationOption {
+    CrisisPreparationOption {
+        id: id.to_string(),
+        label: label.to_string(),
+        state: state.to_string(),
+        detail,
+        action_hint: action_hint.to_string(),
+    }
+}
+
+fn derive_crisis_preparation_options(
+    facts: &CrisisPreparationFacts,
+) -> Vec<CrisisPreparationOption> {
+    let defences = if facts.completed_walls > 0 && facts.damaged_walls == 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "ready",
+            format!(
+                "{} completed wall{} fully repaired.",
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "No wall repair action is needed.",
+        )
+    } else if facts.damaged_walls > 0 && facts.living_villagers > 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "needs_attention",
+            format!(
+                "{} of {} completed wall{} damaged.",
+                facts.damaged_walls,
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Order a living villager to repair a damaged wall.",
+        )
+    } else if facts.damaged_walls > 0 {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "unavailable",
+            format!(
+                "{} of {} completed wall{} damaged.",
+                facts.damaged_walls,
+                facts.completed_walls,
+                if facts.completed_walls == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Wall repair orders require a living owned villager.",
+        )
+    } else if facts.can_start_stockade {
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "needs_attention",
+            "No completed wall is present; a Stockade plan and 3 carried Log-compatible units are ready."
+                .to_string(),
+            "Place a Stockade foundation using the existing plan and carried materials.",
+        )
+    } else {
+        let blocker = if !facts.live_hero {
+            "A live owned hero is required to place a Stockade foundation."
+        } else if !facts.hero_idle {
+            "Finish the current hero action before placing a Stockade foundation."
+        } else if facts.current_tile_wall_present {
+            "Move to a tile without an existing wall before placing a Stockade foundation."
+        } else if !facts.stockade_plan_available {
+            "The Stockade plan is not available to this player."
+        } else if facts.stockade_log_units_carried < 3 {
+            "A Stockade requires 3 carried Log-compatible units."
+        } else {
+            "A completed wall is required before wall repairs are available."
+        };
+        crisis_preparation_option(
+            "defences",
+            "Defences",
+            "unavailable",
+            "No completed defensive walls are available.".to_string(),
+            blocker,
+        )
+    };
+
+    let unarmed_villagers = facts
+        .living_villagers
+        .saturating_sub(facts.combat_capable_villagers);
+    let defenders = if facts.living_villagers == 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "unavailable",
+            "No living owned villagers are available.".to_string(),
+            "A living villager is required for this preparation option.",
+        )
+    } else if unarmed_villagers == 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "ready",
+            format!(
+                "{} living villager{} combat-capable.",
+                facts.combat_capable_villagers,
+                if facts.combat_capable_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your existing combat-capable defenders are ready.",
+        )
+    } else if facts.actionable_villager_weapons > 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "needs_attention",
+            format!(
+                "{} of {} living villager{} combat-capable; {} spare weapon{} available.",
+                facts.combat_capable_villagers,
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                },
+                facts.actionable_villager_weapons,
+                if facts.actionable_villager_weapons == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Equip the weapon already carried by an idle unarmed villager.",
+        )
+    } else if facts.combat_capable_villagers > 0 {
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "ready",
+            format!(
+                "{} of {} living villager{} combat-capable; no spare weapon is available.",
+                facts.combat_capable_villagers,
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your existing combat-capable defenders are ready.",
+        )
+    } else {
+        let blocker = if facts.villager_held_spare_weapons > 0 {
+            "A carried villager weapon cannot be equipped until its unarmed owner is idle."
+        } else if facts.hero_spare_weapons > 0 || facts.transferable_stored_weapons > 0 {
+            "Available hero or storage weapons require a normal adjacent transfer first."
+        } else {
+            "An existing spare weapon is required to arm a villager."
+        };
+        crisis_preparation_option(
+            "defenders",
+            "Defenders",
+            "unavailable",
+            format!(
+                "{} living villager{} unarmed, and no spare weapon is available.",
+                facts.living_villagers,
+                if facts.living_villagers == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            blocker,
+        )
+    };
+
+    let equipment = if !facts.live_hero {
+        crisis_preparation_option(
+            "equipment",
+            "Equipment",
+            "unavailable",
+            "No live hero is available for equipment preparation.".to_string(),
+            "A live owned hero is required for this preparation option.",
+        )
+    } else {
+        let weapon_ready = facts.hero_equipped_weapon.is_some();
+        let armor_ready = facts.hero_equipped_armor > 0;
+        if weapon_ready && armor_ready {
+            crisis_preparation_option(
+                "equipment",
+                "Equipment",
+                "ready",
+                format!(
+                    "{} is equipped with {} armor piece{}.",
+                    facts.hero_equipped_weapon.as_deref().unwrap_or("A weapon"),
+                    facts.hero_equipped_armor,
+                    if facts.hero_equipped_armor == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                "Your hero's combat equipment is ready.",
+            )
+        } else {
+            let carried_action = facts.hero_idle
+                && ((!weapon_ready && facts.hero_carried_weapons > 0)
+                    || (!armor_ready && facts.hero_carried_armor > 0));
+            let storage_action = (!weapon_ready && facts.transferable_stored_weapons > 0)
+                || (!armor_ready && facts.transferable_stored_armor > 0);
+            let (detail, missing_label) =
+                match (weapon_ready, armor_ready) {
+                    (false, false) => (
+                        format!(
+                        "No weapon or armor is equipped; carried: {} weapon{}, {} armor piece{}.",
+                        facts.hero_carried_weapons,
+                        if facts.hero_carried_weapons == 1 { "" } else { "s" },
+                        facts.hero_carried_armor,
+                        if facts.hero_carried_armor == 1 { "" } else { "s" }
+                    ),
+                        "weapon or armor",
+                    ),
+                    (false, true) => (
+                        format!(
+                            "No weapon is equipped; {} armor piece{} equipped.",
+                            facts.hero_equipped_armor,
+                            if facts.hero_equipped_armor == 1 {
+                                " is"
+                            } else {
+                                "s are"
+                            }
+                        ),
+                        "weapon",
+                    ),
+                    (true, false) => (
+                        format!(
+                            "{} is equipped; no armor is equipped.",
+                            facts.hero_equipped_weapon.as_deref().unwrap_or("A weapon")
+                        ),
+                        "armor",
+                    ),
+                    (true, true) => unreachable!(),
+                };
+
+            if carried_action || storage_action {
+                let hint = match (carried_action, storage_action) {
+                    (true, true) => {
+                        "Equip carried gear or transfer missing gear from nearby storage."
+                    }
+                    (true, false) => "Equip the available carried gear while your hero is idle.",
+                    (false, true) => {
+                        "Transfer the missing gear from nearby storage, then equip it."
+                    }
+                    (false, false) => unreachable!(),
+                };
+                crisis_preparation_option("equipment", "Equipment", "needs_attention", detail, hint)
+            } else {
+                let has_carried_missing = (!weapon_ready && facts.hero_carried_weapons > 0)
+                    || (!armor_ready && facts.hero_carried_armor > 0);
+                let hint = if has_carried_missing && !facts.hero_idle {
+                    "Finish the current hero action before changing carried equipment."
+                } else if (!weapon_ready && facts.stored_weapons > 0)
+                    || (!armor_ready && facts.stored_armor > 0)
+                {
+                    "Stored equipment is not currently available through normal item transfer."
+                } else {
+                    match missing_label {
+                        "weapon" => "No weapon is carried or transferable from nearby storage.",
+                        "armor" => "No armor is carried or transferable from nearby storage.",
+                        _ => "No missing equipment is carried or transferable from nearby storage.",
+                    }
+                };
+                crisis_preparation_option("equipment", "Equipment", "unavailable", detail, hint)
+            }
+        }
+    };
+
+    let recovery = if !facts.live_hero {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No live hero is available to carry healing supplies.".to_string(),
+            "A live owned hero is required for this preparation option.",
+        )
+    } else if facts.hero_carried_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "ready",
+            format!(
+                "{} usable healing item{} carried by your hero.",
+                facts.hero_carried_healing,
+                if facts.hero_carried_healing == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Your hero is carrying an existing recovery option.",
+        )
+    } else if facts.transferable_stored_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "needs_attention",
+            format!(
+                "No healing is carried; {} usable item{} available in nearby storage.",
+                facts.transferable_stored_healing,
+                if facts.transferable_stored_healing == 1 {
+                    " is"
+                } else {
+                    "s are"
+                }
+            ),
+            "Transfer a usable healing item from nearby storage to your hero.",
+        )
+    } else if facts.stored_healing > 0 {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No healing is carried; stored supplies are not currently transferable.".to_string(),
+            "Stored healing must be available through normal item transfer.",
+        )
+    } else {
+        crisis_preparation_option(
+            "recovery",
+            "Recovery",
+            "unavailable",
+            "No usable healing supplies are carried or held in completed storage.".to_string(),
+            "An existing usable healing item is required for this preparation option.",
+        )
+    };
+
+    let options = vec![defences, defenders, equipment, recovery];
+    debug_assert!(options.len() <= 4);
+    options
+}
+
+pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisStatusSnapshot {
+    let Some(crisis) = crisis else {
+        return CrisisStatusSnapshot {
+            version: CRISIS_STATUS_VERSION,
+            exists: false,
+            kind: None,
+            phase: None,
+            pressure: None,
+            pressure_max: None,
+            title: None,
+            summary: None,
+            action_hint: None,
+            severity: None,
+            warning: false,
+            assault_ready: false,
+            assault_active: false,
+            resolved: false,
+            remaining_attackers: None,
+            total_attackers: None,
+            preparation_seconds_remaining: None,
+            preferred_launch_window: None,
+            preparation_options: None,
+            continues_while_disconnected: false,
+        };
+    };
+
+    let (title, summary, action_hint, severity) = crisis_phase_presentation(crisis.phase);
+    let assault_ready = crisis.phase == CrisisPhase::AssaultReady;
+    let assault_active = crisis.phase == CrisisPhase::AssaultActive;
+    let resolved = crisis.phase == CrisisPhase::Resolved;
+
+    let (remaining_attackers, total_attackers) = if assault_active {
+        let defeated = crisis
+            .assault_defeated_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        (
+            Some(
+                crisis
+                    .assault_unit_ids
+                    .iter()
+                    .filter(|id| !defeated.contains(id))
+                    .count() as i32,
+            ),
+            Some(crisis.assault_unit_ids.len() as i32),
+        )
+    } else {
+        (None, None)
+    };
+
+    let preparation_seconds_remaining = assault_ready.then(|| {
+        let remaining_ticks = (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
+        (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
+    });
+
+    CrisisStatusSnapshot {
+        version: CRISIS_STATUS_VERSION,
+        exists: true,
+        kind: Some(match crisis.kind {
+            CrisisKind::Goblin => "goblin".to_string(),
+        }),
+        phase: Some(crisis_phase_name(crisis.phase).to_string()),
+        pressure: Some(crisis.pressure),
+        pressure_max: Some(GOBLIN_PRESSURE_MAX),
+        title: Some(title.to_string()),
+        summary: Some(summary.to_string()),
+        action_hint: Some(action_hint.to_string()),
+        severity: Some(severity.to_string()),
+        warning: crisis.warning_active,
+        assault_ready,
+        assault_active,
+        resolved,
+        remaining_attackers,
+        total_attackers,
+        preparation_seconds_remaining,
+        preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
+        preparation_options: None,
+        continues_while_disconnected: assault_active,
+    }
+}
+
+fn build_crisis_status_with_preparation(
+    crisis: Option<&SettlementCrisis>,
+    facts: Option<&CrisisPreparationFacts>,
+) -> CrisisStatusSnapshot {
+    let mut status = build_crisis_status(crisis);
+    if crisis.is_some_and(|crisis| {
+        matches!(
+            crisis.phase,
+            CrisisPhase::Preparing | CrisisPhase::AssaultReady
+        )
+    }) {
+        status.preparation_options = facts.map(derive_crisis_preparation_options);
+    }
+    status
+}
+
+pub(crate) fn crisis_status_changed(
+    previous: &CrisisStatusSnapshot,
+    current: &CrisisStatusSnapshot,
+) -> bool {
+    if previous == current {
+        return false;
+    }
+
+    // Pressure and the ready countdown are rate-limited display values. All
+    // other snapshot changes (phase, warning, launch, roster, resolution, copy,
+    // or clear state) are authoritative and send immediately.
+    let mut structural = current.clone();
+    structural.pressure = previous.pressure;
+    structural.preparation_seconds_remaining = previous.preparation_seconds_remaining;
+    if structural != *previous {
+        return true;
+    }
+
+    let pressure_changed = match (previous.pressure, current.pressure) {
+        (Some(previous), Some(current)) => {
+            current.abs_diff(previous) >= CRISIS_STATUS_PRESSURE_DELTA as u32
+        }
+        (None, None) => false,
+        _ => true,
+    };
+    if pressure_changed {
+        return true;
+    }
+
+    match (
+        previous.preparation_seconds_remaining,
+        current.preparation_seconds_remaining,
+    ) {
+        (Some(previous), Some(current)) => {
+            current.abs_diff(previous) >= CRISIS_STATUS_COUNTDOWN_DELTA_SECONDS as u32
+        }
+        (None, None) => false,
+        _ => true,
+    }
+}
+
+fn crisis_transition_notice(phase: CrisisPhase) -> Option<&'static str> {
+    match phase {
+        CrisisPhase::Preparing => Some("Goblin raiders are gathering. Prepare your settlement."),
+        CrisisPhase::AssaultReady => Some("A goblin raid is imminent."),
+        CrisisPhase::AssaultActive => {
+            Some("The goblin assault has begun. It will continue if you disconnect.")
+        }
+        CrisisPhase::Resolved => Some("The goblin assault has been defeated."),
+        _ => None,
+    }
+}
+
+fn crisis_status_delivery_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    director: Res<SurvivalDirectorConfig>,
+    crisis_state: Res<SettlementCrisisState>,
+    mut login_sync: ResMut<CrisisStatusLoginSync>,
+    mut delivery: ResMut<CrisisStatusDeliveryState>,
+    mut telemetry_state: ResMut<CrisisTelemetryState>,
+    mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
+    preparation_collector: CrisisPreparationCollector,
+) {
+    let active_clients = match clients.lock() {
+        Ok(clients) => clients
+            .iter()
+            .filter(|(client_id, client)| **client_id == client.id && !client.sender.is_closed())
+            .map(|(client_id, client)| (*client_id, client.player_id, client.sender.clone()))
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let active_clients = active_clients
+        .into_iter()
+        .filter(|(client_id, player_id, _)| clients.is_current_connection(*player_id, *client_id))
+        .collect::<Vec<_>>();
+    let active_client_players = active_clients
+        .iter()
+        .map(|(client_id, player_id, _)| (*client_id, *player_id))
+        .collect::<HashMap<_, _>>();
+
+    delivery
+        .sent
+        .retain(|client_id, sent| active_client_players.get(client_id) == Some(&sent.player_id));
+
+    // Track actual phase transitions independently of login snapshots. This
+    // prevents a reconnect from replaying historical launch notices.
+    if director.mode == SurvivalDirectorMode::PersonalCrisis {
+        let current_players = crisis_state.keys().copied().collect::<HashSet<_>>();
+        delivery
+            .observed_phases
+            .retain(|player_id, _| current_players.contains(player_id));
+
+        for (player_id, crisis) in crisis_state.iter() {
+            match delivery.observed_phases.insert(*player_id, crisis.phase) {
+                Some(previous) if previous != crisis.phase => {
+                    if clients.is_player_online(*player_id) {
+                        if let Some(message) = crisis_transition_notice(crisis.phase) {
+                            send_to_client(
+                                *player_id,
+                                ResponsePacket::Notice {
+                                    noticemsg: message.to_string(),
+                                    expiry: None,
+                                },
+                                &clients,
+                            );
+                            info!(
+                                "personal_crisis_notice_delivered player_id={} old_phase={:?} new_phase={:?}",
+                                player_id, previous, crisis.phase
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        delivery.observed_phases.clear();
+    }
+
+    for (client_id, player_id, _sender) in &active_clients {
+        let status = if director.mode == SurvivalDirectorMode::PersonalCrisis {
+            let crisis = crisis_state.get(player_id);
+            if crisis.is_some_and(|crisis| {
+                matches!(
+                    crisis.phase,
+                    CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                )
+            }) {
+                let facts = preparation_collector.collect(*player_id);
+                build_crisis_status_with_preparation(crisis, Some(&facts))
+            } else {
+                build_crisis_status_with_preparation(crisis, None)
+            }
+        } else {
+            build_crisis_status(None)
+        };
+        let previous = delivery.sent.get(client_id);
+        let new_connection = previous.is_none();
+        let resume_requires_sync = resume_login_sync
+            .get(player_id)
+            .map(|progress| progress.connection_id == *client_id && !progress.crisis_status_queued)
+            .unwrap_or(false);
+        let should_send = if resume_requires_sync {
+            previous
+                .map(|previous| previous.status != status)
+                .unwrap_or(true)
+        } else if new_connection {
+            login_sync.contains(player_id)
+        } else {
+            previous.is_some_and(|previous| crisis_status_changed(&previous.status, &status))
+        };
+
+        if !should_send {
+            if resume_requires_sync
+                && previous
+                    .map(|previous| previous.status == status)
+                    .unwrap_or(false)
+            {
+                if let Some(progress) = resume_login_sync.get_mut(player_id) {
+                    if progress.connection_id == *client_id {
+                        progress.crisis_status_queued = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let packet = ResponsePacket::CrisisStatus {
+            status: status.clone(),
+        };
+        let Ok(serialized) = serde_json::to_string(&packet) else {
+            error!(
+                "personal_crisis_status_serialization_failed player_id={}",
+                player_id
+            );
+            continue;
+        };
+
+        match clients.try_send_current_bundle(*player_id, *client_id, vec![serialized]) {
+            Ok(()) => {
+                delivery.sent.insert(
+                    *client_id,
+                    SentCrisisStatus {
+                        player_id: *player_id,
+                        status: status.clone(),
+                    },
+                );
+                if let Some(telemetry) = telemetry_state.get_mut(player_id) {
+                    telemetry.status_packets_sent = telemetry.status_packets_sent.saturating_add(1);
+                    if new_connection {
+                        telemetry.login_snapshots_sent =
+                            telemetry.login_snapshots_sent.saturating_add(1);
+                    }
+                }
+                if let Some(crisis) = crisis_state.get(player_id) {
+                    let balance = balance_telemetry_state.entry(*player_id).or_default();
+                    balance.warnings.record(
+                        crisis.phase,
+                        game_tick.0,
+                        crisis.online_active_ticks,
+                        true,
+                        balance.latest_near_settlement,
+                    );
+                }
+                if let Some(progress) = resume_login_sync.get_mut(player_id) {
+                    if progress.connection_id == *client_id {
+                        progress.crisis_status_queued = true;
+                    }
+                }
+                info!(
+                    "personal_crisis_status_sent player_id={} phase={} exists={} reason={}",
+                    player_id,
+                    status.phase.as_deref().unwrap_or("none"),
+                    status.exists,
+                    if new_connection { "login" } else { "changed" }
+                );
+            }
+            Err(error) => {
+                if error != CurrentConnectionSendError::Full {
+                    safe_logout_telemetry.record_stale_connection_event(*player_id);
+                }
+                debug!(
+                    "personal_crisis_status_send_deferred player_id={} error={:?}",
+                    player_id, error
+                );
+            }
+        }
+    }
+
+    // A login request is satisfied only after every active connection for that
+    // player has a cached authoritative snapshot. Duplicate Login events on an
+    // already-synchronized connection therefore do not emit duplicates.
+    let pending_players = login_sync.iter().copied().collect::<Vec<_>>();
+    for player_id in pending_players {
+        let player_clients = active_client_players
+            .iter()
+            .filter_map(|(client_id, owner)| (*owner == player_id).then_some(*client_id))
+            .collect::<Vec<_>>();
+        if player_clients.is_empty()
+            || player_clients
+                .iter()
+                .all(|client_id| delivery.sent.contains_key(client_id))
+        {
+            login_sync.remove(&player_id);
+        }
+    }
 }
 
 fn player_survival_day(
@@ -1004,8 +2740,13 @@ pub struct GameEventExtras<'w, 's> {
     pub initial_encounter_state: Res<'w, InitialEncounterState>,
     pub plans: ResMut<'w, Plans>,
     pub sanctuary_login_checks: ResMut<'w, SanctuaryLoginChecks>,
+    pub crisis_status_login_sync: ResMut<'w, CrisisStatusLoginSync>,
+    resume_login_sync: ResMut<'w, ResumeLoginSyncState>,
     // Used to give a spawned villager its player's start-location team color.
     pub assigned_start_locations: Res<'w, AssignedStartLocations>,
+    pub run_spawned_objs: ResMut<'w, RunSpawnedObjs>,
+    pub presence: Res<'w, PlayerWorldPresenceState>,
+    pub safe_logout_telemetry: ResMut<'w, SafeLogoutTelemetryState>,
 }
 
 #[derive(Debug, Reflect, Component, Default)]
@@ -1087,6 +2828,13 @@ pub struct WeakSanctuary {
 pub struct EffectAdded {
     pub effect: Effect,
 }
+
+/// Marks the one-shot stat modifier for an [`EffectAdded`] payload as applied.
+/// Keeping the payload pending while its owner is protected lets the modifier
+/// resume exactly once instead of being lost with Bevy's one-update `Added`
+/// filter.
+#[derive(Debug, Component)]
+struct EffectAddedProcessed;
 
 #[derive(Debug, Component)]
 pub struct Monolith {
@@ -1401,13 +3149,24 @@ impl Plugin for GamePlugin {
             .add_plugins(WorldPlugin)
             .add_plugins(NPCPlugin)
             .add_plugins(VillagerPlugin)
-            .add_plugins(TaxCollectorPlugin);
+            .add_plugins(TaxCollectorPlugin)
+            .add_plugins(SafeLogoutPlugin);
         app.add_systems(OnEnter(AppState::Running), init_objs);
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
         app.init_resource::<SanctuaryExcursions>();
         app.init_resource::<SanctuaryLoginChecks>();
         app.init_resource::<SurveyHistory>();
         app.init_resource::<InvestigatedPOIs>();
+        app.init_resource::<IntroEncounterState>();
+        app.init_resource::<SettlementCrisisState>();
+        app.init_resource::<NextCrisisAssaultId>();
+        app.init_resource::<CrisisTelemetryState>();
+        app.init_resource::<CrisisBalanceTelemetryState>();
+        app.init_resource::<CrisisBalanceTelemetryConfig>();
+        app.init_resource::<CrisisBalanceObservationState>();
+        app.init_resource::<CrisisStatusLoginSync>();
+        app.init_resource::<CrisisStatusDeliveryState>();
+        app.init_resource::<ResumeLoginSyncState>();
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
@@ -1496,6 +3255,30 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 player_intro_state_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                personal_crisis_system
+                    .after(player_intro_state_system)
+                    .after(update_game_tick)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
+                personal_crisis_assault_system
+                    .after(personal_crisis_system)
+                    .after(sanctuary_zones_sync_system)
+                    .after(hero_dead_system)
+                    .after(resurrect_system)
+                    .after(true_death_system)
+                    .after(BigBrainSet::Actions)
+                    .before(map_event_system)
+                    .before(remove_dead_system)
+                    .before(despawn_wandering_npc_system)
+                    .before(perception_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
             )
             .add_systems(
                 Update,
@@ -1640,6 +3423,24 @@ impl Plugin for GamePlugin {
                     .after(game_event_system)
                     .run_if(in_state(AppState::Running)),
             )
+            .add_systems(
+                Update,
+                crisis_balance_snapshot_system
+                    .after(personal_crisis_assault_system)
+                    .after(game_event_system)
+                    .before(crisis_status_delivery_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
+                crisis_status_delivery_system
+                    .after(game_event_system)
+                    .after(personal_crisis_system)
+                    .after(personal_crisis_assault_system)
+                    .after(true_death_system)
+                    .run_if(in_state(AppState::Running)),
+            )
             /* .add_systems(
                 Update,
                 cancel_game_event_system.run_if(in_state(AppState::Running)),
@@ -1680,7 +3481,16 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                perception_system.run_if(in_state(AppState::Running)),
+                perception_system
+                    .after(game_event_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                resume_login_sync_completion_system
+                    .after(crisis_status_delivery_system)
+                    .after(perception_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -1712,7 +3522,8 @@ impl Plugin for GamePlugin {
             .add_observer(cancel_events_observer)
             .add_observer(update_obj_observer)
             .add_observer(add_light_effect_system)
-            .add_observer(remove_light_effect_system);
+            .add_observer(remove_light_effect_system)
+            .add_observer(crisis_combat_telemetry_observer);
     }
 }
 
@@ -2140,6 +3951,233 @@ fn init_objs(
     }
 }
 
+fn initial_encounter_object_owner(
+    object_id: i32,
+    encounters: &InitialEncounterState,
+) -> Option<i32> {
+    encounters.iter().find_map(|(player_id, entry)| {
+        (entry.merchant_id == object_id
+            || entry.necromancer_id == object_id
+            || entry.mausoleum_id == object_id
+            || entry.rat_ids.contains(&object_id)
+            || entry.phase1_npc_id == Some(object_id))
+        .then_some(*player_id)
+    })
+}
+
+fn initial_encounter_object_is_protected(
+    object_id: i32,
+    encounters: &InitialEncounterState,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    initial_encounter_object_owner(object_id, encounters)
+        .map(|player_id| is_player_offline_protected(player_id, presence))
+        .unwrap_or(false)
+}
+
+fn attributed_threat_owner(
+    legendary_follower: Option<&LegendaryFollower>,
+    legendary_boss: Option<&LegendaryBoss>,
+    sanctuary_hunter: Option<&SanctuaryHunter>,
+) -> Option<i32> {
+    legendary_follower
+        .map(|follower| follower.player_id)
+        .or_else(|| legendary_boss.map(|boss| boss.player_id))
+        .or_else(|| sanctuary_hunter.map(|hunter| hunter.player_id))
+}
+
+fn game_event_belongs_to_protected_run(
+    event_type: &GameEventType,
+    ids: &Ids,
+    presence: &PlayerWorldPresenceState,
+) -> bool {
+    let object_is_protected = |obj_id| object_belongs_to_protected_run(obj_id, ids, presence);
+
+    match event_type {
+        // Login is part of the reconnect/rebase protocol and must never be
+        // parked behind the protection state it is responsible for leaving.
+        GameEventType::Login { .. } => false,
+        GameEventType::PlayerNotice { player_id, .. }
+        | GameEventType::MerchantArrival { player_id, .. }
+        | GameEventType::MerchantLeavingSoon { player_id, .. }
+        | GameEventType::MerchantDeparture { player_id, .. }
+        | GameEventType::SpawnVillager { player_id, .. }
+        | GameEventType::AddEffectOnTile { player_id, .. }
+        | GameEventType::RemoveEffectOnTile { player_id, .. } => {
+            is_player_offline_protected(*player_id, presence)
+        }
+        GameEventType::ForageEvent { forager_id } => object_is_protected(*forager_id),
+        GameEventType::GatherEvent { gatherer_id, .. } => object_is_protected(*gatherer_id),
+        GameEventType::StructureGatherEvent {
+            operator_id,
+            structure_id,
+        }
+        | GameEventType::StructureOperateEvent {
+            operator_id,
+            structure_id,
+        } => object_is_protected(*operator_id) || object_is_protected(*structure_id),
+        GameEventType::RefineEvent { refiner_id, .. } => object_is_protected(*refiner_id),
+        GameEventType::CraftEvent { crafter_id, .. } => object_is_protected(*crafter_id),
+        GameEventType::StructureRefineEvent {
+            refiner_id,
+            structure_id,
+            ..
+        } => object_is_protected(*refiner_id) || object_is_protected(*structure_id),
+        GameEventType::StructureCraftEvent {
+            crafter_id,
+            structure_id,
+            ..
+        } => object_is_protected(*crafter_id) || object_is_protected(*structure_id),
+        GameEventType::ExperimentEvent {
+            experimenter_id,
+            structure_id,
+        } => object_is_protected(*experimenter_id) || object_is_protected(*structure_id),
+        GameEventType::UpdatePos { obj_id, .. }
+        | GameEventType::DespawnObj { obj_id }
+        | GameEventType::CancelRefineEvent { obj_id }
+        | GameEventType::CancelAllMapEvents { obj_id }
+        | GameEventType::CancelAllowedMapEvents { obj_id } => object_is_protected(*obj_id),
+        GameEventType::NecroEvent {
+            necromancer_id,
+            mausoleum_id,
+            ..
+        } => {
+            necromancer_id.is_some_and(|id| object_is_protected(id))
+                || mausoleum_id.is_some_and(|id| object_is_protected(id))
+        }
+        GameEventType::SpawnNPC { run_owner, .. } => run_owner
+            .map(|player_id| is_player_offline_protected(player_id, presence))
+            .unwrap_or(false),
+        GameEventType::RemoveEntity { .. } | GameEventType::CancelMapEventsById { .. } => false,
+    }
+}
+
+fn visible_event_references_ended_run(
+    event: &VisibleEvent,
+    ended_object_ids: &HashSet<i32>,
+) -> bool {
+    let referenced = match event {
+        VisibleEvent::EmbarkEvent { transport_id } => Some(*transport_id),
+        VisibleEvent::DamageEvent { target_id, .. }
+        | VisibleEvent::StealEvent { target_id, .. }
+        | VisibleEvent::BroadcastStealEvent { target_id, .. }
+        | VisibleEvent::SpoilEvent { target_id, .. }
+        | VisibleEvent::BroadcastSpoilEvent { target_id, .. }
+        | VisibleEvent::TorchEvent { target_id, .. }
+        | VisibleEvent::BroadcastTorchEvent { target_id, .. }
+        | VisibleEvent::InvestigateEvent { target_id }
+        | VisibleEvent::SpellDamageEvent { target_id, .. } => Some(*target_id),
+        VisibleEvent::ActivateEvent { structure_id }
+        | VisibleEvent::OperateEvent { structure_id }
+        | VisibleEvent::RefineEvent { structure_id }
+        | VisibleEvent::CraftEvent { structure_id, .. }
+        | VisibleEvent::ExperimentEvent { structure_id }
+        | VisibleEvent::PlantEvent { structure_id }
+        | VisibleEvent::TendEvent { structure_id }
+        | VisibleEvent::HarvestEvent { structure_id }
+        | VisibleEvent::RepairEvent { structure_id } => Some(*structure_id),
+        VisibleEvent::UseItemEvent { item_owner_id, .. } => Some(*item_owner_id),
+        VisibleEvent::FindDrinkEvent { obj_id }
+        | VisibleEvent::DrinkEvent { obj_id, .. }
+        | VisibleEvent::FindFoodEvent { obj_id }
+        | VisibleEvent::EatEvent { obj_id, .. }
+        | VisibleEvent::FindShelterEvent { obj_id }
+        | VisibleEvent::SleepEvent { obj_id }
+        | VisibleEvent::FishingEvent { obj_id } => Some(*obj_id),
+        VisibleEvent::SpellRaiseDeadEvent { corpse_id } => Some(*corpse_id),
+        _ => None,
+    };
+    referenced
+        .map(|object_id| ended_object_ids.contains(&object_id))
+        .unwrap_or(false)
+}
+
+fn game_event_belongs_to_ended_run(
+    event_type: &GameEventType,
+    player_id: i32,
+    ended_object_ids: &HashSet<i32>,
+    entity_map: &EntityObjMap,
+    map_events: &MapEvents,
+) -> bool {
+    let ended = |object_id: i32| ended_object_ids.contains(&object_id);
+    match event_type {
+        GameEventType::Login {
+            player_id: owner, ..
+        }
+        | GameEventType::PlayerNotice {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantArrival {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantLeavingSoon {
+            player_id: owner, ..
+        }
+        | GameEventType::MerchantDeparture {
+            player_id: owner, ..
+        }
+        | GameEventType::SpawnVillager {
+            player_id: owner, ..
+        }
+        | GameEventType::AddEffectOnTile {
+            player_id: owner, ..
+        }
+        | GameEventType::RemoveEffectOnTile {
+            player_id: owner, ..
+        } => *owner == player_id,
+        GameEventType::SpawnNPC { run_owner, .. } => *run_owner == Some(player_id),
+        GameEventType::ForageEvent { forager_id } => ended(*forager_id),
+        GameEventType::GatherEvent { gatherer_id, .. } => ended(*gatherer_id),
+        GameEventType::StructureGatherEvent {
+            operator_id,
+            structure_id,
+        }
+        | GameEventType::StructureOperateEvent {
+            operator_id,
+            structure_id,
+        } => ended(*operator_id) || ended(*structure_id),
+        GameEventType::RefineEvent { refiner_id, .. } => ended(*refiner_id),
+        GameEventType::CraftEvent { crafter_id, .. } => ended(*crafter_id),
+        GameEventType::StructureRefineEvent {
+            refiner_id,
+            structure_id,
+            ..
+        } => ended(*refiner_id) || ended(*structure_id),
+        GameEventType::StructureCraftEvent {
+            crafter_id,
+            structure_id,
+            ..
+        } => ended(*crafter_id) || ended(*structure_id),
+        GameEventType::ExperimentEvent {
+            experimenter_id,
+            structure_id,
+        } => ended(*experimenter_id) || ended(*structure_id),
+        GameEventType::UpdatePos { obj_id, .. }
+        | GameEventType::DespawnObj { obj_id }
+        | GameEventType::CancelRefineEvent { obj_id }
+        | GameEventType::CancelAllMapEvents { obj_id }
+        | GameEventType::CancelAllowedMapEvents { obj_id } => ended(*obj_id),
+        GameEventType::NecroEvent {
+            necromancer_id,
+            mausoleum_id,
+            ..
+        } => necromancer_id.map(ended).unwrap_or(false) || mausoleum_id.map(ended).unwrap_or(false),
+        GameEventType::RemoveEntity { entity } => entity_map
+            .get_obj_by_entity(*entity)
+            .map(ended)
+            .unwrap_or(false),
+        GameEventType::CancelMapEventsById { event_ids } => event_ids.iter().any(|event_id| {
+            map_events
+                .get(event_id)
+                .map(|event| {
+                    ended(event.obj_id)
+                        || visible_event_references_ended_run(&event.event_type, ended_object_ids)
+                })
+                .unwrap_or(false)
+        }),
+    }
+}
+
 fn move_event_system(
     mut commands: Commands,
     entity_map: ResMut<EntityObjMap>,
@@ -2147,6 +4185,15 @@ fn move_event_system(
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    threat_attribution_query: Query<(
+        Option<&LegendaryFollower>,
+        Option<&LegendaryBoss>,
+        Option<&SanctuaryHunter>,
+        Option<&CrisisAssaultUnit>,
+        Option<&TaxCollector>,
+    )>,
     mut set: ParamSet<(
         Query<(&mut Position, &mut State)>, // for the chosen entity (mutable)
         Query<(&PlayerId, &Id, &Position, &Class, &Subclass, &State)>, // for all entities (read-only)
@@ -2157,6 +4204,33 @@ fn move_event_system(
 
     for (map_event_id, map_event) in map_events.iter() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence)
+                || initial_encounter_object_is_protected(
+                    map_event.obj_id,
+                    &initial_encounter_state,
+                    &presence,
+                )
+            {
+                continue;
+            }
+            if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                if let Ok((follower, boss, hunter, assault, collector)) =
+                    threat_attribution_query.get(entity)
+                {
+                    let attributed_owner_is_protected = assault.is_none()
+                        && attributed_threat_owner(follower, boss, hunter)
+                            .map(|player_id| is_player_offline_protected(player_id, &presence))
+                            .unwrap_or(false);
+                    let collector_target_is_protected = collector
+                        .map(|collector| {
+                            is_player_offline_protected(collector.target_player, &presence)
+                        })
+                        .unwrap_or(false);
+                    if attributed_owner_is_protected || collector_target_is_protected {
+                        continue;
+                    }
+                }
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::MoveEvent { src: _, dst } => {
@@ -2478,8 +4552,10 @@ fn move_event_completed_system(
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
     player_intro_state: Res<PlayerIntroState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     mut sanctuary_excursions: ResMut<SanctuaryExcursions>,
     sanctuary_zones: Res<SanctuaryZones>,
+    presence: Res<PlayerWorldPresenceState>,
     (
         mover_query,
         map_obj_query,
@@ -2493,7 +4569,21 @@ fn move_event_completed_system(
         hero_power_query,
         inventory_query,
     ): (
-        Query<(Entity, &Id, &PlayerId, &Position, &Subclass, &Viewshed), With<MoveEventCompleted>>,
+        Query<
+            (
+                Entity,
+                &Id,
+                &PlayerId,
+                &Position,
+                &Subclass,
+                &Viewshed,
+                Option<&LegendaryFollower>,
+                Option<&LegendaryBoss>,
+                Option<&SanctuaryHunter>,
+                Option<&CrisisAssaultUnit>,
+            ),
+            With<MoveEventCompleted>,
+        >,
         Query<MapObjQuery>,
         Query<&mut Effects>,
         Query<&Sanctuary>,
@@ -2506,9 +4596,32 @@ fn move_event_completed_system(
         Query<(&PlayerId, &Inventory)>,
     ),
 ) {
-    for (mover_entity, mover_id, mover_player_id, mover_pos, mover_subclass, mover_viewshed) in
-        mover_query.iter()
+    for (
+        mover_entity,
+        mover_id,
+        mover_player_id,
+        mover_pos,
+        mover_subclass,
+        mover_viewshed,
+        legendary_follower,
+        legendary_boss,
+        sanctuary_hunter,
+        crisis_assault,
+    ) in mover_query.iter()
     {
+        if object_belongs_to_protected_run(mover_id.0, &ids, &presence)
+            || initial_encounter_object_is_protected(
+                mover_id.0,
+                &initial_encounter_state,
+                &presence,
+            )
+            || (crisis_assault.is_none()
+                && attributed_threat_owner(legendary_follower, legendary_boss, sanctuary_hunter)
+                    .map(|player_id| is_player_offline_protected(player_id, &presence))
+                    .unwrap_or(false))
+        {
+            continue;
+        }
         info!("MoveEventCompletedSystem - {:?}", mover_pos);
         commands.entity(mover_entity).remove::<MoveEventCompleted>();
 
@@ -2610,6 +4723,7 @@ fn move_event_completed_system(
                         npc_type: npc_type,
                         pos: encounter_pos,
                         npc_id: Some(wolf_id),
+                        run_owner: mover_player_id.is_human().then_some(mover_player_id.0),
                     };
 
                     let event_id = ids.new_map_event_id();
@@ -2706,7 +4820,11 @@ fn move_event_completed_system(
             if let Some((monolith_id, monolith_pos)) = in_range_sanctuary {
                 // In-zone defensive bonus scales with how far the sanctuary is upgraded.
                 let sanctuary_amp = 1.0
-                    + sanctuary_zones.0.get(&monolith_id).map(|z| z.level).unwrap_or(0) as f32
+                    + sanctuary_zones
+                        .0
+                        .get(&monolith_id)
+                        .map(|z| z.level)
+                        .unwrap_or(0) as f32
                         * SANCTUARY_DEFENSE_PER_LEVEL;
                 // Check if coming from weak sanctuary
                 if effects.has(Effect::WeakSanctuary) {
@@ -3023,6 +5141,8 @@ fn move_event_completed_system(
 
 fn hide_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -3032,6 +5152,9 @@ fn hide_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::HideEvent => {
@@ -3065,6 +5188,7 @@ fn hide_event_system(
 fn update_obj_event_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
@@ -3077,6 +5201,9 @@ fn update_obj_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::UpdateObjEvent { attrs } => {
@@ -3175,6 +5302,7 @@ fn update_obj_event_system(
 fn activate_event_system(
     mut commands: Commands,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -3188,9 +5316,15 @@ fn activate_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::ActivateEvent { structure_id } => {
+                    if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                        continue;
+                    }
                     debug!(
                         "Processing ActivateEvent: structure_id: {:?} ",
                         structure_id
@@ -3270,6 +5404,7 @@ pub fn build_system(
     entity_map: Res<EntityObjMap>,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
+    presence: OptionalPlayerWorldPresence,
     mut structure_query: Query<
         (
             Entity,
@@ -3291,6 +5426,8 @@ pub fn build_system(
         (Entity, &PlayerId, &Position, &State, &mut Effects),
         Without<ClassStructure>,
     >,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -3310,6 +5447,9 @@ pub fn build_system(
         mut structure_work_queue,
     ) in structure_query.iter_mut()
     {
+        if is_owner_offline_protected(structure_player_id, &presence) {
+            continue;
+        }
         debug!("Building system processing structure: {:?}", structure_id);
         debug!("Structure position: {:?}", structure_pos);
         debug!("Structure state: {:?}", structure_state);
@@ -3406,6 +5546,28 @@ pub fn build_system(
             // Set structure hp to base hp
             structure_stats.hp = structure_stats.base_hp;
 
+            if matches!(*structure_subclass, Subclass::Wall | Subclass::Watchtower)
+                && matches!(
+                    crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(&structure_player_id.0))
+                        .map(|crisis| crisis.phase),
+                    Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                )
+            {
+                if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                    telemetry_state
+                        .entry(structure_player_id.0)
+                        .or_default()
+                        .preparation_actions
+                        .record_defensive_structure_completed(
+                            structure_id.0,
+                            *structure_subclass == Subclass::Wall,
+                            game_tick.0,
+                        );
+                }
+            }
+
             if *structure_subclass == Subclass::Wall {
                 for (entity, player_id, pos, state, mut effects) in occupant_query.iter_mut() {
                     if *player_id == *structure_player_id
@@ -3490,10 +5652,12 @@ pub fn upgrade_system(
     entity_map: Res<EntityObjMap>,
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
+    presence: OptionalPlayerWorldPresence,
     mut structure_query: Query<
         (
             Entity,
             &Id,
+            &PlayerId,
             &Position,
             &State,
             &mut Name,
@@ -3521,6 +5685,7 @@ pub fn upgrade_system(
     for (
         structure_entity,
         structure_id,
+        structure_player_id,
         structure_pos,
         structure_state,
         mut structure_name,
@@ -3534,6 +5699,9 @@ pub fn upgrade_system(
         selected_upgrade,
     ) in structure_query.iter_mut()
     {
+        if is_owner_offline_protected(structure_player_id, &presence) {
+            continue;
+        }
         debug!("Upgrading system processing structure: {:?}", structure_id);
         debug!("Structure position: {:?}", structure_pos);
         debug!("Structure state: {:?}", structure_state);
@@ -4173,6 +6341,7 @@ fn forage_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -4186,6 +6355,9 @@ fn forage_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::ForageEvent { forager_id } => {
@@ -4283,6 +6455,7 @@ fn gather_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: OptionalPlayerWorldPresence,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -4298,6 +6471,9 @@ fn gather_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::GatherEvent {
@@ -4550,6 +6726,7 @@ fn structure_gather_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -4566,6 +6743,9 @@ fn structure_gather_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureGatherEvent {
@@ -4784,6 +6964,7 @@ fn refine_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -4796,6 +6977,9 @@ fn refine_event_system(
 
     'event_loop: for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::RefineEvent {
@@ -5001,6 +7185,7 @@ fn structure_refine_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5014,6 +7199,9 @@ fn structure_refine_event_system(
 
     'event_loop: for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureRefineEvent {
@@ -5282,6 +7470,7 @@ fn craft_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: OptionalPlayerWorldPresence,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5295,6 +7484,9 @@ fn craft_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::CraftEvent {
@@ -5426,6 +7618,7 @@ fn structure_craft_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5440,6 +7633,9 @@ fn structure_craft_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureCraftEvent {
@@ -5619,6 +7815,7 @@ fn structure_operate_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5639,6 +7836,9 @@ fn structure_operate_event_system(
 
     for (event_id, game_event_type) in game_events.iter() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::StructureOperateEvent {
@@ -5900,6 +8100,7 @@ fn experiment_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut game_events: ResMut<GameEvents>,
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
@@ -5914,6 +8115,9 @@ fn experiment_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            if game_event_belongs_to_protected_run(&game_event_type.event_type, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
                 GameEventType::ExperimentEvent {
@@ -6718,6 +8922,7 @@ fn explore_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
     mut resources: ResMut<Resources>,
@@ -6745,6 +8950,9 @@ fn explore_event_system(
         .collect();
 
     for (map_event_id, map_event) in due_events {
+        if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+            continue;
+        }
         match &map_event.event_type {
             VisibleEvent::SurveyEvent
             | VisibleEvent::ProspectEvent
@@ -6871,6 +9079,7 @@ fn investigate_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
     mut resources: ResMut<Resources>,
@@ -6899,6 +9108,9 @@ fn investigate_event_system(
         .collect();
 
     for (map_event_id, map_event) in due_events {
+        if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+            continue;
+        }
         let VisibleEvent::InvestigateEvent { target_id } = map_event.event_type else {
             continue;
         };
@@ -7056,6 +9268,7 @@ fn farm_event_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut crops: ResMut<Crops>,
     resources: ResMut<Resources>,
@@ -7068,6 +9281,9 @@ fn farm_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::PlantEvent { structure_id } => {
@@ -7264,6 +9480,8 @@ fn repair_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     crops: ResMut<Crops>,
     resources: ResMut<Resources>,
@@ -7275,14 +9493,22 @@ fn repair_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     active_infos: Res<ActiveInfos>,
     mut run_score_state: ResMut<RunScoreState>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
 ) {
     let mut events_to_remove = Vec::new();
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::RepairEvent { structure_id } => {
+                    if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                        continue;
+                    }
                     info!("Processing RepairEvent");
                     events_to_remove.push(*map_event_id);
 
@@ -7318,8 +9544,26 @@ fn repair_event_system(
                         continue;
                     };
 
-                    // Repair structure to full health
+                    // Repair structure to full health.
+                    let previous_hp = structure.stats.hp;
                     structure.stats.hp = structure.stats.base_hp;
+                    if previous_hp < structure.stats.hp
+                        && matches!(
+                            crisis_state
+                                .as_ref()
+                                .and_then(|state| state.get(&structure.player_id.0))
+                                .map(|crisis| crisis.phase),
+                            Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+                        )
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(structure.player_id.0)
+                                .or_default()
+                                .preparation_actions
+                                .record_repair_completed(*structure_id, game_tick.0);
+                        }
+                    }
                     run_score_state
                         .entry(structure.player_id.0)
                         .or_insert_with(|| PlayerRunScore {
@@ -7343,6 +9587,8 @@ fn spell_raise_dead_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut entity_map: ResMut<EntityObjMap>,
     pos_query: Query<(&Position, &Template)>,
     mut caster_query: Query<(&mut State, &mut Minions)>,
@@ -7355,9 +9601,27 @@ fn spell_raise_dead_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::SpellRaiseDeadEvent { corpse_id } => {
+                    if object_belongs_to_protected_run(*corpse_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) {
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                            if let Ok(mut event_executing) =
+                                event_executing_query.get_mut(caster_entity)
+                            {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpellRaiseDeadEvent {:?}", corpse_id);
                     events_to_remove.push(*map_event_id);
 
@@ -7414,10 +9678,19 @@ fn spell_raise_dead_event_system(
                         "Zombie".to_string()
                     };
 
+                    let run_owner = ids
+                        .get_player(map_event.obj_id)
+                        .and_then(|owner| PlayerId(owner).is_human().then_some(owner))
+                        .or_else(|| {
+                            run_spawned_objs.iter().find_map(|(player_id, object_ids)| {
+                                object_ids.contains(&map_event.obj_id).then_some(*player_id)
+                            })
+                        });
                     let event_type = GameEventType::SpawnNPC {
                         npc_type: zombie_type,
                         pos: *corpse_pos,
                         npc_id: Some(minion_id),
+                        run_owner,
                     };
 
                     let event_id = ids.new_map_event_id();
@@ -7461,20 +9734,48 @@ fn spell_raise_dead_event_system(
 fn spell_damage_event_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut query: Query<CombatSpellQuery>,
     mut map_events: ResMut<MapEvents>,
     _game_events: ResMut<GameEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     mut event_executing_query: Query<&mut EventExecuting>,
+    mut telemetry: Option<ResMut<SafeLogoutTelemetryState>>,
 ) {
     let mut events_to_remove = Vec::new();
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::SpellDamageEvent { spell, target_id } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        if let (Some(player_id), Some(telemetry)) = (
+                            protected_player_for_object(*target_id, &ids, &presence),
+                            telemetry.as_deref_mut(),
+                        ) {
+                            telemetry.record_protected_target_rejection(player_id);
+                            telemetry.record_protected_damage_block(player_id);
+                        }
+                        events_to_remove.push(*map_event_id);
+                        if let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) {
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                            if let Ok(mut event_executing) =
+                                event_executing_query.get_mut(caster_entity)
+                            {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpellDamageEvent");
                     events_to_remove.push(*map_event_id);
 
@@ -7629,6 +9930,8 @@ fn broadcast_event_system(
 
 fn effect_expired_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut effect_query: Query<&mut Effects>,
@@ -7637,6 +9940,9 @@ fn effect_expired_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::EffectExpiredEvent { effect } => {
@@ -7665,6 +9971,8 @@ fn effect_expired_event_system(
 
 fn cooldown_event_system(
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut event_executing_query: Query<&mut EventExecuting>,
@@ -7673,6 +9981,9 @@ fn cooldown_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::CooldownEvent { duration } => {
@@ -7712,9 +10023,12 @@ fn use_item_system(
     map: Res<Map>,
     resources: Res<Resources>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut plans: ResMut<Plans>,
     mut visible_events: ResMut<VisibleEvents>,
     mut map_events: ResMut<MapEvents>,
+    crisis_state: Option<Res<SettlementCrisisState>>,
+    mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
     mut query: Query<ObjWithStatsQuery, Without<ClassStructure>>,
     mut structure_query: Query<
         (&Id, &PlayerId, &Position, &mut State, &mut Effects),
@@ -7732,6 +10046,11 @@ fn use_item_system(
                     item_id,
                     item_owner_id,
                 } => {
+                    if object_belongs_to_protected_run(*item_owner_id, &ids, &presence)
+                        || object_belongs_to_protected_run(map_event.obj_id, &ids, &presence)
+                    {
+                        continue;
+                    }
                     debug!("Processing UseItemEvent {:?}", item_id);
                     events_to_remove.push(*map_event_id);
 
@@ -7750,6 +10069,7 @@ fn use_item_system(
                         continue;
                     };
 
+                    let mut successful_healing_use = false;
                     match (item.class.as_str(), item.subclass.as_str()) {
                         (item::POTION, item::HEALTH) => {
                             if let Some(healing_attrval) = item.attrs.get(&item::AttrKey::Healing) {
@@ -7761,6 +10081,7 @@ fn use_item_system(
                                 };
 
                                 if item_owner.stats.hp < item_owner.stats.base_hp {
+                                    successful_healing_use = healing_value > 0;
                                     if (item_owner.stats.hp + healing_value)
                                         > item_owner.stats.base_hp
                                     {
@@ -7817,24 +10138,23 @@ fn use_item_system(
                             // closes minor wounds. Consumed when it did either;
                             // refusing to consume on a full-health, non-bleeding
                             // target keeps mis-clicks free.
-                            let stopped_bleeding = explore_cure_for_item(
-                                &item.name,
-                                &item.class,
-                                &item.subclass,
-                            ) == Some(Effect::Bleed)
-                                && clear_effect_with_item(
-                                    item_owner.player_id.0,
-                                    item_owner.id.0,
-                                    *item_owner.pos,
-                                    &mut item_owner.effects,
-                                    Effect::Bleed,
-                                    &clients,
-                                );
+                            let stopped_bleeding =
+                                explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                    == Some(Effect::Bleed)
+                                    && clear_effect_with_item(
+                                        item_owner.player_id.0,
+                                        item_owner.id.0,
+                                        *item_owner.pos,
+                                        &mut item_owner.effects,
+                                        Effect::Bleed,
+                                        &clients,
+                                    );
 
                             let missing_hp = item_owner.stats.base_hp - item_owner.stats.hp;
                             let healed = missing_hp.min(BANDAGE_HEAL_HP).max(0);
 
                             if stopped_bleeding || healed > 0 {
+                                successful_healing_use = true;
                                 if healed > 0 {
                                     item_owner.stats.hp += healed;
 
@@ -8228,6 +10548,23 @@ fn use_item_system(
                         }
                         _ => {}
                     }
+
+                    if successful_healing_use
+                        && is_preparation_phase(
+                            crisis_state
+                                .as_ref()
+                                .and_then(|state| state.get(&item_owner.player_id.0))
+                                .map(|crisis| crisis.phase),
+                        )
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(item_owner.player_id.0)
+                                .or_default()
+                                .preparation_actions
+                                .record_healing_item_used_before_launch(*map_event_id, game_tick.0);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -8271,10 +10608,12 @@ fn hero_auto_consume_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     mut map_events: ResMut<MapEvents>,
+    presence: OptionalPlayerWorldPresence,
     mut hero_query: Query<
         (
             Entity,
             &Id,
+            Option<&PlayerId>,
             &State,
             &Inventory,
             &Thirst,
@@ -8286,9 +10625,25 @@ fn hero_auto_consume_system(
         With<SubclassHero>,
     >,
 ) {
-    for (entity, id, state, inventory, thirst, hunger, tired, last_combat_tick, event_executing) in
-        hero_query.iter_mut()
+    for (
+        entity,
+        id,
+        player_id,
+        state,
+        inventory,
+        thirst,
+        hunger,
+        tired,
+        last_combat_tick,
+        event_executing,
+    ) in hero_query.iter_mut()
     {
+        if player_id
+            .map(|player_id| is_owner_offline_protected(player_id, &presence))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         if *state != State::None
             || last_combat_tick
                 .map(|last_combat_tick| is_combat_locked(game_tick.0, last_combat_tick))
@@ -8379,6 +10734,7 @@ fn drink_eat_system(
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut visible_events: ResMut<VisibleEvents>,
@@ -8394,6 +10750,9 @@ fn drink_eat_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::FindDrinkEvent { obj_id } => {
@@ -8700,11 +11059,7 @@ fn drink_eat_system(
                                         effects: Vec::new(),
                                     },
                                 };
-                                send_to_client(
-                                    ids.get_player(*obj_id).unwrap(),
-                                    packet,
-                                    &clients,
-                                );
+                                send_to_client(ids.get_player(*obj_id).unwrap(), packet, &clients);
                             }
                         }
                     }
@@ -8755,6 +11110,8 @@ fn drink_eat_system(
 fn find_shelter_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     mut villager_query: Query<
@@ -8771,6 +11128,9 @@ fn find_shelter_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             // Execute event
             match &map_event.event_type {
                 VisibleEvent::FindShelterEvent { obj_id } => {
@@ -8846,6 +11206,7 @@ fn steal_spoil_event_system(
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     clients: Res<Clients>,
     active_infos: Res<ActiveInfos>,
     templates: Res<Templates>,
@@ -8858,12 +11219,27 @@ fn steal_spoil_event_system(
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             match &map_event.event_type {
                 VisibleEvent::SpoilEvent {
                     target_id,
                     target_pos,
                     item_type,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing SpoilEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -8928,6 +11304,18 @@ fn steal_spoil_event_system(
                     target_pos,
                     item_types,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing StealEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9017,6 +11405,18 @@ fn steal_spoil_event_system(
                     target_id,
                     target_pos,
                 } => {
+                    if object_belongs_to_protected_run(*target_id, &ids, &presence) {
+                        events_to_remove.push(*map_event_id);
+                        if let Some(entity) = entity_map.get_entity(map_event.obj_id) {
+                            if let Ok(mut state) = state_query.get_mut(entity) {
+                                *state = State::None;
+                            }
+                            if let Ok(mut event_executing) = event_executing_query.get_mut(entity) {
+                                event_executing.state = EventExecutingState::Failed;
+                            }
+                        }
+                        continue;
+                    }
                     debug!("Processing TorchEvent {:?}", target_id);
                     events_to_remove.push(*map_event_id);
 
@@ -9125,6 +11525,7 @@ fn fishing_event_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     map: ResMut<Map>,
@@ -9136,6 +11537,9 @@ fn fishing_event_system(
     let mut events_to_remove = Vec::new();
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
+            if object_belongs_to_protected_run(map_event.obj_id, &ids, &presence) {
+                continue;
+            }
             match &map_event.event_type {
                 VisibleEvent::FishingEvent { obj_id } => {
                     debug!("Processing FishingEvent {:?}", obj_id);
@@ -9672,8 +12076,8 @@ fn visible_event_system(
                     Ok(_) => {}
                     Err(e) => {
                         error!(
-                            "Could not send message to client: {:?} error: {:?}",
-                            client.id, e
+                            "Could not send perception changes player_id={} error={:?}",
+                            player_id, e
                         );
                     }
                 }
@@ -9693,8 +12097,8 @@ fn visible_event_system(
                         Ok(_) => {}
                         Err(e) => {
                             error!(
-                                "Could not send message to client: {:?} error: {:?}",
-                                client.id, e
+                                "Could not send perception message player_id={} error={:?}",
+                                player_id, e
                             );
                         }
                     }
@@ -9789,10 +12193,14 @@ fn reveal_unhidden_system(
 
 fn perception_system(
     map: Res<Map>,
+    game_tick: Res<GameTick>,
     mut explored_map: ResMut<ExploredMap>,
     weather_areas: Res<WeatherAreas>,
     clients: Res<Clients>,
     mut perception_updates: ResMut<PerceptionUpdates>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
     observer_query: Query<ObjQueryVision>,
     obj_query: Query<ObjQuery>,
 ) {
@@ -9803,8 +12211,19 @@ fn perception_system(
 
     // Could not use HashSet here due to the trait `FromIterator<&std::collections::HashSet<(i32, i32)>>` is not implemented for `Vec<(i32, i32)>`
     let mut tiles_to_send: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
+    let mut retry_updates = Vec::new();
 
     for (perception_player, perception_update_type) in perception_updates.iter() {
+        let is_init_perception = matches!(
+            perception_update_type,
+            PerceptionUpdateType::InitPerception | PerceptionUpdateType::ResumeInitPerception(_)
+        );
+        let resume_connection_id = match perception_update_type {
+            PerceptionUpdateType::ResumeInitPerception(connection_id) => Some(*connection_id),
+            _ => None,
+        };
+        let mut init_perception_queued = false;
+        let mut retry_resume_perception = resume_connection_id.is_some();
         for observer in observer_query.iter() {
             debug!("Observer: {:?}", observer);
             if observer.player_id.0 == *perception_player {
@@ -9936,38 +12355,154 @@ fn perception_system(
                 weather: weather_tiles,
             };
 
-            let perception_packet =
-                if *perception_update_type == PerceptionUpdateType::InitPerception {
-                    ResponsePacket::InitPerception {
-                        data: perception_data,
-                    }
-                } else {
-                    ResponsePacket::NewPerception {
-                        data: perception_data,
-                    }
-                };
+            let init_for_requested_player = is_init_perception && *player_id == *perception_player;
+            let perception_packet = if is_init_perception {
+                ResponsePacket::InitPerception {
+                    data: perception_data,
+                }
+            } else {
+                ResponsePacket::NewPerception {
+                    data: perception_data,
+                }
+            };
 
-            debug!("clients: {:?}", clients);
-            for (_client_id, client) in clients.lock().unwrap().iter() {
+            if let Some(connection_id) = resume_connection_id {
+                if !init_for_requested_player {
+                    continue;
+                }
+                let Ok(serialized) = serde_json::to_string(&perception_packet) else {
+                    error!(
+                        "player_login_sync_serialization_failed player_id={} packet=init_perception",
+                        player_id
+                    );
+                    retry_resume_perception = false;
+                    resume_login_sync.remove(player_id);
+                    continue;
+                };
+                match clients.try_send_current_bundle(*player_id, connection_id, vec![serialized]) {
+                    Ok(()) => {
+                        init_perception_queued = true;
+                        retry_resume_perception = false;
+                    }
+                    Err(CurrentConnectionSendError::Full) => {
+                        debug!(
+                            "player_login_sync_deferred player_id={} game_tick={} reason=perception_channel_full",
+                            player_id, game_tick.0
+                        );
+                    }
+                    Err(error) => {
+                        retry_resume_perception = false;
+                        resume_login_sync.remove(player_id);
+                        safe_logout_telemetry.record_stale_connection_event(*player_id);
+                        info!(
+                            "player_login_sync_stale_connection_rejected player_id={} game_tick={} stage=perception reason={:?}",
+                            player_id, game_tick.0, error
+                        );
+                    }
+                }
+                continue;
+            }
+
+            for (client_id, client) in clients.lock().unwrap().iter() {
                 if client.player_id == *player_id {
                     match client
                         .sender
                         .try_send(serde_json::to_string(&perception_packet).unwrap())
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            if init_for_requested_player && *client_id == client.id {
+                                init_perception_queued = true;
+                            }
+                        }
                         Err(e) => {
                             error!(
-                                "Could not send message to client: {:?} error: {:?}",
-                                client.id, e
+                                "Could not send perception message player_id={} error={:?}",
+                                player_id, e
                             );
                         }
                     }
                 }
             }
         }
+
+        if let Some(connection_id) = resume_connection_id {
+            if init_perception_queued {
+                if let Some(progress) = resume_login_sync.get_mut(perception_player) {
+                    if progress.connection_id == connection_id {
+                        progress.perception_queued = true;
+                    }
+                }
+            } else if retry_resume_perception
+                && presence
+                    .players
+                    .get(perception_player)
+                    .map(|record| {
+                        record.resume_in_progress
+                            && record.resume_connection_id == Some(connection_id)
+                    })
+                    .unwrap_or(false)
+            {
+                retry_updates.push((*perception_player, perception_update_type.clone()));
+            }
+        }
     }
 
     perception_updates.clear();
+    perception_updates.extend(retry_updates);
+}
+
+/// Release-ready is published only after the exact reconnect has queued the
+/// complete core login bundle, its current crisis snapshot, and its initial
+/// perception. Final simulation release remains in the ordered PostUpdate
+/// resume barrier and therefore occurs no earlier than the following update.
+fn resume_login_sync_completion_system(
+    clients: Res<Clients>,
+    game_tick: Res<GameTick>,
+    mut presence: ResMut<PlayerWorldPresenceState>,
+    mut resume_login_sync: ResMut<ResumeLoginSyncState>,
+    mut telemetry: ResMut<SafeLogoutTelemetryState>,
+) {
+    let pending = resume_login_sync
+        .iter()
+        .map(|(player_id, progress)| (*player_id, *progress))
+        .collect::<Vec<_>>();
+
+    for (player_id, progress) in pending {
+        let record_matches = presence
+            .players
+            .get(&player_id)
+            .map(|record| {
+                record.resume_in_progress
+                    && record.resume_connection_id == Some(progress.connection_id)
+            })
+            .unwrap_or(false);
+        let connection_is_current =
+            clients.is_current_connection(player_id, progress.connection_id);
+
+        if !record_matches || !connection_is_current {
+            resume_login_sync.remove(&player_id);
+            if record_matches && !connection_is_current {
+                telemetry.record_stale_connection_event(player_id);
+                info!(
+                    "player_login_sync_stale_connection_rejected player_id={} game_tick={} stage=completion",
+                    player_id, game_tick.0
+                );
+            }
+            continue;
+        }
+
+        if progress.crisis_status_queued
+            && progress.perception_queued
+            && mark_player_login_sync_complete(
+                player_id,
+                progress.connection_id,
+                game_tick.0,
+                &mut presence,
+            )
+        {
+            resume_login_sync.remove(&player_id);
+        }
+    }
 }
 
 // On (re)login, evaluate the hero's proximity to monoliths and re-send its current
@@ -9980,6 +12515,7 @@ fn sanctuary_login_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut login_checks: ResMut<SanctuaryLoginChecks>,
     mut hero_query: Query<(Entity, &Id, &PlayerId, &Position, &mut Effects), With<SubclassHero>>,
     monolith_query: Query<(&Id, &Position), With<Monolith>>,
@@ -9994,7 +12530,9 @@ fn sanctuary_login_system(
     let mut pending: Vec<(i32, i32)> = Vec::new();
 
     for (player_id, due_tick) in login_checks.drain(..) {
-        if due_tick <= now {
+        if is_player_offline_protected(player_id, &presence) {
+            pending.push((player_id, now.saturating_add(1)));
+        } else if due_tick <= now {
             due_player_ids.push(player_id);
         } else {
             pending.push((player_id, due_tick));
@@ -10107,11 +12645,114 @@ fn game_event_system(
 
     for (event_id, game_event_type) in game_events.iter_mut() {
         if game_event_type.run_tick < game_tick.0 {
+            let protected_intro_event = match &game_event_type.event_type {
+                GameEventType::NecroEvent {
+                    necromancer_id,
+                    mausoleum_id,
+                    ..
+                } => necromancer_id
+                    .iter()
+                    .chain(mausoleum_id.iter())
+                    .any(|object_id| {
+                        initial_encounter_object_is_protected(
+                            *object_id,
+                            &extras.initial_encounter_state,
+                            &extras.presence,
+                        )
+                    }),
+                _ => false,
+            };
+            if protected_intro_event
+                || game_event_belongs_to_protected_run(
+                    &game_event_type.event_type,
+                    &ids,
+                    &extras.presence,
+                )
+            {
+                continue;
+            }
             // Execute event
             match &game_event_type.event_type {
-                GameEventType::Login { player_id } => {
+                GameEventType::Login {
+                    player_id,
+                    connection_id,
+                } => {
                     debug!("Processing Login: {:?}", player_id);
+                    let connection_id = Uuid::from_u128(*connection_id);
+                    if !clients.is_current_connection(*player_id, connection_id) {
+                        events_to_remove.push(*event_id);
+                        extras
+                            .safe_logout_telemetry
+                            .record_stale_connection_event(*player_id);
+                        info!(
+                            "player_login_sync_stale_connection_rejected player_id={} game_tick={}",
+                            player_id, game_tick.0
+                        );
+                        continue;
+                    }
+
+                    let mut sync_packets = Vec::new();
+                    if let Some(player_explored_map) = explored_map.get(&player_id) {
+                        let explored_map_packet = ResponsePacket::ExploredMap {
+                            tiles: Map::pos_to_tiles(player_explored_map, &map),
+                        };
+                        match serde_json::to_string(&explored_map_packet) {
+                            Ok(packet) => sync_packets.push(packet),
+                            Err(error) => {
+                                events_to_remove.push(*event_id);
+                                error!(
+                                    "player_login_sync_serialization_failed player_id={} packet=explored_map error={:?}",
+                                    player_id, error
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    debug!("Game tick: {:?}", game_tick.0);
+                    let world_packet = ResponsePacket::World {
+                        time_of_day: game_tick.time_of_day(),
+                        day: game_tick.day(),
+                    };
+                    match serde_json::to_string(&world_packet) {
+                        Ok(packet) => sync_packets.push(packet),
+                        Err(error) => {
+                            events_to_remove.push(*event_id);
+                            error!(
+                                "player_login_sync_serialization_failed player_id={} packet=world error={:?}",
+                                player_id, error
+                            );
+                            continue;
+                        }
+                    }
+
+                    match clients.try_send_current_bundle(*player_id, connection_id, sync_packets) {
+                        Ok(()) => {}
+                        Err(CurrentConnectionSendError::Full) => {
+                            debug!(
+                                "player_login_sync_deferred player_id={} game_tick={} reason=channel_full",
+                                player_id, game_tick.0
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            events_to_remove.push(*event_id);
+                            extras
+                                .safe_logout_telemetry
+                                .record_stale_connection_event(*player_id);
+                            info!(
+                                "player_login_sync_stale_connection_rejected player_id={} game_tick={} reason={:?}",
+                                player_id, game_tick.0, error
+                            );
+                            continue;
+                        }
+                    }
                     events_to_remove.push(*event_id);
+
+                    // Crisis status uses this established delayed login point
+                    // so the first snapshot follows the Login packet and is
+                    // deduplicated per authenticated connection.
+                    extras.crisis_status_login_sync.insert(*player_id);
 
                     // Re-send the hero's current sanctuary state to the client, which
                     // otherwise only learns it from movement transitions. Held a few
@@ -10120,23 +12761,32 @@ fn game_event_system(
                         .sanctuary_login_checks
                         .push((*player_id, game_tick.0 + 10));
 
-                    if let Some(player_explored_map) = explored_map.get(&player_id) {
-                        let explored_map_packet = ResponsePacket::ExploredMap {
-                            tiles: Map::pos_to_tiles(player_explored_map, &map),
-                        };
-
-                        send_to_client(*player_id, explored_map_packet, &clients);
+                    let resuming = extras
+                        .presence
+                        .players
+                        .get(player_id)
+                        .map(|record| {
+                            record.resume_in_progress
+                                && record.resume_connection_id == Some(connection_id)
+                        })
+                        .unwrap_or(false);
+                    if resuming {
+                        extras.resume_login_sync.insert(
+                            *player_id,
+                            ResumeLoginSyncProgress {
+                                connection_id,
+                                crisis_status_queued: false,
+                                perception_queued: false,
+                            },
+                        );
+                        perception_updates.insert((
+                            *player_id,
+                            PerceptionUpdateType::ResumeInitPerception(connection_id),
+                        ));
+                    } else {
+                        perception_updates
+                            .insert((*player_id, PerceptionUpdateType::InitPerception));
                     }
-
-                    debug!("Game tick: {:?}", game_tick.0);
-                    let world_packet = ResponsePacket::World {
-                        time_of_day: game_tick.time_of_day(),
-                        day: game_tick.day(),
-                    };
-
-                    send_to_client(*player_id, world_packet, &clients);
-
-                    perception_updates.insert((*player_id, PerceptionUpdateType::InitPerception));
                 }
                 GameEventType::PlayerNotice {
                     player_id,
@@ -10240,6 +12890,7 @@ fn game_event_system(
                     npc_type,
                     pos,
                     npc_id,
+                    run_owner,
                 } => {
                     debug!("Processing SpawnNPC");
                     events_to_remove.push(*event_id);
@@ -10271,6 +12922,14 @@ fn game_event_system(
                     }
 
                     let (entity, npc_id, _player_id, _pos) = result;
+
+                    if let Some(player_id) = run_owner {
+                        extras
+                            .run_spawned_objs
+                            .entry(*player_id)
+                            .or_default()
+                            .push(npc_id.0);
+                    }
 
                     // Create a new object event
                     commands.trigger(NewObj { entity: entity });
@@ -10753,13 +13412,17 @@ fn game_event_system(
 
 fn player_intro_state_system(
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
     }
 
-    for intro_entry in player_intro_state.values_mut() {
+    for (player_id, intro_entry) in player_intro_state.iter_mut() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
         if !intro_entry.danger_unlocked && game_tick.0 >= intro_entry.start_tick + 4800 {
             intro_entry.danger_unlocked = true;
         }
@@ -10776,7 +13439,9 @@ fn rat_event_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // only run this every 20 ticks (2 seconds)
     if game_tick.0 % 20 != 0 {
@@ -10786,6 +13451,9 @@ fn rat_event_system(
     let mut food_items_stored = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
+        if object_belongs_to_protected_run(id.0, &ids, &presence) {
+            continue;
+        }
         // Skip players who have already triggered the tier 1 pest crisis
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.rat_spoilage {
@@ -10833,8 +13501,9 @@ fn rat_event_system(
                         if path.len() < 20 {
                             let num_pests = rand::thread_rng().gen_range(2..=3);
                             for _ in 0..num_pests {
+                                let npc_id = ids.new_obj_id();
                                 Encounter::spawn_spoil_crisis(
-                                    ids.new_obj_id(),
+                                    npc_id,
                                     NPC_PLAYER_ID,
                                     spawn_pos,
                                     random_early_game_enemy_template().to_string(),
@@ -10844,6 +13513,7 @@ fn rat_event_system(
                                     &templates,
                                     *id,
                                 );
+                                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                             }
                             spawned = true;
                             break;
@@ -10866,6 +13536,1656 @@ fn rat_event_system(
     }
 }
 
+/// Evaluates the Checkpoint 2 personal goblin crisis. This system only derives
+/// state and advances ordered phases through `AssaultReady`; it deliberately
+/// has no Commands, combat spawning, client packets, rewards, or database I/O.
+fn personal_crisis_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    presence: OptionalPlayerWorldPresence,
+    player_intro_state: Res<PlayerIntroState>,
+    objectives: Res<Objectives>,
+    mut settlement_crisis_state: ResMut<SettlementCrisisState>,
+    mut crisis_telemetry_state: ResMut<CrisisTelemetryState>,
+    mut balance_telemetry_state: ResMut<CrisisBalanceTelemetryState>,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+            Option<&BoundMonolith>,
+        ),
+        With<SubclassHero>,
+    >,
+    structure_query: Query<(&PlayerId, &State), With<ClassStructure>>,
+    villager_query: Query<(&PlayerId, &State, Option<&StateDead>), With<SubclassVillager>>,
+    storage_query: Query<(&PlayerId, &State, &Inventory), (With<Storage>, With<ClassStructure>)>,
+    monolith_query: Query<(&Id, &Monolith)>,
+) {
+    let current_tick = game_tick.0;
+
+    // Aggregate settlement facts once per evaluation rather than rescanning
+    // the whole ECS separately for every player.
+    let mut completed_structures: HashMap<i32, usize> = HashMap::new();
+    for (player_id, state) in structure_query.iter() {
+        if player_id.is_human() && Structure::is_built(*state) {
+            *completed_structures.entry(player_id.0).or_default() += 1;
+        }
+    }
+
+    let mut living_villagers: HashMap<i32, usize> = HashMap::new();
+    for (player_id, state, state_dead) in villager_query.iter() {
+        if player_id.is_human() && state.is_alive() && state_dead.is_none() {
+            *living_villagers.entry(player_id.0).or_default() += 1;
+        }
+    }
+
+    let mut stored_gold: HashMap<i32, i32> = HashMap::new();
+    for (player_id, state, inventory) in storage_query.iter() {
+        if player_id.is_human() && Structure::is_built(*state) {
+            let total = stored_gold.entry(player_id.0).or_default();
+            *total = total.saturating_add(inventory.get_total_gold());
+        }
+    }
+
+    let monolith_levels: HashMap<i32, i32> = monolith_query
+        .iter()
+        .map(|(id, monolith)| (id.0, monolith.sanctuary_level))
+        .collect();
+
+    // Collapse duplicate hero rows conservatively. A player has a valid run if
+    // any current hero row is alive and has neither death marker.
+    let mut hero_runs: HashMap<i32, (bool, Option<i32>)> = HashMap::new();
+    for (player_id, state, state_dead, true_death, bound_monolith) in hero_query.iter() {
+        if !player_id.is_human() {
+            continue;
+        }
+
+        let valid = state.is_alive() && state_dead.is_none() && true_death.is_none();
+        let bound_id = bound_monolith.map(|bound| bound.id);
+        hero_runs
+            .entry(player_id.0)
+            .and_modify(|(existing_valid, existing_bound)| {
+                if valid {
+                    *existing_valid = true;
+                    *existing_bound = bound_id.or(*existing_bound);
+                }
+            })
+            .or_insert((valid, bound_id));
+    }
+
+    for (player_id, (valid_run, bound_monolith_id)) in hero_runs.iter() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
+
+        let Some(intro) = player_intro_state.get(player_id) else {
+            if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
+                advance_online_crisis_time(crisis, current_tick, false);
+            }
+            continue;
+        };
+
+        if !valid_run {
+            if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
+                advance_online_crisis_time(crisis, current_tick, false);
+            }
+            continue;
+        }
+
+        let online = clients.is_player_online(*player_id);
+        let crisis = match settlement_crisis_state.entry(*player_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(SettlementCrisis::new(current_tick));
+                crisis_telemetry_state.insert(*player_id, CrisisTelemetry::new(current_tick));
+                let balance = balance_telemetry_state.entry(*player_id).or_default();
+                balance.record_pressure(
+                    CrisisPhase::Dormant,
+                    current_tick,
+                    0,
+                    CrisisPressureBreakdown::default(),
+                );
+                balance.record_phase(CrisisPhase::Dormant, current_tick, 0);
+                info!(
+                    "personal_crisis_created player_id={} kind={:?} phase={:?} pressure=0 game_tick={} online={}",
+                    player_id,
+                    CrisisKind::Goblin,
+                    CrisisPhase::Dormant,
+                    current_tick,
+                    online
+                );
+                // Keep the freshly-created state observably Dormant for one
+                // evaluation even if a developed settlement already exists.
+                continue;
+            }
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
+
+        let count_online_time = intro.danger_unlocked && online;
+        advance_online_crisis_time(crisis, current_tick, count_online_time);
+
+        let objective = objectives.get(player_id);
+        let pressure_breakdown = calculate_goblin_pressure_breakdown(&GoblinPressureFacts {
+            danger_unlocked: intro.danger_unlocked,
+            completed_structures: completed_structures.get(player_id).copied().unwrap_or(0),
+            living_villagers: living_villagers.get(player_id).copied().unwrap_or(0),
+            stored_gold: stored_gold.get(player_id).copied().unwrap_or(0),
+            sanctuary_level: bound_monolith_id
+                .and_then(|id| monolith_levels.get(&id).copied())
+                .unwrap_or(0),
+            explore_poi: objective.map(|value| value.explore_poi).unwrap_or(false),
+            choose_expansion: objective
+                .map(|value| value.choose_expansion)
+                .unwrap_or(false),
+            online_active_ticks: crisis.online_active_ticks,
+        });
+        crisis.pressure = pressure_breakdown.clamped_total;
+        balance_telemetry_state
+            .entry(*player_id)
+            .or_default()
+            .record_pressure(
+                crisis.phase,
+                current_tick,
+                crisis.online_active_ticks,
+                pressure_breakdown,
+            );
+
+        if count_online_time {
+            if let Some((old_phase, new_phase)) = transition_goblin_crisis(crisis, current_tick) {
+                crisis_telemetry_state
+                    .entry(*player_id)
+                    .or_insert_with(|| CrisisTelemetry::new(crisis.phase_started_tick))
+                    .observe_phase(new_phase, current_tick);
+                balance_telemetry_state
+                    .entry(*player_id)
+                    .or_default()
+                    .record_phase(new_phase, current_tick, crisis.online_active_ticks);
+                info!(
+                    "personal_crisis_transition player_id={} old_phase={:?} new_phase={:?} pressure={} game_tick={} online=true",
+                    player_id, old_phase, new_phase, crisis.pressure, current_tick
+                );
+            }
+        }
+    }
+
+    // A hero entity can be absent while the world continues. Catch the
+    // watermark up without crediting that interval, so a later recreation or
+    // ECS repair cannot backfill missing-hero time.
+    for (player_id, crisis) in settlement_crisis_state.iter_mut() {
+        if !hero_runs.contains_key(player_id) && !is_player_offline_protected(*player_id, &presence)
+        {
+            advance_online_crisis_time(crisis, current_tick, false);
+        }
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct CrisisBalanceSnapshotQueries<'w, 's> {
+    hero_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            Option<&'static HeroClass>,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static BoundMonolith>,
+            &'static State,
+            Option<&'static StateDead>,
+            Option<&'static TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    villager_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static Assignment>,
+            Option<&'static StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
+    structure_query: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static Id,
+            &'static Position,
+            &'static Template,
+            &'static Subclass,
+            &'static State,
+            &'static Stats,
+            &'static Inventory,
+            Option<&'static StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: Query<
+        'w,
+        's,
+        (
+            &'static Id,
+            &'static Position,
+            &'static Monolith,
+            &'static State,
+            Option<&'static StateDead>,
+        ),
+    >,
+}
+
+fn crisis_preparation_snapshot(
+    player_id: i32,
+    crisis: &SettlementCrisis,
+    spawn_positions: &SpawnPositions,
+    queries: &CrisisBalanceSnapshotQueries,
+) -> (CrisisPreparationSnapshot, CrisisBalanceObservation) {
+    let hero = queries
+        .hero_query
+        .iter()
+        .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == player_id);
+    let hero_is_alive = hero
+        .map(|(_, _, _, _, _, stats, _, _, state, dead, true_death)| {
+            state.is_alive() && stats.hp > 0 && dead.is_none() && true_death.is_none()
+        })
+        .unwrap_or(false);
+
+    let mut snapshot = CrisisPreparationSnapshot {
+        game_tick: crisis.last_evaluated_tick,
+        phase: balance_phase_name(crisis.phase).to_string(),
+        ..CrisisPreparationSnapshot::default()
+    };
+    let mut observation = CrisisBalanceObservation {
+        tick: crisis.last_evaluated_tick,
+        online_active_ticks: crisis.online_active_ticks,
+        phase: Some(crisis.phase),
+        ..CrisisBalanceObservation::default()
+    };
+
+    let mut hero_info = None;
+    let mut bound_monolith_id = None;
+    let mut hero_pos = None;
+    if let Some((_, id, pos, template, hero_class, stats, inventory, bound, _, _, _)) = hero {
+        bound_monolith_id = bound.map(|bound| bound.id);
+        if hero_is_alive {
+            hero_pos = Some(*pos);
+            hero_info = Some(AssaultHeroInfo {
+                id: id.0,
+                pos: *pos,
+                bound_monolith_id,
+                valid_run: spawn_positions.contains_key(&player_id),
+            });
+        }
+        snapshot.hero_class = hero_class
+            .map(|class| class.to_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        snapshot.hero_template = template.0.clone();
+        snapshot.hero_health = stats.hp;
+        snapshot.hero_max_health = stats.base_hp;
+        snapshot.equipped_weapon = inventory
+            .items
+            .iter()
+            .find(|item| item.equipped && item.class == WEAPON)
+            .map(|item| item.name.clone());
+        snapshot.equipped_armor_count = inventory
+            .items
+            .iter()
+            .filter(|item| item.equipped && item.class == ARMOR)
+            .count() as i32;
+        observation.equipped_item_ids = inventory
+            .items
+            .iter()
+            .filter(|item| {
+                item.quantity > 0 && item.equipped && (item.class == WEAPON || item.class == ARMOR)
+            })
+            .map(|item| item.id)
+            .collect();
+        snapshot.healing_items = inventory
+            .items
+            .iter()
+            .filter(|item| is_usable_crisis_healing_item(item))
+            .map(|item| item.quantity.max(0))
+            .sum();
+        snapshot.food_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.class == FOOD)
+            .map(|item| item.quantity.max(0))
+            .sum();
+        snapshot.drink_items = inventory
+            .items
+            .iter()
+            .filter(|item| item.class == DRINK)
+            .map(|item| item.quantity.max(0))
+            .sum();
+        observation.total_run_items = inventory
+            .items
+            .iter()
+            .map(|item| item.quantity.max(0))
+            .sum();
+        observation.equipped_weapon = snapshot.equipped_weapon.clone();
+        observation.equipped_armor_count = snapshot.equipped_armor_count;
+        observation.healing_items = snapshot.healing_items;
+    }
+
+    let mut assault_structures = Vec::new();
+    for (owner, id, pos, template, subclass, state, stats, inventory, dead) in
+        queries.structure_query.iter()
+    {
+        if owner.0 != player_id || dead.is_some() {
+            continue;
+        }
+        observation.total_run_items = observation.total_run_items.saturating_add(
+            inventory
+                .items
+                .iter()
+                .map(|item| item.quantity.max(0))
+                .sum::<i32>(),
+        );
+        if Structure::is_built(*state) {
+            snapshot.completed_structures = snapshot.completed_structures.saturating_add(1);
+            observation.completed_structure_ids.insert(id.0);
+            observation.structure_health.insert(id.0, stats.hp);
+            assault_structures.push(AssaultStructureInfo {
+                id: id.0,
+                owner_player_id: owner.0,
+                pos: *pos,
+                subclass: *subclass,
+            });
+            if *subclass == Subclass::Wall {
+                snapshot.wall_segments = snapshot.wall_segments.saturating_add(1);
+                snapshot.wall_total_health =
+                    snapshot.wall_total_health.saturating_add(stats.hp.max(0));
+                snapshot.wall_total_max_health = snapshot
+                    .wall_total_max_health
+                    .saturating_add(stats.base_hp.max(0));
+                observation.wall_ids.insert(id.0);
+                match template.0.as_str() {
+                    "Stockade" => snapshot.stockades = snapshot.stockades.saturating_add(1),
+                    "Palisade" => snapshot.palisades = snapshot.palisades.saturating_add(1),
+                    _ => {}
+                }
+            }
+            if *subclass == Subclass::Watchtower {
+                snapshot.watchtowers = snapshot.watchtowers.saturating_add(1);
+            }
+            if matches!(*subclass, Subclass::Wall | Subclass::Watchtower) {
+                observation.defensive_structure_ids.insert(id.0);
+            }
+            if *subclass == Subclass::Storage {
+                let stored = inventory
+                    .items
+                    .iter()
+                    .map(|item| item.quantity.max(0))
+                    .sum::<i32>();
+                observation.stored_items = observation.stored_items.saturating_add(stored);
+                snapshot.stored_resources_total =
+                    snapshot.stored_resources_total.saturating_add(stored);
+                snapshot.stored_gold = snapshot
+                    .stored_gold
+                    .saturating_add(inventory.get_total_gold());
+                snapshot.stored_food = snapshot.stored_food.saturating_add(
+                    inventory
+                        .items
+                        .iter()
+                        .filter(|item| item.class == FOOD)
+                        .map(|item| item.quantity.max(0))
+                        .sum::<i32>(),
+                );
+            }
+        } else {
+            snapshot.foundations = snapshot.foundations.saturating_add(1);
+            observation.foundation_ids.insert(id.0);
+            if matches!(*subclass, Subclass::Wall | Subclass::Watchtower) {
+                observation.defensive_foundation_ids.insert(id.0);
+            }
+        }
+    }
+
+    let mut living_villager_ids = BTreeSet::new();
+    for (owner, id, state, stats, inventory, assignment, dead) in queries.villager_query.iter() {
+        if owner.0 != player_id || !state.is_alive() || dead.is_some() || stats.hp <= 0 {
+            continue;
+        }
+        snapshot.villagers_alive = snapshot.villagers_alive.saturating_add(1);
+        living_villager_ids.insert(id.0);
+        if stats.base_damage.unwrap_or(0) > 0
+            || inventory
+                .items
+                .iter()
+                .any(|item| item.equipped && item.class == WEAPON)
+        {
+            snapshot.villagers_combat_capable = snapshot.villagers_combat_capable.saturating_add(1);
+            observation.combat_capable_villagers.insert(id.0);
+        }
+        observation.total_run_items = observation.total_run_items.saturating_add(
+            inventory
+                .items
+                .iter()
+                .map(|item| item.quantity.max(0))
+                .sum::<i32>(),
+        );
+        if let Some(assignment) = assignment {
+            observation
+                .villager_assignments
+                .insert(id.0, assignment.structure_id);
+        }
+    }
+    observation.villagers = living_villager_ids;
+
+    let assault_monoliths = queries
+        .monolith_query
+        .iter()
+        .filter(|(_, _, _, state, dead)| Structure::is_built(**state) && dead.is_none())
+        .map(|(id, pos, monolith, _, _)| {
+            (
+                id.0,
+                AssaultMonolithInfo {
+                    pos: *pos,
+                    sanctuary_level: monolith.sanctuary_level,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if let Some(level) = bound_monolith_id
+        .and_then(|id| assault_monoliths.get(&id))
+        .map(|monolith| monolith.sanctuary_level)
+    {
+        snapshot.sanctuary_level = level;
+        observation.sanctuary_level = level;
+    }
+    let settlement_anchor = hero_info
+        .and_then(|hero| {
+            select_personal_assault_anchor(
+                player_id,
+                hero,
+                spawn_positions,
+                &assault_structures,
+                &assault_monoliths,
+            )
+        })
+        .map(|anchor| {
+            (
+                anchor.pos,
+                anchor
+                    .sanctuary_level
+                    .map(sanctuary_full_radius)
+                    .unwrap_or(WEAK_SANCTUARY_RANGE),
+            )
+        });
+    snapshot.hero_near_settlement = hero_pos
+        .zip(settlement_anchor)
+        .map(|(hero, (anchor, radius))| Map::dist(hero, anchor) < radius)
+        .unwrap_or(false);
+    observation.near_settlement = snapshot.hero_near_settlement;
+
+    (snapshot, observation)
+}
+
+fn is_preparation_phase(phase: Option<CrisisPhase>) -> bool {
+    matches!(
+        phase,
+        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
+    )
+}
+
+fn record_crisis_preparation_observation(
+    telemetry: &mut CrisisBalanceTelemetry,
+    previous: Option<&CrisisBalanceObservation>,
+    current: &CrisisBalanceObservation,
+    offline_protected: bool,
+) {
+    telemetry.latest_near_settlement = current.near_settlement;
+    telemetry.latest_online = current.online;
+
+    let Some(previous) = previous else {
+        return;
+    };
+
+    if is_preparation_phase(previous.phase)
+        && is_preparation_phase(current.phase)
+        && current.online
+        && !offline_protected
+    {
+        let elapsed = current
+            .online_active_ticks
+            .saturating_sub(previous.online_active_ticks)
+            .max(0);
+        if current.near_settlement {
+            telemetry.preparation_actions.online_ticks_near_settlement = telemetry
+                .preparation_actions
+                .online_ticks_near_settlement
+                .saturating_add(elapsed);
+        } else {
+            telemetry
+                .preparation_actions
+                .online_ticks_away_from_settlement = telemetry
+                .preparation_actions
+                .online_ticks_away_from_settlement
+                .saturating_add(elapsed);
+        }
+
+        let actions = &mut telemetry.preparation_actions;
+
+        for structure_id in current
+            .defensive_foundation_ids
+            .difference(&previous.defensive_foundation_ids)
+        {
+            actions.record_defensive_structure_started(*structure_id, current.tick);
+        }
+
+        for structure_id in current
+            .completed_structure_ids
+            .difference(&previous.completed_structure_ids)
+        {
+            if current.defensive_structure_ids.contains(structure_id) {
+                actions.record_defensive_structure_completed(
+                    *structure_id,
+                    current.wall_ids.contains(structure_id),
+                    current.tick,
+                );
+            } else {
+                actions.structures_built = actions.structures_built.saturating_add(1);
+                actions.mark_action_at(current.tick);
+            }
+        }
+
+        for (structure_id, hp) in &current.structure_health {
+            let repaired = previous.completed_structure_ids.contains(structure_id)
+                && current.completed_structure_ids.contains(structure_id)
+                && previous
+                    .structure_health
+                    .get(structure_id)
+                    .is_some_and(|previous_hp| *hp > *previous_hp);
+            if repaired {
+                actions.record_repair_completed(*structure_id, current.tick);
+            }
+        }
+
+        for item_id in current
+            .equipped_item_ids
+            .difference(&previous.equipped_item_ids)
+        {
+            actions.record_equipment_change(*item_id, current.tick);
+        }
+
+        // Establish each high-water baseline from the prior sample before
+        // observing the current value. This counts genuine new supply once
+        // while ignoring transfer-out/transfer-back loops.
+        actions.observe_healing_items(previous.healing_items, previous.tick);
+        actions.observe_healing_items(current.healing_items, current.tick);
+
+        for villager_id in current.villagers.difference(&previous.villagers) {
+            actions.record_villager_recruited(*villager_id, current.tick);
+        }
+        for (villager_id, structure_id) in &current.villager_assignments {
+            if previous.villager_assignments.get(villager_id) != Some(structure_id) {
+                actions.record_villager_assignment_changed(*villager_id, current.tick);
+            }
+        }
+
+        actions.observe_sanctuary_level(previous.sanctuary_level, previous.tick);
+        actions.observe_sanctuary_level(current.sanctuary_level, current.tick);
+        actions.observe_total_run_items(previous.total_run_items, previous.tick);
+        actions.observe_total_run_items(current.total_run_items, current.tick);
+        actions.observe_stored_items(previous.stored_items, previous.tick);
+        actions.observe_stored_items(current.stored_items, current.tick);
+    }
+
+    // Warning response is observation, not a preparation-phase gate: a player
+    // may receive Signs while away and return during Signs or Pressure, before
+    // the formal Preparing phase begins.
+    let warning_was_away = matches!(telemetry.warnings.signs_near_settlement, Some(false))
+        || matches!(telemetry.warnings.preparing_near_settlement, Some(false))
+        || matches!(
+            telemetry.warnings.assault_ready_near_settlement,
+            Some(false)
+        );
+    if warning_was_away && !previous.near_settlement && current.near_settlement {
+        telemetry
+            .preparation_actions
+            .returned_to_settlement_after_warning = true;
+    }
+}
+
+/// Samples authoritative state after crisis evaluation. It writes only the
+/// runtime telemetry resources and never feeds a value back into gameplay.
+pub(crate) fn crisis_balance_snapshot_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
+    spawn_positions: Res<SpawnPositions>,
+    crisis_state: Res<SettlementCrisisState>,
+    config: Res<CrisisBalanceTelemetryConfig>,
+    mut telemetry_state: ResMut<CrisisBalanceTelemetryState>,
+    mut observation_state: ResMut<CrisisBalanceObservationState>,
+    snapshot_queries: CrisisBalanceSnapshotQueries,
+) {
+    // Detailed preparation deltas require a full inventory/unit/structure
+    // observation each update. Production keeps this analysis sampler off;
+    // explicit headless balance runs opt in with a bounded sample interval.
+    if config.sample_interval_ticks.is_none() {
+        return;
+    }
+    let sample_interval = config.sample_interval_ticks.unwrap_or(1).max(1);
+    for (player_id, crisis) in crisis_state.iter() {
+        let online = clients.is_player_online(*player_id);
+        let hero_alive = snapshot_queries
+            .hero_query
+            .iter()
+            .find(|(owner, _, _, _, _, _, _, _, _, _, _)| owner.0 == *player_id)
+            .map(|(_, _, _, _, _, stats, _, _, state, dead, true_death)| {
+                state.is_alive() && stats.hp > 0 && dead.is_none() && true_death.is_none()
+            })
+            .unwrap_or(false);
+        {
+            let telemetry = telemetry_state.entry(*player_id).or_default();
+            let previous_phase = telemetry.latest_phase;
+            if let (Some(previous_phase), Some(previous_alive)) =
+                (previous_phase, telemetry.latest_hero_alive)
+            {
+                telemetry.assault_outcome.record_hero_lifecycle_transition(
+                    Some(previous_phase),
+                    Some(crisis.phase),
+                    previous_alive,
+                    hero_alive,
+                );
+            }
+            telemetry.latest_phase = Some(crisis.phase);
+            telemetry.latest_hero_alive = Some(hero_alive);
+            if crisis.phase == CrisisPhase::Resolved
+                && telemetry.assault_outcome.hero_alive_at_resolution.is_none()
+            {
+                telemetry.assault_outcome.hero_alive_at_resolution = Some(hero_alive);
+            }
+            if is_player_offline_protected(*player_id, &presence)
+                && crisis.phase < CrisisPhase::AssaultActive
+            {
+                telemetry.assault_outcome.safe_logout_before_assault = true;
+            }
+            if telemetry.latest_online
+                && !online
+                && (crisis.phase == CrisisPhase::AssaultActive
+                    || previous_phase == Some(CrisisPhase::AssaultActive))
+            {
+                telemetry.assault_outcome.ordinary_disconnect_during_assault = true;
+            }
+            if crisis.phase == CrisisPhase::AssaultActive
+                && !telemetry.latest_online
+                && online
+                && telemetry.assault_outcome.ordinary_disconnect_during_assault
+            {
+                telemetry.assault_outcome.reconnected_during_assault = true;
+            }
+            telemetry.latest_online = online;
+        }
+
+        let should_sample = observation_state
+            .0
+            .get(player_id)
+            .map(|previous| {
+                previous.phase != Some(crisis.phase)
+                    || game_tick.0.saturating_sub(previous.tick) >= sample_interval
+            })
+            .unwrap_or(true);
+        if !should_sample {
+            continue;
+        }
+        let (mut snapshot, mut current) =
+            crisis_preparation_snapshot(*player_id, crisis, &spawn_positions, &snapshot_queries);
+        snapshot.game_tick = game_tick.0;
+        current.tick = game_tick.0;
+        current.online = online;
+
+        let previous = observation_state.0.remove(player_id);
+        let telemetry = telemetry_state.entry(*player_id).or_default();
+        record_crisis_preparation_observation(
+            telemetry,
+            previous.as_ref(),
+            &current,
+            is_player_offline_protected(*player_id, &presence),
+        );
+
+        match crisis.phase {
+            CrisisPhase::Preparing => {
+                telemetry
+                    .preparation_snapshots
+                    .preparing
+                    .get_or_insert_with(|| snapshot.clone());
+            }
+            CrisisPhase::AssaultReady => {
+                telemetry
+                    .preparation_snapshots
+                    .assault_ready
+                    .get_or_insert_with(|| snapshot.clone());
+            }
+            CrisisPhase::AssaultActive => {
+                if telemetry.preparation_snapshots.assault_launch.is_none() {
+                    telemetry.preparation_actions.record_launch_readiness(
+                        snapshot.healing_items,
+                        current.combat_capable_villagers.iter().copied(),
+                    );
+                    telemetry.preparation_snapshots.assault_launch = Some(snapshot.clone());
+                    telemetry.assault_outcome.villagers_at_launch = snapshot.villagers_alive;
+                    telemetry.assault_outcome.structures_at_launch = snapshot.completed_structures;
+                    telemetry.assault_outcome.wall_segments_at_launch = snapshot.wall_segments;
+                }
+                telemetry.assault_outcome.assault_units_remaining = crisis
+                    .assault_unit_ids
+                    .len()
+                    .saturating_sub(crisis.assault_defeated_unit_ids.len())
+                    as i32;
+                telemetry.assault_outcome.assault_units_defeated =
+                    crisis.assault_defeated_unit_ids.len() as i32;
+            }
+            CrisisPhase::Resolved => {
+                // Captured below. The first resolved sample replaces the latest
+                // pre-resolution/end-of-run sample and is then preserved.
+            }
+            _ => {}
+        }
+        if telemetry
+            .preparation_snapshots
+            .resolution_or_end
+            .as_ref()
+            .map(|existing| existing.phase.as_str())
+            != Some(balance_phase_name(CrisisPhase::Resolved))
+        {
+            telemetry.preparation_snapshots.resolution_or_end = Some(snapshot);
+        }
+
+        if let Some(interval) = config.sample_interval_ticks.filter(|value| *value > 0) {
+            if telemetry
+                .pressure_snapshots
+                .periodic
+                .last()
+                .map(|sample| game_tick.0.saturating_sub(sample.game_tick) >= interval)
+                .unwrap_or(true)
+            {
+                telemetry
+                    .pressure_snapshots
+                    .periodic
+                    .push(CrisisPressureSnapshot {
+                        game_tick: game_tick.0,
+                        online_active_ticks: crisis.online_active_ticks,
+                        phase: balance_phase_name(crisis.phase).to_string(),
+                        breakdown: telemetry.latest_pressure,
+                    });
+            }
+        }
+
+        observation_state.0.insert(*player_id, current);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssaultAnchorKind {
+    BoundMonolith,
+    PrimaryStructure,
+    BuiltStructure,
+    HeroFallback,
+}
+
+impl AssaultAnchorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            AssaultAnchorKind::BoundMonolith => "bound_monolith",
+            AssaultAnchorKind::PrimaryStructure => "primary_structure",
+            AssaultAnchorKind::BuiltStructure => "built_structure",
+            AssaultAnchorKind::HeroFallback => "hero_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssaultAnchor {
+    id: i32,
+    pos: Position,
+    kind: AssaultAnchorKind,
+    sanctuary_level: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultHeroInfo {
+    id: i32,
+    pos: Position,
+    bound_monolith_id: Option<i32>,
+    valid_run: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultStructureInfo {
+    id: i32,
+    owner_player_id: i32,
+    pos: Position,
+    subclass: Subclass,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssaultMonolithInfo {
+    pos: Position,
+    sanctuary_level: i32,
+}
+
+#[derive(Debug, Clone)]
+struct AssaultUnitSnapshot {
+    id: i32,
+    attribution: CrisisAssaultUnit,
+    normally_dead: bool,
+}
+
+fn select_personal_assault_anchor(
+    player_id: i32,
+    hero: AssaultHeroInfo,
+    spawn_positions: &SpawnPositions,
+    structures: &[AssaultStructureInfo],
+    monoliths: &HashMap<i32, AssaultMonolithInfo>,
+) -> Option<AssaultAnchor> {
+    if let Some(bound_id) = hero.bound_monolith_id {
+        if let Some(monolith) = monoliths.get(&bound_id) {
+            return Some(AssaultAnchor {
+                id: bound_id,
+                pos: monolith.pos,
+                kind: AssaultAnchorKind::BoundMonolith,
+                sanctuary_level: Some(monolith.sanctuary_level),
+            });
+        }
+    }
+
+    let home = spawn_positions.get(&player_id).copied().unwrap_or(hero.pos);
+    let mut owned = structures
+        .iter()
+        .filter(|structure| structure.owner_player_id == player_id)
+        .copied()
+        .collect::<Vec<_>>();
+    owned.sort_by_key(|structure| {
+        let primary_priority = match structure.subclass {
+            Subclass::Campfire => 0,
+            Subclass::Storage => 1,
+            _ => 2,
+        };
+        (
+            primary_priority,
+            Map::dist(home, structure.pos),
+            structure.id,
+        )
+    });
+
+    if let Some(primary) = owned
+        .iter()
+        .find(|structure| matches!(structure.subclass, Subclass::Campfire | Subclass::Storage))
+    {
+        return Some(AssaultAnchor {
+            id: primary.id,
+            pos: primary.pos,
+            kind: AssaultAnchorKind::PrimaryStructure,
+            sanctuary_level: None,
+        });
+    }
+
+    if let Some(structure) = owned.first() {
+        return Some(AssaultAnchor {
+            id: structure.id,
+            pos: structure.pos,
+            kind: AssaultAnchorKind::BuiltStructure,
+            sanctuary_level: None,
+        });
+    }
+
+    // A real allocated run always has a SpawnPositions entry. Requiring that
+    // evidence prevents a partially constructed or stale hero row from turning
+    // into a settlement anchor while retaining current-position compatibility.
+    spawn_positions
+        .contains_key(&player_id)
+        .then_some(AssaultAnchor {
+            id: hero.id,
+            pos: hero.pos,
+            kind: AssaultAnchorKind::HeroFallback,
+            sanctuary_level: None,
+        })
+}
+
+fn personal_assault_spawn_positions(
+    owner_player_id: i32,
+    anchor: AssaultAnchor,
+    count: usize,
+    occupied: &HashSet<Position>,
+    structures: &[AssaultStructureInfo],
+    map: &Map,
+) -> Option<Vec<Position>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+
+    let (minimum_radius, maximum_radius) = match anchor.sanctuary_level {
+        Some(level) => {
+            let weak_radius = sanctuary_weak_radius(level) as i32;
+            (
+                weak_radius + PERSONAL_ASSAULT_SANCTUARY_MIN_OFFSET,
+                weak_radius + PERSONAL_ASSAULT_SANCTUARY_MAX_OFFSET,
+            )
+        }
+        None => (
+            PERSONAL_ASSAULT_FALLBACK_MIN_RADIUS,
+            PERSONAL_ASSAULT_FALLBACK_MAX_RADIUS,
+        ),
+    };
+
+    let mut candidates = Vec::new();
+    for radius in minimum_radius..=maximum_radius {
+        candidates.extend(Map::ring((anchor.pos.x, anchor.pos.y), radius));
+    }
+    candidates.shuffle(&mut rand::thread_rng());
+
+    let mut selected = Vec::with_capacity(count);
+    for (x, y) in candidates
+        .into_iter()
+        .take(PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT)
+    {
+        let pos = Position { x, y };
+        if !Map::is_valid_pos((x, y))
+            || !Map::is_passable(x, y, map)
+            || occupied.contains(&pos)
+            || selected.contains(&pos)
+        {
+            continue;
+        }
+
+        // Avoid putting a personal assault in the immediate footprint of a
+        // neighbouring settlement. Helpers can still engage after the spawn.
+        if structures.iter().any(|structure| {
+            structure.owner_player_id != owner_player_id
+                && Map::dist(pos, structure.pos) < PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE
+        }) {
+            continue;
+        }
+
+        if Map::find_path(
+            pos,
+            anchor.pos,
+            map,
+            NPC_PLAYER_ID,
+            Vec::new(),
+            true,
+            false,
+            false,
+            true,
+            true,
+        )
+        .is_none()
+        {
+            continue;
+        }
+
+        selected.push(pos);
+        if selected.len() == count {
+            return Some(selected);
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AssaultSpawnError {
+    EmptyComposition,
+    PositionCountMismatch,
+    MissingTemplate(String),
+}
+
+fn spawn_goblin_assault(
+    owner_player_id: i32,
+    assault_id: u64,
+    spawn_generation: u32,
+    unit_templates: &[String],
+    spawn_positions: &[Position],
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
+) -> Result<Vec<i32>, AssaultSpawnError> {
+    if unit_templates.is_empty() {
+        return Err(AssaultSpawnError::EmptyComposition);
+    }
+    if unit_templates.len() != spawn_positions.len() {
+        return Err(AssaultSpawnError::PositionCountMismatch);
+    }
+    for template in unit_templates {
+        if !templates
+            .obj_templates
+            .iter()
+            .any(|candidate| candidate.template == *template)
+        {
+            return Err(AssaultSpawnError::MissingTemplate(template.clone()));
+        }
+    }
+
+    // Template and position validation happens before the first deferred spawn,
+    // so this loop is an all-or-nothing logical operation in the current ECS.
+    let mut spawned_ids = Vec::with_capacity(unit_templates.len());
+    for (template, spawn_pos) in unit_templates.iter().zip(spawn_positions.iter()) {
+        let (entity, id, _, _) = Encounter::spawn_npc(
+            NPC_PLAYER_ID,
+            *spawn_pos,
+            template.clone(),
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+        commands.entity(entity).try_insert((
+            CrisisAssaultUnit {
+                owner_player_id,
+                assault_id,
+                spawn_generation,
+            },
+            Viewshed {
+                range: PERSONAL_ASSAULT_VISION,
+            },
+        ));
+        commands.trigger(NewObj { entity });
+        spawned_ids.push(id.0);
+    }
+
+    run_spawned_objs
+        .entry(owner_player_id)
+        .or_default()
+        .extend(spawned_ids.iter().copied());
+    Ok(spawned_ids)
+}
+
+fn clear_assault_target_references(
+    removed_ids: &HashSet<i32>,
+    commands: &mut Commands,
+    target_query: &Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
+) {
+    for (entity, target, visible_target, task_target) in target_query.iter() {
+        if target
+            .map(|target| removed_ids.contains(&target.id))
+            .unwrap_or(false)
+        {
+            commands.entity(entity).try_remove::<Target>();
+        }
+        if visible_target
+            .map(|target| removed_ids.contains(&target.target))
+            .unwrap_or(false)
+        {
+            commands
+                .entity(entity)
+                .try_insert(VisibleTarget::new(NO_TARGET));
+        }
+        if task_target
+            .map(|target| removed_ids.contains(&target.target))
+            .unwrap_or(false)
+        {
+            commands
+                .entity(entity)
+                .try_insert(TaskTarget::new(NO_TARGET));
+        }
+    }
+}
+
+fn record_personal_assault_resolution(
+    player_id: i32,
+    game_tick: i32,
+    crisis: &mut SettlementCrisis,
+    run_score_state: &mut RunScoreState,
+) -> bool {
+    if crisis.resolution_recorded || crisis.phase == CrisisPhase::Resolved {
+        return false;
+    }
+
+    crisis.resolution_recorded = true;
+    crisis.resolved_at_tick = Some(game_tick);
+    crisis.phase = CrisisPhase::Resolved;
+    crisis.phase_started_tick = game_tick;
+    crisis.phase_online_ticks = 0;
+    crisis.warning_active = false;
+    crisis.assault_unit_ids.clear();
+    crisis.assault_recovery_required = false;
+    run_score_state
+        .entry(player_id)
+        .or_insert_with(|| PlayerRunScore {
+            start_tick: game_tick,
+            ..PlayerRunScore::default()
+        })
+        .personal_crises_resolved += 1;
+
+    info!(
+        "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} game_tick={} completion_count={}",
+        player_id,
+        crisis.phase,
+        crisis.assault_id,
+        crisis.assault_spawn_generation,
+        game_tick,
+        run_score_state
+            .get(&player_id)
+            .map(|score| score.personal_crises_resolved)
+            .unwrap_or(0)
+    );
+    true
+}
+
+/// Owns the Checkpoint 3 transition from ready through committed launch and
+/// normal-combat resolution. A successful launch is the commitment point: an
+/// ordinary disconnect cannot remove, reset, or rebuild the active assault.
+fn personal_crisis_assault_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
+    map: Res<Map>,
+    templates: Res<Templates>,
+    (
+        mut ids,
+        mut entity_map,
+        mut crisis_state,
+        mut next_assault_id,
+        mut run_spawned_objs,
+        mut run_score_state,
+        mut crisis_telemetry_state,
+        mut balance_telemetry_state,
+        balance_telemetry_config,
+        mut balance_observation_state,
+    ): (
+        ResMut<Ids>,
+        ResMut<EntityObjMap>,
+        ResMut<SettlementCrisisState>,
+        ResMut<NextCrisisAssaultId>,
+        ResMut<RunSpawnedObjs>,
+        ResMut<RunScoreState>,
+        ResMut<CrisisTelemetryState>,
+        ResMut<CrisisBalanceTelemetryState>,
+        Res<CrisisBalanceTelemetryConfig>,
+        ResMut<CrisisBalanceObservationState>,
+    ),
+    spawn_positions: Res<SpawnPositions>,
+    balance_snapshot_queries: CrisisBalanceSnapshotQueries,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &State,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+            Option<&BoundMonolith>,
+        ),
+        With<SubclassHero>,
+    >,
+    structure_query: Query<
+        (
+            &PlayerId,
+            &Id,
+            &Position,
+            &Subclass,
+            &State,
+            Option<&StateDead>,
+        ),
+        With<ClassStructure>,
+    >,
+    monolith_query: Query<(&Id, &Position, &Monolith, &State, Option<&StateDead>)>,
+    occupied_query: Query<&Position>,
+    assault_unit_query: Query<(&Id, &CrisisAssaultUnit, &State, Option<&StateDead>)>,
+    target_query: Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
+) {
+    let current_tick = game_tick.0;
+    let mut heroes = HashMap::new();
+    for (player_id, id, pos, state, state_dead, true_death, bound_monolith) in hero_query.iter() {
+        if !player_id.is_human() {
+            continue;
+        }
+        let candidate = AssaultHeroInfo {
+            id: id.0,
+            pos: *pos,
+            bound_monolith_id: bound_monolith.map(|bound| bound.id),
+            valid_run: state.is_alive() && state_dead.is_none() && true_death.is_none(),
+        };
+        heroes
+            .entry(player_id.0)
+            .and_modify(|existing: &mut AssaultHeroInfo| {
+                if candidate.valid_run && !existing.valid_run {
+                    *existing = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let structures = structure_query
+        .iter()
+        .filter_map(|(player_id, id, pos, subclass, state, dead)| {
+            (player_id.is_human() && Structure::is_built(*state) && dead.is_none()).then_some(
+                AssaultStructureInfo {
+                    id: id.0,
+                    owner_player_id: player_id.0,
+                    pos: *pos,
+                    subclass: *subclass,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let monoliths = monolith_query
+        .iter()
+        .filter_map(|(id, pos, monolith, state, dead)| {
+            (Structure::is_built(*state) && dead.is_none()).then_some((
+                id.0,
+                AssaultMonolithInfo {
+                    pos: *pos,
+                    sanctuary_level: monolith.sanctuary_level,
+                },
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let occupied = occupied_query.iter().copied().collect::<HashSet<_>>();
+    let unit_snapshots = assault_unit_query
+        .iter()
+        .map(|(id, attribution, state, dead)| AssaultUnitSnapshot {
+            id: id.0,
+            attribution: *attribution,
+            // Normal combat writes State::Dead synchronously and queues
+            // StateDead. Observing either closes the same-update gap without
+            // treating controlled cleanup (which writes neither) as defeat.
+            normally_dead: *state == State::Dead || dead.is_some(),
+        })
+        .collect::<Vec<_>>();
+
+    let player_ids = crisis_state.keys().copied().collect::<Vec<_>>();
+    for player_id in player_ids {
+        let online = clients.is_player_online(player_id);
+        let hero = heroes.get(&player_id).copied();
+        let valid_run = hero.map(|value| value.valid_run).unwrap_or(false);
+        let Some(crisis) = crisis_state.get_mut(&player_id) else {
+            continue;
+        };
+
+        // An active assault is committed world state and deliberately keeps
+        // running after an ordinary disconnect. Protection is only a launch
+        // barrier for the pre-active state; the presence reconciler repairs
+        // the impossible protected+active invariant separately.
+        if crisis.phase != CrisisPhase::AssaultActive
+            && is_player_offline_protected(player_id, &presence)
+        {
+            continue;
+        }
+
+        match crisis.phase {
+            CrisisPhase::AssaultReady => {
+                // Ready state never reuses a prior logical assault. Once an ID
+                // is committed the crisis must already be AssaultActive (or
+                // Resolved); anything else requires explicit recovery rather
+                // than an automatic second wave. Detect this before presence,
+                // anchor, or stale-unit gates so corruption cannot hide behind
+                // an ordinary disconnect or another pre-launch prerequisite.
+                if crisis.assault_id.is_some() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={:?} generation={} reason=ready_with_committed_assault game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation,
+                            current_tick
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+
+                if !online || !valid_run {
+                    continue;
+                }
+                if !crisis.assault_grace_logged {
+                    info!(
+                        "personal_crisis_assault_grace_started player_id={} phase={:?} assault_id={:?} game_tick={} online=true grace_ticks={} max_wait_ticks={}",
+                        player_id,
+                        crisis.phase,
+                        crisis.assault_id,
+                        current_tick,
+                        ASSAULT_READY_GRACE_TICKS,
+                        ASSAULT_MAX_ONLINE_WAIT_TICKS
+                    );
+                    crisis.assault_grace_logged = true;
+                }
+                if !assault_launch_allowed(crisis.phase_online_ticks, current_tick) {
+                    continue;
+                }
+
+                if unit_snapshots
+                    .iter()
+                    .any(|unit| unit.attribution.owner_player_id == player_id)
+                {
+                    if !crisis.assault_spawn_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_blocked player_id={} phase={:?} assault_id={:?} generation={} reason=prior_attributed_units game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                }
+
+                let Some(hero) = hero else {
+                    continue;
+                };
+                let Some(anchor) = select_personal_assault_anchor(
+                    player_id,
+                    hero,
+                    &spawn_positions,
+                    &structures,
+                    &monoliths,
+                ) else {
+                    if !crisis.assault_anchor_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_blocked player_id={} phase={:?} assault_id={:?} reason=no_settlement_anchor game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            current_tick
+                        );
+                        crisis.assault_anchor_warning_logged = true;
+                    }
+                    continue;
+                };
+                crisis.assault_anchor_warning_logged = false;
+
+                let unit_templates = GOBLIN_ASSAULT_COMPOSITION
+                    .iter()
+                    .map(|template| (*template).to_string())
+                    .collect::<Vec<_>>();
+                let Some(unit_positions) = personal_assault_spawn_positions(
+                    player_id,
+                    anchor,
+                    unit_templates.len(),
+                    &occupied,
+                    &structures,
+                    &map,
+                ) else {
+                    if !crisis.assault_spawn_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_failed player_id={} phase={:?} assault_id={:?} generation={} reason=no_valid_spawn anchor_kind={} anchor_id={} anchor=({}, {}) game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_id,
+                            crisis.assault_spawn_generation.saturating_add(1),
+                            anchor.kind.as_str(),
+                            anchor.id,
+                            anchor.pos.x,
+                            anchor.pos.y,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                };
+
+                let Some(assault_id) = next_assault_id.allocate() else {
+                    if !crisis.assault_spawn_warning_logged {
+                        error!(
+                            "personal_crisis_assault_spawn_failed player_id={} phase={:?} reason=assault_id_exhausted game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                };
+                let generation = crisis.assault_spawn_generation.saturating_add(1);
+                match spawn_goblin_assault(
+                    player_id,
+                    assault_id,
+                    generation,
+                    &unit_templates,
+                    &unit_positions,
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
+                    &mut run_spawned_objs,
+                ) {
+                    Ok(spawned_ids) => {
+                        // The periodic sampler normally runs after this system
+                        // so it can capture launch readiness and outcomes from
+                        // AssaultActive. Preserve that ordering, but close the
+                        // final Ready interval at the successful launch
+                        // commitment point before changing the phase. This is
+                        // opt-in and runs at most once per committed assault.
+                        if balance_telemetry_config.sample_interval_ticks.is_some() {
+                            let (_, mut current) = crisis_preparation_snapshot(
+                                player_id,
+                                crisis,
+                                &spawn_positions,
+                                &balance_snapshot_queries,
+                            );
+                            current.tick = current_tick;
+                            current.online = online;
+                            let previous = balance_observation_state.0.remove(&player_id);
+                            let telemetry = balance_telemetry_state.entry(player_id).or_default();
+                            record_crisis_preparation_observation(
+                                telemetry,
+                                previous.as_ref(),
+                                &current,
+                                is_player_offline_protected(player_id, &presence),
+                            );
+                            balance_observation_state.0.insert(player_id, current);
+                        }
+
+                        crisis.assault_id = Some(assault_id);
+                        crisis.assault_started_tick = Some(current_tick);
+                        crisis.assault_online_ticks = 0;
+                        crisis.assault_unit_ids = spawned_ids;
+                        crisis.assault_defeated_unit_ids.clear();
+                        crisis.assault_spawn_generation = generation;
+                        crisis.phase = CrisisPhase::AssaultActive;
+                        crisis.phase_started_tick = current_tick;
+                        crisis.phase_online_ticks = 0;
+                        crisis.assault_recovery_required = false;
+                        crisis.assault_spawn_warning_logged = false;
+                        crisis_telemetry_state
+                            .entry(player_id)
+                            .or_default()
+                            .record_launch(current_tick);
+                        let balance = balance_telemetry_state.entry(player_id).or_default();
+                        balance.record_phase(
+                            CrisisPhase::AssaultActive,
+                            current_tick,
+                            crisis.online_active_ticks,
+                        );
+                        balance
+                            .assault_outcome
+                            .record_launch_units(&crisis.assault_unit_ids);
+                        info!(
+                            "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            current_tick,
+                            crisis.assault_unit_ids.len(),
+                            unit_templates,
+                            anchor.kind.as_str(),
+                            anchor.id,
+                            anchor.pos.x,
+                            anchor.pos.y,
+                            unit_positions
+                        );
+                    }
+                    Err(error) => {
+                        if !crisis.assault_spawn_warning_logged {
+                            warn!(
+                                "personal_crisis_assault_spawn_failed player_id={} phase={:?} assault_id={} generation={} error={:?} game_tick={}",
+                                player_id,
+                                crisis.phase,
+                                assault_id,
+                                generation,
+                                error,
+                                current_tick
+                            );
+                            crisis.assault_spawn_warning_logged = true;
+                        }
+                    }
+                }
+            }
+            CrisisPhase::AssaultActive => {
+                let Some(assault_id) = crisis.assault_id else {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id=None generation={} reason=missing_assault_id game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            crisis.assault_spawn_generation,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                };
+                let generation = crisis.assault_spawn_generation;
+
+                if crisis.assault_unit_ids.is_empty() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={} generation={} reason=no_tracked_units game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+
+                // Record each normally-dead attributed object once. Ordinary
+                // disconnect and controlled despawn are not death evidence.
+                for id in crisis.assault_unit_ids.clone() {
+                    if crisis.assault_defeated_unit_ids.contains(&id) {
+                        continue;
+                    }
+                    let normally_dead = unit_snapshots.iter().any(|unit| {
+                        unit.id == id
+                            && unit.attribution.owner_player_id == player_id
+                            && unit.attribution.assault_id == assault_id
+                            && unit.attribution.spawn_generation == generation
+                            && unit.normally_dead
+                    });
+                    if normally_dead {
+                        crisis.assault_defeated_unit_ids.push(id);
+                    }
+                }
+
+                let missing_expected_ids = crisis
+                    .assault_unit_ids
+                    .iter()
+                    .filter(|id| !crisis.assault_defeated_unit_ids.contains(id))
+                    .filter(|id| {
+                        !unit_snapshots.iter().any(|unit| {
+                            unit.id == **id
+                                && unit.attribution.owner_player_id == player_id
+                                && unit.attribution.assault_id == assault_id
+                                && unit.attribution.spawn_generation == generation
+                        })
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+
+                if !missing_expected_ids.is_empty() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={} generation={} reason=expected_unit_missing_without_normal_death missing_ids={:?} game_tick={} online={} valid_run={}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            missing_expected_ids,
+                            current_tick,
+                            online,
+                            valid_run
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+                crisis.assault_recovery_required = false;
+
+                if crisis
+                    .assault_unit_ids
+                    .iter()
+                    .all(|id| crisis.assault_defeated_unit_ids.contains(id))
+                {
+                    clear_assault_target_references(
+                        &crisis
+                            .assault_unit_ids
+                            .iter()
+                            .copied()
+                            .collect::<HashSet<_>>(),
+                        &mut commands,
+                        &target_query,
+                    );
+                    if record_personal_assault_resolution(
+                        player_id,
+                        current_tick,
+                        crisis,
+                        &mut run_score_state,
+                    ) {
+                        crisis_telemetry_state
+                            .entry(player_id)
+                            .or_default()
+                            .record_resolution(current_tick);
+                        let balance = balance_telemetry_state.entry(player_id).or_default();
+                        balance.record_phase(
+                            CrisisPhase::Resolved,
+                            current_tick,
+                            crisis.online_active_ticks,
+                        );
+                        balance.assault_outcome.assault_resolved = true;
+                        balance.assault_outcome.assault_units_defeated = crisis
+                            .assault_defeated_unit_ids
+                            .len()
+                            .try_into()
+                            .unwrap_or(i32::MAX);
+                        balance.assault_outcome.assault_units_remaining = 0;
+                        balance.assault_outcome.assault_duration_ticks = crisis
+                            .assault_started_tick
+                            .map(|started| current_tick.saturating_sub(started));
+                        balance.assault_outcome.resolved_while_owner_offline = !online;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // Watches for the initial enemy kills and chains boar/crab into spider spawns
 fn initial_encounter_system(
     mut commands: Commands,
@@ -10876,24 +15196,52 @@ fn initial_encounter_system(
     mut game_events: ResMut<GameEvents>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
-    mut crisis_state: ResMut<CrisisState>,
+    mut intro_encounter_state: ResMut<IntroEncounterState>,
     objectives: Res<Objectives>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     dead_query: Query<&Id, With<StateDead>>,
+    hero_query: Query<
+        (&PlayerId, &State, Option<&StateDead>, Option<&TrueDeath>),
+        With<SubclassHero>,
+    >,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
     }
 
     let dead_ids: std::collections::HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
+    let live_player_ids: HashSet<i32> = hero_query
+        .iter()
+        .filter_map(|(player_id, state, state_dead, true_death)| {
+            (player_id.is_human()
+                && state.is_alive()
+                && state_dead.is_none()
+                && true_death.is_none())
+            .then_some(player_id.0)
+        })
+        .collect();
 
     for (player_id, entry) in initial_encounter_state.iter_mut() {
+        if is_player_offline_protected(*player_id, &presence) {
+            continue;
+        }
+
+        // True Death cleanup and encounter spawning can otherwise share an
+        // Update. Since spawns are deferred, a newly queued hostile would not
+        // be visible to that cleanup sweep and could survive at a recycled
+        // start location. Ordinary-dead and absent heroes also pause the chain.
+        if !live_player_ids.contains(player_id) {
+            continue;
+        }
+
         let Some(intro_entry) = player_intro_state.get_mut(player_id) else {
             continue;
         };
 
-        let crisis = crisis_state
+        let intro_progress = intro_encounter_state
             .entry(*player_id)
-            .or_insert_with(PlayerCrisis::default);
+            .or_insert_with(PlayerIntroEncounters::default);
         let all_opening_enemies_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
 
         if !intro_entry.shipwreck_chain_started && game_tick.0 >= entry.first_rat_spawn_tick {
@@ -10970,7 +15318,7 @@ fn initial_encounter_system(
         }
 
         // Phase 0: waiting for both opening enemies to die, then spawn boar/crab
-        if !crisis.initial_encounter {
+        if !intro_progress.initial_encounter {
             if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_dead {
                 let npc_id = ids.new_obj_id();
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
@@ -10985,7 +15333,8 @@ fn initial_encounter_system(
                 );
                 commands.trigger(NewObj { entity });
                 entry.phase1_npc_id = Some(npc_id);
-                crisis.initial_encounter = true;
+                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
+                intro_progress.initial_encounter = true;
                 info!(
                     "Initial Encounter: spawning {} after opening enemies killed for player {}",
                     entry.phase1_spawn, player_id
@@ -10995,10 +15344,10 @@ fn initial_encounter_system(
         }
 
         // Phase 1: waiting for the boar/crab to die → spawn spider
-        if !crisis.spider_encounter {
+        if !intro_progress.spider_encounter {
             if let Some(phase1_id) = entry.phase1_npc_id {
                 if game_tick.0 >= entry.spider_unlock_tick && dead_ids.contains(&phase1_id) {
-                    let (entity, _, _, _) = Encounter::spawn_npc(
+                    let (entity, spider_id, _, _) = Encounter::spawn_npc(
                         NPC_PLAYER_ID,
                         entry.spawn_pos,
                         "Spider".to_string(),
@@ -11008,7 +15357,11 @@ fn initial_encounter_system(
                         &templates,
                     );
                     commands.trigger(NewObj { entity });
-                    crisis.spider_encounter = true;
+                    run_spawned_objs
+                        .entry(*player_id)
+                        .or_default()
+                        .push(spider_id.0);
+                    intro_progress.spider_encounter = true;
                     info!(
                         "Initial Encounter: spawning Spider after {} killed for player {}",
                         entry.phase1_spawn, player_id
@@ -11030,14 +15383,19 @@ fn wolf_pack_system(
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // Check every 10 ticks (1 second)
     if game_tick.0 % 10 != 0 {
         return;
     }
 
-    for (_id, player_id, pos) in hero_query.iter() {
+    for (id, player_id, pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
             continue;
         }
@@ -11094,7 +15452,7 @@ fn wolf_pack_system(
                         // Spawn 2-3 wolves
                         let num_wolves = rand::thread_rng().gen_range(2..=3);
                         for _ in 0..num_wolves {
-                            Encounter::spawn_npc(
+                            let (_, npc_id, _, _) = Encounter::spawn_npc(
                                 NPC_PLAYER_ID,
                                 wolf_spawn,
                                 "Wolf".to_string(),
@@ -11103,6 +15461,10 @@ fn wolf_pack_system(
                                 &mut entity_map,
                                 &templates,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id.0);
                         }
                         spawned = true;
                         break;
@@ -11135,7 +15497,9 @@ fn goblin_raid_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     // Check every 30 ticks (3 seconds)
     if game_tick.0 % 30 != 0 {
@@ -11145,6 +15509,9 @@ fn goblin_raid_system(
     let mut gold_stored: HashMap<i32, (i32, Position, i32)> = HashMap::new();
 
     for (id, player_id, pos, inventory, _storage) in storage_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Skip players who have already triggered goblin raid
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.goblin_raid {
@@ -11186,8 +15553,9 @@ fn goblin_raid_system(
                         if path.len() < 20 {
                             // Spawn 2 Wolf Riders that steal gold/weapons
                             for _ in 0..2 {
+                                let npc_id = ids.new_obj_id();
                                 Encounter::spawn_steal_crisis(
-                                    ids.new_obj_id(),
+                                    npc_id,
                                     NPC_PLAYER_ID,
                                     spawn_pos,
                                     "Wolf Rider".to_string(),
@@ -11197,6 +15565,7 @@ fn goblin_raid_system(
                                     &templates,
                                     *id,
                                 );
+                                run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                             }
                             spawned = true;
                             break;
@@ -11221,6 +15590,9 @@ fn goblin_raid_system(
     // Fallback: force the raid if the player never stockpiled enough gold by the
     // deadline. Steal from a storage if the player has one, otherwise the hero.
     for (hero_id, player_id, hero_pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(hero_id, player_id, &presence) {
+            continue;
+        }
         if let Some(crisis) = crisis_state.get(&player_id.0) {
             if crisis.goblin_raid {
                 continue;
@@ -11267,8 +15639,9 @@ fn goblin_raid_system(
                 if let Some((path, _cost)) = path {
                     if path.len() < 20 {
                         for _ in 0..2 {
+                            let npc_id = ids.new_obj_id();
                             Encounter::spawn_steal_crisis(
-                                ids.new_obj_id(),
+                                npc_id,
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Wolf Rider".to_string(),
@@ -11278,6 +15651,10 @@ fn goblin_raid_system(
                                 &templates,
                                 target_id,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id);
                         }
                         spawned = true;
                         break;
@@ -11309,19 +15686,23 @@ fn undead_incursion_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
     }
 
-    for (_id, player_id, pos) in hero_query.iter() {
+    for (id, player_id, pos) in hero_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Primary trigger at 3 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
-        if survival_ticks < UNDEAD_INCURSION_SURVIVAL_TICKS
-            && survival_ticks < UNDEAD_INCURSION_FALLBACK_TICKS
-        {
+        let trigger_tick = UNDEAD_INCURSION_SURVIVAL_TICKS.min(UNDEAD_INCURSION_FALLBACK_TICKS);
+        if survival_ticks < trigger_tick {
             continue;
         }
 
@@ -11354,7 +15735,7 @@ fn undead_incursion_system(
                     if path.len() < 20 {
                         // Spawn 3 Zombies + 1 Skeleton + 1 Necromancer
                         for _ in 0..3 {
-                            Encounter::spawn_npc(
+                            let (_, npc_id, _, _) = Encounter::spawn_npc(
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Zombie".to_string(),
@@ -11363,8 +15744,12 @@ fn undead_incursion_system(
                                 &mut entity_map,
                                 &templates,
                             );
+                            run_spawned_objs
+                                .entry(player_id.0)
+                                .or_default()
+                                .push(npc_id.0);
                         }
-                        Encounter::spawn_npc(
+                        let (_, skeleton_id, _, _) = Encounter::spawn_npc(
                             NPC_PLAYER_ID,
                             spawn_pos,
                             "Skeleton".to_string(),
@@ -11373,7 +15758,7 @@ fn undead_incursion_system(
                             &mut entity_map,
                             &templates,
                         );
-                        Encounter::spawn_necromancer(
+                        let (_, necromancer_id, _, _) = Encounter::spawn_necromancer(
                             NPC_PLAYER_ID,
                             spawn_pos,
                             spawn_pos,
@@ -11382,6 +15767,10 @@ fn undead_incursion_system(
                             &mut entity_map,
                             &templates,
                         );
+                        run_spawned_objs
+                            .entry(player_id.0)
+                            .or_default()
+                            .extend([skeleton_id.0, necromancer_id.0]);
                         spawned = true;
                         break;
                     }
@@ -11412,7 +15801,9 @@ fn goblin_pillager_system(
     templates: Res<Templates>,
     map: Res<Map>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut crisis_state: ResMut<CrisisState>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -11422,12 +15813,14 @@ fn goblin_pillager_system(
     let mut player_targets: HashMap<i32, (i32, Position)> = HashMap::new();
 
     for (id, player_id, pos) in storage_query.iter() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         // Primary trigger at 5 survived days; the fallback guarantees it by the
         // deadline even if the primary threshold is ever raised past it.
         let survival_ticks = player_survival_ticks(&game_tick, player_id.0, &player_intro_state);
-        if survival_ticks < GOBLIN_PILLAGER_SURVIVAL_TICKS
-            && survival_ticks < GOBLIN_PILLAGER_FALLBACK_TICKS
-        {
+        let trigger_tick = GOBLIN_PILLAGER_SURVIVAL_TICKS.min(GOBLIN_PILLAGER_FALLBACK_TICKS);
+        if survival_ticks < trigger_tick {
             continue;
         }
 
@@ -11465,8 +15858,9 @@ fn goblin_pillager_system(
                     if path.len() < 25 {
                         // Spawn 3 Goblin Pillagers that set structures on fire
                         for _ in 0..3 {
+                            let npc_id = ids.new_obj_id();
                             Encounter::spawn_torch_crisis(
-                                ids.new_obj_id(),
+                                npc_id,
                                 NPC_PLAYER_ID,
                                 spawn_pos,
                                 "Goblin Pillager".to_string(),
@@ -11476,6 +15870,7 @@ fn goblin_pillager_system(
                                 &templates,
                                 *target_id,
                             );
+                            run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                         }
                         spawned = true;
                         break;
@@ -11504,11 +15899,6 @@ fn goblin_pillager_system(
 // plus the spread of a camp, so the horde actually descends on the settlement.
 const HORDE_HUNT_VISION: u32 = 14;
 
-// How far from a dead player's camp True Death sweeps NPC hostiles before the
-// start location is recycled. Kept tight: start locations sit as close as 9
-// tiles apart, so a wider sweep could delete enemies engaging a neighbour.
-const RUN_CLEANUP_RADIUS: u32 = 8;
-
 fn nightly_threat_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -11518,7 +15908,7 @@ fn nightly_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     clients: Res<Clients>,
-    player_intro_state: Res<PlayerIntroState>,
+    (player_intro_state, presence): (Res<PlayerIntroState>, Res<PlayerWorldPresenceState>),
     objectives: Res<Objectives>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
@@ -11542,6 +15932,9 @@ fn nightly_threat_system(
     }
 
     for (_id, player_id, pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if intro_is_younger_than(&game_tick, player_id.0, &player_intro_state, 4800) {
             continue;
         }
@@ -11964,7 +16357,7 @@ fn legendary_threat_system(
     templates: Res<Templates>,
     map: Res<Map>,
     spawn_positions: Res<SpawnPositions>,
-    player_intro_state: Res<PlayerIntroState>,
+    (player_intro_state, presence): (Res<PlayerIntroState>, Res<PlayerWorldPresenceState>),
     hero_query: Query<(&Id, &PlayerId, &Position), With<SubclassHero>>,
     structure_query: Query<(&Id, &PlayerId, &Position), With<ClassStructure>>,
     storage_query: Query<(&Id, &PlayerId, &Position, &Inventory), With<Storage>>,
@@ -11980,6 +16373,9 @@ fn legendary_threat_system(
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (_hero_id, player_id, hero_pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
         if player_day < LEGENDARY_RUMOR_DAY {
             continue;
@@ -12162,9 +16558,13 @@ fn legendary_death_tracking_system(
     mut objectives: ResMut<Objectives>,
     mut run_score_state: ResMut<RunScoreState>,
     mut legendary_threat_state: ResMut<LegendaryThreatState>,
+    presence: Res<PlayerWorldPresenceState>,
 ) {
     for (id, follower, boss) in dead_query.iter() {
         if let Some(follower) = follower {
+            if is_player_offline_protected(follower.player_id, &presence) {
+                continue;
+            }
             let run_score = run_score_state
                 .entry(follower.player_id)
                 .or_insert_with(|| PlayerRunScore {
@@ -12197,6 +16597,9 @@ fn legendary_death_tracking_system(
         }
 
         if let Some(boss) = boss {
+            if is_player_offline_protected(boss.player_id, &presence) {
+                continue;
+            }
             let run_score =
                 run_score_state
                     .entry(boss.player_id)
@@ -12244,6 +16647,7 @@ fn legendary_death_tracking_system(
 fn run_score_kill_tracking_system(
     game_tick: Res<GameTick>,
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     dead_query: Query<
         (&Template, Option<&LastAttacker>),
         (
@@ -12263,6 +16667,9 @@ fn run_score_kill_tracking_system(
             continue;
         };
         if !player::is_player(player_id) {
+            continue;
+        }
+        if is_player_offline_protected(player_id, &presence) {
             continue;
         }
 
@@ -12326,6 +16733,7 @@ fn wildness_regen_system(
 
 fn wildness_reduction_on_enemy_death_system(
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map: ResMut<Map>,
     dead_query: Query<
         (&Position, Option<&LastAttacker>),
@@ -12348,6 +16756,7 @@ fn wildness_reduction_on_enemy_death_system(
             continue;
         };
         if !player::is_player(player_id)
+            || is_player_offline_protected(player_id, &presence)
             || !outside_weak_sanctuary_from_monolith_positions(*pos, &monolith_positions)
         {
             continue;
@@ -12410,6 +16819,7 @@ fn map_event_system(
     clients: Res<Clients>,
     hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut last_event_tick: Local<HashMap<i32, i32>>,
 ) {
     // Check every 100 ticks (10 seconds)
@@ -12420,6 +16830,9 @@ fn map_event_system(
     let ticks_in_day = game_tick.0 % GAME_TICKS_PER_DAY;
 
     for (player_id, _pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let last_tick = last_event_tick.get(&player_id.0).copied().unwrap_or(0);
 
         // Don't send events too frequently — at least 600 ticks (1 minute) between events
@@ -12455,6 +16868,7 @@ fn objectives_system(
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut objectives: ResMut<Objectives>,
     mut run_score_state: ResMut<RunScoreState>,
 ) {
@@ -12466,6 +16880,9 @@ fn objectives_system(
     let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
 
     for (player_id, hero_pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
         let player_structures: Vec<String> = structure_query
             .iter()
@@ -13089,8 +17506,17 @@ fn weather_effects_system(
     game_tick: Res<GameTick>,
     weather_areas: Res<WeatherAreas>,
     clients: Res<Clients>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut hero_query: Query<
-        (&Id, &PlayerId, &Position, &mut Stats, Option<&Sheltered>),
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &Position,
+            &mut Stats,
+            Option<&Sheltered>,
+        ),
         With<SubclassHero>,
     >,
     campfire_query: Query<(&Position, &Campfire)>,
@@ -13111,7 +17537,10 @@ fn weather_effects_system(
     }
 
     // Process hero weather effects
-    for (id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
+    for (entity, id, player_id, pos, mut stats, sheltered) in hero_query.iter_mut() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
             continue;
         };
@@ -13128,7 +17557,13 @@ fn weather_effects_system(
                 Weather::Snow | Weather::IceStorm => 2,
                 _ => 1,
             };
+            let previous_hp = stats.hp;
             stats.hp = (stats.hp - cold_damage).max(0);
+            if stats.hp < previous_hp {
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
+            }
 
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 300 {
@@ -13185,7 +17620,10 @@ fn weather_effects_system(
     }
 
     // Storm damage to structures
-    for (_id, _player_id, pos, mut stats, _template) in structure_query.iter_mut() {
+    for (id, _player_id, pos, mut stats, _template) in structure_query.iter_mut() {
+        if object_belongs_to_protected_run(id.0, &ids, &presence) {
+            continue;
+        }
         let Some(weather) = weather_areas.get_weather_at(pos.x, pos.y) else {
             continue;
         };
@@ -13205,7 +17643,10 @@ fn weather_effects_system(
 
     // Rain boosts crop growth: reduce remaining growth time
     if weather_areas.iter().any(|w| w.weather.is_rainy()) {
-        for (_structure_id, crop) in crops.iter_mut() {
+        for (structure_id, crop) in crops.iter_mut() {
+            if object_belongs_to_protected_run(*structure_id, &ids, &presence) {
+                continue;
+            }
             // Boost growth by reducing stage_end (effectively 50% faster when checked every 50 ticks)
             if crop.stage != CropStages::Mature && crop.stage != CropStages::Dead {
                 // Shave 25 ticks off remaining time per check (50% boost over natural 50-tick intervals)
@@ -13224,6 +17665,7 @@ fn morale_system(
     templates: Res<Templates>,
     mut map_events: ResMut<MapEvents>,
     weather_areas: Res<WeatherAreas>,
+    presence: Res<PlayerWorldPresenceState>,
     mut villager_query: Query<
         (&Id, &PlayerId, &Position, &mut Morale, Option<&Sheltered>),
         With<SubclassVillager>,
@@ -13240,6 +17682,9 @@ fn morale_system(
     }
 
     for (id, player_id, pos, mut morale, sheltered) in villager_query.iter_mut() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let mut new_morale: f32 = 50.0; // Base morale
 
         // +20 if sheltered
@@ -13368,6 +17813,7 @@ fn victory_check_system(
     objectives: Res<Objectives>,
     monolith_investigation: Res<MonolithInvestigation>,
     player_intro_state: Res<PlayerIntroState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut victory_state: ResMut<VictoryState>,
 ) {
     // Check every 200 ticks (20 seconds)
@@ -13376,6 +17822,9 @@ fn victory_check_system(
     }
 
     for (player_id, _pos) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         let victory = victory_state
             .entry(player_id.0)
             .or_insert_with(PlayerVictory::default);
@@ -13842,13 +18291,21 @@ fn resurrect_system(
 fn state_change_observer(
     state_change: On<StateChange>,
     game_tick: Res<GameTick>,
+    presence: OptionalPlayerWorldPresence,
     mut visible_events: ResMut<VisibleEvents>,
-    mut query: Query<(&Id, &mut State)>,
+    mut query: Query<(&Id, Option<&PlayerId>, &mut State)>,
 ) {
-    let Ok((id, mut state)) = query.get_mut(state_change.entity) else {
+    let Ok((id, player_id, mut state)) = query.get_mut(state_change.entity) else {
         error!("Query failed to find entity {:?}", state_change.entity);
         return;
     };
+
+    if player_id
+        .map(|player_id| is_owner_offline_protected(player_id, &presence))
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     *state = state_change.new_state;
 
@@ -14042,6 +18499,9 @@ fn remove_obj_observer(
     mut commands: Commands,
     mut entity_map: ResMut<EntityObjMap>,
     game_tick: Res<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     mut visible_events: ResMut<VisibleEvents>,
     query: Query<(&Id, &Position)>,
 ) {
@@ -14049,6 +18509,12 @@ fn remove_obj_observer(
         error!("Query failed to find entity {:?}", remove_obj.entity);
         return;
     };
+
+    if object_belongs_to_protected_run(id.0, &ids, &presence)
+        || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+    {
+        return;
+    }
 
     // Guard against double-removal: if the obj is already gone from the entity map,
     // a previous RemoveObj observer already processed this entity this frame.
@@ -14189,13 +18655,22 @@ fn start_build_observer(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    mut query: Query<(&Position, &State, &Template, &mut Inventory, &Assignments)>,
+    mut query: Query<(
+        &PlayerId,
+        &Position,
+        &State,
+        &Template,
+        &mut Inventory,
+        &Assignments,
+    )>,
     worker_query: Query<(&Position, &State)>,
 ) {
     info!("Starting build observer");
     let Ok((
+        structure_player_id,
         structure_pos,
         structure_state,
         structure_template_name,
@@ -14206,6 +18681,10 @@ fn start_build_observer(
         info!("Query failed to find entity {:?}", start_build.entity);
         return;
     };
+
+    if is_owner_offline_protected(structure_player_id, &presence) {
+        return;
+    }
 
     let structure_template = templates
         .obj_templates
@@ -14291,11 +18770,13 @@ fn transfer_all_resources_observer(
     commands: Commands,
     clients: Res<Clients>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     templates: Res<Templates>,
-    mut inventory_query: Query<(&Template, &mut Inventory)>,
+    mut inventory_query: Query<(&PlayerId, &Template, &mut Inventory)>,
 ) {
-    let Ok([(_source_template, mut source_inventory), (target_template, mut target_inventory)]) =
-        inventory_query.get_many_mut([event.entity, event.target_entity])
+    let Ok(
+        [(source_player_id, _source_template, mut source_inventory), (target_player_id, target_template, mut target_inventory)],
+    ) = inventory_query.get_many_mut([event.entity, event.target_entity])
     else {
         error!(
             "Query failed to find inventories for entities {:?}",
@@ -14303,6 +18784,12 @@ fn transfer_all_resources_observer(
         );
         return;
     };
+
+    if is_owner_offline_protected(source_player_id, &presence)
+        || is_owner_offline_protected(target_player_id, &presence)
+    {
+        return;
+    }
 
     let target_capacity = templates
         .obj_templates
@@ -14325,6 +18812,7 @@ fn food_poisoning_effect_observer(
     event: On<FoodPoisoningEffect>,
     mut commands: Commands,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut query: Query<(&PlayerId, &Id, &Position, &mut Effects)>,
 ) {
     let food_poisoning_value = match event.food_poisoning_attr {
@@ -14338,11 +18826,18 @@ fn food_poisoning_effect_observer(
             return;
         };
 
+        if is_owner_offline_protected(player_id, &presence) {
+            return;
+        }
+
         effects.0.insert(Effect::FoodPoisoning, (10, 1.0, 1));
 
-        commands.entity(event.entity).insert(EffectAdded {
-            effect: Effect::FoodPoisoning,
-        });
+        commands
+            .entity(event.entity)
+            .remove::<EffectAddedProcessed>()
+            .insert(EffectAdded {
+                effect: Effect::FoodPoisoning,
+            });
 
         let response_packet = ResponsePacket::GainedEffect {
             id: id.0,
@@ -14466,9 +18961,11 @@ fn start_upgrade_observer(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut query: Query<(
+        &PlayerId,
         &Position,
         &State,
         &Template,
@@ -14480,6 +18977,7 @@ fn start_upgrade_observer(
 ) {
     info!("Starting upgrade observer");
     let Ok((
+        structure_player_id,
         structure_pos,
         structure_state,
         structure_template_name,
@@ -14491,6 +18989,10 @@ fn start_upgrade_observer(
         info!("Query failed to find entity {:?}", start_upgrade.entity);
         return;
     };
+
+    if is_owner_offline_protected(structure_player_id, &presence) {
+        return;
+    }
 
     let selected_upgrade_structure_template =
         templates.obj_templates.get(selected_upgrade.0.clone());
@@ -14575,6 +19077,7 @@ fn start_work_observer(
     start_work: On<StartWork>,
     mut commands: Commands,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
@@ -14586,6 +19089,12 @@ fn start_work_observer(
     mut active_task_query: Query<&mut ActiveTask>,
 ) {
     info!("Processing StartWork");
+
+    if object_belongs_to_protected_run(start_work.worker_id, &ids, &presence)
+        || object_belongs_to_protected_run(start_work.structure_id, &ids, &presence)
+    {
+        return;
+    }
 
     // Get player id from worker
     let Some(player_worker_id) = ids.get_player(start_work.worker_id) else {
@@ -14926,6 +19435,7 @@ fn remove_worker_from_work_queue_observer(
 
 fn hero_dead_system(
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     mut player_stats: ResMut<PlayerStats>,
     entity_map: Res<EntityObjMap>,
     hero_query: Query<
@@ -14935,6 +19445,9 @@ fn hero_dead_system(
     monolith_inventory_query: Query<&Inventory, With<Monolith>>,
 ) {
     for (player_id, id, name, skills, bound_monolith) in hero_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         info!("Hero dead: {:?}", player_id.0);
         let player_stat = player_stats.entry(player_id.0).or_insert(PlayerStat {
             player_id: player_id.0,
@@ -14984,7 +19497,7 @@ fn true_death_system(
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
     mut explored_map: ResMut<ExploredMap>,
-    mut map_events: ResMut<MapEvents>,
+    (mut map_events, mut game_events): (ResMut<MapEvents>, ResMut<GameEvents>),
     player_stats: Res<PlayerStats>,
     (
         mut crisis_state,
@@ -14999,6 +19512,10 @@ fn true_death_system(
         mut start_locations,
         mut assigned_start_locations,
         mut run_spawned_objs,
+        mut intro_encounter_state,
+        mut settlement_crisis_state,
+        mut player_world_presence_state,
+        mut safe_logout_telemetry,
     ): (
         ResMut<CrisisState>,
         ResMut<SpawnPositions>,
@@ -15012,6 +19529,10 @@ fn true_death_system(
         ResMut<StartLocations>,
         ResMut<AssignedStartLocations>,
         ResMut<RunSpawnedObjs>,
+        ResMut<IntroEncounterState>,
+        ResMut<SettlementCrisisState>,
+        ResMut<PlayerWorldPresenceState>,
+        ResMut<SafeLogoutTelemetryState>,
     ),
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut hero_query: Query<
@@ -15036,9 +19557,21 @@ fn true_death_system(
     )>,
     villager_query: Query<(Entity, &PlayerId, &Id, Option<&StateDead>), With<SubclassVillager>>,
     cleanup_query: Query<
-        (Entity, &Id, &PlayerId, &Position),
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &Position,
+            Option<&CrisisAssaultUnit>,
+        ),
         (Without<SubclassHero>, Without<SubclassVillager>),
     >,
+    target_query: Query<(
+        Entity,
+        Option<&Target>,
+        Option<&VisibleTarget>,
+        Option<&TaskTarget>,
+    )>,
 ) {
     for (entity, player_id, id, name, template, skills, true_death, state_dead, bound_monolith) in
         hero_query.iter_mut()
@@ -15198,7 +19731,7 @@ fn true_death_system(
 
             // Clean up crisis state and spawn position for this player
             crisis_state.remove(&player_id.0);
-            let camp_pos = spawn_positions.remove(&player_id.0);
+            spawn_positions.remove(&player_id.0);
             run_score_state.remove(&player_id.0);
             legendary_threat_state.remove(&player_id.0);
             // Also drop the scripted per-run state: a dead player's intro /
@@ -15208,6 +19741,28 @@ fn true_death_system(
             objectives.remove(&player_id.0);
             player_intro_state.remove(&player_id.0);
             initial_encounter_state.remove(&player_id.0);
+            intro_encounter_state.remove(&player_id.0);
+            if let Some(personal_crisis) = settlement_crisis_state.get(&player_id.0) {
+                if personal_crisis.assault_id.is_some() {
+                    info!(
+                        "personal_crisis_assault_true_death_cleanup player_id={} phase={:?} assault_id={:?} generation={} game_tick={} tracked_units={} recovery_required={}",
+                        player_id.0,
+                        personal_crisis.phase,
+                        personal_crisis.assault_id,
+                        personal_crisis.assault_spawn_generation,
+                        game_tick.0,
+                        personal_crisis.assault_unit_ids.len(),
+                        personal_crisis.assault_recovery_required
+                    );
+                }
+            }
+            settlement_crisis_state.remove(&player_id.0);
+            remove_player_presence_for_run_cleanup(
+                player_id.0,
+                game_tick.0,
+                &mut player_world_presence_state,
+                &mut safe_logout_telemetry,
+            );
 
             // Release this player's start location back to the pool so a new hero can
             // spawn there. (In-memory: lost on restart, same as StartLocations itself.)
@@ -15220,10 +19775,13 @@ fn true_death_system(
                 );
             }
 
-            // Transfer villagers to merchant player
+            // Transfer villagers to merchant player. Their old-run queued work
+            // is cleared below even though the entities themselves survive.
+            let mut ended_run_villager_ids = Vec::new();
             for (villager_entity, villager_player_id, villager_id, _) in villager_query.iter() {
                 if villager_player_id.0 == player_id.0 {
                     info!("Transferring villager: {:?}", villager_id.0);
+                    ended_run_villager_ids.push(villager_id.0);
 
                     // Add Update Event for Player Id change
                     commands.trigger(UpdateObj {
@@ -15233,24 +19791,37 @@ fn true_death_system(
                 }
             }
 
-            // Clean the start area before the location is recycled: the dead
-            // player's own objects (burrow, campfire, structures, corpses),
-            // this run's scripted spawns (shipwreck, POIs, intro NPCs), and
-            // hostiles that accumulated around the camp. Villagers are kept —
-            // they were just transferred to the merchant for re-hire.
+            // Clean only objects owned by or explicitly attributed to this run.
+            // Nearby unrelated world hostiles survive start-location recycling;
+            // villagers are kept because they were just transferred to the
+            // merchant for re-hire.
             let run_objs = run_spawned_objs.remove(&player_id.0).unwrap_or_default();
             let mut removed_obj_ids: Vec<i32> = Vec::new();
-            for (obj_entity, obj_id, obj_player_id, obj_pos) in cleanup_query.iter() {
+            for (obj_entity, obj_id, obj_player_id, _obj_pos, crisis_assault) in
+                cleanup_query.iter()
+            {
+                // Another player's explicitly attributed personal assault is
+                // never collateral cleanup.
+                if crisis_assault
+                    .map(|assault| assault.owner_player_id != player_id.0)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
                 let owned_by_dead_player = obj_player_id.0 == player_id.0;
                 let spawned_for_this_run = run_objs.contains(&obj_id.0);
-                let hostile_near_camp = obj_player_id.0 == NPC_PLAYER_ID
-                    && camp_pos
-                        .map(|camp| Map::dist(camp, *obj_pos) <= RUN_CLEANUP_RADIUS)
-                        .unwrap_or(false);
+                let attributed_to_dead_run = crisis_assault
+                    .map(|assault| assault.owner_player_id == player_id.0)
+                    .unwrap_or(false);
 
-                if owned_by_dead_player || spawned_for_this_run || hostile_near_camp {
+                if owned_by_dead_player || spawned_for_this_run || attributed_to_dead_run {
                     removed_obj_ids.push(obj_id.0);
-                    commands.trigger(RemoveObj { entity: obj_entity });
+                    ids.remove_obj(obj_id.0);
+                    if entity_map.get_entity(obj_id.0) == Some(obj_entity) {
+                        commands.trigger(RemoveObj { entity: obj_entity });
+                    } else {
+                        commands.entity(obj_entity).try_despawn();
+                    }
                 }
             }
 
@@ -15258,7 +19829,29 @@ fn true_death_system(
             // hero) — an in-flight MoveEvent applying to a despawned entity
             // panics when its completion command runs.
             removed_obj_ids.push(id.0);
-            map_events.retain(|_, map_event| !removed_obj_ids.contains(&map_event.obj_id));
+            let ended_run_object_ids = removed_obj_ids
+                .iter()
+                .copied()
+                .chain(run_objs.iter().copied())
+                .chain(ended_run_villager_ids.iter().copied())
+                .collect::<HashSet<_>>();
+            game_events.retain(|_, event| {
+                !game_event_belongs_to_ended_run(
+                    &event.event_type,
+                    player_id.0,
+                    &ended_run_object_ids,
+                    &entity_map,
+                    &map_events,
+                )
+            });
+            map_events.retain(|_, map_event| {
+                !ended_run_object_ids.contains(&map_event.obj_id)
+                    && !visible_event_references_ended_run(
+                        &map_event.event_type,
+                        &ended_run_object_ids,
+                    )
+            });
+            clear_assault_target_references(&ended_run_object_ids, &mut commands, &target_query);
 
             // The next run bound to this monolith must get the same first-death
             // safety net: restore its Soulshards to the starting amount.
@@ -15322,12 +19915,20 @@ fn state_dead_system(
 fn remove_dead_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
+    ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     state_dead_query: Query<(Entity, &Id, &Position, &Inventory, &StateDead)>,
     mut map_events: ResMut<MapEvents>,
 ) {
     // Every 10 ticks
     if (game_tick.0 % 10) == 0 {
         for (entity, id, pos, inventory, dead_state) in state_dead_query.iter() {
+            if object_belongs_to_protected_run(id.0, &ids, &presence)
+                || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+            {
+                continue;
+            }
             if (game_tick.0 - dead_state.dead_at) > 500 {
                 // Remove obj observer event
                 commands.trigger(RemoveObj { entity: entity });
@@ -15346,6 +19947,7 @@ fn despawn_wandering_npc_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut ids: ResMut<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     wandering_behavior_query: Query<(Entity, &Id, &Position, &WanderingBehavior)>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -15354,6 +19956,9 @@ fn despawn_wandering_npc_system(
     if (game_tick.0 % 100) == 0 {
         trace!("Attempting to despawn NPCs that have been wandering for 10 moves...");
         for (entity, id, pos, wandering_behavior) in wandering_behavior_query.iter() {
+            if object_belongs_to_protected_run(id.0, &ids, &presence) {
+                continue;
+            }
             if wandering_behavior.num_moves > 10 {
                 trace!("Despawning NPC: {:?} due to excess wandering.", id.0);
 
@@ -15431,6 +20036,7 @@ fn update_game_tick(
     clients: Res<Clients>,
     ids: Res<Ids>,
     active_infos: Res<ActiveInfos>,
+    presence: Res<PlayerWorldPresenceState>,
     mut attrs: Query<(Entity, &mut Thirst, &mut Hunger, &mut Tired, &mut Heat)>,
     obj_query: Query<(&Id, &PlayerId, &Position)>,
     dehydrated: Query<&Dehydrated>,
@@ -15447,6 +20053,10 @@ fn update_game_tick(
             error!("No obj found for entity: {:?}", entity);
             continue;
         };
+
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
 
         let current_thirst_level = thirst.num_to_string();
         let current_hunger_level = hunger.num_to_string();
@@ -15615,13 +20225,25 @@ fn update_game_tick(
 
 fn stamina_recovery_system(
     game_tick: Res<GameTick>,
-    mut stats_query: Query<(&mut Stats, &LastCombatTick), Without<StateDead>>,
+    presence: OptionalPlayerWorldPresence,
+    mut stats_query: Query<
+        (Option<&Id>, Option<&PlayerId>, &mut Stats, &LastCombatTick),
+        Without<StateDead>,
+    >,
 ) {
     if game_tick.0 % TICKS_PER_SEC != 0 {
         return;
     }
 
-    for (mut stats, last_combat_tick) in stats_query.iter_mut() {
+    for (id, player_id, mut stats, last_combat_tick) in stats_query.iter_mut() {
+        if id
+            .zip(player_id)
+            .map(|(id, player_id)| entity_belongs_to_protected_run(id, player_id, &presence))
+            .or_else(|| player_id.map(|player_id| is_owner_offline_protected(player_id, &presence)))
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let in_combat = game_tick.0.saturating_sub(last_combat_tick.0) < 30;
         if let (Some(stamina), Some(base_stamina)) = (stats.stamina, stats.base_stamina) {
             if stamina < base_stamina {
@@ -15687,9 +20309,14 @@ fn merchant_sailing_system(
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut merchant_query: Query<(Entity, ObjStatQuery, &Merchant)>,
 ) {
     for (entity, mut obj, merchant) in merchant_query.iter_mut() {
+        if initial_encounter_object_is_protected(obj.id.0, &initial_encounter_state, &presence) {
+            continue;
+        }
         let dest = match merchant.sail_state {
             MerchantSailState::SailingToLanding => merchant.landing_at,
             MerchantSailState::SailingToEmpire => merchant.trade_port,
@@ -15784,6 +20411,7 @@ fn merchant_arrival_system(
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
     initial_encounter_state: Res<InitialEncounterState>,
+    presence: Res<PlayerWorldPresenceState>,
     mut merchant_query: Query<(&Id, &mut Merchant, &Position, &mut Inventory)>,
 ) {
     if game_tick.0 % 10 != 0 {
@@ -15791,6 +20419,9 @@ fn merchant_arrival_system(
     }
 
     for (id, mut merchant, pos, mut inventory) in merchant_query.iter_mut() {
+        if initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence) {
+            continue;
+        }
         match merchant.sail_state {
             MerchantSailState::SailingToLanding if *pos == merchant.landing_at => {
                 merchant.sail_state = MerchantSailState::AtLanding;
@@ -15990,6 +20621,7 @@ fn needs_warning_stage(
 fn hero_needs_warning_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
     dehydrated_query: Query<(&PlayerId, &Dehydrated), (With<SubclassHero>, Without<StateDead>)>,
     starving_query: Query<(&PlayerId, &Starving), (With<SubclassHero>, Without<StateDead>)>,
     exhausted_query: Query<(&PlayerId, &Exhausted), (With<SubclassHero>, Without<StateDead>)>,
@@ -16016,6 +20648,9 @@ fn hero_needs_warning_system(
     let mut warnings: Vec<(i32, &str)> = Vec::new();
 
     for (player_id, dehydrated) in dehydrated_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             dehydrated.at_tick,
@@ -16028,6 +20663,9 @@ fn hero_needs_warning_system(
     }
 
     for (player_id, starving) in starving_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             starving.at_tick,
@@ -16040,6 +20678,9 @@ fn hero_needs_warning_system(
     }
 
     for (player_id, exhausted) in exhausted_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
         if let Some(stage) = needs_warning_stage(
             game_tick.0,
             exhausted.at_tick,
@@ -16064,9 +20705,16 @@ fn dehydrated_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut dehydrated_query: Query<(Entity, &Id, &mut State, &Dehydrated), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut dehydrated_query: Query<
+        (Entity, &Id, &PlayerId, &mut State, &Dehydrated),
+        Without<StateDead>,
+    >,
 ) {
-    for (entity, id, mut state, dehydrated) in dehydrated_query.iter_mut() {
+    for (entity, id, player_id, mut state, dehydrated) in dehydrated_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - dehydrated.at_tick > DEHYDRATED_DEATH_AT {
             // Add state dead event
             debug!(
@@ -16099,9 +20747,13 @@ fn starving_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut starving_query: Query<(Entity, &Id, &mut State, &Starving), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut starving_query: Query<(Entity, &Id, &PlayerId, &mut State, &Starving), Without<StateDead>>,
 ) {
-    for (entity, id, mut state, starving) in starving_query.iter_mut() {
+    for (entity, id, player_id, mut state, starving) in starving_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - starving.at_tick > STARVING_DEATH_AT {
             debug!(
                 "Starving: at tick: {:?} Adding state dead event for {:?}",
@@ -16133,9 +20785,16 @@ fn exhausted_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut exhausted_query: Query<(Entity, &Id, &mut State, &Exhausted), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut exhausted_query: Query<
+        (Entity, &Id, &PlayerId, &mut State, &Exhausted),
+        Without<StateDead>,
+    >,
 ) {
-    for (entity, id, mut state, exhausted) in exhausted_query.iter_mut() {
+    for (entity, id, player_id, mut state, exhausted) in exhausted_query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         if game_tick.0 - exhausted.at_tick > EXHAUSTED_DEATH_AT {
             debug!(
                 "Exhausted: at tick: {:?} Adding state dead event for {:?}",
@@ -16167,12 +20826,56 @@ fn burning_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     mut map_events: ResMut<MapEvents>,
-    mut burning_query: Query<(Entity, &Id, &mut State, &mut Stats, &Effects), Without<StateDead>>,
+    presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
+    mut burning_query: Query<
+        (
+            Entity,
+            &Id,
+            &PlayerId,
+            &mut State,
+            &mut Stats,
+            &Effects,
+            Option<&LegendaryFollower>,
+            Option<&LegendaryBoss>,
+            Option<&SanctuaryHunter>,
+            Option<&CrisisAssaultUnit>,
+        ),
+        Without<StateDead>,
+    >,
 ) {
     if game_tick.0 % 10 == 0 {
-        for (entity, id, mut state, mut stats, effects) in burning_query.iter_mut() {
+        for (
+            entity,
+            id,
+            player_id,
+            mut state,
+            mut stats,
+            effects,
+            legendary_follower,
+            legendary_boss,
+            sanctuary_hunter,
+            crisis_assault,
+        ) in burning_query.iter_mut()
+        {
+            if entity_belongs_to_protected_run(id, player_id, &presence)
+                || initial_encounter_object_is_protected(id.0, &initial_encounter_state, &presence)
+                || (crisis_assault.is_none()
+                    && attributed_threat_owner(
+                        legendary_follower,
+                        legendary_boss,
+                        sanctuary_hunter,
+                    )
+                    .map(|owner| is_player_offline_protected(owner, &presence))
+                    .unwrap_or(false))
+            {
+                continue;
+            }
             if effects.has(Effect::Burning) {
                 stats.hp -= 1;
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
 
                 if stats.hp <= 0 {
                     commands.entity(entity).insert(StateDead {
@@ -16238,10 +20941,19 @@ fn skill_changed_system(query: Query<(&PlayerId, &Id, &mut Skills), Changed<Skil
 }
 
 fn effect_added_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
     templates: Res<Templates>,
-    mut query: Query<(Entity, &PlayerId, &mut Stats, &EffectAdded), Added<EffectAdded>>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut query: Query<
+        (Entity, &Id, &PlayerId, &mut Stats, &EffectAdded),
+        Without<EffectAddedProcessed>,
+    >,
 ) {
-    for (_entity, player_id, mut stats, effect_added) in query.iter_mut() {
+    for (entity, id, player_id, mut stats, effect_added) in query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) {
+            continue;
+        }
         info!("Effect added: {:?}", player_id.0);
         let effect = effect_added.effect.clone();
 
@@ -16251,14 +20963,22 @@ fn effect_added_system(
             .expect("Effect missing from templates");
 
         if let Some(health_modifier) = effect_template.health {
+            let previous_hp = stats.hp;
             let modifier = 1.0 + health_modifier;
             stats.hp = (stats.hp as f32 * modifier) as i32;
+            if stats.hp < previous_hp {
+                commands
+                    .entity(entity)
+                    .try_insert(LastDamageTick(game_tick.0));
+            }
         }
 
         if let Some(stamina_modifier) = effect_template.stamina {
             let modifier = 1.0 + stamina_modifier;
             stats.stamina = Some((stats.stamina.unwrap() as f32 * modifier) as i32);
         }
+
+        commands.entity(entity).try_insert(EffectAddedProcessed);
     }
 }
 
@@ -16267,6 +20987,7 @@ pub fn item_duration_system(
     game_tick: ResMut<GameTick>,
     clients: Res<Clients>,
     ids: Res<Ids>,
+    presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
     active_infos: Res<ActiveInfos>,
     entity_map: Res<EntityObjMap>,
@@ -16274,6 +20995,9 @@ pub fn item_duration_system(
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
         for (player_id, id, mut inventory) in query.iter_mut() {
+            if entity_belongs_to_protected_run(id, player_id, &presence) {
+                continue;
+            }
             let expired_items = inventory.find_expired_items(game_tick.0);
 
             for item in expired_items {
@@ -16319,6 +21043,7 @@ pub fn fuel_system(
     mut commands: Commands,
     clients: Res<Clients>,
     game_tick: ResMut<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -16338,6 +21063,9 @@ pub fn fuel_system(
 ) {
     if game_tick.0 % (TICKS_PER_SEC * 10) == 0 {
         for (entity, player_id, id, pos, class, template, mut inventory) in obj_query.iter_mut() {
+            if is_owner_offline_protected(player_id, &presence) {
+                continue;
+            }
             info!("Fueling campfire with fuel");
 
             // Remove wood from tent

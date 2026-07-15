@@ -419,6 +419,12 @@ impl Personality {
 #[derive(Debug, Component, Clone)]
 pub struct LastCombatTick(pub i32);
 
+/// Authoritative tick of the most recent positive HP loss. Unlike
+/// `LastCombatTick`, this also covers weather and damage-over-time effects and
+/// cannot be hidden by healing later in the same update.
+#[derive(Debug, Component, Clone, Copy, Default)]
+pub struct LastDamageTick(pub i32);
+
 pub const COMBAT_LOCK_TICKS: i32 = 3 * TICKS_PER_SEC;
 
 pub fn is_combat_locked(game_tick: i32, last_combat_tick: &LastCombatTick) -> bool {

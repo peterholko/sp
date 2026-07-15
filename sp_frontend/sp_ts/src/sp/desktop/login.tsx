@@ -21,12 +21,20 @@ import TrueDeathPanel from "./ui/trueDeathPanel";
 import LeaderboardSidebar from "./ui/leaderboardSidebar";
 import { isDesktop, isWideScreen } from "../core/config";
 import appStyles from "./app.module.css";
+import {
+  SAFE_LOGOUT_COMPLETION_MESSAGE,
+  SafeLogoutResumeNoticeGuard,
+  clearSafeLogoutReconnectSuppression,
+  consumeSafeLogoutCompletion,
+  hasSafeLogoutReconnectSuppression,
+} from "../core/safeLogoutStatus";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
   private readonly accountSetupDelay = 10000; // TEMP: 10s for testing (revert to 60000)
   private healthIntervalId?: number;
   private accountSetupTimerId?: number;
+  private readonly safeLogoutResumeNotice = new SafeLogoutResumeNoticeGuard();
 
   constructor(props) {
     super(props);
@@ -68,6 +76,7 @@ export default class LoginControl extends React.Component<any, any> {
       resetConfirmPassword: '',
       resetButtonPressed: false,
       resetInfo: '',
+      safeLogoutCompletionMessage: '',
     };
 
     this.handleHeroNameChange = this.handleHeroNameChange.bind(this);
@@ -97,6 +106,8 @@ export default class LoginControl extends React.Component<any, any> {
 
     this.handleServerOffline = this.handleServerOffline.bind(this);
     this.handleNetworkError = this.handleNetworkError.bind(this);
+    this.handleSafeLogoutComplete = this.handleSafeLogoutComplete.bind(this);
+    this.handleSafeLogoutResumed = this.handleSafeLogoutResumed.bind(this);
 
     Global.gameEmitter.on(GameEvent.INTRO_OK_CLICK, this.handleIntroOkClick, this);
     Global.gameEmitter.on(GameEvent.ERROR_OK_CLICK, this.handleErrorOkClick, this);
@@ -108,6 +119,8 @@ export default class LoginControl extends React.Component<any, any> {
 
     Global.gameEmitter.on(NetworkEvent.SERVER_OFFLINE, this.handleServerOffline, this);
     Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleNetworkError, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
 
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleInfoTrueDeath, this);
 
@@ -142,6 +155,16 @@ export default class LoginControl extends React.Component<any, any> {
           serverHealthy: false,
           serverHealthLoading: false,
         });
+      } else {
+        Global.connected = false;
+        Global.serverOffline = false;
+        Global.networkError = true;
+        this.setState({
+          errorMessage: "Connection closed, click to reconnect.",
+          hideError: false,
+          serverHealthy: true,
+          serverHealthLoading: false,
+        });
       }
     } catch (error) {
       Global.serverOffline = true;
@@ -161,6 +184,70 @@ export default class LoginControl extends React.Component<any, any> {
   handleNetworkError() {
     Global.networkError = true;
     this.setState({ errorMessage: "Network error, click to reconnect.", hideError: false });
+  }
+
+  handleSafeLogoutComplete(data?) {
+    if (this.accountSetupTimerId) {
+      window.clearTimeout(this.accountSetupTimerId);
+      this.accountSetupTimerId = undefined;
+    }
+
+    Global.connected = false;
+    Global.networkError = false;
+    Global.serverOffline = false;
+    this.safeLogoutResumeNotice.reset();
+    this.setState({
+      hideLandingPage: false,
+      hideSelectClass: true,
+      hideIntro: true,
+      hideGame: true,
+      hideError: true,
+      hideTrueDeathPanel: true,
+      hideAccountSetupPanel: true,
+      showEnterWorld: true,
+      safeLogoutCompletionMessage:
+        data && typeof data.message === 'string'
+          ? data.message
+          : SAFE_LOGOUT_COMPLETION_MESSAGE,
+    });
+  }
+
+  handleSafeLogoutResumed() {
+    this.safeLogoutResumeNotice.receive();
+    this.flushSafeLogoutResumeMessage();
+  }
+
+  flushSafeLogoutResumeMessage() {
+    const message = this.safeLogoutResumeNotice.takeWhenReady(!this.state.hideGame);
+    if (!message) {
+      return;
+    }
+
+    Global.gameEmitter.emit(NetworkEvent.NOTICE, {
+      noticemsg: message,
+      expiry: Global.noticeExpiry,
+    });
+  }
+
+  resetSafeLogoutResumeMessage() {
+    this.safeLogoutResumeNotice.reset();
+  }
+
+  clearSafeLogoutSuppression() {
+    try {
+      clearSafeLogoutReconnectSuppression(window.sessionStorage);
+    } catch (error) {
+      console.warn('Unable to clear Safe Logout reconnect suppression', error);
+    }
+    this.resetSafeLogoutResumeMessage();
+    this.setState({ safeLogoutCompletionMessage: '' });
+  }
+
+  resetNetworkForAuthentication() {
+    if (Global.network && typeof Global.network.resetForAuthentication === 'function') {
+      Global.network.resetForAuthentication();
+    }
+    this.clearSafeLogoutSuppression();
   }
 
   async fetchServerHealth() {
@@ -207,6 +294,29 @@ export default class LoginControl extends React.Component<any, any> {
       this.loadLeaderboardEntries();
       return;
     }
+
+    try {
+      const safeLogoutCompletionMessage = consumeSafeLogoutCompletion(window.sessionStorage);
+      if (hasSafeLogoutReconnectSuppression(window.sessionStorage)) {
+        this.setState({
+          hideLandingPage: false,
+          hideSelectClass: true,
+          hideGame: true,
+          hideError: true,
+          showEnterWorld: true,
+          safeLogoutCompletionMessage: safeLogoutCompletionMessage || '',
+        });
+        this.loadLeaderboardEntries();
+        return;
+      }
+    } catch (error) {
+      console.warn('Unable to restore Safe Logout completion state', error);
+    }
+
+    // A remounted login surface may still share the prior account's Network
+    // singleton. Invalidate it before the asynchronous session check so none
+    // of its cached state or delayed callbacks can cross the auth boundary.
+    this.resetNetworkForAuthentication();
 
     try {
       const url = `${window.location.origin}/session`;
@@ -257,6 +367,8 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   componentWillUnmount() {
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
     if (this.healthIntervalId) {
       window.clearInterval(this.healthIntervalId);
     }
@@ -266,6 +378,7 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   async fingerprintAuth() {
+    this.resetNetworkForAuthentication();
     try {
       const fingerprint = await getFingerprint();
       const deviceToken = localStorage.getItem('deviceToken');
@@ -341,6 +454,7 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleEnterWorld() {
+    this.clearSafeLogoutSuppression();
     this.setState({ showEnterWorld: false, hideLandingPage: true });
     this.fingerprintAuth();
   }
@@ -348,6 +462,7 @@ export default class LoginControl extends React.Component<any, any> {
   // TEMP test-only: clears this device's fingerprint + tokens so the next
   // Enter World creates a brand-new player. Remove before production.
   async handleClearFingerprint() {
+    this.resetNetworkForAuthentication();
     try {
       const fingerprint = await getFingerprint();
       await fetch(`${window.location.origin}/clear-fingerprint`, {
@@ -365,6 +480,7 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleShowLogin() {
+    this.resetNetworkForAuthentication();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
@@ -377,6 +493,7 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   async passwordAuth(accountName: string, password: string) {
+    this.resetNetworkForAuthentication();
     try {
       const url = `${window.location.origin}/auth`;
       const response = await fetch(url, {
@@ -670,6 +787,7 @@ export default class LoginControl extends React.Component<any, any> {
   async handleErrorOkClick() {
     if (Global.serverOffline) {
       console.log('ErrorOkClick: server offline');
+      this.clearSafeLogoutSuppression();
       try {
         const url = `${window.location.origin}/logout`;
 
@@ -726,20 +844,24 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleSelectClass() {
+    this.clearSafeLogoutSuppression();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: false,
       hideTrueDeathPanel: true,
-      hideGame: true
+      hideGame: true,
+      safeLogoutCompletionMessage: '',
     });
   }
 
   handleFirstLogin() {
+    this.clearSafeLogoutSuppression();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
       hideTrueDeathPanel: true,
-      hideGame: false
+      hideGame: false,
+      safeLogoutCompletionMessage: '',
     });
 
     fetch(`${window.location.origin}/set-display-name`, {
@@ -763,8 +885,9 @@ export default class LoginControl extends React.Component<any, any> {
       hideLandingPage: true,
       hideSelectClass: true,
       hideTrueDeathPanel: true,
-      hideGame: false
-    });
+      hideGame: false,
+      safeLogoutCompletionMessage: '',
+    }, () => this.flushSafeLogoutResumeMessage());
     if (data && data.has_account) {
       Global.accountSetupCompleted = true;
     }
@@ -772,12 +895,14 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleInfoTrueDeath(message) {
+    this.clearSafeLogoutSuppression();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
       hideGame: true,
       hideTrueDeathPanel: false,
-      trueDeathData: message
+      trueDeathData: message,
+      safeLogoutCompletionMessage: '',
     });
   }
 
@@ -1002,6 +1127,23 @@ export default class LoginControl extends React.Component<any, any> {
                 </p>
               ) : (
                 <p style={{ textAlign: 'center', color: '#b4bcc4' }}>Connecting...</p>
+              )}
+
+              {this.state.safeLogoutCompletionMessage && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  style={{
+                    color: '#9fcf95',
+                    fontSize: '13px',
+                    lineHeight: 1.4,
+                    margin: '1em auto 0',
+                    maxWidth: '300px',
+                    textAlign: 'center',
+                  }}
+                >
+                  {this.state.safeLogoutCompletionMessage}
+                </p>
               )}
 
               <p className="leaderboard-link">

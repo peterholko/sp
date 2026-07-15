@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use std::net::SocketAddr;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use rustls::ServerConfig;
@@ -103,6 +104,10 @@ enum NetworkPacket {
     },
     #[serde(rename = "recreate_hero")]
     RecreateHero,
+    #[serde(rename = "request_safe_logout")]
+    RequestSafeLogout,
+    #[serde(rename = "cancel_safe_logout")]
+    CancelSafeLogout,
     #[serde(rename = "get_stats")]
     GetStats { id: i32 },
     #[serde(rename = "image_def")]
@@ -328,9 +333,90 @@ enum NetworkPacket {
     GetLogLevels,
 }
 
+fn decode_network_packet(input: &str) -> serde_json::Result<NetworkPacket> {
+    let packet = serde_json::from_str::<NetworkPacket>(input)?;
+    if matches!(
+        &packet,
+        NetworkPacket::RequestSafeLogout | NetworkPacket::CancelSafeLogout
+    ) {
+        let value = serde_json::from_str::<serde_json::Value>(input)?;
+        let exact_command_only = value
+            .as_object()
+            .map(|object| object.len() == 1 && object.contains_key("cmd"))
+            .unwrap_or(false);
+        if !exact_command_only {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "safe-logout commands do not accept client-controlled fields",
+            ));
+        }
+    }
+    Ok(packet)
+}
+
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct StructureList {
     pub result: Vec<Structure>,
+}
+
+/// One server-authoritative preparation affordance shown while a personal
+/// crisis is gathering or ready to launch. IDs and states are stable protocol
+/// values; copy remains presentation data and deliberately exposes no ECS IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CrisisPreparationOption {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub detail: String,
+    pub action_hint: String,
+}
+
+/// Versioned, player-facing personal-crisis state. Gameplay systems remain
+/// authoritative; this snapshot deliberately excludes ECS/object IDs,
+/// generation bookkeeping, and cleanup/debug state.
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CrisisStatusSnapshot {
+    pub version: u32,
+    pub exists: bool,
+    pub kind: Option<String>,
+    pub phase: Option<String>,
+    pub pressure: Option<i32>,
+    pub pressure_max: Option<i32>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub action_hint: Option<String>,
+    pub severity: Option<String>,
+    pub warning: bool,
+    pub assault_ready: bool,
+    pub assault_active: bool,
+    pub resolved: bool,
+    pub remaining_attackers: Option<i32>,
+    pub total_attackers: Option<i32>,
+    pub preparation_seconds_remaining: Option<i32>,
+    pub preferred_launch_window: Option<String>,
+    /// Additive v1 presentation field. Omitted outside Preparing and
+    /// AssaultReady so older clients retain their existing compact payload.
+    pub preparation_options: Option<Vec<CrisisPreparationOption>>,
+    pub continues_while_disconnected: bool,
+}
+
+/// Versioned, server-authoritative safe-logout presentation. The payload
+/// deliberately contains no player, entity, sanctuary, or protected-run IDs.
+#[skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SafeLogoutStatusSnapshot {
+    pub version: u32,
+    pub state: String,
+    pub can_request: bool,
+    pub can_cancel: bool,
+    pub countdown_total_seconds: Option<i32>,
+    pub countdown_remaining_seconds: Option<i32>,
+    pub reason: Option<String>,
+    pub message: String,
+    pub in_own_sanctuary: bool,
+    pub active_assault: bool,
+    pub protected: bool,
+    pub resumed_from_protection: bool,
 }
 
 #[skip_serializing_none]
@@ -989,6 +1075,16 @@ pub enum ResponsePacket {
         current_id: String,
         objectives: Vec<ObjectiveProgress>,
     },
+    #[serde(rename = "crisis_status")]
+    CrisisStatus {
+        #[serde(flatten)]
+        status: CrisisStatusSnapshot,
+    },
+    #[serde(rename = "safe_logout_status")]
+    SafeLogoutStatus {
+        #[serde(flatten)]
+        status: SafeLogoutStatusSnapshot,
+    },
     #[serde(rename = "threat_state")]
     ThreatState {
         version: i32,
@@ -1391,6 +1487,7 @@ pub struct UpgradeTemplate {
 pub struct ActiveStream {
     pub player_id: i32,
     pub client_id: Uuid,
+    pub displaced_client_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -1402,6 +1499,103 @@ pub struct Stream {
 
 #[derive(Debug, Clone)]
 pub struct Streams(Arc<Mutex<HashMap<Uuid, Stream>>>);
+
+/// Connection-scoped producer for the network-to-ECS queue. The current UUID
+/// check and nonblocking crossbeam enqueue share the client-registry mutex, so
+/// either an input is accepted before replacement activation or the displaced
+/// socket is rejected; there is no check/enqueue gap.
+#[derive(Clone)]
+struct AuthorizedPlayerEventSender {
+    sender: CBSender<PlayerEvent>,
+    clients: Clients,
+    player_id: i32,
+    connection_id: Uuid,
+}
+
+#[derive(Clone)]
+struct AcceptedPlayerEventSender {
+    sender: CBSender<PlayerEvent>,
+}
+
+impl AuthorizedPlayerEventSender {
+    fn new(
+        sender: CBSender<PlayerEvent>,
+        clients: Clients,
+        player_id: i32,
+        connection_id: Uuid,
+    ) -> Self {
+        Self {
+            sender,
+            clients,
+            player_id,
+            connection_id,
+        }
+    }
+
+    fn is_current_locked(&self, clients: &HashMap<Uuid, Client>) -> bool {
+        clients
+            .get(&self.connection_id)
+            .map(|client| {
+                client.id == self.connection_id
+                    && client.player_id == self.player_id
+                    && !client.sender.is_closed()
+                    && !clients.iter().any(|(other_id, other)| {
+                        *other_id != self.connection_id
+                            && other.id == *other_id
+                            && other.player_id == self.player_id
+                            && !other.sender.is_closed()
+                    })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Drop stale input without panicking the socket task. Existing handlers
+    /// use `expect` because a disconnected crossbeam consumer is exceptional;
+    /// displaced authority is an expected rejection instead.
+    fn send(&self, event: PlayerEvent) -> Result<(), crossbeam_channel::SendError<PlayerEvent>> {
+        let Ok(clients) = self.clients.lock() else {
+            info!(
+                "stale_connection_event_rejected player_id={} reason=registry_unavailable",
+                self.player_id
+            );
+            return Ok(());
+        };
+        if !self.is_current_locked(&clients) {
+            info!(
+                "stale_connection_event_rejected player_id={} reason=authority_replaced",
+                self.player_id
+            );
+            return Ok(());
+        }
+        self.sender.send(event)
+    }
+
+    /// Strict form for commands whose response must distinguish rejection.
+    fn send_strict(&self, event: PlayerEvent) -> bool {
+        let Ok(clients) = self.clients.lock() else {
+            return false;
+        };
+        self.is_current_locked(&clients) && self.sender.send(event).is_ok()
+    }
+
+    /// Linearization token for an accepted operation that performs database
+    /// awaits before it can emit its ECS event. Replacement after this point
+    /// does not retroactively cancel a request accepted by the old authority;
+    /// replacement before it prevents the operation entirely.
+    fn begin_operation(&self) -> Option<AcceptedPlayerEventSender> {
+        let clients = self.clients.lock().ok()?;
+        self.is_current_locked(&clients)
+            .then(|| AcceptedPlayerEventSender {
+                sender: self.sender.clone(),
+            })
+    }
+}
+
+impl AcceptedPlayerEventSender {
+    fn send(&self, event: PlayerEvent) -> Result<(), crossbeam_channel::SendError<PlayerEvent>> {
+        self.sender.send(event)
+    }
+}
 
 pub fn send_to_client(player_id: i32, packet: ResponsePacket, clients: &Res<Clients>) {
     for (_client_id, client) in clients.lock().unwrap().iter() {
@@ -1601,24 +1795,38 @@ pub async fn tokio_setup(
         tokio::sync::mpsc::channel::<ActiveStream>(100);
 
     let streams_clone = streams.clone();
+    let manager_clients = clients.clone();
     tokio::spawn(async move {
         while let Some(message) = stream_to_manager_receiver.recv().await {
-            println!("Received message from stream: {:?}", message);
-
             let active_client_id = message.client_id;
 
-            // Terminate other streams for the same player id
+            // A delayed notification may no longer describe the current
+            // connection. Its displacement list is still safe to process:
+            // `Clients::activate` captured only connections older than this
+            // activation, so it can never name a later replacement.
+            if !manager_clients.is_current_connection(message.player_id, active_client_id) {
+                info!(
+                    "connection_manager_stale_activation_cleanup player_id={}",
+                    message.player_id
+                );
+            }
+
+            // Terminate precisely the connections displaced by this atomic
+            // activation. Rescanning by player here would introduce a race in
+            // which a later replacement could be mistaken for an older stream.
             let streams_to_terminate: Vec<_> = {
                 let streams_lock = streams_clone.0.lock().unwrap();
-
-                println!("Streams lock: {:?}", streams_lock);
-                streams_lock
+                message
+                    .displaced_client_ids
                     .iter()
-                    .filter(|(_client_id, stream)| {
-                        stream.player_id == message.player_id
-                            && stream.client_id != active_client_id
+                    .filter_map(|client_id| {
+                        streams_lock.get(client_id).and_then(|stream| {
+                            (stream.player_id == message.player_id
+                                && stream.client_id == *client_id
+                                && stream.client_id != active_client_id)
+                                .then(|| stream.sender.clone())
+                        })
                     })
-                    .map(|(_client_id, stream)| stream.sender.clone())
                     .collect()
             };
 
@@ -1855,20 +2063,13 @@ async fn accept_connection(
     {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => {
-                println!(
-                    "Connection closed - removing client: {:?} {:?}",
-                    client_id, e
-                );
-
-                clients.lock().unwrap().remove(&client_id);
+                info!("connection_closed reason={:?}", e);
+                clients.remove_if_current(client_id);
                 streams.0.lock().unwrap().remove(&client_id);
             }
             err => {
-                println!(
-                    "Error processing connection - removing client: {:?} {:?}",
-                    client_id, err
-                );
-                clients.lock().unwrap().remove(&client_id);
+                warn!("connection_processing_failed reason={:?}", err);
+                clients.remove_if_current(client_id);
                 streams.0.lock().unwrap().remove(&client_id);
             }
         }
@@ -1890,11 +2091,7 @@ async fn handle_connection(
     //Client ID
     let client_id = Uuid::new_v4();
 
-    net_debug!(
-        "New client id: {:?} for WebSocket connection: {}",
-        client_id,
-        peer
-    );
+    net_debug!("New WebSocket connection from {}", peer);
 
     // Get peer address
     let peer: SocketAddr = stream.get_ref().0.peer_addr().unwrap();
@@ -1941,12 +2138,9 @@ async fn handle_connection(
 
             for pair in pairs {
                 if let Some((key, value)) = pair.split_once('=') {
-                    println!("key: {:?} value: {:?}", key, value);
                     parsed.insert(key, value);
                 }
             }
-
-            println!("Parsed: {:?}", parsed);
             // Access values by key
             session_id = parsed.get("session").map(|s| s.to_string());
 
@@ -1957,7 +2151,7 @@ async fn handle_connection(
     let ws_stream = match accept_hdr_async(stream, callback).await {
         Ok(ws_stream) => ws_stream,
         Err(e) => {
-            println!("WebSocket handshake error for client {}: {}", client_id, e);
+            println!("WebSocket handshake error: {}", e);
             return Err((client_id, e));
         }
     };
@@ -1976,9 +2170,6 @@ async fn handle_connection(
     let Some(session_id) = session_id else {
         return Err((client_id, Error::AttackAttempt));
     };
-
-    // Print the session id
-    net_debug!("session_id: {:?}", session_id);
 
     let client = pool
         .get()
@@ -2035,20 +2226,6 @@ async fn handle_connection(
         },
     );
 
-    println!("Streams: {:?}", streams.0.lock().unwrap());
-
-    // Kill the other streams for the same player id
-    match stream_to_manager_sender
-        .send(ActiveStream {
-            player_id: player_id,
-            client_id: client_id,
-        })
-        .await
-    {
-        Ok(_) => (),
-        Err(_e) => return Err((client_id, Error::ConnectionClosed)),
-    }
-
     // Get the player account_name from the accounts table
     let row_account = client
         .query_one(
@@ -2060,8 +2237,8 @@ async fn handle_connection(
     let Ok(row_account) = row_account else {
         // Account not found - this is a data integrity issue (orphaned session)
         println!(
-            "DATA INTEGRITY ERROR: Account not found for player_id {} referenced by session {}",
-            player_id, session_id
+            "DATA INTEGRITY ERROR: Account not found for authenticated player_id {}",
+            player_id
         );
         println!("Cleaning up orphaned session...");
 
@@ -2126,18 +2303,42 @@ async fn handle_connection(
         crisis_tier = row_score.get("crisis_tier");
     };
 
-    //Store the incremented client id and the game to client sender in the clients hashmap
-    println!("Inserting client into clients hashmap");
-    clients.lock().unwrap().insert(
+    // Full session/account validation has completed. This atomic activation is
+    // the authority boundary: displaced sockets immediately lose command
+    // authority even if their asynchronous close has not arrived yet.
+    let displaced = clients.activate(Client {
+        id: client_id,
+        player_id,
+        sender: game_to_client_sender,
+    });
+    if !clients.is_current_connection(player_id, client_id) {
+        return Err((client_id, Error::ConnectionClosed));
+    }
+    info!(
+        "authenticated_connection_activated player_id={} displaced_connections={}",
+        player_id,
+        displaced.len()
+    );
+    let client_to_game_sender = AuthorizedPlayerEventSender::new(
+        client_to_game_sender,
+        clients.clone(),
+        player_id,
         client_id,
-        Client {
-            id: client_id,
-            player_id: player_id,
-            sender: game_to_client_sender,
-        },
     );
 
-    println!("Clients: {:?}", clients.lock().unwrap());
+    // Notify the stream manager only after atomic activation. It independently
+    // verifies this UUID is still current, making delayed messages harmless.
+    if stream_to_manager_sender
+        .send(ActiveStream {
+            player_id,
+            client_id,
+            displaced_client_ids: displaced,
+        })
+        .await
+        .is_err()
+    {
+        return Err((client_id, Error::ConnectionClosed));
+    }
 
     println!("player_state: {:?}", player_state);
 
@@ -2153,7 +2354,8 @@ async fn handle_connection(
             //Send login to player
             client_to_game_sender
                 .send(PlayerEvent::Login {
-                    player_id: player_id,
+                    player_id,
+                    connection_id: client_id,
                 })
                 .expect("Could not send message");
 
@@ -2195,6 +2397,10 @@ async fn handle_connection(
 
     let res = serde_json::to_string(&packet).unwrap();
 
+    if !clients.is_current_connection(player_id, client_id) {
+        return Err((client_id, Error::ConnectionClosed));
+    }
+
     ws_sender
         .send(Message::Text(res.into()))
         .await
@@ -2214,12 +2420,22 @@ async fn handle_connection(
                         };
                         if msg.is_text() || msg.is_binary() {
 
+                            if authenticated_player_for_connection(client_id, &clients)
+                                != Some(player_id)
+                            {
+                                info!(
+                                    "stale_connection_packet_rejected player_id={}",
+                                    player_id
+                                );
+                                break;
+                            }
+
                             println!("player_id: {:?}", player_id);
 
                             //Check if the player is authenticated
                             /*if player_id == -1 {
                                 //Attempt to login
-                                let res_packet: ResponsePacket = match serde_json::from_str(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
                                     Ok(packet) => {
                                         match packet {
                                             /*NetworkPacket::Register{account_name, password} => {
@@ -2270,7 +2486,7 @@ async fn handle_connection(
                             } else {*/
                                 println!("Authenticated packet: {:?}", msg.to_text().unwrap());
 
-                                let res_packet: ResponsePacket = match serde_json::from_str(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
                                     Ok(packet) => {
                                         match packet {
                                             NetworkPacket::SelectedClass{class_name, hero_name} => {
@@ -2283,7 +2499,27 @@ async fn handle_connection(
                                                 ).await
                                             }
                                             NetworkPacket::RecreateHero => {
-                                                handle_recreate_hero(pool.clone(), player_id).await
+                                                handle_recreate_hero(
+                                                    pool.clone(),
+                                                    player_id,
+                                                    client_to_game_sender.clone(),
+                                                ).await
+                                            }
+                                            NetworkPacket::RequestSafeLogout => {
+                                                handle_safe_logout_command(
+                                                    client_id,
+                                                    &clients,
+                                                    client_to_game_sender.clone(),
+                                                    false,
+                                                )
+                                            }
+                                            NetworkPacket::CancelSafeLogout => {
+                                                handle_safe_logout_command(
+                                                    client_id,
+                                                    &clients,
+                                                    client_to_game_sender.clone(),
+                                                    true,
+                                                )
                                             }
                                             NetworkPacket::GetStats{id} => {
                                                 handle_get_stats(player_id, id, client_to_game_sender.clone())
@@ -2637,12 +2873,9 @@ async fn handle_connection(
 
                     match serde_json::from_str(game_msg.as_str()) {
                         Ok(ResponsePacket::Disconnect { player, client }) => {
-                            println!("Received disconnect from game, closing websocket for player: {:?} client: {:?}", player, client);
-                            println!("Stream: {:?}", ws_sender);
+                            info!("server_disconnect_requested player_id={}", player);
                             ws_sender.send(Message::Close(None)).await.map_err(|e| (client_id, e))?;
-                            let removed_client = clients.lock().unwrap().remove(&client);
-                            // Don't try to close the sender since it doesn't implement the required trait
-                            println!("Removed client: {:?}", removed_client);
+                            clients.remove_if_current(client);
                             break;
                         }
                         _ => {
@@ -2655,11 +2888,12 @@ async fn handle_connection(
 
             //Receive messages from the manager
             manager_msg = manager_to_stream_receiver.recv() => {
-                if let Some(manager_msg) = manager_msg {
-                    println!("Received message from manager: {:?}", manager_msg);
+                if let Some(_manager_msg) = manager_msg {
                     ws_sender.send(Message::Close(None)).await.map_err(|e| (client_id, e))?;
+                    clients.remove_if_current(client_id);
                     let removed_stream = streams.0.lock().unwrap().remove(&client_id);
-                    println!("Removed stream: {:?}", removed_stream);
+                    let _ = removed_stream;
+                    break;
                 }
             }
         }
@@ -2668,8 +2902,7 @@ async fn handle_connection(
 }
 
 fn handle_disconnect(client_id: Uuid, clients: Clients) {
-    let mut clients = clients.lock().unwrap();
-    clients.remove(&client_id);
+    clients.remove_if_current(client_id);
 }
 
 async fn handle_selected_class(
@@ -2677,9 +2910,14 @@ async fn handle_selected_class(
     player_id: i32,
     class_name: String,
     hero_name: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     println!("handle_selected_class: {:?}", player_id);
+    let Some(accepted_sender) = client_to_game_sender.begin_operation() else {
+        return ResponsePacket::Error {
+            errmsg: "This connection is no longer authoritative.".to_string(),
+        };
+    };
 
     // Check if valid class_name
     let selected_class = match class_name.as_str() {
@@ -2723,7 +2961,7 @@ async fn handle_selected_class(
         .expect("Error executing statement");
 
     //Send new player event to game
-    client_to_game_sender
+    accepted_sender
         .send(PlayerEvent::NewPlayer {
             player_id: player_id,
             hero_name: hero_name.clone(),
@@ -2736,8 +2974,17 @@ async fn handle_selected_class(
     }
 }
 
-async fn handle_recreate_hero(pool: Pool, player_id: i32) -> ResponsePacket {
+async fn handle_recreate_hero(
+    pool: Pool,
+    player_id: i32,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+) -> ResponsePacket {
     println!("handle_recreate_hero: {:?}", player_id);
+    let Some(_accepted_operation) = client_to_game_sender.begin_operation() else {
+        return ResponsePacket::Error {
+            errmsg: "This connection is no longer authoritative.".to_string(),
+        };
+    };
 
     let client = pool
         .get()
@@ -2763,7 +3010,7 @@ async fn handle_recreate_hero(pool: Pool, player_id: i32) -> ResponsePacket {
 fn handle_get_stats(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::GetStats {
@@ -2780,7 +3027,7 @@ fn handle_move(
     player_id: i32,
     x: i32,
     y: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Move {
@@ -2793,12 +3040,63 @@ fn handle_move(
     ResponsePacket::Ok
 }
 
+/// Resolve the player solely from the currently active authenticated
+/// connection. The WebSocket task's local `player_id` is intentionally not an
+/// argument: a removed, replaced, malformed, or closed client record must not
+/// retain authority to start or cancel safe logout.
+fn authenticated_player_for_connection(client_id: Uuid, clients: &Clients) -> Option<i32> {
+    let player_id = {
+        let clients_guard = clients.lock().ok()?;
+        let client = clients_guard.get(&client_id)?;
+        (client.id == client_id && client.player_id >= 0).then_some(client.player_id)?
+    };
+
+    clients
+        .is_current_connection(player_id, client_id)
+        .then_some(player_id)
+}
+
+fn handle_safe_logout_command(
+    client_id: Uuid,
+    clients: &Clients,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+    cancel: bool,
+) -> ResponsePacket {
+    let Some(player_id) = authenticated_player_for_connection(client_id, clients) else {
+        return ResponsePacket::Error {
+            errmsg: "Safe Logout requires an authenticated connection.".to_string(),
+        };
+    };
+
+    let event = if cancel {
+        PlayerEvent::CancelSafeLogout {
+            player_id,
+            connection_id: client_id,
+        }
+    } else {
+        PlayerEvent::RequestSafeLogout {
+            player_id,
+            connection_id: client_id,
+        }
+    };
+
+    if !client_to_game_sender.send_strict(event) {
+        return ResponsePacket::Error {
+            errmsg: "Safe Logout is temporarily unavailable.".to_string(),
+        };
+    }
+
+    // The authoritative safe-logout status system reports acceptance,
+    // rejection, cancellation, countdown, and completion asynchronously.
+    ResponsePacket::None
+}
+
 fn handle_attack(
     player_id: i32,
     attack_type: String,
     source_id: i32,
     target_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Attack {
@@ -2817,7 +3115,7 @@ fn handle_ability(
     ability_id: String,
     source_id: i32,
     target_id: Option<i32>,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Ability {
@@ -2836,7 +3134,7 @@ fn handle_combo(
     source_id: i32,
     target_id: i32,
     combo_type: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Combo {
@@ -2854,7 +3152,7 @@ fn handle_block(
     player_id: i32,
     source_id: i32,
     defense: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Block {
@@ -2870,7 +3168,7 @@ fn handle_block(
 fn handle_info_obj(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoObj {
@@ -2886,7 +3184,7 @@ fn handle_info_obj(
 fn handle_info_skills(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoSkills {
@@ -2902,7 +3200,7 @@ fn handle_info_skills(
 fn handle_info_attrs(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoAttrs {
@@ -2918,7 +3216,7 @@ fn handle_info_attrs(
 fn handle_info_advance(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoAdvance {
@@ -2934,7 +3232,7 @@ fn handle_info_advance(
 fn handle_info_upgrade(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoUpgrade {
@@ -2951,7 +3249,7 @@ fn handle_info_tile(
     player_id: i32,
     x: i32,
     y: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoTile {
@@ -2969,7 +3267,7 @@ fn handle_info_tile_resources(
     player_id: i32,
     x: i32,
     y: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoTileResources {
@@ -2986,7 +3284,7 @@ fn handle_info_tile_resources(
 fn handle_info_inventory(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoInventory {
@@ -3002,7 +3300,7 @@ fn handle_info_inventory(
 fn handle_info_equip(
     player_id: i32,
     id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoEquip {
@@ -3020,7 +3318,7 @@ fn handle_info_item(
     obj_id: i32,
     item_id: i32,
     action: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoItem {
@@ -3038,7 +3336,7 @@ fn handle_info_item(
 fn handle_info_item_by_name(
     player_id: i32,
     name: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoItemByName {
@@ -3055,7 +3353,7 @@ fn handle_info_item_transfer(
     player_id: i32,
     source_id: i32,
     target_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoItemTransfer {
@@ -3073,7 +3371,7 @@ fn handle_info_exit(
     player_id: i32,
     id: i32,
     panel_type: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoExit {
@@ -3091,7 +3389,7 @@ fn handle_info_merchant(
     player_id: i32,
     source_id: i32,
     merchant_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoMerchant {
@@ -3108,7 +3406,7 @@ fn handle_info_merchant(
 fn handle_info_hire(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoHire {
@@ -3126,7 +3424,7 @@ fn handle_item_transfer(
     item: i32,
     source_id: i32,
     target_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::ItemTransfer {
@@ -3146,7 +3444,7 @@ fn handle_item_split(
     owner_id: i32,
     item: i32,
     quantity: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::ItemSplit {
@@ -3161,7 +3459,10 @@ fn handle_item_split(
     ResponsePacket::None
 }
 
-fn handle_gather(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -> ResponsePacket {
+fn handle_gather(
+    player_id: i32,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Gather {
             player_id: player_id,
@@ -3175,7 +3476,7 @@ fn handle_gather(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -
 fn handle_plant(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Plant {
@@ -3191,7 +3492,7 @@ fn handle_plant(
 fn handle_tend(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Tend {
@@ -3207,7 +3508,7 @@ fn handle_tend(
 fn handle_harvest(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Harvest {
@@ -3223,7 +3524,7 @@ fn handle_harvest(
 fn handle_refine(
     player_id: i32,
     item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Refine {
@@ -3240,7 +3541,7 @@ fn handle_structure_refine(
     player_id: i32,
     structure_id: i32,
     item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::StructureRefine {
@@ -3257,7 +3558,7 @@ fn handle_structure_refine(
 fn handle_craft(
     player_id: i32,
     recipe: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Craft {
@@ -3274,7 +3575,7 @@ fn handle_structure_craft(
     player_id: i32,
     structure_id: i32,
     recipe: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::StructureCraft {
@@ -3291,7 +3592,7 @@ fn handle_structure_craft(
 fn handle_order_follow(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderFollow {
@@ -3308,7 +3609,7 @@ fn handle_order_gather(
     player_id: i32,
     source_id: i32,
     res_type: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderGather {
@@ -3324,7 +3625,7 @@ fn handle_order_gather(
 
 fn handle_structure_list(
     player_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::StructureList {
@@ -3340,7 +3641,7 @@ fn handle_create_foundation(
     player_id: i32,
     source_id: i32,
     structure: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::CreateFoundation {
@@ -3358,7 +3659,7 @@ fn handle_build(
     player_id: i32,
     source_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Build {
@@ -3376,7 +3677,7 @@ fn handle_start_upgrade(
     player_id: i32,
     structure_id: i32,
     selected_upgrade: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::StartUpgrade {
@@ -3394,7 +3695,7 @@ fn handle_upgrade(
     player_id: i32,
     source_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Upgrade {
@@ -3411,7 +3712,7 @@ fn handle_upgrade(
 fn handle_experiment(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Experiment {
@@ -3426,7 +3727,7 @@ fn handle_experiment(
 fn handle_activate(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Activate {
@@ -3441,7 +3742,7 @@ fn handle_activate(
 fn handle_survey(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Survey {
@@ -3453,7 +3754,10 @@ fn handle_survey(
     ResponsePacket::Ok
 }
 
-fn handle_prospect(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -> ResponsePacket {
+fn handle_prospect(
+    player_id: i32,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Prospect {
             player_id: player_id,
@@ -3463,7 +3767,10 @@ fn handle_prospect(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>)
     ResponsePacket::Ok
 }
 
-fn handle_explore(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) -> ResponsePacket {
+fn handle_explore(
+    player_id: i32,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Explore {
             player_id: player_id,
@@ -3476,7 +3783,7 @@ fn handle_explore(player_id: i32, client_to_game_sender: CBSender<PlayerEvent>) 
 fn handle_investigate(
     player_id: i32,
     target_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InvestigatePOI {
@@ -3490,7 +3797,7 @@ fn handle_investigate(
 
 fn handle_nearby_resources(
     player_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::NearbyResources {
@@ -3504,7 +3811,7 @@ fn handle_nearby_resources(
 fn handle_info_assign(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoAssign {
@@ -3521,7 +3828,7 @@ fn handle_assign(
     player_id: i32,
     worker_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Assign {
@@ -3539,7 +3846,7 @@ fn handle_remove_assign(
     player_id: i32,
     worker_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::RemoveAssign {
@@ -3558,7 +3865,7 @@ fn handle_equip(
     obj_id: i32,
     item: i32,
     status: bool,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Equip {
@@ -3576,7 +3883,7 @@ fn handle_equip(
 fn handle_sleep(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Sleep {
@@ -3593,7 +3900,7 @@ fn handle_delete_item(
     player_id: i32,
     obj_id: i32,
     item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::DeleteItem {
@@ -3610,7 +3917,7 @@ fn handle_delete_item(
 fn handle_info_craft(
     player_id: i32,
     crafter_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoCraft {
@@ -3626,7 +3933,7 @@ fn handle_info_craft(
 fn handle_info_structure_craft(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoStructureCraft {
@@ -3642,7 +3949,7 @@ fn handle_info_structure_craft(
 fn handle_info_structure_queue(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoStructureQueue {
@@ -3659,7 +3966,7 @@ fn handle_info_work_queue_entry(
     player_id: i32,
     structure_id: i32,
     index: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoWorkQueueEntry {
@@ -3676,7 +3983,7 @@ fn handle_add_crafting_entry(
     player_id: i32,
     structure_id: i32,
     recipe_name: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::AddCraftingEntry {
@@ -3694,7 +4001,7 @@ fn handle_add_refine_entry(
     player_id: i32,
     structure_id: i32,
     refine_item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::AddRefineEntry {
@@ -3713,7 +4020,7 @@ fn handle_remove_work_entry(
     player_id: i32,
     structure_id: i32,
     index: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::RemoveWorkEntry {
@@ -3730,7 +4037,7 @@ fn handle_remove_work_entry(
 fn handle_info_refine(
     player_id: i32,
     refiner_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoRefine {
@@ -3746,7 +4053,7 @@ fn handle_info_refine(
 fn handle_info_structure_refine(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoStructureRefine {
@@ -3763,7 +4070,7 @@ fn handle_info_structure_refine_item(
     player_id: i32,
     structure_id: i32,
     item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoStructureRefineItem {
@@ -3781,7 +4088,7 @@ fn handle_order_refine(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderRefine {
@@ -3799,7 +4106,7 @@ fn handle_order_craft(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderCraft {
@@ -3816,7 +4123,7 @@ fn handle_order_craft(
 fn handle_order_explore(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderExplore {
@@ -3832,7 +4139,7 @@ fn handle_order_explore(
 fn handle_order_prospect(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderProspect {
@@ -3848,7 +4155,7 @@ fn handle_order_experiment(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderExperiment {
@@ -3866,7 +4173,7 @@ fn handle_order_plant(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderPlant {
@@ -3884,7 +4191,7 @@ fn handle_order_tend(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderTend {
@@ -3902,7 +4209,7 @@ fn handle_order_harvest(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderHarvest {
@@ -3919,7 +4226,7 @@ fn handle_order_harvest(
 fn handle_order_repair(
     player_id: i32,
     villager_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderRepair {
@@ -3936,7 +4243,7 @@ fn handle_use(
     player_id: i32,
     obj_id: i32,
     item_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Use {
@@ -3953,7 +4260,7 @@ fn handle_use(
 fn handle_remove(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Remove {
@@ -3969,7 +4276,7 @@ fn handle_remove(
 fn handle_advance(
     player_id: i32,
     source_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Advance {
@@ -3985,7 +4292,7 @@ fn handle_advance(
 fn handle_info_experiment(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::InfoExperinment {
@@ -4003,7 +4310,7 @@ fn handle_set_experiment_item(
     structure_id: i32,
     item_id: i32,
     is_resource: bool,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::SetExperimentItem {
@@ -4021,7 +4328,7 @@ fn handle_set_experiment_item(
 fn handle_reset_experiment(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::ResetExperiment {
@@ -4038,7 +4345,7 @@ fn handle_hire(
     player_id: i32,
     source_id: i32,
     target_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Hire {
@@ -4057,7 +4364,7 @@ fn handle_buy_item(
     seller_id: i32,
     item_id: i32,
     quantity: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::BuyItem {
@@ -4077,7 +4384,7 @@ fn handle_sell_item(
     item_id: i32,
     target_id: i32,
     quantity: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::SellItem {
@@ -4096,7 +4403,7 @@ fn handle_order_operate(
     player_id: i32,
     villager_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::OrderOperate {
@@ -4113,7 +4420,7 @@ fn handle_order_operate(
 fn handle_operate(
     player_id: i32,
     structure_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Operate {
@@ -4128,7 +4435,7 @@ fn handle_operate(
 
 fn handle_cancel_action(
     player_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::CancelAction {
@@ -4143,7 +4450,7 @@ fn handle_cancel_action(
 fn handle_debug_obj(
     player_id: i32,
     obj_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::DebugObj {
@@ -4159,7 +4466,7 @@ fn handle_set_log_level(
     player_id: i32,
     target: String,
     level: String,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     // Validate level
     if !["ERROR", "WARN", "INFO", "DEBUG", "TRACE", "OFF"].contains(&level.as_str()) {
@@ -4184,7 +4491,7 @@ fn handle_set_log_level(
 
 fn handle_get_log_levels(
     player_id: i32,
-    client_to_game_sender: CBSender<PlayerEvent>,
+    client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::GetLogLevels { player_id })
@@ -4197,9 +4504,537 @@ fn handle_get_log_levels(
 mod tests {
     use super::*;
 
+    fn no_crisis_status() -> CrisisStatusSnapshot {
+        CrisisStatusSnapshot {
+            version: 1,
+            exists: false,
+            kind: None,
+            phase: None,
+            pressure: None,
+            pressure_max: None,
+            title: None,
+            summary: None,
+            action_hint: None,
+            severity: None,
+            warning: false,
+            assault_ready: false,
+            assault_active: false,
+            resolved: false,
+            remaining_attackers: None,
+            total_attackers: None,
+            preparation_seconds_remaining: None,
+            preferred_launch_window: None,
+            preparation_options: None,
+            continues_while_disconnected: false,
+        }
+    }
+
+    fn safe_logout_status(state: &str) -> SafeLogoutStatusSnapshot {
+        SafeLogoutStatusSnapshot {
+            version: 1,
+            state: state.to_string(),
+            can_request: state == "online",
+            can_cancel: state == "pending",
+            countdown_total_seconds: (state == "pending").then_some(10),
+            countdown_remaining_seconds: (state == "pending").then_some(7),
+            reason: None,
+            message: "status".to_string(),
+            in_own_sanctuary: true,
+            active_assault: false,
+            protected: state == "protected",
+            resumed_from_protection: false,
+        }
+    }
+
+    fn authenticated_client(
+        player_id: i32,
+    ) -> (Clients, Uuid, tokio::sync::mpsc::Receiver<String>) {
+        let clients = Clients::default();
+        let client_id = Uuid::new_v4();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        clients.lock().unwrap().insert(
+            client_id,
+            Client {
+                id: client_id,
+                player_id,
+                sender,
+            },
+        );
+        (clients, client_id, receiver)
+    }
+
     #[test]
     fn test_is_inappropriate() {
         let hero_name = "Fuck";
         assert!(hero_name.is_inappropriate());
+    }
+
+    #[test]
+    fn checkpoint4_crisis_status_uses_stable_tag_and_flat_payload() {
+        let mut status = no_crisis_status();
+        status.exists = true;
+        status.kind = Some("goblin".to_string());
+        status.phase = Some("assault_active".to_string());
+        status.pressure = Some(91);
+        status.pressure_max = Some(100);
+        status.title = Some("Settlement Under Attack".to_string());
+        status.summary = Some("Goblin raiders are attacking your settlement.".to_string());
+        status.action_hint = Some(
+            "Defeat the remaining attackers. This assault continues if you disconnect.".to_string(),
+        );
+        status.severity = Some("crisis".to_string());
+        status.warning = true;
+        status.assault_active = true;
+        status.remaining_attackers = Some(2);
+        status.total_attackers = Some(3);
+        status.continues_while_disconnected = true;
+
+        let value = serde_json::to_value(ResponsePacket::CrisisStatus { status }).unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["phase"], "assault_active");
+        assert_eq!(value["remaining_attackers"], 2);
+        assert_eq!(value["continues_while_disconnected"], true);
+        assert!(value.get("status").is_none(), "payload must remain flat");
+    }
+
+    #[test]
+    fn checkpoint4_no_crisis_status_serializes_as_a_clear_state() {
+        let value = serde_json::to_value(ResponsePacket::CrisisStatus {
+            status: no_crisis_status(),
+        })
+        .unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["exists"], false);
+        assert_eq!(value["warning"], false);
+        assert!(value.get("kind").is_none());
+        assert!(value.get("phase").is_none());
+        assert!(value.get("pressure").is_none());
+        assert!(value.get("remaining_attackers").is_none());
+        assert!(value.get("preparation_options").is_none());
+    }
+
+    #[test]
+    fn checkpoint3_preparation_options_are_additive_flat_v1_fields() {
+        let mut status = no_crisis_status();
+        status.exists = true;
+        status.phase = Some("preparing".to_string());
+        status.preparation_options = Some(vec![CrisisPreparationOption {
+            id: "defences".to_string(),
+            label: "Defences".to_string(),
+            state: "needs_attention".to_string(),
+            detail: "One completed wall is damaged.".to_string(),
+            action_hint: "Order a living villager to repair it.".to_string(),
+        }]);
+
+        let encoded = serde_json::to_string(&ResponsePacket::CrisisStatus { status }).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["preparation_options"][0]["id"], "defences");
+        assert_eq!(value["preparation_options"][0]["state"], "needs_attention");
+        assert!(value.get("status").is_none(), "payload must remain flat");
+
+        let decoded: ResponsePacket = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            ResponsePacket::CrisisStatus {
+                status: CrisisStatusSnapshot {
+                    preparation_options: Some(options),
+                    ..
+                }
+            } if options.len() == 1 && options[0].id == "defences"
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_request_commands_use_stable_tags_without_player_ids() {
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"request_safe_logout"}"#).unwrap(),
+            NetworkPacket::RequestSafeLogout
+        ));
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"cancel_safe_logout"}"#).unwrap(),
+            NetworkPacket::CancelSafeLogout
+        ));
+
+        let request = serde_json::to_value(NetworkPacket::RequestSafeLogout).unwrap();
+        let cancel = serde_json::to_value(NetworkPacket::CancelSafeLogout).unwrap();
+        assert_eq!(request, serde_json::json!({"cmd": "request_safe_logout"}));
+        assert_eq!(cancel, serde_json::json!({"cmd": "cancel_safe_logout"}));
+        assert!(request.get("player_id").is_none());
+        assert!(cancel.get("player_id").is_none());
+        assert!(decode_network_packet(r#"{"cmd":"request_safe_logout","player_id":999}"#).is_err());
+        assert!(decode_network_packet(r#"{"cmd":"cancel_safe_logout","player_id":999}"#).is_err());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_status_is_flat_versioned_and_omits_optional_fields() {
+        let value = serde_json::to_value(ResponsePacket::SafeLogoutStatus {
+            status: safe_logout_status("online"),
+        })
+        .unwrap();
+
+        assert_eq!(value["packet"], "safe_logout_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["state"], "online");
+        assert_eq!(value["can_request"], true);
+        assert_eq!(value["protected"], false);
+        assert_eq!(value["resumed_from_protection"], false);
+        assert!(value.get("status").is_none());
+        assert!(value.get("countdown_total_seconds").is_none());
+        assert!(value.get("countdown_remaining_seconds").is_none());
+        assert!(value.get("reason").is_none());
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_all_stable_states_serialize() {
+        for state in ["online", "pending", "protected", "disconnected"] {
+            let value = serde_json::to_value(ResponsePacket::SafeLogoutStatus {
+                status: safe_logout_status(state),
+            })
+            .unwrap();
+            assert_eq!(value["state"], state);
+        }
+    }
+
+    #[test]
+    fn connection_authority_activation_displaces_old_session_atomically() {
+        let player_id = 40;
+        let clients = Clients::default();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
+        let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
+
+        assert!(clients
+            .activate(Client {
+                id: first_id,
+                player_id,
+                sender: first_sender,
+            })
+            .is_empty());
+        assert!(clients.is_current_connection(player_id, first_id));
+
+        assert_eq!(
+            clients.activate(Client {
+                id: second_id,
+                player_id,
+                sender: second_sender,
+            }),
+            vec![first_id]
+        );
+        assert!(!clients.is_current_connection(player_id, first_id));
+        assert!(clients.is_current_connection(player_id, second_id));
+        assert_eq!(
+            authenticated_player_for_connection(first_id, &clients),
+            None
+        );
+        assert_eq!(
+            authenticated_player_for_connection(second_id, &clients),
+            Some(player_id)
+        );
+
+        // Cleanup from the displaced socket cannot remove the replacement.
+        assert!(clients.remove_if_current(first_id).is_none());
+        assert!(clients.is_current_connection(player_id, second_id));
+        assert!(clients.remove_if_current(second_id).is_some());
+        assert!(!clients.is_player_online(player_id));
+    }
+
+    #[test]
+    fn connection_authority_duplicate_registry_state_fails_closed() {
+        let player_id = 44;
+        let clients = Clients::default();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
+        let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
+        clients.lock().unwrap().extend([
+            (
+                first_id,
+                Client {
+                    id: first_id,
+                    player_id,
+                    sender: first_sender,
+                },
+            ),
+            (
+                second_id,
+                Client {
+                    id: second_id,
+                    player_id,
+                    sender: second_sender,
+                },
+            ),
+        ]);
+
+        assert!(!clients.is_current_connection(player_id, first_id));
+        assert!(!clients.is_current_connection(player_id, second_id));
+        assert_eq!(
+            authenticated_player_for_connection(first_id, &clients),
+            None
+        );
+        assert_eq!(
+            authenticated_player_for_connection(second_id, &clients),
+            None
+        );
+    }
+
+    #[test]
+    fn connection_authority_near_simultaneous_replacements_leave_one_controller() {
+        let player_id = 45;
+        let clients = Clients::default();
+        let original_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let (original_sender, _original_receiver) = tokio::sync::mpsc::channel(1);
+        let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
+        let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client {
+            id: original_id,
+            player_id,
+            sender: original_sender,
+        });
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let first_clients = clients.clone();
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_clients.activate(Client {
+                id: first_id,
+                player_id,
+                sender: first_sender,
+            })
+        });
+        let second_clients = clients.clone();
+        let second_barrier = barrier.clone();
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second_clients.activate(Client {
+                id: second_id,
+                player_id,
+                sender: second_sender,
+            })
+        });
+
+        barrier.wait();
+        first.join().unwrap();
+        second.join().unwrap();
+
+        let first_is_current = clients.is_current_connection(player_id, first_id);
+        let second_is_current = clients.is_current_connection(player_id, second_id);
+        assert_ne!(first_is_current, second_is_current);
+        assert!(!clients.is_current_connection(player_id, original_id));
+        assert_eq!(clients.active_connection_ids(player_id).len(), 1);
+    }
+
+    #[test]
+    fn connection_authority_event_enqueue_is_atomic_with_replacement() {
+        let player_id = 46;
+        let displaced_id = Uuid::new_v4();
+        let replacement_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (network_sender, network_receiver) = crossbeam_channel::unbounded();
+        let (displaced_sender, _displaced_receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client {
+            id: displaced_id,
+            player_id,
+            sender: displaced_sender,
+        });
+        let displaced_events = AuthorizedPlayerEventSender::new(
+            network_sender.clone(),
+            clients.clone(),
+            player_id,
+            displaced_id,
+        );
+
+        let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client {
+            id: replacement_id,
+            player_id,
+            sender: replacement_sender,
+        });
+        let replacement_events =
+            AuthorizedPlayerEventSender::new(network_sender, clients, player_id, replacement_id);
+
+        displaced_events
+            .send(PlayerEvent::Move {
+                player_id,
+                x: 1,
+                y: 2,
+            })
+            .unwrap();
+        assert!(
+            network_receiver.try_recv().is_err(),
+            "a displaced socket must not enqueue even a connectionless gameplay event"
+        );
+        assert!(!displaced_events.send_strict(PlayerEvent::Move {
+            player_id,
+            x: 3,
+            y: 4,
+        }));
+
+        replacement_events
+            .send(PlayerEvent::Move {
+                player_id,
+                x: 5,
+                y: 6,
+            })
+            .unwrap();
+        assert!(matches!(
+            network_receiver.try_recv().unwrap(),
+            PlayerEvent::Move { x: 5, y: 6, .. }
+        ));
+    }
+
+    #[test]
+    fn connection_authority_async_operation_has_an_explicit_linearization_point() {
+        let player_id = 47;
+        let accepted_id = Uuid::new_v4();
+        let replacement_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (network_sender, network_receiver) = crossbeam_channel::unbounded();
+        let (accepted_sender, _accepted_receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client {
+            id: accepted_id,
+            player_id,
+            sender: accepted_sender,
+        });
+        let accepted_events = AuthorizedPlayerEventSender::new(
+            network_sender,
+            clients.clone(),
+            player_id,
+            accepted_id,
+        );
+        let operation = accepted_events
+            .begin_operation()
+            .expect("operation accepted before replacement");
+
+        let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client {
+            id: replacement_id,
+            player_id,
+            sender: replacement_sender,
+        });
+        assert!(accepted_events.begin_operation().is_none());
+
+        operation
+            .send(PlayerEvent::NewPlayer {
+                player_id,
+                hero_name: "Linearized".to_string(),
+                class_name: "Warrior".to_string(),
+            })
+            .unwrap();
+        assert!(matches!(
+            network_receiver.try_recv().unwrap(),
+            PlayerEvent::NewPlayer { hero_name, .. } if hero_name == "Linearized"
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_authenticated_routing_uses_connection_owner_only() {
+        let authenticated_player = 41;
+        let (clients, client_id, _client_receiver) = authenticated_client(authenticated_player);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(
+            sender,
+            clients.clone(),
+            authenticated_player,
+            client_id,
+        );
+
+        assert_eq!(
+            handle_safe_logout_command(client_id, &clients, sender, false),
+            ResponsePacket::None
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            PlayerEvent::RequestSafeLogout {
+                player_id,
+                connection_id,
+            } if player_id == authenticated_player && connection_id == client_id
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_cancel_is_owner_scoped() {
+        let authenticated_player = 52;
+        let (clients, client_id, _client_receiver) = authenticated_client(authenticated_player);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(
+            sender,
+            clients.clone(),
+            authenticated_player,
+            client_id,
+        );
+
+        assert_eq!(
+            handle_safe_logout_command(client_id, &clients, sender, true),
+            ResponsePacket::None
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            PlayerEvent::CancelSafeLogout {
+                player_id,
+                connection_id,
+            } if player_id == authenticated_player && connection_id == client_id
+        ));
+    }
+
+    #[test]
+    fn safe_logout_checkpoint3_unauthenticated_and_stale_mappings_fail_closed() {
+        let clients = Clients::default();
+        let missing_id = Uuid::new_v4();
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(sender, clients.clone(), -1, missing_id);
+        assert!(matches!(
+            handle_safe_logout_command(missing_id, &clients, sender, false),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let map_key = Uuid::new_v4();
+        let mismatched_id = Uuid::new_v4();
+        let (client_sender, _client_receiver) = tokio::sync::mpsc::channel(1);
+        clients.lock().unwrap().insert(
+            map_key,
+            Client {
+                id: mismatched_id,
+                player_id: 12,
+                sender: client_sender,
+            },
+        );
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(sender, clients.clone(), 12, map_key);
+        assert!(matches!(
+            handle_safe_logout_command(map_key, &clients, sender, true),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let closed_id = Uuid::new_v4();
+        let (closed_sender, closed_receiver) = tokio::sync::mpsc::channel(1);
+        drop(closed_receiver);
+        clients.lock().unwrap().insert(
+            closed_id,
+            Client {
+                id: closed_id,
+                player_id: 13,
+                sender: closed_sender,
+            },
+        );
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(sender, clients.clone(), 13, closed_id);
+        assert!(matches!(
+            handle_safe_logout_command(closed_id, &clients, sender, false),
+            ResponsePacket::Error { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 }

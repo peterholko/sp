@@ -1,5 +1,6 @@
 use bevy::{
     ecs::query::{Or, QueryData},
+    ecs::system::SystemParam,
     prelude::*,
 };
 use big_brain::prelude::*;
@@ -29,11 +30,44 @@ use crate::{
     player::{ActiveInfoType, ActiveInfos},
     recipe::Recipes,
     resource::{Resource, Resources},
+    safe_logout::{
+        is_owner_offline_protected, object_belongs_to_protected_run, PlayerWorldPresenceState,
+    },
     templates::Templates,
     villager_debug, villager_error, villager_info, villager_trace,
     villager_util::VillagerUtil,
     villager_warn, with_span, AppState,
 };
+
+#[derive(SystemParam)]
+pub struct VillagerProtection<'w, 's> {
+    presence: Option<Res<'w, PlayerWorldPresenceState>>,
+    owners: Query<'w, 's, &'static PlayerId>,
+}
+
+impl VillagerProtection<'_, '_> {
+    fn owner_is_protected(&self, owner: &PlayerId) -> bool {
+        self.presence
+            .as_deref()
+            .map(|presence| is_owner_offline_protected(owner, presence))
+            .unwrap_or(false)
+    }
+
+    fn is_protected(&self, actor: Entity) -> bool {
+        self.owners
+            .get(actor)
+            .map(|owner| self.owner_is_protected(owner))
+            .unwrap_or(false)
+    }
+
+    fn object_is_protected(&self, object_id: i32, ids: &Ids) -> bool {
+        self.presence
+            .as_deref()
+            .map(|presence| object_belongs_to_protected_run(object_id, ids, presence))
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct EnemyDistanceScorer;
 
@@ -150,12 +184,7 @@ const VILLAGER_WATER_RANGE: i32 = 15;
 // that either holds a revealed spring (stand on it, like the hero) or sits beside a
 // river (drink from the bank). Rivers are always visible, so this gives villagers a
 // reliable water source even before the hero has prospected a spring nearby.
-fn nearest_water(
-    pos: &Position,
-    resources: &Resources,
-    map: &Map,
-    range: i32,
-) -> Option<Position> {
+fn nearest_water(pos: &Position, resources: &Resources, map: &Map, range: i32) -> Option<Position> {
     for r in 0..=range {
         for (x, y) in Map::ring((pos.x, pos.y), r) {
             if !Map::is_valid_pos((x, y)) {
@@ -642,7 +671,9 @@ impl Plugin for VillagerPlugin {
 
 pub fn armed_retaliation_scorer_system(
     game_tick: Res<GameTick>,
+    ids: Option<Res<Ids>>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ArmedRetaliationScorer>>,
     villager_query: Query<
         (
@@ -654,9 +685,13 @@ pub fn armed_retaliation_scorer_system(
         ),
         With<SubclassVillager>,
     >,
-    target_query: Query<(&PlayerId, &Position, &State)>,
+    target_query: Query<(&Id, &PlayerId, &Position, &State)>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         score.set(0.0);
 
@@ -703,7 +738,7 @@ pub fn armed_retaliation_scorer_system(
             continue;
         };
 
-        let Ok((attacker_player_id, attacker_pos, attacker_state)) =
+        let Ok((attacker_id, attacker_player_id, attacker_pos, attacker_state)) =
             target_query.get(attacker_entity)
         else {
             span.span().in_scope(|| {
@@ -720,6 +755,11 @@ pub fn armed_retaliation_scorer_system(
 
         if attacker_player_id.0 == villager_player_id.0
             || attacker_player_id.0 == MERCHANT_PLAYER_ID
+            || protection.owner_is_protected(attacker_player_id)
+            || ids
+                .as_deref()
+                .map(|ids| protection.object_is_protected(attacker_id.0, ids))
+                .unwrap_or(false)
             || Obj::is_dead(attacker_state)
             || Map::dist(*villager_pos, *attacker_pos) > 1
         {
@@ -743,6 +783,7 @@ pub fn enemy_distance_scorer_system(
     ids: Res<Ids>,
     map: Res<Map>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     hero_query: Query<ObjQuery, With<SubclassHero>>,
     obj_query: Query<
         (
@@ -761,6 +802,10 @@ pub fn enemy_distance_scorer_system(
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<EnemyDistanceScorer>>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         if let Ok((
             _villager_entity,
@@ -925,21 +970,31 @@ fn villager_is_fortified(villager_effects: Option<&Effects>) -> bool {
 
 pub fn idle_scorer_system(
     templates: Res<Templates>,
+    protection: VillagerProtection,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<IdleScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         score.set(0.1);
     }
 }
 
 pub fn thirsty_scorer_system(
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     thirsts: Query<&Thirst>,
     no_drinks: Query<&NoDrinks>,
     event_query: Query<(&EventExecuting, &ActiveTask)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ThirstyScorer>>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         if let Ok(thirst) = thirsts.get(*actor) {
             let (event_executing, active_task) = event_query
@@ -1006,12 +1061,17 @@ pub fn thirsty_scorer_system(
 
 pub fn hungry_scorer_system(
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     hungers: Query<&Hunger>,
     no_food: Query<&NoFood>,
     event_query: Query<(&EventExecuting, &ActiveTask)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<HungryScorer>>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         if let Ok(hunger) = hungers.get(*actor) {
             let (event_executing, active_task) = event_query
@@ -1075,12 +1135,17 @@ pub fn hungry_scorer_system(
 }
 
 pub fn drowsy_scorer_system(
+    protection: VillagerProtection,
     tired_query: Query<&Tired>,
     no_shelter: Query<&NoShelter>,
     event_query: Query<(&EventExecuting, &ActiveTask)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<DrowsyScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         if let Ok(tired) = tired_query.get(*actor) {
             let (event_executing, active_task) = event_query
                 .get(*actor)
@@ -1128,10 +1193,15 @@ pub fn drowsy_scorer_system(
 }
 
 pub fn exhausted_scorer_system(
+    protection: VillagerProtection,
     tired_query: Query<&Tired, Without<EventExecuting>>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ExhaustedScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         if let Ok(tired) = tired_query.get(*actor) {
             let exhausted_score;
 
@@ -1146,12 +1216,17 @@ pub fn exhausted_scorer_system(
 }
 
 pub fn heat_scorer_system(
+    protection: VillagerProtection,
     heat_query: Query<&Heat>,
     no_shelter: Query<&NoShelter>,
     active_task: Query<&ActiveTask>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<HeatScorer>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         if let Ok(heat) = heat_query.get(*actor) {
             /*let Ok(villager_attrs) = villager_attrs.get(*actor) else {
                 error!("No villager attrs component for {:?}", *actor);
@@ -1194,10 +1269,15 @@ pub fn heat_scorer_system(
 }
 
 pub fn morale_scorer_system(
+    protection: VillagerProtection,
     morale_query: Query<(&Morale, Option<&Order>)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<GoodMorale>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         if let Ok((_morale, order)) = morale_query.get(*actor) {
             if matches!(order, None | Some(Order::None)) {
                 score.set(0.0);
@@ -1220,11 +1300,16 @@ pub fn morale_scorer_system(
 pub fn structure_capacity_scorer_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
+    protection: VillagerProtection,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<StructureCapacityScorer>>,
     villager_query: Query<(&Id, &Assignment)>,
     structure_query: Query<(&Id, &Template, &Inventory)>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         let Ok((villager_id, assignment)) = villager_query.get(*actor) else {
@@ -1300,10 +1385,15 @@ const FOOD_HAUL_WEIGHT: i32 = 8;
 pub fn capacity_scorer_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
+    protection: VillagerProtection,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<CapacityScorer>>,
     villager_query: Query<(&Id, &Template, &Inventory)>,
 ) {
     for (Actor(actor), mut score, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         let Ok((villager_id, villager_template, inventory)) = villager_query.get(*actor) else {
             span.span().in_scope(|| {
@@ -1324,8 +1414,10 @@ pub fn capacity_scorer_system(
         // larder after a reasonable trip instead of hoarding a full stack.
         let total_weight_food = inventory.get_total_weight_by_class(FOOD.to_string());
 
-        let resource_weight = total_weight_ore + total_weight_log + total_weight_food * FOOD_HAUL_WEIGHT;
-        let non_resource_weight = total_weight - total_weight_ore - total_weight_log - total_weight_food;
+        let resource_weight =
+            total_weight_ore + total_weight_log + total_weight_food * FOOD_HAUL_WEIGHT;
+        let non_resource_weight =
+            total_weight - total_weight_ore - total_weight_log - total_weight_food;
 
         let capacity = Obj::get_capacity(&villager_template.0, &templates.obj_templates);
 
@@ -1344,10 +1436,15 @@ pub fn capacity_scorer_system(
 
 pub fn idle_action_system(
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut active_task_query: Query<&mut ActiveTask>,
     mut query: Query<(&Actor, &mut ActionState, &mut Idle, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, mut idle, _span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         match *state {
             ActionState::Requested => {
                 if let Ok(mut active_task) = active_task_query.get_mut(*actor) {
@@ -1377,6 +1474,7 @@ pub fn idle_action_system(
 pub fn set_order_destination_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     map: Res<Map>,
     obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
     storage_query: Query<BaseQuery, (With<ClassStructure>, Without<SubclassVillager>)>,
@@ -1394,6 +1492,10 @@ pub fn set_order_destination_system(
     mut action_query: Query<(&Actor, &mut ActionState, &SetOrderDestination, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _set_order_destination, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -1658,6 +1760,7 @@ pub fn set_order_destination_system(
 pub fn maybe_transfer_gather_tool_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     mut inventory_query: Query<(&PlayerId, &Position, &mut Inventory)>,
     mut villager_query: Query<(&Order, &mut ActiveTask), With<SubclassVillager>>,
     fetch_query: Query<&ToolFetchTarget>,
@@ -1669,6 +1772,10 @@ pub fn maybe_transfer_gather_tool_system(
     )>,
 ) {
     for (Actor(actor), mut state, _maybe_transfer, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -1819,6 +1926,7 @@ pub fn process_order_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     templates: Res<Templates>,
@@ -1853,6 +1961,10 @@ pub fn process_order_system(
     ),
 ) {
     for (Actor(actor), mut state, _process_order, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -2389,6 +2501,7 @@ pub fn fight_back_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
@@ -2399,6 +2512,10 @@ pub fn fight_back_system(
     mut action_query: Query<(&Actor, &mut ActionState, &FightBack, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _fight_back, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -2498,6 +2615,8 @@ pub fn fight_back_system(
 
                 if attacker.player_id.0 == villager.player_id.0
                     || attacker.player_id.0 == MERCHANT_PLAYER_ID
+                    || protection.owner_is_protected(attacker.player_id)
+                    || protection.object_is_protected(attacker.id.0, &ids)
                     || Obj::is_dead(&attacker.state)
                     || Map::dist(*villager.pos, *attacker.pos) > 1
                 {
@@ -2845,6 +2964,7 @@ pub fn set_flee_destination_system(
     map: Res<Map>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     hero_query: Query<&Position, (With<SubclassHero>, Without<SubclassVillager>)>,
     villager_query: Query<
         (
@@ -2874,6 +2994,10 @@ pub fn set_flee_destination_system(
     mut action_query: Query<(&Actor, &mut ActionState, &SetFleeDestination, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _set_flee_destination, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3178,6 +3302,7 @@ pub fn set_flee_destination_system(
 pub fn find_drink_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     map: Res<Map>,
@@ -3194,6 +3319,10 @@ pub fn find_drink_system(
     mut action_query: Query<(&Actor, &mut ActionState, &FindDrink, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _find_drink, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3324,6 +3453,7 @@ pub fn move_to_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     map: Res<Map>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -3334,6 +3464,10 @@ pub fn move_to_system(
     mut action_query: Query<(&Actor, &mut ActionState, &MoveTo, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _move_to, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -3638,12 +3772,17 @@ pub fn transfer_drink_system(
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
     templates: Res<Templates>,
+    protection: VillagerProtection,
     villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
     water_query: Query<&DrinkingFromWater>,
     mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
     mut action_query: Query<(&Actor, &mut ActionState, &TransferDrink, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _transfer_drink, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -3766,6 +3905,7 @@ pub fn transfer_drink_system(
 pub fn drink_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -3779,6 +3919,10 @@ pub fn drink_action_system(
     mut query: Query<(&Actor, &mut ActionState, &Drink, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _drink, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         // Use the drink_action's actor to look up the corresponding Thirst Component.
@@ -3917,6 +4061,7 @@ pub fn drink_action_system(
 pub fn find_food_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     map: Res<Map>,
@@ -3932,6 +4077,10 @@ pub fn find_food_system(
     mut action_query: Query<(&Actor, &mut ActionState, &FindFood, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _find_food, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -4064,11 +4213,16 @@ pub fn transfer_food_system(
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
     templates: Res<Templates>,
+    protection: VillagerProtection,
     villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
     mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
     mut action_query: Query<(&Actor, &mut ActionState, &TransferFood, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _transfer_food, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -4186,6 +4340,7 @@ pub fn transfer_food_system(
 pub fn eat_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -4196,6 +4351,10 @@ pub fn eat_action_system(
     mut query: Query<(&Actor, &mut ActionState, &Eat, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _eat, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -4320,6 +4479,7 @@ pub fn find_shelter_system(
     mut ids: ResMut<Ids>,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     mut villager_query: Query<(&Id, &Position, &mut ActiveShelter), With<SubclassVillager>>,
@@ -4331,6 +4491,10 @@ pub fn find_shelter_system(
     mut action_query: Query<(&Actor, &mut ActionState, &FindShelter, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _find_shelter_action, span) in &mut action_query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -4483,6 +4647,7 @@ pub fn find_shelter_system(
 pub fn sleep_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -4493,6 +4658,10 @@ pub fn sleep_action_system(
     mut query: Query<(&Actor, &mut ActionState, &Sleep, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _sleep, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -4613,6 +4782,7 @@ pub fn set_storage_destination_system(
     mut commands: Commands,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     map: Res<Map>,
     _templates: Res<Templates>,
     (obj_query, mut query): (
@@ -4626,6 +4796,10 @@ pub fn set_storage_destination_system(
     ),
 ) {
     for (Actor(actor), mut state, _set_storage_destination, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
 
         match *state {
@@ -4752,10 +4926,15 @@ pub fn set_storage_destination_system(
 pub fn load_items_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     villager_query: Query<&Assignment>,
     mut query: Query<(&Actor, &mut ActionState, &LoadItems, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _load_items, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -4808,11 +4987,16 @@ pub fn load_items_system(
 
 pub fn unload_items_system(
     entity_map: Res<EntityObjMap>,
+    protection: VillagerProtection,
     mut inventory_query: Query<(&PlayerId, &Position, &mut Inventory)>,
     storage_query: Query<&Storage>,
     mut query: Query<(&Actor, &mut ActionState, &UnloadItems, &ActionSpan)>,
 ) {
     for (Actor(actor), mut state, _unload_items, span) in &mut query {
+        if protection.is_protected(*actor) {
+            continue;
+        }
+
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
@@ -4971,6 +5155,7 @@ pub fn villager_activity_text(
 pub fn activity_update_system(
     clients: Res<Clients>,
     active_infos: Res<ActiveInfos>,
+    protection: VillagerProtection,
     changed_query: Query<
         (
             Entity,
@@ -5024,6 +5209,10 @@ pub fn activity_update_system(
     }
 
     for entity in changed_entities {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         let Ok((id, active_task, state, order, inventory, blocked_work, tool_fetch_target)) =
             query.get(entity)
         else {
@@ -5138,9 +5327,14 @@ pub fn dialogue_system(
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
     mut map_events: ResMut<MapEvents>,
-    dialogue_query: Query<(&Id, &Dialogue)>,
+    protection: VillagerProtection,
+    dialogue_query: Query<(Entity, &Id, &Dialogue)>,
 ) {
-    for (id, dialogue) in dialogue_query.iter() {
+    for (entity, id, dialogue) in dialogue_query.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 >= dialogue.at_tick {
             Obj::add_speech_event(
                 game_tick.0,
@@ -5156,11 +5350,16 @@ pub fn vital_dialogue_system(
     game_tick: Res<GameTick>,
     templates: Res<Templates>,
     mut map_events: ResMut<MapEvents>,
-    dehydrated: Query<(&Id, &Dehydrated), Without<StateDead>>,
-    starving: Query<(&Id, &Starving), Without<StateDead>>,
-    exhausted: Query<(&Id, &Exhausted), Without<StateDead>>,
+    protection: VillagerProtection,
+    dehydrated: Query<(Entity, &Id, &Dehydrated), Without<StateDead>>,
+    starving: Query<(Entity, &Id, &Starving), Without<StateDead>>,
+    exhausted: Query<(Entity, &Id, &Exhausted), Without<StateDead>>,
 ) {
-    for (id, dehydrated) in dehydrated.iter() {
+    for (entity, id, dehydrated) in dehydrated.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 == dehydrated.at_tick + 5 {
             // Add 5 ticks for delay
             Obj::add_speech_event(
@@ -5193,7 +5392,11 @@ pub fn vital_dialogue_system(
         }
     }
 
-    for (id, starving) in starving.iter() {
+    for (entity, id, starving) in starving.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 == starving.at_tick + 5 {
             // Add 5 ticks for delay
             Obj::add_speech_event(
@@ -5226,7 +5429,11 @@ pub fn vital_dialogue_system(
         }
     }
 
-    for (id, exhausted) in exhausted.iter() {
+    for (entity, id, exhausted) in exhausted.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 == exhausted.at_tick + 5 {
             // Add 5 ticks for delay
             Obj::add_speech_event(
@@ -5264,8 +5471,13 @@ pub fn remove_no_drinks_system(
     mut commands: Commands,
     no_drink_query: Query<(Entity, &NoDrinks)>,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
 ) {
     for (entity, no_drink) in no_drink_query.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 > no_drink.at_tick + TICKS_PER_SEC * 10 {
             commands.entity(entity).remove::<NoDrinks>();
         }
@@ -5276,8 +5488,13 @@ pub fn remove_no_food_system(
     mut commands: Commands,
     no_food_query: Query<(Entity, &NoFood)>,
     game_tick: Res<GameTick>,
+    protection: VillagerProtection,
 ) {
     for (entity, no_food) in no_food_query.iter() {
+        if protection.is_protected(entity) {
+            continue;
+        }
+
         if game_tick.0 > no_food.at_tick + TICKS_PER_SEC * 10 {
             commands.entity(entity).remove::<NoFood>();
         }
@@ -5285,6 +5502,7 @@ pub fn remove_no_food_system(
 }
 
 pub fn active_task_system(
+    protection: VillagerProtection,
     mut villager_queries: ParamSet<(
         Query<(Entity, &mut ActiveTask), With<SubclassVillager>>,
         Query<&ActiveTask, With<SubclassVillager>>,
@@ -5306,6 +5524,10 @@ pub fn active_task_system(
 
     for action in &actions {
         let actor = action.actor.0;
+
+        if protection.is_protected(actor) {
+            continue;
+        }
 
         // Inline ranking: Executing > Requested > everything else
         let state_rank = match *action.state {
@@ -5343,6 +5565,10 @@ pub fn active_task_system(
     }
 
     for (villager_entity, mut active_task) in &mut villager_queries.p0() {
+        if protection.is_protected(villager_entity) {
+            continue;
+        }
+
         if let Some((_, _, _, next_task)) = best.remove(&villager_entity) {
             let previous_task = (*active_task).clone();
             if ActiveTask::set_if_changed(&mut active_task, next_task.clone()) {
@@ -5356,6 +5582,7 @@ pub fn active_task_system(
 }
 
 pub fn clear_event_executing(
+    protection: VillagerProtection,
     mut event_executing_query: Query<&mut EventExecuting>,
     actions: Query<(&Actor, &ActionState)>,
 ) {
@@ -5374,6 +5601,10 @@ pub fn clear_event_executing(
     }
 
     for (actor, (has_terminal_action, has_active_action)) in actor_actions {
+        if protection.is_protected(actor) {
+            continue;
+        }
+
         if !has_terminal_action || has_active_action {
             continue;
         }
@@ -5384,6 +5615,78 @@ pub fn clear_event_executing(
                 event_executing.state = EventExecutingState::None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod protected_simulation_tests {
+    use super::*;
+    use big_brain::{actions::spawn_action, scorers::spawn_scorer};
+
+    use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence, PlayerWorldPresenceState};
+
+    #[test]
+    fn checkpoint2_protected_villager_score_action_and_active_task_stay_unchanged() {
+        let mut app = App::new();
+        app.add_systems(Update, (morale_scorer_system, idle_action_system));
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+
+        let mut protected_record = PlayerPresenceRecord::new(false);
+        protected_record.state = PlayerWorldPresence::OfflineProtected;
+        let mut presence = PlayerWorldPresenceState::default();
+        presence.players.insert(1, protected_record);
+        app.world_mut().insert_resource(presence);
+
+        let actor = app
+            .world_mut()
+            .spawn((
+                PlayerId(1),
+                Morale::new(50.0),
+                Order::None,
+                ActiveTask::Fleeing,
+            ))
+            .id();
+
+        let scorer = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&GoodMorale, &mut commands, actor)
+        };
+        let action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(
+                &Idle {
+                    start_time: 0,
+                    duration: 1,
+                },
+                &mut commands,
+                actor,
+            )
+        };
+        app.world_mut().flush();
+        app.world_mut()
+            .entity_mut(scorer)
+            .get_mut::<Score>()
+            .unwrap()
+            .set(0.37);
+        *app.world_mut()
+            .entity_mut(action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Requested;
+
+        app.update();
+
+        assert_eq!(
+            app.world().entity(scorer).get::<Score>().unwrap().get(),
+            0.37
+        );
+        assert_eq!(
+            *app.world().entity(action).get::<ActionState>().unwrap(),
+            ActionState::Requested
+        );
+        assert_eq!(
+            *app.world().entity(actor).get::<ActiveTask>().unwrap(),
+            ActiveTask::Fleeing
+        );
     }
 }
 
