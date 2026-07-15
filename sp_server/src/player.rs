@@ -27,10 +27,11 @@ use crate::effect::{Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
-    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, CrisisPhase, DamageRecord,
-    DebugObjs, GameTick, InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant,
-    Monolith, MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
-    PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
+    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase,
+    DamageRecord, DebugObjs, GameTick, InitialEncounterState, IntroEncounterState,
+    LogLevelOverrides, Merchant, Monolith, MonolithInvestigation, MonolithProgress,
+    NetworkReceiver, ObjQuery, Objectives, PersonalCrisisHistory, PlayerIntroState,
+    PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
     SettlementCrisisState, SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
@@ -1224,6 +1225,7 @@ fn new_player_system(
         ResMut<SafeLogoutTelemetryState>,
         ResMut<CrisisBalanceTelemetryState>,
         ResMut<CrisisBalanceObservationState>,
+        ResMut<PersonalCrisisHistory>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -1318,6 +1320,7 @@ fn new_player_system(
                         run_intro_state.3.remove(player_id);
                         run_intro_state.6.remove(player_id);
                         run_intro_state.7 .0.remove(player_id);
+                        run_intro_state.8.by_player.remove(player_id);
                         initialize_player_presence(
                             *player_id,
                             clients.is_player_online(*player_id),
@@ -7275,13 +7278,16 @@ fn create_foundation_system(
                 entity_map.insert(structure_id, structure_entity);
 
                 if matches!(structure_subclass, Subclass::Wall | Subclass::Watchtower)
-                    && matches!(
-                        crisis_state
-                            .as_ref()
-                            .and_then(|state| state.get(player_id))
-                            .map(|crisis| crisis.phase),
-                        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
-                    )
+                    && crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(player_id))
+                        .is_some_and(|crisis| {
+                            crisis.kind == CrisisKind::Goblin
+                                && matches!(
+                                    crisis.phase,
+                                    CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                                )
+                        })
                 {
                     if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                         telemetry_state
@@ -8827,13 +8833,16 @@ fn equip_system(
                     && owner_inventory
                         .get_by_id(item_to_equip.id)
                         .is_some_and(|item| item.equipped)
-                    && matches!(
-                        crisis_state
-                            .as_ref()
-                            .and_then(|state| state.get(player_id))
-                            .map(|crisis| crisis.phase),
-                        Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
-                    )
+                    && crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(player_id))
+                        .is_some_and(|crisis| {
+                            crisis.kind == CrisisKind::Goblin
+                                && matches!(
+                                    crisis.phase,
+                                    CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                                )
+                        })
                 {
                     if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                         telemetry_state
@@ -10287,13 +10296,17 @@ fn order_repair_system(
                 // recorder is observation-only and is gated to the two
                 // preparation phases, so ordinary repairs and rejected input
                 // cannot contaminate crisis preparation metrics.
-                if matches!(
-                    crisis_state
-                        .as_ref()
-                        .and_then(|state| state.get(player_id))
-                        .map(|crisis| crisis.phase),
-                    Some(CrisisPhase::Preparing | CrisisPhase::AssaultReady)
-                ) {
+                if crisis_state
+                    .as_ref()
+                    .and_then(|state| state.get(player_id))
+                    .is_some_and(|crisis| {
+                        crisis.kind == CrisisKind::Goblin
+                            && matches!(
+                                crisis.phase,
+                                CrisisPhase::Preparing | CrisisPhase::AssaultReady
+                            )
+                    })
+                {
                     if let Some((_, structure_id, _, _, _)) = structure_query
                         .iter()
                         .filter(|(owner, _, _, class, stats)| {
