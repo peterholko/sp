@@ -5,11 +5,26 @@
 Checkpoint 1, **Balance Audit and Telemetry Baseline**, and Checkpoint 2,
 **Pressure and Phase Pacing**, are implementation- and validation-complete.
 Checkpoint 3's guidance, telemetry, desktop presentation, observed-launch-field
-comparison harness, and 20-pair evidence artifact are implemented. No gameplay
-value changed. Checkpoint 3 does **not** meet its formal balance acceptance:
-none of four tested preparation paths improved a directional outcome, prepared
-solo did not outperform control, and deterministic same-seed replay is not
-available in the current entropy-backed architecture.
+comparison harness, and 20-pair/40-leg evidence artifact are also complete.
+Checkpoint 3 intentionally accepted zero production gameplay changes. Its result
+was that none of four tested preparation paths improved a directional outcome;
+that completed evidence finding was handed to Checkpoint 4 rather than being
+misstated as a Checkpoint 3 implementation failure.
+
+Checkpoint 4 diagnosis, engagement telemetry, class-valid headless policies,
+fixture corrections, intended-production combat/safety fixes, focused battle
+copy, and the dedicated final/edge runner are implemented. Three explicitly
+predeclared production balance candidates were tested and reverted. None met
+the frozen all-class, preparation-ordering, Basic, and Passive bands, and no
+evidence-supported fourth standalone change was available. The production
+assault therefore remains the original simultaneous two Wolf Riders plus one
+Goblin Pillager with unchanged shared template values. Checkpoint 4 and
+Milestone 3 are **not accepted/closed**. The corrected final artifact contains
+260 retained rows: 14 resolutions, 239 True Deaths, six caps, one known unrelated
+panic, zero invalid paired fingerprints, and 13 edge-invariant failures. Warrior
+and Ranger have no prepared win, preparation treatments resolve 0/40, and offline
+helper resolution is 1/10. The detailed evidence and exact rollback decisions are
+in `docs/goblin_crisis_balance_checkpoint4.md`.
 
 > Checkpoint 1 measures the current goblin crisis and intentionally does not make material balance changes.
 
@@ -17,7 +32,8 @@ The bounded runtime matrices and validation records below contain the completed
 Checkpoint 1 and 2 evidence. The detailed Checkpoint 3 proposal, implementation,
 raw outcomes, validation record, and limitations are in
 `docs/goblin_crisis_balance_checkpoint3.md`. The milestone itself is not
-complete: Checkpoint 3 balance acceptance and Checkpoint 4 remain outstanding.
+complete: prepared solo victory for every class, prepared-over-basic outcome
+ordering, and two repeated preparation-value signals remain outstanding.
 
 ## Milestone goal and checkpoint plan
 
@@ -923,22 +939,72 @@ repository's duplicate Phaser declarations/missing Matter type while the
 focused compile, `--skipLibCheck`, and production webpack build pass. See the
 detailed report for exact counts and reruns.
 
-## Work deferred to Checkpoint 4
+## Checkpoint 4 result and remaining closure work
 
-Checkpoint 4 must first create and validate useful first-assault outcome range:
-38/40 Checkpoint 3 legs died twice and the other two took zero damage and
-remained unresolved at the cap; every leg killed zero attackers. That result
-prevents walls, equipment, healing, or combined preparation from demonstrating
-meaningful value. It should
-then add wall-contact/core-exposure measurement, reevaluate existing healing
-and equipment magnitude, and validate Warrior, Ranger, and Mage combat
-policy/outcomes. A controlled RNG/replay architecture is required before future
-A/B results can be called deterministic or causal.
+Checkpoint 4 explained the Checkpoint 2/3 discrepancy, corrected the harness and
+class policies, added exact engagement/wall/core/defeat telemetry, fixed intended
+combat and ownership defects, froze target bands, tested three predeclared
+production candidates, reverted all three, and generated the required human- and
+machine-readable final reports. The final restored assault is mechanically
+engageable: every nonpanic broad row and every focused row reached targeting,
+accepted combat, hits, and damage. Walls target and absorb damage through their
+ordinary systems, with zero measured bypass or core damage; no repeated
+core-protection benefit was established. Cross-owner isolation, ordinary
+disconnect, and Safe Logout behavior remain intact. The repeated cleanup cohort
+demonstrated correct cleanup/fresh reset in 9/10; one disconnected row stalled
+outside perception at the cap and retained its failure evidence.
 
-Checkpoint 4 must preserve personal ownership, offline rules, Safe Logout,
-ordinary disconnect behavior, cross-player isolation, the 50x50 map, and the
-entire existing resource/production economy. New enemies, objectives,
-resources, buildings, recipes, loot, rewards, villager AI, crisis types,
-regional crises, offline production, durable restart persistence, multiplayer
-scaling, cross-world interaction, and larger maps remain out of scope unless a
-later explicit milestone authorizes them.
+The balance contract is not achieved. Prepared Solo resolves 2/30 (Warrior 0,
+Ranger 0, Mage 2), Basic resolves 0/30, all 40 preparation treatments resolve
+zero, and the offline-helper matrix resolves 1/10. Existing Walls have reliable
+mechanical contact but no repeated resolution/survival signal; equipment has a
+limited attacker-kill signal but no survival or resolution benefit, and healing
+also shows no repeated outcome benefit. No fourth change was made without clean
+evidence. The original simultaneous `Wolf Rider`, `Wolf Rider`, `Goblin Pillager`
+configuration
+and all shared enemy values remain production behavior.
+
+Future work must predeclare an evidence-backed pressure-distribution or equivalent
+small proposal that can improve fragile-class prepared outcomes without
+trivializing Warrior or Passive play. It must also define the quantitative “two
+useful preparation paths” threshold, demonstrate reliable offline-helper
+completion, and
+retain the current ownership, disconnect, Safe Logout, economy, map, and legacy
+contracts. Controlled RNG replay is desirable test infrastructure but is not a
+hidden prerequisite for ordinary production behavior.
+
+### Required closure contract — not yet achieved
+
+The following is the required final gameplay contract, not a description of the
+current accepted state:
+
+> Goblin-crisis pressure rises through visible settlement development and active
+> play.
+>
+> The player receives distinct Signs, Pressure, Preparing, and AssaultReady
+> phases.
+>
+> Preparing and AssaultReady provide enough time for meaningful choices using
+> existing settlement systems.
+>
+> The first goblin assault reliably engages the owning settlement and is
+> solo-completable with legitimate preparation.
+>
+> Repairs, defences, villagers, equipment, healing, and sanctuary preparation
+> affect outcomes only through their normal gameplay systems.
+>
+> An active assault continues after ordinary disconnect.
+>
+> Safe Logout is available only before the assault becomes active.
+>
+> Personal assault units cannot target another player's settlement.
+>
+> Defeating all attributed attackers resolves the crisis exactly once.
+
+Engagement, ownership, ordinary-disconnect/Safe-Logout lifecycle, and exactly-once
+resolution are demonstrated. Repeated cleanup and helper lifecycle acceptance,
+all-class solo completion, and meaningful repeated preparation benefit are not.
+New enemies, objectives, resources, buildings, recipes, loot, rewards, villager
+roles, crisis types, regional crises, offline production, durable restart
+persistence, participant scaling, cross-world interaction, and larger maps remain
+out of scope unless a later explicit milestone authorizes them.

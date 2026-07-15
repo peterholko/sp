@@ -1,5 +1,6 @@
 use bevy::ecs::query::{QueryData, WorldQuery};
 use bevy::prelude::*;
+use big_brain::thinker::ThinkerBuilder;
 use rand::Rng;
 use serde::Deserialize;
 use std::env;
@@ -12,7 +13,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::common::{Destination, Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
-use crate::crisis_balance::{CrisisBalanceObservationState, CrisisBalanceTelemetryState};
+use crate::crisis_balance::{
+    is_live_built_human_core_structure, CrisisAttackTelemetryStage, CrisisBalanceObservationState,
+    CrisisBalanceTelemetryState,
+};
 use crate::encounter::Encounter;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
 use crate::farm::Crops;
@@ -1613,7 +1617,7 @@ fn combo_hints_for_history(
     return (matching_combos, available_finisher);
 }
 
-fn enemy_intent_for_template(template: &str) -> String {
+fn enemy_intent_for_template(template: &str, personal_assault: bool) -> String {
     match template {
         "Giant Rat" | "Cave Bat" | "Ash Viper" | "Mountain Lion" | "Saberfang Cat"
         | "Terror Bird" | "Spider" | "Scorpion" => {
@@ -1634,6 +1638,9 @@ fn enemy_intent_for_template(template: &str) -> String {
             "Undead pressure advancing steadily".to_string()
         }
         "Necromancer" => "Caster seeking distance and corpses to exploit".to_string(),
+        "Wolf Rider" | "Goblin Pillager" if personal_assault => {
+            "Raider advancing on your defenders and blocking walls".to_string()
+        }
         "Wolf Rider" | "Goblin Pillager" => {
             "Raider targeting your stored value and structures".to_string()
         }
@@ -2135,6 +2142,14 @@ fn apply_ability_damage(
 ) -> i32 {
     let damage = damage.max(1);
     let target_hp_before = target.stats.hp;
+    let target_was_core_structure = is_live_built_human_core_structure(
+        target.class_structure,
+        target.class,
+        target.player_id,
+        *target.subclass,
+        *target.state,
+        false,
+    );
     target.stats.hp -= damage;
     commands
         .entity(target.entity)
@@ -2153,13 +2168,27 @@ fn apply_ability_damage(
 
     if target.stats.hp <= 0 {
         *target.state = State::Dead;
-        commands.entity(target.entity).insert(StateDead {
-            dead_at: game_tick.0,
-            killer: actor.template.0.clone(),
+        commands
+            .entity(target.entity)
+            .try_insert(StateDead {
+                dead_at: game_tick.0,
+                killer: actor.template.0.clone(),
+            })
+            .try_remove::<ThinkerBuilder>();
+        commands.trigger(StateChange {
+            entity: target.entity,
+            new_state: State::Dead,
         });
     }
 
-    Combat::emit_crisis_combat_telemetry(commands, actor, target, target_hp_before);
+    Combat::emit_crisis_combat_telemetry(
+        commands,
+        game_tick.0,
+        actor,
+        target,
+        target_hp_before,
+        target_was_core_structure,
+    );
 
     damage
 }
@@ -2207,7 +2236,7 @@ fn send_combat_state(
     let packet = ResponsePacket::CombatState {
         version: 1,
         target_id,
-        enemy_intent: enemy_intent_for_template(&target_template),
+        enemy_intent: enemy_intent_for_template(&target_template, target.crisis_assault.is_some()),
         attack_history: attack_history.clone(),
         matching_combos,
         available_finisher,
@@ -2295,6 +2324,14 @@ fn attack_system(
                     continue;
                 }
 
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Requested,
+                    &attacker,
+                    &target,
+                );
+
                 let attack_profile = basic_attack_profile(&attacker);
                 let target_distance = Map::dist(*attacker.pos, *target.pos);
 
@@ -2367,6 +2404,14 @@ fn attack_system(
                 {
                     continue;
                 }
+
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Accepted,
+                    &attacker,
+                    &target,
+                );
 
                 let mut attack_history = attacker
                     .combo_tracker
@@ -2668,6 +2713,16 @@ fn attack_system(
                     continue;
                 }
 
+                if ability_is_damaging(ability) {
+                    Combat::emit_crisis_attack_telemetry(
+                        &mut commands,
+                        game_tick.0,
+                        CrisisAttackTelemetryStage::Requested,
+                        &attacker,
+                        &target,
+                    );
+                }
+
                 if let Some(reason) = ability_disabled_reason(ability, &attacker, Some(&target)) {
                     let packet = ResponsePacket::Error { errmsg: reason };
                     send_to_client(*player_id, packet, &clients);
@@ -2681,6 +2736,16 @@ fn attack_system(
                     || object_belongs_to_protected_run(target.id.0, &ids, &presence)
                 {
                     continue;
+                }
+
+                if ability_is_damaging(ability) {
+                    Combat::emit_crisis_attack_telemetry(
+                        &mut commands,
+                        game_tick.0,
+                        CrisisAttackTelemetryStage::Accepted,
+                        &attacker,
+                        &target,
+                    );
                 }
 
                 let target_template = target.template.0.clone();
@@ -2893,6 +2958,14 @@ fn attack_system(
                     continue;
                 }
 
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Requested,
+                    &attacker,
+                    &target,
+                );
+
                 // Is target adjacent
                 if Map::dist(*attacker.pos, *target.pos) > 1 {
                     let packet = ResponsePacket::Error {
@@ -2968,6 +3041,14 @@ fn attack_system(
                 {
                     continue;
                 }
+
+                Combat::emit_crisis_attack_telemetry(
+                    &mut commands,
+                    game_tick.0,
+                    CrisisAttackTelemetryStage::Accepted,
+                    &attacker,
+                    &target,
+                );
 
                 let target_template = target.template.0.clone();
 
@@ -11602,6 +11683,122 @@ mod tests {
             base_damage: Some(1),
             base_speed: Some(1),
             base_vision: Some(1),
+        }
+    }
+
+    #[derive(Component)]
+    struct TestAbilityActor;
+
+    #[derive(Component)]
+    struct TestAbilityTarget;
+
+    #[derive(Resource, Default)]
+    struct AbilityDeathTransitions(Vec<Entity>);
+
+    fn apply_lethal_test_ability(
+        mut commands: Commands,
+        game_tick: Res<GameTick>,
+        mut actors: Query<CombatQuery, (With<TestAbilityActor>, Without<TestAbilityTarget>)>,
+        mut targets: Query<CombatQuery, (With<TestAbilityTarget>, Without<TestAbilityActor>)>,
+    ) {
+        let mut actor = actors.single_mut().expect("one ability actor");
+        let mut target = targets.single_mut().expect("one ability target");
+        apply_ability_damage(&mut commands, &game_tick, &mut actor, &mut target, 10);
+    }
+
+    fn capture_ability_death_transition(
+        event: On<StateChange>,
+        mut transitions: ResMut<AbilityDeathTransitions>,
+    ) {
+        if event.new_state == State::Dead {
+            transitions.0.push(event.entity);
+        }
+    }
+
+    fn spawn_ability_test_actor(
+        world: &mut World,
+        id: i32,
+        player_id: i32,
+        position: Position,
+        subclass: Subclass,
+        marker: impl Bundle,
+    ) -> Entity {
+        world
+            .spawn((
+                marker,
+                Id(id),
+                PlayerId(player_id),
+                position,
+                Class(CLASS_UNIT.to_string()),
+                subclass,
+                Template("Ability Test Actor".to_string()),
+                State::None,
+                Misc {
+                    image: String::new(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                base_test_stats(),
+                Effects(HashMap::new()),
+                Inventory {
+                    owner: id,
+                    items: Vec::new(),
+                },
+                LastCombatTick(0),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn lethal_direct_ability_stops_thinker_and_emits_dead_state_change() {
+        let mut app = App::new();
+        app.insert_resource(GameTick(42))
+            .init_resource::<AbilityDeathTransitions>()
+            .add_observer(capture_ability_death_transition)
+            .add_systems(Update, apply_lethal_test_ability);
+        spawn_ability_test_actor(
+            app.world_mut(),
+            1,
+            1,
+            Position { x: 0, y: 0 },
+            Subclass::Hero,
+            TestAbilityActor,
+        );
+        let target = spawn_ability_test_actor(
+            app.world_mut(),
+            2,
+            NPC_PLAYER_ID,
+            Position { x: 1, y: 0 },
+            Subclass::Npc,
+            TestAbilityTarget,
+        );
+        app.world_mut()
+            .entity_mut(target)
+            .insert(ThinkerBuilder::default());
+
+        app.update();
+
+        let target_ref = app.world().entity(target);
+        assert_eq!(*target_ref.get::<State>().unwrap(), State::Dead);
+        assert_eq!(target_ref.get::<StateDead>().unwrap().dead_at, 42);
+        assert!(target_ref.get::<ThinkerBuilder>().is_none());
+        assert_eq!(
+            app.world().resource::<AbilityDeathTransitions>().0,
+            vec![target]
+        );
+    }
+
+    #[test]
+    fn personal_goblin_intent_copy_matches_owner_combat_targeting() {
+        for template in ["Wolf Rider", "Goblin Pillager"] {
+            assert_eq!(
+                enemy_intent_for_template(template, true),
+                "Raider advancing on your defenders and blocking walls"
+            );
+            assert_eq!(
+                enemy_intent_for_template(template, false),
+                "Raider targeting your stored value and structures"
+            );
         }
     }
 

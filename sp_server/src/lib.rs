@@ -85,6 +85,7 @@ mod skill_defs;
 // crate) can name these types without the modules being public.
 pub use network::ResponsePacket;
 pub use player::PlayerEvent;
+pub use player_setup::StartLocations;
 
 const TIMESTEP_10_PER_SECOND: f64 = 1.0 / 10.0;
 

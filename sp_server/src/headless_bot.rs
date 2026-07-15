@@ -20,14 +20,14 @@
 // are auto-managed by the game when the hero is idle. Movement is single-hex-step
 // because the server's MoveEvent only accepts a destination adjacent to the mover.
 
-use crate::constants::{WATERSKIN_EMPTY, WATERSKIN_FILLED};
+use crate::constants::{ATTACK_COOLDOWN_TICKS, WATERSKIN_EMPTY, WATERSKIN_FILLED};
 use crate::crisis_balance::CrisisBalanceScenario;
 use crate::game::{
     sanctuary_upgrade_cost, sanctuary_weak_radius, CrisisPhase, SANCTUARY_MAX_LEVEL,
 };
 use crate::headless::{HeroView, ItemView, StructureView, UnitView, WorldView};
 use crate::map::{Map, TileType};
-use crate::obj::Position;
+use crate::obj::{HeroClass, Position};
 use crate::PlayerEvent;
 
 // Engage enemies within this range. A lingering enemy keeps re-applying the
@@ -35,6 +35,17 @@ use crate::PlayerEvent;
 // clear nearby harassers rather than passively ignore them, or it starves while
 // standing idle holding food.
 const AGGRO_RADIUS: u32 = 3;
+const BASIC_ATTACK_STAMINA_COST: i32 = 5;
+const GUARD_BASH_STAMINA_COST: i32 = 10;
+const AIMED_SHOT_STAMINA_COST: i32 = 8;
+const DISENGAGE_STAMINA_COST: i32 = 8;
+const ARCANE_BOLT_MANA_COST: i32 = 20;
+const WARD_MANA_COST: i32 = 15;
+const CLASS_ABILITY_RANGE: u32 = 3;
+// Defensive abilities share the production five-second attack cooldown. Two
+// damaging commands between defensive casts keeps each class attacking instead
+// of falling into a no-damage Disengage/Ward loop.
+const OFFENSIVE_COMMANDS_PER_DEFENSIVE_ABILITY: u8 = 2;
 const DANGER_RADIUS: u32 = 3; // an enemy this close counts as a threat for retreat
 const SLEEP_SAFE_RADIUS: u32 = 3; // no enemy within this -> clear to rest/eat
 const LOW_HP: f32 = 0.5; // retreat / heal below this HP fraction
@@ -231,6 +242,26 @@ pub struct Bot {
     // ordinary Move events until adjacent to the owner's settlement, then holds
     // there and fights nearby enemies through the normal combat event path.
     helper_support_anchor: Option<Position>,
+    // The settlement owner whose attributed personal-assault units this helper
+    // deliberately supports. This is policy-only targeting context: emitted
+    // events remain owned by `player_id` and production validates them normally.
+    helper_supported_owner_id: Option<i32>,
+    // During the owner's active personal assault, retain one attributed unit
+    // until it dies/despawns instead of dropping combat as soon as it leaves the
+    // old ambient-enemy aggro radius.
+    assault_target_id: Option<i32>,
+    // Ranger and Mage tactics intentionally obey the same shared cooldown as
+    // production combat. The counters allow a defensive action only after two
+    // offensive commands, avoiding both melee-only class simulations and
+    // no-damage defensive loops.
+    last_tactical_combat_command_tick: Option<i32>,
+    ranger_disengaged_target_id: Option<i32>,
+    ranger_offensive_commands_since_disengage: u8,
+    // Test/audit marker for the most recent ordinary cooldown-reposition event.
+    // It has no gameplay effect and is never sent to production systems.
+    last_ranger_cooldown_reposition_tick: Option<i32>,
+    mage_warded_target_id: Option<i32>,
+    mage_offensive_commands_since_ward: u8,
 }
 
 impl Bot {
@@ -242,9 +273,14 @@ impl Bot {
         Self::new_with_policy(player_id, BalanceBotPolicy::for_scenario(scenario))
     }
 
-    pub fn for_helper_support(player_id: i32, owner_settlement_anchor: Position) -> Self {
+    pub fn for_helper_support(
+        player_id: i32,
+        supported_owner_id: i32,
+        owner_settlement_anchor: Position,
+    ) -> Self {
         let mut bot = Self::new_with_policy(player_id, BalanceBotPolicy::supporting_helper());
         bot.helper_support_anchor = Some(owner_settlement_anchor);
+        bot.helper_supported_owner_id = Some(supported_owner_id);
         bot
     }
 
@@ -264,11 +300,26 @@ impl Bot {
             hunts: 0,
             balance_policy,
             helper_support_anchor: None,
+            helper_supported_owner_id: None,
+            assault_target_id: None,
+            last_tactical_combat_command_tick: None,
+            ranger_disengaged_target_id: None,
+            ranger_offensive_commands_since_disengage: 0,
+            last_ranger_cooldown_reposition_tick: None,
+            mage_warded_target_id: None,
+            mage_offensive_commands_since_ward: 0,
         }
     }
 
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// The owner-attributed assault unit retained by the headless policy. This
+    /// exposes policy observation for opt-in telemetry only; callers still send
+    /// ordinary production events and the server validates every action.
+    pub fn observed_assault_target_id(&self) -> Option<i32> {
+        self.assault_target_id
     }
 
     pub fn step(&mut self, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
@@ -429,7 +480,9 @@ impl Bot {
 
     fn hero_action(&mut self, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let hero = view.hero?;
-        let nearest = nearest_enemy(hero.pos, view);
+        let owned_assault_target = self.owned_assault_target(&hero, view);
+        let nearest = owned_assault_target.or_else(|| nearest_enemy(hero.pos, view));
+        let pursuing_assault = owned_assault_target.is_some();
         let threat = nearest
             .map(|e| hex_dist(hero.pos, e.pos) <= DANGER_RADIUS)
             .unwrap_or(false);
@@ -523,7 +576,7 @@ impl Bot {
         //     can't be safely eaten (food poisoning) and a finished batch of Cooked
         //     Meat (Feed 100) is many days of food, so completing the cook outranks
         //     routine chores. Yield only to a close threat.
-        if !threat {
+        if !threat && !pursuing_assault {
             let has_meat = view
                 .inventory
                 .iter()
@@ -563,28 +616,22 @@ impl Bot {
             }
         }
 
-        // 5. Fight only near enemies while healthy (don't chase — chasing denies
-        //    the rest/eat windows the hero needs to survive).
+        // 5. Ambient enemies retain the conservative short aggro radius. During
+        //    AssaultActive, however, retain and chase an owner-attributed assault
+        //    unit so the production wave cannot sit beyond radius 3 forever. Class
+        //    actions still travel through ordinary Attack/Ability/Move events.
         if let Some(enemy) = nearest {
             let d = hex_dist(hero.pos, enemy.pos);
-            if d <= AGGRO_RADIUS && hero.hp_frac() >= LOW_HP {
-                // Make sure the strong combat weapon (axe) is equipped — hunting
-                // swaps in the weak Hunting spear, so swap back before a fight.
-                if let Some(eq) = self.equip_combat_weapon(view) {
-                    return Some(eq);
-                }
-                if d <= 1 {
-                    return Some(PlayerEvent::Attack {
-                        player_id: self.player_id,
-                        attack_type: "quick".to_string(),
-                        source_id: hero.id,
-                        target_id: enemy.id,
-                    });
-                }
-                if let Some(mv) = self.step_toward(hero.pos, enemy.pos, view, map) {
-                    return Some(mv);
+            if hero.hp_frac() >= LOW_HP && (pursuing_assault || d <= AGGRO_RADIUS) {
+                if let Some(action) = self.class_combat_action(&hero, enemy, d, view, map) {
+                    return Some(action);
                 }
             }
+        }
+        if pursuing_assault && hero.hp_frac() >= LOW_HP {
+            // A temporarily blocked path or depleted combat resource is a hold,
+            // not permission to abandon the retained assault target for economy.
+            return None;
         }
 
         // A support hero has no synthetic relocation or damage path: it walks
@@ -1507,6 +1554,258 @@ impl Bot {
         None
     }
 
+    /// Return the retained owner-attributed target for an active personal assault.
+    /// Once selected, a target remains selected while it is present in the
+    /// observation; a deterministic nearest/id tie-break chooses its replacement.
+    fn owned_assault_target(&mut self, hero: &HeroView, view: &WorldView) -> Option<UnitView> {
+        if self.helper_supported_owner_id.is_none()
+            && view.crisis_phase != Some(CrisisPhase::AssaultActive)
+        {
+            self.assault_target_id = None;
+            self.ranger_disengaged_target_id = None;
+            self.ranger_offensive_commands_since_disengage = 0;
+            self.mage_warded_target_id = None;
+            self.mage_offensive_commands_since_ward = 0;
+            return None;
+        }
+
+        let owner_player_id = self.helper_supported_owner_id.unwrap_or(self.player_id);
+        let retained = self.assault_target_id.and_then(|target_id| {
+            view.enemies
+                .iter()
+                .filter(|enemy| enemy.crisis_owner_player_id == Some(owner_player_id))
+                .find(|enemy| enemy.id == target_id)
+                .copied()
+        });
+        let target = retained.or_else(|| {
+            view.enemies
+                .iter()
+                .filter(|enemy| enemy.crisis_owner_player_id == Some(owner_player_id))
+                .filter(|enemy| hex_dist(hero.pos, enemy.pos) <= hero.vision)
+                .min_by_key(|enemy| (hex_dist(hero.pos, enemy.pos), enemy.id))
+                .copied()
+        });
+        let target_id = target.map(|enemy| enemy.id);
+        if self.assault_target_id != target_id {
+            self.ranger_disengaged_target_id = None;
+            self.ranger_offensive_commands_since_disengage = 0;
+            self.mage_warded_target_id = None;
+            self.mage_offensive_commands_since_ward = 0;
+        }
+        self.assault_target_id = target_id;
+        target
+    }
+
+    /// Emit only production-valid class combat commands. The bot does not apply
+    /// damage or relocate actors directly; the server remains authoritative for
+    /// cooldown, resource, range, accuracy, and hit resolution.
+    fn class_combat_action(
+        &mut self,
+        hero: &HeroView,
+        enemy: UnitView,
+        distance: u32,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        match hero.hero_class {
+            HeroClass::Warrior => {
+                if let Some(equip) = self.equip_combat_weapon(view) {
+                    return Some(equip);
+                }
+                if distance <= 1 {
+                    if hero.hp < hero.base_hp && has_resource(hero.stamina, GUARD_BASH_STAMINA_COST)
+                    {
+                        return Some(PlayerEvent::Ability {
+                            player_id: self.player_id,
+                            ability_id: "shield_bash".to_string(),
+                            source_id: hero.id,
+                            target_id: Some(enemy.id),
+                        });
+                    }
+                    return has_resource(hero.stamina, BASIC_ATTACK_STAMINA_COST)
+                        .then(|| self.basic_attack(hero.id, enemy.id));
+                }
+            }
+            HeroClass::Ranger => {
+                if let Some(equip) = self.equip_training_bow(view) {
+                    return Some(equip);
+                }
+                let bow_range = equipped_training_bow_range(view);
+                let tactical_command_ready = self.tactical_combat_command_ready(view.game_tick);
+                // Use the production movement path while the shared combat
+                // cooldown runs. This preserves the bow's ordinary range-two
+                // advantage without resetting the cooldown or manufacturing
+                // damage; once the cooldown expires, offense still wins below.
+                if distance <= 1 && hero.hp < hero.base_hp && !tactical_command_ready {
+                    let reposition =
+                        self.ranger_bow_reposition_step(hero.pos, enemy.pos, bow_range, view, map);
+                    if reposition.is_some() {
+                        self.last_ranger_cooldown_reposition_tick = Some(view.game_tick);
+                    }
+                    return reposition;
+                }
+                let disengage_due = self.ranger_disengaged_target_id != Some(enemy.id)
+                    || self.ranger_offensive_commands_since_disengage
+                        >= OFFENSIVE_COMMANDS_PER_DEFENSIVE_ABILITY;
+                if distance <= 1
+                    && hero.hp < hero.base_hp
+                    && disengage_due
+                    && has_resource(hero.stamina, DISENGAGE_STAMINA_COST)
+                    && disengage_destination_is_open(hero.pos, enemy.pos, view, map)
+                {
+                    debug_assert!(tactical_command_ready);
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.ranger_disengaged_target_id = Some(enemy.id);
+                    self.ranger_offensive_commands_since_disengage = 0;
+                    return Some(PlayerEvent::Ability {
+                        player_id: self.player_id,
+                        ability_id: "disengage".to_string(),
+                        source_id: hero.id,
+                        target_id: Some(enemy.id),
+                    });
+                }
+                if distance <= bow_range && has_resource(hero.stamina, BASIC_ATTACK_STAMINA_COST) {
+                    if !tactical_command_ready {
+                        return None;
+                    }
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.ranger_offensive_commands_since_disengage = self
+                        .ranger_offensive_commands_since_disengage
+                        .saturating_add(1);
+                    return Some(self.basic_attack(hero.id, enemy.id));
+                }
+                if bow_range > 0
+                    && distance <= CLASS_ABILITY_RANGE
+                    && has_resource(hero.stamina, AIMED_SHOT_STAMINA_COST)
+                {
+                    if !tactical_command_ready {
+                        return None;
+                    }
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.ranger_offensive_commands_since_disengage = self
+                        .ranger_offensive_commands_since_disengage
+                        .saturating_add(1);
+                    return Some(PlayerEvent::Ability {
+                        player_id: self.player_id,
+                        ability_id: "aimed_shot".to_string(),
+                        source_id: hero.id,
+                        target_id: Some(enemy.id),
+                    });
+                }
+            }
+            HeroClass::Mage => {
+                let ward_due = self.mage_warded_target_id != Some(enemy.id)
+                    || self.mage_offensive_commands_since_ward
+                        >= OFFENSIVE_COMMANDS_PER_DEFENSIVE_ABILITY;
+                if distance <= 1
+                    && hero.hp < hero.base_hp
+                    && ward_due
+                    && has_resource(hero.mana, WARD_MANA_COST)
+                {
+                    if !self.tactical_combat_command_ready(view.game_tick) {
+                        return None;
+                    }
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.mage_warded_target_id = Some(enemy.id);
+                    self.mage_offensive_commands_since_ward = 0;
+                    return Some(PlayerEvent::Ability {
+                        player_id: self.player_id,
+                        ability_id: "ward".to_string(),
+                        source_id: hero.id,
+                        target_id: None,
+                    });
+                }
+                if distance <= CLASS_ABILITY_RANGE && has_resource(hero.mana, ARCANE_BOLT_MANA_COST)
+                {
+                    if !self.tactical_combat_command_ready(view.game_tick) {
+                        return None;
+                    }
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.mage_offensive_commands_since_ward =
+                        self.mage_offensive_commands_since_ward.saturating_add(1);
+                    return Some(PlayerEvent::Ability {
+                        player_id: self.player_id,
+                        ability_id: "arcane_bolt".to_string(),
+                        source_id: hero.id,
+                        target_id: Some(enemy.id),
+                    });
+                }
+                if let Some(equip) = self.equip_combat_weapon(view) {
+                    return Some(equip);
+                }
+                if distance <= 1 && has_resource(hero.stamina, BASIC_ATTACK_STAMINA_COST) {
+                    if !self.tactical_combat_command_ready(view.game_tick) {
+                        return None;
+                    }
+                    self.last_tactical_combat_command_tick = Some(view.game_tick);
+                    self.mage_offensive_commands_since_ward =
+                        self.mage_offensive_commands_since_ward.saturating_add(1);
+                    return Some(self.basic_attack(hero.id, enemy.id));
+                }
+            }
+        }
+
+        self.step_toward(hero.pos, enemy.pos, view, map)
+    }
+
+    fn tactical_combat_command_ready(&self, game_tick: i32) -> bool {
+        self.last_tactical_combat_command_tick
+            .is_none_or(|last_tick| game_tick.saturating_sub(last_tick) >= ATTACK_COOLDOWN_TICKS)
+    }
+
+    fn ranger_bow_reposition_step(
+        &self,
+        from: Position,
+        enemy: Position,
+        bow_range: u32,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        if bow_range == 0 {
+            return None;
+        }
+        let current_distance = hex_dist(from, enemy);
+        let destination =
+            self.best_neighbor(from, view, map, |position| hex_dist(position, enemy) as i32)?;
+        let destination_distance = hex_dist(destination, enemy);
+        (destination_distance > current_distance && destination_distance <= bow_range)
+            .then(|| self.move_to(destination))
+    }
+
+    fn basic_attack(&self, source_id: i32, target_id: i32) -> PlayerEvent {
+        PlayerEvent::Attack {
+            player_id: self.player_id,
+            attack_type: "quick".to_string(),
+            source_id,
+            target_id,
+        }
+    }
+
+    /// Equip the production starting bow even though it also carries the Hunting
+    /// attribute. The old generic combat selector excluded all hunting weapons and
+    /// therefore swapped Rangers away from their only legitimate ranged weapon.
+    fn equip_training_bow(&self, view: &WorldView) -> Option<PlayerEvent> {
+        let hero = view.hero?;
+        if view
+            .inventory
+            .iter()
+            .any(|item| item.name == "Training Bow" && item.equipped && item.quantity > 0)
+        {
+            return None;
+        }
+        let item_id = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Training Bow" && !item.equipped && item.quantity > 0)
+            .map(|item| item.id)?;
+        Some(PlayerEvent::Equip {
+            player_id: self.player_id,
+            obj_id: hero.id,
+            item_id,
+            status: true,
+        })
+    }
+
     // Equip the strongest non-hunting weapon (the axe) if it isn't already — used
     // before combat, since hunting swaps in the weak Hunting spear.
     fn equip_combat_weapon(&self, view: &WorldView) -> Option<PlayerEvent> {
@@ -1707,6 +2006,45 @@ fn nearest_enemy(from: Position, view: &WorldView) -> Option<UnitView> {
         .copied()
 }
 
+fn has_resource(resource: Option<i32>, cost: i32) -> bool {
+    resource.is_some_and(|available| available >= cost)
+}
+
+fn equipped_training_bow_range(view: &WorldView) -> u32 {
+    view.inventory
+        .iter()
+        .filter(|item| item.name == "Training Bow" && item.equipped && item.quantity > 0)
+        .map(|item| item.attack_range)
+        .max()
+        .unwrap_or(0)
+}
+
+fn disengage_destination_is_open(
+    from: Position,
+    target: Position,
+    view: &WorldView,
+    map: &Map,
+) -> bool {
+    let Some(destination) = disengage_destination(from, target) else {
+        return false;
+    };
+    Map::is_valid_pos((destination.x, destination.y))
+        && Map::is_passable(destination.x, destination.y, map)
+        && !view.occupied.contains(&(destination.x, destination.y))
+}
+
+fn disengage_destination(from: Position, target: Position) -> Option<Position> {
+    let dx = (from.x - target.x).signum();
+    let dy = (from.y - target.y).signum();
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+    Some(Position {
+        x: from.x + dx,
+        y: from.y + dy,
+    })
+}
+
 fn healing_item(view: &WorldView) -> Option<i32> {
     view.inventory.iter().find(|i| i.is_healing).map(|i| i.id)
 }
@@ -1901,8 +2239,9 @@ fn storage_with_req(view: &WorldView, reqs: &[(&str, i32)]) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headless::HeadlessGame;
-    use crate::obj::State;
+    use crate::headless::{HeadlessGame, PreparationComparison, PreparationPairLeg};
+    use crate::network::ResponsePacket;
+    use crate::obj::{HeroClassProfile, State};
 
     #[test]
     fn helper_supported_primary_policy_matches_prepared_solo() {
@@ -1945,7 +2284,7 @@ mod tests {
         view.occupied.insert((helper_hero.pos.x, helper_hero.pos.y));
         view.occupied.insert((owner_anchor.x, owner_anchor.y));
 
-        let mut bot = Bot::for_helper_support(helper_player_id, owner_anchor);
+        let mut bot = Bot::for_helper_support(helper_player_id, owner_player_id, owner_anchor);
         let movement = bot
             .step(&view, game.map())
             .expect("helper should travel toward the owner settlement");
@@ -1973,6 +2312,7 @@ mod tests {
             id: ENEMY_ID,
             player_id: 900_000,
             pos: enemy_pos,
+            crisis_owner_player_id: None,
         });
 
         let combat = bot
@@ -1991,6 +2331,918 @@ mod tests {
             }
             _ => panic!("helper combat must use an ordinary Attack event"),
         }
+    }
+
+    #[test]
+    fn helper_support_filters_and_retains_supported_owner_targets_beyond_ambient_radius() {
+        let mut game = HeadlessGame::new(1_000);
+        let owner_player_id = game.spawn_hero("Warrior", "SupportTargetOwnerBot");
+        let owner_anchor = game
+            .observe_for_player(owner_player_id)
+            .home()
+            .expect("owner settlement anchor");
+        let helper_player_id = game.spawn_connected_scenario_helper("SupportTargetHelperBot");
+        let mut view = game.observe_for_player(helper_player_id);
+        let hero = view.hero.as_mut().expect("connected helper hero");
+        hero.state = State::None;
+        hero.hp = hero.base_hp;
+        hero.hunger = 0.0;
+        hero.thirst = 0.0;
+        hero.tired = 0.0;
+        hero.vision = AGGRO_RADIUS + 1;
+        let helper_hero = *hero;
+        view.inventory.clear();
+        view.enemies.clear();
+        view.occupied.clear();
+        view.occupied.insert((helper_hero.pos.x, helper_hero.pos.y));
+        // The helper's own crisis is deliberately inactive. Explicit support
+        // context, not the helper's crisis phase, retains the owner's units.
+        view.crisis_phase = Some(CrisisPhase::Dormant);
+
+        let supported_pos = passable_at_distance(helper_hero.pos, AGGRO_RADIUS + 1, game.map());
+        let other_owner_pos = passable_at_distance(helper_hero.pos, 1, game.map());
+        const SUPPORTED_TARGET_ID: i32 = 9_999_910;
+        const OTHER_OWNER_TARGET_ID: i32 = 9_999_911;
+        view.enemies.push(owner_assault_enemy(
+            OTHER_OWNER_TARGET_ID,
+            owner_player_id + 100,
+            other_owner_pos,
+        ));
+        view.enemies.push(owner_assault_enemy(
+            SUPPORTED_TARGET_ID,
+            owner_player_id,
+            supported_pos,
+        ));
+        view.occupied.insert((supported_pos.x, supported_pos.y));
+        view.occupied.insert((other_owner_pos.x, other_owner_pos.y));
+
+        let mut bot = Bot::for_helper_support(helper_player_id, owner_player_id, owner_anchor);
+        assert_eq!(
+            bot.owned_assault_target(&helper_hero, &view)
+                .expect("supported-owner target selection")
+                .id,
+            SUPPORTED_TARGET_ID,
+            "a closer unit from another owner must be filtered out"
+        );
+        view.enemies
+            .retain(|enemy| enemy.id != OTHER_OWNER_TARGET_ID);
+        view.occupied
+            .remove(&(other_owner_pos.x, other_owner_pos.y));
+        let event = bot
+            .step(&view, game.map())
+            .expect("helper should chase the supported owner's distant unit");
+        match event {
+            PlayerEvent::Move { player_id, x, y } => {
+                let destination = Position { x, y };
+                assert_eq!(player_id, helper_player_id);
+                assert!(
+                    hex_dist(destination, supported_pos) < hex_dist(helper_hero.pos, supported_pos),
+                    "support movement must close on the supported owner's target"
+                );
+            }
+            event => panic!("distant supported target must produce a normal Move, got {event:?}"),
+        }
+        assert_eq!(bot.observed_assault_target_id(), Some(SUPPORTED_TARGET_ID));
+
+        let closer_supported_pos = passable_at_distance(helper_hero.pos, 2, game.map());
+        view.enemies.push(owner_assault_enemy(
+            9_999_912,
+            owner_player_id,
+            closer_supported_pos,
+        ));
+        assert_eq!(
+            bot.owned_assault_target(&helper_hero, &view)
+                .expect("retained supported-owner target")
+                .id,
+            SUPPORTED_TARGET_ID,
+            "a newly closer unit must not replace the retained live target"
+        );
+    }
+
+    #[test]
+    fn helper_support_attack_keeps_event_and_crisis_ownership_separate() {
+        let mut game = HeadlessGame::new(1_000);
+        let owner_player_id = game.spawn_hero("Warrior", "SupportOwnershipOwnerBot");
+        let owner_anchor = game
+            .observe_for_player(owner_player_id)
+            .home()
+            .expect("owner settlement anchor");
+        let helper_player_id = game.spawn_connected_scenario_helper("SupportOwnershipHelperBot");
+        let mut view = game.observe_for_player(helper_player_id);
+        let hero = view.hero.as_mut().expect("connected helper hero");
+        hero.state = State::None;
+        hero.hp = hero.base_hp;
+        hero.hunger = 0.0;
+        hero.thirst = 0.0;
+        hero.tired = 0.0;
+        let helper_hero = *hero;
+        view.inventory.clear();
+        view.enemies.clear();
+        view.occupied.clear();
+        view.occupied.insert((helper_hero.pos.x, helper_hero.pos.y));
+        view.crisis_phase = Some(CrisisPhase::Dormant);
+
+        let target_pos = passable_at_distance(helper_hero.pos, 1, game.map());
+        const TARGET_ID: i32 = 9_999_913;
+        view.enemies
+            .push(owner_assault_enemy(TARGET_ID, owner_player_id, target_pos));
+        view.occupied.insert((target_pos.x, target_pos.y));
+
+        let mut bot = Bot::for_helper_support(helper_player_id, owner_player_id, owner_anchor);
+        match bot
+            .step(&view, game.map())
+            .expect("adjacent supported target should be attacked")
+        {
+            PlayerEvent::Attack {
+                player_id,
+                source_id,
+                target_id,
+                ..
+            } => {
+                assert_eq!(player_id, helper_player_id);
+                assert_eq!(source_id, helper_hero.id);
+                assert_eq!(target_id, TARGET_ID);
+            }
+            event => panic!("helper must emit an ordinary Attack event, got {event:?}"),
+        }
+        assert_eq!(
+            view.enemies[0].crisis_owner_player_id,
+            Some(owner_player_id),
+            "bot policy must not mutate crisis ownership"
+        );
+        assert_eq!(bot.helper_supported_owner_id, Some(owner_player_id));
+    }
+
+    fn isolated_assault_view(class_name: &str, hero_name: &str) -> (HeadlessGame, i32, WorldView) {
+        let mut game = HeadlessGame::new(1_000);
+        let player_id = game.spawn_hero(class_name, hero_name);
+        let mut view = game.observe_for_player(player_id);
+        let hero = view.hero.as_mut().expect("headless hero");
+        hero.state = State::None;
+        hero.hp = hero.base_hp;
+        hero.hunger = 0.0;
+        hero.thirst = 0.0;
+        hero.tired = 0.0;
+        view.enemies.clear();
+        view.occupied.clear();
+        view.occupied.insert((hero.pos.x, hero.pos.y));
+        view.crisis_phase = Some(CrisisPhase::AssaultActive);
+        (game, player_id, view)
+    }
+
+    fn passable_at_distance(from: Position, distance: u32, map: &Map) -> Position {
+        Map::range((from.x, from.y), distance)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                hex_dist(from, *position) == distance
+                    && Map::is_passable(position.x, position.y, map)
+            })
+            .expect("passable combat-test position")
+    }
+
+    fn passable_adjacent_with_disengage(from: Position, view: &WorldView, map: &Map) -> Position {
+        Map::range((from.x, from.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                hex_dist(from, *position) == 1
+                    && Map::is_passable(position.x, position.y, map)
+                    && disengage_destination_is_open(from, *position, view, map)
+            })
+            .expect("passable adjacent target and disengage destination")
+    }
+
+    fn passable_adjacent_with_blocked_disengage_and_bow_step(
+        from: Position,
+        view: &WorldView,
+        map: &Map,
+    ) -> (Position, Position) {
+        Map::range((from.x, from.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find_map(|enemy| {
+                if hex_dist(from, enemy) != 1
+                    || !Map::is_passable(enemy.x, enemy.y, map)
+                    || !disengage_destination_is_open(from, enemy, view, map)
+                {
+                    return None;
+                }
+                let retreat = disengage_destination(from, enemy)?;
+                let has_alternate_bow_step = Map::range((from.x, from.y), 1)
+                    .into_iter()
+                    .map(|(x, y)| Position { x, y })
+                    .any(|position| {
+                        position != from
+                            && position != enemy
+                            && position != retreat
+                            && Map::is_valid_pos((position.x, position.y))
+                            && Map::is_passable(position.x, position.y, map)
+                            && !view.occupied.contains(&(position.x, position.y))
+                            && hex_dist(position, enemy) > 1
+                            && hex_dist(position, enemy) <= 2
+                    });
+                has_alternate_bow_step.then_some((enemy, retreat))
+            })
+            .expect("adjacent target with blockable retreat and alternate bow step")
+    }
+
+    fn owner_assault_enemy(id: i32, owner_player_id: i32, pos: Position) -> UnitView {
+        UnitView {
+            id,
+            player_id: 1_000,
+            pos,
+            crisis_owner_player_id: Some(owner_player_id),
+        }
+    }
+
+    #[test]
+    fn warrior_uses_normal_melee_attack_for_adjacent_owner_assault_unit() {
+        let (game, player_id, mut view) =
+            isolated_assault_view("Warrior", "WarriorCombatPolicyBot");
+        let hero = view.hero.expect("hero");
+        let enemy_pos = passable_adjacent_with_disengage(hero.pos, &view, game.map());
+        const ENEMY_ID: i32 = 9_999_901;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        match bot.step(&view, game.map()).expect("warrior combat action") {
+            PlayerEvent::Attack {
+                player_id: event_player_id,
+                source_id,
+                target_id,
+                ..
+            } => {
+                assert_eq!(event_player_id, player_id);
+                assert_eq!(source_id, hero.id);
+                assert_eq!(target_id, ENEMY_ID);
+            }
+            event => panic!("Warrior must use an ordinary adjacent Attack, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn wounded_warrior_uses_guard_bash_defensively_at_adjacency() {
+        let (game, player_id, mut view) = isolated_assault_view("Warrior", "WarriorGuardPolicyBot");
+        let hero = view.hero.as_mut().expect("hero");
+        hero.hp = hero.base_hp - 1;
+        assert!(has_resource(hero.stamina, GUARD_BASH_STAMINA_COST));
+        let hero = *hero;
+        let enemy_pos = passable_at_distance(hero.pos, 1, game.map());
+        const ENEMY_ID: i32 = 9_999_906;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                player_id: event_player_id,
+                ref ability_id,
+                source_id,
+                target_id: Some(ENEMY_ID),
+            }) if event_player_id == player_id
+                && ability_id == "shield_bash"
+                && source_id == hero.id
+        ));
+    }
+
+    #[test]
+    fn ranger_equips_and_uses_training_bow_at_its_projected_range() {
+        let (game, player_id, mut view) = isolated_assault_view("Ranger", "RangerCombatPolicyBot");
+        let hero = view.hero.expect("hero");
+        let enemy_pos = passable_at_distance(hero.pos, 2, game.map());
+        const ENEMY_ID: i32 = 9_999_902;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+
+        let bow_id = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Training Bow")
+            .map(|item| item.id)
+            .expect("Ranger starting Training Bow");
+        for item in &mut view.inventory {
+            if item.name == "Training Bow" {
+                assert_eq!(item.attack_range, 2);
+                item.equipped = false;
+            } else if item.is_weapon {
+                item.equipped = true;
+            }
+        }
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Equip {
+                player_id: event_player_id,
+                item_id,
+                status: true,
+                ..
+            }) if event_player_id == player_id && item_id == bow_id
+        ));
+
+        for item in &mut view.inventory {
+            item.equipped = item.name == "Training Bow";
+        }
+        match bot.step(&view, game.map()).expect("Ranger ranged attack") {
+            PlayerEvent::Attack {
+                player_id: event_player_id,
+                source_id,
+                target_id,
+                ..
+            } => {
+                assert_eq!(event_player_id, player_id);
+                assert_eq!(source_id, hero.id);
+                assert_eq!(target_id, ENEMY_ID);
+            }
+            event => panic!("Ranger must use the Training Bow's normal Attack, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn wounded_ranger_repositions_during_cooldown_without_starving_bow_offense() {
+        let (game, player_id, mut view) =
+            isolated_assault_view("Ranger", "RangerDisengagePolicyBot");
+        let hero = view.hero.as_mut().expect("hero");
+        hero.hp = hero.base_hp - 1;
+        assert!(has_resource(hero.stamina, DISENGAGE_STAMINA_COST));
+        let hero = *hero;
+        let enemy_pos = passable_adjacent_with_disengage(hero.pos, &view, game.map());
+        const ENEMY_ID: i32 = 9_999_907;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+        let first_command_tick = view.game_tick;
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                player_id: event_player_id,
+                ref ability_id,
+                source_id,
+                target_id: Some(ENEMY_ID),
+            }) if event_player_id == player_id
+                && ability_id == "disengage"
+                && source_id == hero.id
+        ));
+
+        // Model the retained target catching the Ranger again before the shared
+        // combat cooldown expires. The policy uses an ordinary one-hex Move to
+        // restore Training Bow range and does not move the cooldown deadline.
+        view.game_tick += 1;
+        let reposition = bot
+            .step(&view, game.map())
+            .expect("wounded adjacent Ranger cooldown reposition");
+        assert_eq!(
+            bot.last_ranger_cooldown_reposition_tick,
+            Some(view.game_tick)
+        );
+        let repositioned = match reposition {
+            PlayerEvent::Move {
+                player_id: event_player_id,
+                x,
+                y,
+            } => {
+                assert_eq!(event_player_id, player_id);
+                Position { x, y }
+            }
+            event => panic!("cooldown reposition must be an ordinary Move, got {event:?}"),
+        };
+        assert!(Map::is_passable(repositioned.x, repositioned.y, game.map()));
+        assert!(!view.occupied.contains(&(repositioned.x, repositioned.y)));
+        assert_eq!(hex_dist(hero.pos, repositioned), 1);
+        assert_eq!(hex_dist(repositioned, enemy_pos), 2);
+        assert!(hex_dist(repositioned, enemy_pos) <= equipped_training_bow_range(&view));
+
+        view.occupied.remove(&(hero.pos.x, hero.pos.y));
+        view.occupied.insert((repositioned.x, repositioned.y));
+        view.hero.as_mut().expect("hero").pos = repositioned;
+        view.game_tick = first_command_tick + ATTACK_COOLDOWN_TICKS;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Attack {
+                player_id: event_player_id,
+                source_id,
+                target_id: ENEMY_ID,
+                ..
+            }) if event_player_id == player_id && source_id == hero.id
+        ));
+
+        view.game_tick += ATTACK_COOLDOWN_TICKS;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Attack {
+                player_id: event_player_id,
+                source_id,
+                target_id: ENEMY_ID,
+                ..
+            }) if event_player_id == player_id && source_id == hero.id
+        ));
+
+        // Once two real bow commands have been issued, a later adjacent contact
+        // permits the bounded Disengage again rather than kiting forever.
+        view.occupied.remove(&(repositioned.x, repositioned.y));
+        view.occupied.insert((hero.pos.x, hero.pos.y));
+        view.hero.as_mut().expect("hero").pos = hero.pos;
+        view.game_tick += ATTACK_COOLDOWN_TICKS;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                ref ability_id,
+                target_id: Some(ENEMY_ID),
+                ..
+            }) if ability_id == "disengage"
+        ));
+
+        const REPLACEMENT_ID: i32 = 9_999_908;
+        view.enemies.clear();
+        view.enemies
+            .push(owner_assault_enemy(REPLACEMENT_ID, player_id, enemy_pos));
+        view.game_tick += ATTACK_COOLDOWN_TICKS;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                ref ability_id,
+                target_id: Some(REPLACEMENT_ID),
+                ..
+            }) if ability_id == "disengage"
+        ));
+    }
+
+    #[test]
+    fn occupied_disengage_destination_skips_ability_and_preserves_ranger_actions() {
+        let (game, player_id, mut view) =
+            isolated_assault_view("Ranger", "RangerOccupiedDisengagePolicyBot");
+        let hero = view.hero.as_mut().expect("hero");
+        hero.hp = hero.base_hp - 1;
+        assert!(has_resource(hero.stamina, DISENGAGE_STAMINA_COST));
+        let hero = *hero;
+        let (enemy_pos, retreat_pos) =
+            passable_adjacent_with_blocked_disengage_and_bow_step(hero.pos, &view, game.map());
+        const ENEMY_ID: i32 = 9_999_909;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+        view.occupied.insert((retreat_pos.x, retreat_pos.y));
+        for item in &mut view.inventory {
+            if item.is_weapon {
+                item.equipped = item.name == "Training Bow";
+            }
+        }
+
+        let first_command_tick = view.game_tick;
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Attack {
+                player_id: event_player_id,
+                source_id,
+                target_id: ENEMY_ID,
+                ..
+            }) if event_player_id == player_id && source_id == hero.id
+        ));
+        assert_eq!(
+            bot.last_tactical_combat_command_tick,
+            Some(first_command_tick)
+        );
+        assert_eq!(bot.ranger_disengaged_target_id, None);
+        assert_eq!(bot.ranger_offensive_commands_since_disengage, 1);
+
+        view.game_tick += 1;
+        let reposition = bot
+            .step(&view, game.map())
+            .expect("Ranger should keep using a valid cooldown reposition");
+        let repositioned = match reposition {
+            PlayerEvent::Move {
+                player_id: event_player_id,
+                x,
+                y,
+            } => {
+                assert_eq!(event_player_id, player_id);
+                Position { x, y }
+            }
+            event => panic!(
+                "occupied retreat must skip Disengage and preserve ordinary movement, got {event:?}"
+            ),
+        };
+        assert_ne!(repositioned, retreat_pos);
+        assert!(!view.occupied.contains(&(repositioned.x, repositioned.y)));
+        assert_eq!(hex_dist(hero.pos, repositioned), 1);
+        assert_eq!(hex_dist(repositioned, enemy_pos), 2);
+        assert_eq!(
+            bot.last_tactical_combat_command_tick,
+            Some(first_command_tick),
+            "ordinary movement must not manufacture a new combat cooldown"
+        );
+        assert_eq!(
+            bot.last_ranger_cooldown_reposition_tick,
+            Some(view.game_tick)
+        );
+    }
+
+    #[test]
+    fn mage_uses_arcane_bolt_with_mana_at_range_three() {
+        let (game, player_id, mut view) = isolated_assault_view("Mage", "MageCombatPolicyBot");
+        let hero = view.hero.expect("hero");
+        assert!(has_resource(hero.mana, ARCANE_BOLT_MANA_COST));
+        let enemy_pos = passable_at_distance(hero.pos, 3, game.map());
+        const ENEMY_ID: i32 = 9_999_903;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        match bot.step(&view, game.map()).expect("Mage ranged ability") {
+            PlayerEvent::Ability {
+                player_id: event_player_id,
+                ability_id,
+                source_id,
+                target_id,
+            } => {
+                assert_eq!(event_player_id, player_id);
+                assert_eq!(ability_id, "arcane_bolt");
+                assert_eq!(source_id, hero.id);
+                assert_eq!(target_id, Some(ENEMY_ID));
+            }
+            event => panic!("Mage must use Arcane Bolt at range three, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn wounded_mage_interleaves_two_arcane_bolts_between_wards() {
+        let (game, player_id, mut view) = isolated_assault_view("Mage", "MageWardCadencePolicyBot");
+        let hero = view.hero.as_mut().expect("hero");
+        hero.hp = hero.base_hp - 1;
+        assert!(has_resource(hero.mana, WARD_MANA_COST));
+        let hero = *hero;
+        let enemy_pos = passable_at_distance(hero.pos, 1, game.map());
+        const ENEMY_ID: i32 = 9_999_909;
+        view.enemies
+            .push(owner_assault_enemy(ENEMY_ID, player_id, enemy_pos));
+        view.occupied.insert((enemy_pos.x, enemy_pos.y));
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                player_id: event_player_id,
+                ref ability_id,
+                source_id,
+                target_id: None,
+            }) if event_player_id == player_id
+                && ability_id == "ward"
+                && source_id == hero.id
+        ));
+        assert!(
+            bot.step(&view, game.map()).is_none(),
+            "Ward must not be followed by cooldown-starving command spam"
+        );
+
+        for _ in 0..OFFENSIVE_COMMANDS_PER_DEFENSIVE_ABILITY {
+            view.game_tick += ATTACK_COOLDOWN_TICKS;
+            assert!(matches!(
+                bot.step(&view, game.map()),
+                Some(PlayerEvent::Ability {
+                    player_id: event_player_id,
+                    ref ability_id,
+                    source_id,
+                    target_id: Some(ENEMY_ID),
+                }) if event_player_id == player_id
+                    && ability_id == "arcane_bolt"
+                    && source_id == hero.id
+            ));
+        }
+
+        view.game_tick += ATTACK_COOLDOWN_TICKS;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::Ability {
+                ref ability_id,
+                target_id: None,
+                ..
+            }) if ability_id == "ward"
+        ));
+    }
+
+    #[derive(Debug, Default)]
+    struct IntegratedClassCombatEvidence {
+        target_acquired: bool,
+        normal_move_event: bool,
+        normal_attack_event: bool,
+        normal_ability_event: bool,
+        normal_equip_event: bool,
+        ranger_bow_event: bool,
+        ranger_cooldown_reposition_event: bool,
+        mage_ward_event: bool,
+        mage_ward_accepted: bool,
+        accepted_attacks: i32,
+        damage_dealt: i32,
+    }
+
+    fn assert_legitimate_class_setup(class: HeroClass, view: &WorldView) {
+        let hero = view.hero.expect("class hero at assault launch");
+        assert_eq!(hero.hero_class, class);
+        let profile = HeroClassProfile::for_class(class);
+        assert_eq!(profile.hero_class, class);
+        assert!(
+            !profile.ability_ids.is_empty(),
+            "{class:?} must use the existing class ability catalogue"
+        );
+        match class {
+            HeroClass::Warrior => assert!(view.inventory.iter().any(|item| {
+                item.name == "Sharpened Stick"
+                    && item.is_weapon
+                    && item.equipped
+                    && item.attack_range == 1
+            })),
+            HeroClass::Ranger => assert!(view.inventory.iter().any(|item| {
+                item.name == "Training Bow"
+                    && item.is_weapon
+                    && item.equipped
+                    && item.attack_range == 2
+            })),
+            HeroClass::Mage => {
+                assert!(view.inventory.iter().any(|item| {
+                    item.name == "Sharpened Stick"
+                        && item.is_weapon
+                        && item.equipped
+                        && item.attack_range == 1
+                }));
+                assert!(has_resource(hero.mana, ARCANE_BOLT_MANA_COST));
+                assert!(profile.ability_ids.contains(&"arcane_bolt"));
+                assert!(profile.ability_ids.contains(&"ward"));
+            }
+        }
+    }
+
+    fn integrated_class_combat_evidence(class: HeroClass) -> IntegratedClassCombatEvidence {
+        const DECISION_TICKS: u32 = 8;
+        const OBSERVATION_TICKS: i32 = 2_000;
+        const MAX_ATTEMPTS: usize = 3;
+
+        let mut last_evidence = IntegratedClassCombatEvidence::default();
+        for attempt in 0..MAX_ATTEMPTS {
+            let class_name = class.to_str();
+            let mut game = HeadlessGame::new(20_000);
+            game.restrict_to_preparation_pair_start_location()
+                .expect("fixed class-combat start");
+            let player_id =
+                game.spawn_hero(class_name, &format!("Cp4Integrated{class_name}{attempt}"));
+            game.set_crisis_balance_sample_interval(Some(1));
+            let launch = game
+                .prepare_checkpoint4_preparation_pair_launch(
+                    PreparationComparison::EquipmentPrepared,
+                    PreparationPairLeg::Control,
+                )
+                .expect("production active-assault fixture");
+            assert_eq!(
+                launch.common_fingerprint.hero_class, class_name,
+                "fixture must preserve the selected production hero class"
+            );
+            assert!(!launch.common_fingerprint.assault_units.is_empty());
+
+            let launch_view = game.observe();
+            assert_legitimate_class_setup(class, &launch_view);
+            let launch_tick = game.game_tick();
+            let mut bot =
+                Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+            let mut evidence = IntegratedClassCombatEvidence::default();
+            game.start_packet_capture();
+
+            while game.game_tick().saturating_sub(launch_tick) < OBSERVATION_TICKS {
+                let view = game.observe();
+                if view.hero.is_none_or(|hero| hero.true_death)
+                    || game.settlement_crisis().map(|crisis| crisis.phase)
+                        == Some(CrisisPhase::Resolved)
+                {
+                    break;
+                }
+
+                let event = bot.step(&view, game.map());
+                if let Some(target_id) = bot.observed_assault_target_id() {
+                    assert!(
+                        game.record_observed_crisis_target(target_id),
+                        "bot target must belong to the live owner assault"
+                    );
+                    evidence.target_acquired = true;
+                }
+                if let Some(event) = event {
+                    match &event {
+                        PlayerEvent::Move {
+                            player_id: event_player_id,
+                            x,
+                            y,
+                        } => {
+                            assert_eq!(*event_player_id, player_id);
+                            evidence.normal_move_event = true;
+                            if class == HeroClass::Ranger
+                                && bot.last_ranger_cooldown_reposition_tick == Some(view.game_tick)
+                            {
+                                let hero = view.hero.expect("Ranger reposition source");
+                                let target_id = bot
+                                    .observed_assault_target_id()
+                                    .expect("retained Ranger assault target");
+                                let target = view
+                                    .enemies
+                                    .iter()
+                                    .find(|enemy| enemy.id == target_id)
+                                    .expect("retained Ranger target in view");
+                                let destination = Position { x: *x, y: *y };
+                                let bow_range = equipped_training_bow_range(&view);
+                                assert!(hero.hp < hero.base_hp);
+                                assert_eq!(hex_dist(hero.pos, target.pos), 1);
+                                assert_eq!(hex_dist(hero.pos, destination), 1);
+                                assert!(Map::is_passable(destination.x, destination.y, game.map()));
+                                assert!(!view.occupied.contains(&(destination.x, destination.y)));
+                                assert!(hex_dist(destination, target.pos) > 1);
+                                assert!(hex_dist(destination, target.pos) <= bow_range);
+                                evidence.ranger_cooldown_reposition_event = true;
+                            }
+                        }
+                        PlayerEvent::Attack {
+                            player_id: event_player_id,
+                            source_id,
+                            target_id,
+                            ..
+                        } => {
+                            assert_eq!(*event_player_id, player_id);
+                            assert_eq!(Some(*source_id), view.hero.map(|hero| hero.id));
+                            assert!(view.enemies.iter().any(|enemy| {
+                                enemy.id == *target_id
+                                    && enemy.crisis_owner_player_id == Some(player_id)
+                            }));
+                            assert!(
+                                view.inventory
+                                    .iter()
+                                    .any(|item| item.equipped && item.is_weapon),
+                                "normal Attack must use existing equipped production gear"
+                            );
+                            evidence.normal_attack_event = true;
+                            if class == HeroClass::Ranger {
+                                evidence.ranger_bow_event = true;
+                            }
+                        }
+                        PlayerEvent::Ability {
+                            player_id: event_player_id,
+                            ability_id,
+                            source_id,
+                            target_id,
+                        } => {
+                            assert_eq!(*event_player_id, player_id);
+                            assert_eq!(Some(*source_id), view.hero.map(|hero| hero.id));
+                            if ability_id == "ward" {
+                                assert_eq!(*target_id, None, "Ward is production-untargeted");
+                                evidence.mage_ward_event = true;
+                            } else {
+                                assert!(target_id.is_some_and(|target_id| {
+                                    view.enemies.iter().any(|enemy| {
+                                        enemy.id == target_id
+                                            && enemy.crisis_owner_player_id == Some(player_id)
+                                    })
+                                }));
+                            }
+                            assert!(
+                                HeroClassProfile::for_class(class)
+                                    .ability_ids
+                                    .contains(&ability_id.as_str()),
+                                "bot emitted an ability outside the existing class catalogue"
+                            );
+                            evidence.normal_ability_event = true;
+                            if class == HeroClass::Ranger && ability_id == "aimed_shot" {
+                                evidence.ranger_bow_event = true;
+                            }
+                        }
+                        PlayerEvent::Equip {
+                            player_id: event_player_id,
+                            item_id,
+                            status,
+                            ..
+                        } => {
+                            assert_eq!(*event_player_id, player_id);
+                            assert!(*status);
+                            assert!(view.inventory.iter().any(|item| item.id == *item_id));
+                            evidence.normal_equip_event = true;
+                        }
+                        _ => {}
+                    }
+                    // `inject` is the same production PlayerEvent ingress used by
+                    // every headless runner. The server, not the bot, validates
+                    // range/cooldown/resources and applies any resulting damage.
+                    game.inject(event);
+                }
+                bot.advance_phase(&view);
+                game.tick(DECISION_TICKS);
+
+                evidence.mage_ward_accepted |=
+                    game.finish_packet_capture().into_iter().any(|packet| {
+                        matches!(
+                            packet,
+                            ResponsePacket::Ability { ref ability_id, .. }
+                                if ability_id == "ward"
+                        )
+                    });
+                game.start_packet_capture();
+
+                let engagement = game.crisis_balance_telemetry().engagement;
+                evidence.accepted_attacks = engagement.hero_attacks_accepted;
+                evidence.damage_dealt = engagement.hero_damage_dealt_to_assault;
+                if evidence.target_acquired
+                    && evidence.accepted_attacks > 0
+                    && evidence.damage_dealt > 0
+                    && (class != HeroClass::Ranger || evidence.ranger_cooldown_reposition_event)
+                    && (class != HeroClass::Mage || evidence.mage_ward_accepted)
+                {
+                    assert!(engagement.first_hero_target_acquired_tick.is_some());
+                    assert!(engagement.first_hero_attack_requested_tick.is_some());
+                    assert!(engagement.first_hero_attack_accepted_tick.is_some());
+                    assert!(engagement.first_damage_to_attacker_tick.is_some());
+                    assert!(
+                        evidence.normal_attack_event || evidence.normal_ability_event,
+                        "damage must follow an ordinary production combat PlayerEvent"
+                    );
+                    return evidence;
+                }
+            }
+            last_evidence = evidence;
+        }
+
+        panic!(
+            "{class:?} did not acquire and damage a production assault attacker in {MAX_ATTEMPTS} bounded attempts; last evidence={last_evidence:?}"
+        );
+    }
+
+    #[test]
+    fn checkpoint4_warrior_bot_acquires_and_damages_through_production_events() {
+        let evidence = integrated_class_combat_evidence(HeroClass::Warrior);
+        assert!(evidence.target_acquired);
+        assert!(evidence.accepted_attacks > 0);
+        assert!(evidence.damage_dealt > 0);
+    }
+
+    #[test]
+    fn checkpoint4_ranger_bot_acquires_and_damages_through_production_events() {
+        let evidence = integrated_class_combat_evidence(HeroClass::Ranger);
+        assert!(evidence.target_acquired);
+        assert!(
+            evidence.ranger_bow_event,
+            "Ranger damage must follow a Training Bow Attack or Aimed Shot event"
+        );
+        assert!(evidence.ranger_cooldown_reposition_event);
+        assert!(evidence.accepted_attacks > 0);
+        assert!(evidence.damage_dealt > 0);
+    }
+
+    #[test]
+    fn checkpoint4_mage_bot_acquires_and_damages_through_production_events() {
+        let evidence = integrated_class_combat_evidence(HeroClass::Mage);
+        assert!(evidence.target_acquired);
+        assert!(evidence.normal_ability_event);
+        assert!(evidence.mage_ward_event);
+        assert!(evidence.mage_ward_accepted);
+        assert!(evidence.accepted_attacks > 0);
+        assert!(evidence.damage_dealt > 0);
+    }
+
+    #[test]
+    fn active_assault_target_is_retained_and_chased_beyond_old_aggro_radius() {
+        let (game, player_id, mut view) =
+            isolated_assault_view("Warrior", "AssaultRetentionPolicyBot");
+        let mut hero = view.hero.expect("hero");
+        hero.vision = AGGRO_RADIUS + 1;
+        view.hero = Some(hero);
+        let retained_pos = passable_at_distance(hero.pos, AGGRO_RADIUS + 1, game.map());
+        const RETAINED_ID: i32 = 9_999_904;
+        view.enemies
+            .push(owner_assault_enemy(RETAINED_ID, player_id, retained_pos));
+        view.occupied.insert((retained_pos.x, retained_pos.y));
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        let first = bot
+            .step(&view, game.map())
+            .expect("active-assault chase action");
+        let first_destination = match first {
+            PlayerEvent::Move { x, y, .. } => Position { x, y },
+            event => panic!("distant assault unit must be chased with Move, got {event:?}"),
+        };
+        assert!(hex_dist(first_destination, retained_pos) < hex_dist(hero.pos, retained_pos));
+
+        let decoy_pos = passable_at_distance(hero.pos, 1, game.map());
+        view.enemies
+            .push(owner_assault_enemy(9_999_905, player_id, decoy_pos));
+        view.occupied.insert((decoy_pos.x, decoy_pos.y));
+        assert_eq!(
+            bot.owned_assault_target(&hero, &view)
+                .expect("retained owner-assault target")
+                .id,
+            RETAINED_ID,
+            "the closer decoy must not replace the retained assault target"
+        );
     }
 }
 

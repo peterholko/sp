@@ -5,14 +5,17 @@ use serde::Serialize;
 use siege_perilous::constants::GAME_TICKS_PER_DAY;
 use siege_perilous::crisis_balance::CrisisBalanceScenario;
 use siege_perilous::game::CrisisPhase;
+#[cfg(test)]
+use siege_perilous::headless::AssaultObservationStopReason;
 use siege_perilous::headless::{
-    validate_preparation_pair_launches, HeadlessGame, PreparationCommonLaunchFingerprint,
-    PreparationComparison, PreparationDeclaredDifference, PreparationFixtureState,
-    PreparationPairLaunch, PreparationPairLeg,
+    checkpoint4_assault_observation_stop_reason, validate_preparation_pair_launches, HeadlessGame,
+    PreparationAssaultGeometry, PreparationCommonLaunchFingerprint, PreparationComparison,
+    PreparationDeclaredDifference, PreparationFixtureState, PreparationPairLaunch,
+    PreparationPairLeg,
 };
 use siege_perilous::headless_bot::Bot;
 
-const SCHEMA_VERSION: &str = "checkpoint3_preparation_pair_v1";
+const SCHEMA_VERSION: &str = "checkpoint4_preparation_pair_v2";
 const DEFAULT_PAIRS_PER_COMPARISON: u32 = 5;
 const DEFAULT_ASSAULT_RELATIVE_CAP_TICKS: i32 = 15_000;
 const DECISION_TICKS: u32 = 8;
@@ -42,6 +45,7 @@ struct Methodology {
     matched_observed_launch_fields: bool,
     full_ecs_state_matched: bool,
     launch_geometry_normalized: bool,
+    execution_order_counterbalanced: bool,
     random_stream_replayed: bool,
     requested_seed_label_semantics: &'static str,
     combat_policy: &'static str,
@@ -76,6 +80,7 @@ struct LegResult {
     observed_assault_ticks: i32,
     assault_units_defeated: i32,
     assault_units_remaining: i32,
+    launch_geometry: Vec<PreparationAssaultGeometry>,
     launch_fixture: Option<PreparationFixtureState>,
 }
 
@@ -115,6 +120,7 @@ impl LegResult {
             observed_assault_ticks: 0,
             assault_units_defeated: 0,
             assault_units_remaining: 0,
+            launch_geometry: Vec::new(),
             launch_fixture: None,
         }
     }
@@ -152,6 +158,7 @@ struct PairResult {
     requested_seed_label: String,
     hero_class: String,
     comparison: String,
+    execution_order: Vec<String>,
     random_stream_replayed: bool,
     declared_difference: PreparationDeclaredDifference,
     common_launch_fingerprint: Option<PreparationCommonLaunchFingerprint>,
@@ -279,14 +286,25 @@ fn hero_class(pair_index: u32) -> &'static str {
     }
 }
 
-fn should_stop_assault_observation(
+fn terminal_status(
+    resolution: bool,
     hero_present: bool,
-    _hero_dead: bool,
     hero_true_death: bool,
-) -> bool {
-    // Ordinary death is not terminal: production can resurrect the hero at the
-    // bound Monolith, and the personal assault continues through that cycle.
-    !hero_present || hero_true_death
+    timed_out: bool,
+) -> &'static str {
+    if hero_true_death {
+        "true_death"
+    } else if resolution {
+        "resolved"
+    } else if !hero_present {
+        "hero_missing"
+    } else if timed_out {
+        "timeout_unresolved"
+    } else {
+        // Ordinary death is deliberately not a terminal classification: the
+        // production resurrection cycle may still continue the assault.
+        "unresolved"
+    }
 }
 
 fn run_leg(
@@ -295,7 +313,6 @@ fn run_leg(
     leg: PreparationPairLeg,
     class: &str,
     cap_ticks: i32,
-    control_launch: Option<&PreparationPairLaunch>,
 ) -> Result<LegExecution, String> {
     let max_ticks = GAME_TICKS_PER_DAY
         .saturating_mul(2)
@@ -308,31 +325,31 @@ fn run_leg(
         &format!("PrepPair-{requested_seed_label}-{}", leg.label()),
     );
     game.set_crisis_balance_sample_interval(Some(1));
-    let launch = game.prepare_preparation_pair_launch(
-        comparison,
-        leg,
-        control_launch.map(|launch| launch.geometry.as_slice()),
-    )?;
+    let launch = game.prepare_preparation_pair_launch(comparison, leg)?;
     let assault_started_tick = launch.common_fingerprint.world_tick;
     let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
     let mut bandage_use_requested = false;
     let mut bandage_used = false;
+    let mut observed_true_death = false;
 
     loop {
         let phase = game.settlement_crisis().map(|crisis| crisis.phase);
-        if phase == Some(CrisisPhase::Resolved) {
-            break;
-        }
         let view = game.observe();
-        let (hero_present, hero_dead, hero_true_death) = view
+        let (hero_present, hero_true_death) = view
             .hero
-            .map(|hero| (true, hero.dead, hero.true_death))
-            .unwrap_or((false, false, false));
-        if should_stop_assault_observation(hero_present, hero_dead, hero_true_death) {
-            break;
-        }
+            .map(|hero| (true, hero.true_death))
+            .unwrap_or((false, false));
+        observed_true_death |= hero_true_death;
         let elapsed = game.game_tick().saturating_sub(assault_started_tick).max(0);
-        if elapsed >= cap_ticks {
+        if checkpoint4_assault_observation_stop_reason(
+            phase,
+            hero_present,
+            hero_true_death,
+            elapsed,
+            cap_ticks,
+        )
+        .is_some()
+        {
             break;
         }
 
@@ -367,13 +384,18 @@ fn run_leg(
     }
 
     let final_view = game.observe();
+    let hero_present = final_view.hero.is_some();
+    let hero_true_death =
+        observed_true_death || final_view.hero.is_some_and(|hero| hero.true_death);
     let survival = final_view
         .hero
-        .is_some_and(|hero| !hero.dead && !hero.true_death);
+        .is_some_and(|hero| !hero.dead && !hero.true_death)
+        && !hero_true_death;
     let phase = game.settlement_crisis().map(|crisis| crisis.phase);
     let resolution = phase == Some(CrisisPhase::Resolved);
     let observed_assault_ticks = game.game_tick().saturating_sub(assault_started_tick).max(0);
-    let timed_out = !resolution && survival && observed_assault_ticks >= cap_ticks;
+    let timed_out =
+        !resolution && hero_present && !hero_true_death && observed_assault_ticks >= cap_ticks;
     let telemetry = game.crisis_balance_telemetry();
     let outcome = telemetry.assault_outcome;
     let mut completed_preparation_actions = vec!["hide_wraps_carried_at_launch".to_string()];
@@ -400,15 +422,7 @@ fn run_leg(
                 && (!comparison.includes_healing() || launch.fixture.crude_bandages == 1)
         }
     };
-    let status = if resolution {
-        "resolved"
-    } else if !survival {
-        "hero_dead"
-    } else if timed_out {
-        "timeout_unresolved"
-    } else {
-        "unresolved"
-    };
+    let status = terminal_status(resolution, hero_present, hero_true_death, timed_out);
     Ok(LegExecution {
         result: LegResult {
             requested_seed_label: requested_seed_label.to_string(),
@@ -437,6 +451,7 @@ fn run_leg(
             observed_assault_ticks,
             assault_units_defeated: outcome.assault_units_defeated,
             assault_units_remaining: outcome.assault_units_remaining,
+            launch_geometry: launch.geometry.clone(),
             launch_fixture: Some(launch.fixture.clone()),
         },
         launch,
@@ -459,17 +474,9 @@ fn run_leg_caught(
     leg: PreparationPairLeg,
     class: &str,
     cap_ticks: i32,
-    control_launch: Option<&PreparationPairLaunch>,
 ) -> Result<LegExecution, Box<LegResult>> {
     match catch_unwind(AssertUnwindSafe(|| {
-        run_leg(
-            requested_seed_label,
-            comparison,
-            leg,
-            class,
-            cap_ticks,
-            control_launch,
-        )
+        run_leg(requested_seed_label, comparison, leg, class, cap_ticks)
     })) {
         Ok(Ok(execution)) => Ok(execution),
         Ok(Err(error)) => Err(Box::new(LegResult::failure(
@@ -559,36 +566,32 @@ fn classify_pair(comparison: PreparationComparison, deltas: &PairDeltas) -> &'st
     }
 }
 
+fn pair_execution_order(pair_index: u32) -> [PreparationPairLeg; 2] {
+    if pair_index % 2 == 0 {
+        [PreparationPairLeg::Control, PreparationPairLeg::Treatment]
+    } else {
+        [PreparationPairLeg::Treatment, PreparationPairLeg::Control]
+    }
+}
+
 fn run_pair(pair_index: u32, comparison: PreparationComparison, cap_ticks: i32) -> PairResult {
     let requested_seed_label = format!("requested-pair-{pair_index:04}");
     let class = hero_class(pair_index);
     let declared_difference = PreparationDeclaredDifference::for_comparison(comparison);
 
-    let control_execution = run_leg_caught(
-        &requested_seed_label,
-        comparison,
-        PreparationPairLeg::Control,
-        class,
-        cap_ticks,
-        None,
-    );
-    let treatment_execution = match &control_execution {
-        Ok(control) => run_leg_caught(
-            &requested_seed_label,
-            comparison,
-            PreparationPairLeg::Treatment,
-            class,
-            cap_ticks,
-            Some(&control.launch),
+    let execution_order = pair_execution_order(pair_index);
+    let run = |leg| run_leg_caught(&requested_seed_label, comparison, leg, class, cap_ticks);
+    let (control_execution, treatment_execution) = match execution_order {
+        [PreparationPairLeg::Control, PreparationPairLeg::Treatment] => (
+            run(PreparationPairLeg::Control),
+            run(PreparationPairLeg::Treatment),
         ),
-        Err(_) => Err(Box::new(LegResult::failure(
-            &requested_seed_label,
-            comparison,
-            PreparationPairLeg::Treatment,
-            class,
-            "setup_failure",
-            "control leg did not provide launch geometry".to_string(),
-        ))),
+        [PreparationPairLeg::Treatment, PreparationPairLeg::Control] => {
+            let treatment = run(PreparationPairLeg::Treatment);
+            let control = run(PreparationPairLeg::Control);
+            (control, treatment)
+        }
+        _ => unreachable!("pair execution order must contain one control and one treatment"),
     };
 
     let (common_launch_fingerprint, launch_validation_error) =
@@ -621,6 +624,10 @@ fn run_pair(pair_index: u32, comparison: PreparationComparison, cap_ticks: i32) 
         requested_seed_label,
         hero_class: class.to_string(),
         comparison: comparison.label().to_string(),
+        execution_order: execution_order
+            .into_iter()
+            .map(|leg| leg.label().to_string())
+            .collect(),
         random_stream_replayed: false,
         declared_difference,
         common_launch_fingerprint,
@@ -831,11 +838,12 @@ fn build_report(config: &RunnerConfig) -> PreparationPairReport {
             design: "matched_observed_launch_fields_control_treatment_pairs",
             matched_observed_launch_fields: true,
             full_ecs_state_matched: false,
-            launch_geometry_normalized: true,
+            launch_geometry_normalized: false,
+            execution_order_counterbalanced: true,
             random_stream_replayed: false,
             requested_seed_label_semantics: "pair label requested by the harness; not an RNG seed and not evidence of shared random draws",
-            combat_policy: "existing Bot BasicSurvival policy with production combat",
-            treatment_validation: "the selected observed launch fingerprint must match after normalizing only the comparison-specific Stockade, Hide Wraps plus its exact displaced starting shirt, or Crude Bandage artifact; hidden ECS state and RNG state are not claimed equivalent; exact declared fixture details are validated",
+            combat_policy: "class-valid Bot BasicSurvival policy through production Move, Equip, Attack, Ability, and Use events",
+            treatment_validation: "the selected observed launch fingerprint matches composition and HP after normalizing only the comparison-specific Stockade, Hide Wraps plus its exact displaced starting shirt, or Crude Bandage artifact; each leg retains and reports its actual launch geometry; hidden ECS and RNG state are not claimed equivalent; exact declared fixture details are validated",
         },
         pairs_per_comparison: config.pairs_per_comparison,
         assault_relative_cap_ticks: config.assault_relative_cap_ticks,
@@ -900,7 +908,8 @@ mod tests {
                 design: "matched_observed_launch_fields_control_treatment_pairs",
                 matched_observed_launch_fields: true,
                 full_ecs_state_matched: false,
-                launch_geometry_normalized: true,
+                launch_geometry_normalized: false,
+                execution_order_counterbalanced: true,
                 random_stream_replayed: false,
                 requested_seed_label_semantics: "not an RNG seed",
                 combat_policy: "BasicSurvival",
@@ -914,6 +923,11 @@ mod tests {
         let value = serde_json::to_value(report).expect("serialize report");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["methodology"]["random_stream_replayed"], false);
+        assert_eq!(value["methodology"]["launch_geometry_normalized"], false);
+        assert_eq!(
+            value["methodology"]["execution_order_counterbalanced"],
+            true
+        );
         assert_eq!(value["pairs_per_comparison"], 5);
         assert_eq!(
             value["assault_relative_cap_ticks"],
@@ -923,10 +937,66 @@ mod tests {
 
     #[test]
     fn assault_observation_continues_through_ordinary_death() {
-        assert!(!should_stop_assault_observation(true, false, false));
-        assert!(!should_stop_assault_observation(true, true, false));
-        assert!(should_stop_assault_observation(true, true, true));
-        assert!(should_stop_assault_observation(false, false, false));
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                false,
+                0,
+                DEFAULT_ASSAULT_RELATIVE_CAP_TICKS,
+            ),
+            None
+        );
+        // Ordinary death is deliberately not an input to the shared rule: the
+        // production resurrection cycle must remain observable.
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                false,
+                DEFAULT_ASSAULT_RELATIVE_CAP_TICKS - 1,
+                DEFAULT_ASSAULT_RELATIVE_CAP_TICKS,
+            ),
+            None
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                true,
+                true,
+                1,
+                DEFAULT_ASSAULT_RELATIVE_CAP_TICKS,
+            ),
+            Some(AssaultObservationStopReason::HeroTrueDeath)
+        );
+        assert_eq!(
+            checkpoint4_assault_observation_stop_reason(
+                Some(CrisisPhase::AssaultActive),
+                false,
+                false,
+                1,
+                DEFAULT_ASSAULT_RELATIVE_CAP_TICKS,
+            ),
+            Some(AssaultObservationStopReason::HeroMissing)
+        );
+        assert_eq!(terminal_status(false, true, false, false), "unresolved");
+        assert_eq!(terminal_status(false, true, true, false), "true_death");
+        assert_eq!(terminal_status(true, true, true, false), "true_death");
+        assert_eq!(terminal_status(false, false, false, false), "hero_missing");
+        assert_ne!(terminal_status(false, true, false, false), "hero_dead");
+    }
+
+    #[test]
+    fn pair_execution_order_is_counterbalanced_by_pair_index() {
+        assert_eq!(
+            pair_execution_order(0),
+            [PreparationPairLeg::Control, PreparationPairLeg::Treatment]
+        );
+        assert_eq!(
+            pair_execution_order(1),
+            [PreparationPairLeg::Treatment, PreparationPairLeg::Control]
+        );
+        assert_eq!(pair_execution_order(2), pair_execution_order(0));
     }
 
     #[test]

@@ -388,6 +388,94 @@ fn drowsy_scorer_returns_high_score_when_tired() {
     );
 }
 
+#[test]
+fn need_scorers_fail_closed_when_actor_is_despawned() {
+    let mut app = setup_test_app!((
+        thirsty_scorer_system,
+        hungry_scorer_system,
+        drowsy_scorer_system,
+    ));
+
+    let villager = TestVillagerBuilder::new()
+        .with_thirst(80.0)
+        .with_hunger(80.0)
+        .with_tired(80.0)
+        .spawn(app.world_mut());
+    let scorers = [
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&ThirstyScorer, &mut commands, villager)
+        },
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&HungryScorer, &mut commands, villager)
+        },
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&DrowsyScorer, &mut commands, villager)
+        },
+    ];
+    app.world_mut().flush();
+
+    app.update();
+    for scorer in scorers {
+        assert!(app.world().entity(scorer).get::<Score>().unwrap().get() > 0.0);
+    }
+
+    assert!(app.world_mut().despawn(villager));
+    app.update();
+
+    for scorer in scorers {
+        assert_eq!(
+            app.world().entity(scorer).get::<Score>().unwrap().get(),
+            0.0
+        );
+    }
+}
+
+#[test]
+fn need_scorers_fail_closed_when_execution_components_disappear() {
+    let mut app = setup_test_app!((
+        thirsty_scorer_system,
+        hungry_scorer_system,
+        drowsy_scorer_system,
+    ));
+
+    let villager = TestVillagerBuilder::new()
+        .with_thirst(80.0)
+        .with_hunger(80.0)
+        .with_tired(80.0)
+        .spawn(app.world_mut());
+    let scorers = [
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&ThirstyScorer, &mut commands, villager)
+        },
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&HungryScorer, &mut commands, villager)
+        },
+        {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&DrowsyScorer, &mut commands, villager)
+        },
+    ];
+    app.world_mut().flush();
+
+    app.update();
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    app.update();
+
+    for scorer in scorers {
+        assert_eq!(
+            app.world().entity(scorer).get::<Score>().unwrap().get(),
+            0.0
+        );
+    }
+}
+
 // ==================== Idle Scorer Tests ====================
 
 #[test]
@@ -1195,6 +1283,42 @@ fn move_to_succeeds_immediately_when_already_at_destination() {
 }
 
 #[test]
+fn move_to_missing_event_executing_fails_before_scheduling_movement() {
+    let mut app = setup_action_test_app!(move_to_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let start = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Subclass::Villager,
+        Destination {
+            pos: Position { x: 6, y: 5 },
+        },
+        combat_stats(10, 10, 1, 1),
+    ));
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
 fn gather_order_on_current_tile_schedules_another_gather_event() {
     let mut app = App::new();
     app.add_systems(
@@ -1681,6 +1805,53 @@ fn fight_back_system_attacks_adjacent_last_attacker_when_armed() {
 
     let action_state = app.world().entity(action).get::<ActionState>().unwrap();
     assert_eq!(*action_state, ActionState::Executing);
+}
+
+#[test]
+fn fight_back_missing_event_executing_fails_before_applying_damage() {
+    let mut app = setup_action_test_app!(fight_back_system);
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_combat_templates());
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Subclass::Villager);
+    insert_combat_components(app.world_mut(), villager, 30, 10);
+    insert_combat_components(app.world_mut(), attacker, 30, 1);
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    register_test_obj(&mut app, 1, 1, villager);
+    register_test_obj(&mut app, 2, 1001, attacker);
+
+    let action = spawn_action_as_requested(&mut app, &FightBack, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(app.world().entity(attacker).get::<Stats>().unwrap().hp, 30);
+    assert!(app.world().entity(villager).get::<LastAttacker>().is_some());
+    assert!(app.world().resource::<MapEvents>().is_empty());
 }
 
 #[test]
@@ -2333,6 +2504,64 @@ fn drink_action_succeeds_when_event_completes() {
     );
 }
 
+#[test]
+fn drink_action_cancels_pending_event_when_execution_component_disappears() {
+    let mut app = setup_action_test_app!(drink_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_thirst(80.0)
+        .with_drink_item()
+        .spawn(app.world_mut());
+    {
+        let mut entity = app.world_mut().entity_mut(villager);
+        let mut inventory = entity.get_mut::<Inventory>().unwrap();
+        inventory.items[0]
+            .attrs
+            .insert(AttrKey::Thirst, AttrVal::Num(40.0));
+    }
+    register_test_obj(&mut app, 1, 1, villager);
+    let action = spawn_action_as_requested(&mut app, &Drink, villager);
+
+    app.update();
+    let deadline = app
+        .world()
+        .resource::<MapEvents>()
+        .values()
+        .next()
+        .unwrap()
+        .run_tick;
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::Drinking
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+
+    app.world_mut().resource_mut::<GameTick>().0 = deadline + 1;
+    app.update();
+
+    assert_eq!(
+        app.world().entity(villager).get::<Thirst>().unwrap().thirst,
+        80.0
+    );
+    let inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    assert_eq!(inventory.items.len(), 1);
+    assert_eq!(inventory.items[0].quantity, 1);
+}
+
 // ==================== Eat Action Tests ====================
 
 #[test]
@@ -2448,6 +2677,64 @@ fn eat_action_succeeds_when_event_completes() {
         EventExecutingState::None,
         "Expected eat action to consume the completed event state"
     );
+}
+
+#[test]
+fn eat_action_cancels_pending_event_when_execution_component_disappears() {
+    let mut app = setup_action_test_app!(eat_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_hunger(80.0)
+        .with_food_item()
+        .spawn(app.world_mut());
+    {
+        let mut entity = app.world_mut().entity_mut(villager);
+        let mut inventory = entity.get_mut::<Inventory>().unwrap();
+        inventory.items[0]
+            .attrs
+            .insert(AttrKey::Feed, AttrVal::Num(40.0));
+    }
+    register_test_obj(&mut app, 1, 1, villager);
+    let action = spawn_action_as_requested(&mut app, &Eat, villager);
+
+    app.update();
+    let deadline = app
+        .world()
+        .resource::<MapEvents>()
+        .values()
+        .next()
+        .unwrap()
+        .run_tick;
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::Eating
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+
+    app.world_mut().resource_mut::<GameTick>().0 = deadline + 1;
+    app.update();
+
+    assert_eq!(
+        app.world().entity(villager).get::<Hunger>().unwrap().hunger,
+        80.0
+    );
+    let inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    assert_eq!(inventory.items.len(), 1);
+    assert_eq!(inventory.items[0].quantity, 1);
 }
 
 #[test]
@@ -3344,6 +3631,88 @@ fn sleep_action_transitions_to_executing() {
         State::Sleeping,
         "Expected villager state to be Sleeping"
     );
+}
+
+#[test]
+fn sleep_missing_event_executing_fails_before_state_or_event_changes() {
+    let mut app = setup_action_test_app!(sleep_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_tired(80.0)
+        .spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action = spawn_action_as_requested(&mut app, &Sleep, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
+fn executing_sleep_fails_safely_when_event_executing_disappears() {
+    let mut app = setup_action_test_app!(sleep_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_tired(80.0)
+        .spawn(app.world_mut());
+    let mut stats = combat_stats(100, 20, 5, 1);
+    stats.hp = 40;
+    stats.stamina = Some(5);
+    app.world_mut().entity_mut(villager).insert(stats);
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action = spawn_action_as_requested(&mut app, &Sleep, villager);
+
+    app.update();
+    let deadline = app
+        .world()
+        .resource::<MapEvents>()
+        .values()
+        .next()
+        .unwrap()
+        .run_tick;
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::Sleeping
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .remove::<EventExecuting>();
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+
+    app.world_mut().resource_mut::<GameTick>().0 = deadline + 1;
+    app.update();
+
+    assert_eq!(
+        app.world().entity(villager).get::<Tired>().unwrap().tired,
+        80.0
+    );
+    let stats = app.world().entity(villager).get::<Stats>().unwrap();
+    assert_eq!(stats.hp, 40);
+    assert_eq!(stats.stamina, Some(5));
 }
 
 #[test]

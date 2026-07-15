@@ -996,66 +996,67 @@ pub fn thirsty_scorer_system(
         }
 
         let obj_id = entity_map.get_obj_by_entity(*actor);
-        if let Ok(thirst) = thirsts.get(*actor) {
-            let (event_executing, active_task) = event_query
-                .get(*actor)
-                .expect("Missing event executing or active task component");
-
-            // Skip calculating the score if the event is completed,
-            // as this will cause a cancellation of the action due to transition state
-            if event_executing.state == EventExecutingState::Completed {
-                continue;
-            }
-
-            // Calculate thirst score
-            let mut thirst_score;
-
-            // Do not understand why we need this check
-            if thirst.thirst >= DEHYDRATED_SCORE {
-                thirst_score = EMERGENCY_SCORE;
-            } else {
-                let mut no_drink_mod = 0.0;
-
-                // If no drinks, subtract 10 f
-                if let Ok(_no_drinks) = no_drinks.get(*actor) {
-                    no_drink_mod = -50.0;
-                }
-
-                if *active_task == ActiveTask::GettingDrink || *active_task == ActiveTask::Drinking
-                {
-                    thirst_score = thirst.thirst * 1.50 + no_drink_mod;
-
-                    if thirst_score >= MAX_ROUTINE_SCORE {
-                        thirst_score = MAX_ROUTINE_SCORE;
-                    }
-                } else {
-                    thirst_score = thirst.thirst + no_drink_mod;
-
-                    if thirst_score >= MAX_ROUTINE_SCORE {
-                        thirst_score = MAX_ROUTINE_SCORE;
-                    }
-                }
-            }
-
-            let mut final_score = thirst_score / 100.0;
-
-            if final_score > 1.0 {
-                final_score = 1.0;
-            } else if final_score < 0.0 {
-                final_score = 0.0;
-            }
-            span.span().in_scope(|| {
-                villager_debug!(
-                    *actor,
-                    obj_id,
-                    None,
-                    "Thirst score={:.2} state={:?}",
-                    final_score,
-                    event_executing.state
-                );
-            });
-            score.set(final_score);
+        let Ok(thirst) = thirsts.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        let Ok((event_executing, active_task)) = event_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        // Skip calculating the score if the event is completed,
+        // as this will cause a cancellation of the action due to transition state
+        if event_executing.state == EventExecutingState::Completed {
+            continue;
         }
+
+        // Calculate thirst score
+        let mut thirst_score;
+
+        // Do not understand why we need this check
+        if thirst.thirst >= DEHYDRATED_SCORE {
+            thirst_score = EMERGENCY_SCORE;
+        } else {
+            let mut no_drink_mod = 0.0;
+
+            // If no drinks, subtract 10 f
+            if let Ok(_no_drinks) = no_drinks.get(*actor) {
+                no_drink_mod = -50.0;
+            }
+
+            if *active_task == ActiveTask::GettingDrink || *active_task == ActiveTask::Drinking {
+                thirst_score = thirst.thirst * 1.50 + no_drink_mod;
+
+                if thirst_score >= MAX_ROUTINE_SCORE {
+                    thirst_score = MAX_ROUTINE_SCORE;
+                }
+            } else {
+                thirst_score = thirst.thirst + no_drink_mod;
+
+                if thirst_score >= MAX_ROUTINE_SCORE {
+                    thirst_score = MAX_ROUTINE_SCORE;
+                }
+            }
+        }
+
+        let mut final_score = thirst_score / 100.0;
+
+        if final_score > 1.0 {
+            final_score = 1.0;
+        } else if final_score < 0.0 {
+            final_score = 0.0;
+        }
+        span.span().in_scope(|| {
+            villager_debug!(
+                *actor,
+                obj_id,
+                None,
+                "Thirst score={:.2} state={:?}",
+                final_score,
+                event_executing.state
+            );
+        });
+        score.set(final_score);
     }
 }
 
@@ -1073,64 +1074,66 @@ pub fn hungry_scorer_system(
         }
 
         let obj_id = entity_map.get_obj_by_entity(*actor);
-        if let Ok(hunger) = hungers.get(*actor) {
-            let (event_executing, active_task) = event_query
-                .get(*actor)
-                .expect("Missing event executing or active task component");
-
-            // Skip calculating the score if the event is completed,
-            // as this will cause a cancellation of the action due to transition state
-            if event_executing.state == EventExecutingState::Completed {
-                continue;
-            }
-
-            let mut hunger_score;
-
-            if hunger.hunger >= STARVING_SCORE {
-                hunger_score = EMERGENCY_SCORE;
-            } else {
-                let mut no_food_mod = 0.0;
-
-                // If no food, subtract 10 f
-                if let Ok(_no_food) = no_food.get(*actor) {
-                    no_food_mod = -50.0;
-                }
-
-                if *active_task == ActiveTask::GettingFood || *active_task == ActiveTask::Eating {
-                    hunger_score = hunger.hunger * 1.50 + no_food_mod;
-
-                    if hunger_score >= MAX_ROUTINE_SCORE {
-                        hunger_score = MAX_ROUTINE_SCORE;
-                    }
-                } else {
-                    hunger_score = hunger.hunger + no_food_mod;
-
-                    if hunger_score >= MAX_ROUTINE_SCORE {
-                        hunger_score = MAX_ROUTINE_SCORE;
-                    }
-                }
-            }
-
-            let mut final_score = hunger_score / 100.0;
-
-            if final_score > 1.0 {
-                final_score = 1.0;
-            } else if final_score < 0.0 {
-                final_score = 0.0;
-            }
-
-            span.span().in_scope(|| {
-                villager_debug!(
-                    *actor,
-                    obj_id,
-                    None,
-                    "Hunger score={:.2} state={:?}",
-                    final_score,
-                    event_executing.state
-                );
-            });
-            score.set(final_score);
+        let Ok(hunger) = hungers.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        let Ok((event_executing, active_task)) = event_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        // Skip calculating the score if the event is completed,
+        // as this will cause a cancellation of the action due to transition state
+        if event_executing.state == EventExecutingState::Completed {
+            continue;
         }
+
+        let mut hunger_score;
+
+        if hunger.hunger >= STARVING_SCORE {
+            hunger_score = EMERGENCY_SCORE;
+        } else {
+            let mut no_food_mod = 0.0;
+
+            // If no food, subtract 10 f
+            if let Ok(_no_food) = no_food.get(*actor) {
+                no_food_mod = -50.0;
+            }
+
+            if *active_task == ActiveTask::GettingFood || *active_task == ActiveTask::Eating {
+                hunger_score = hunger.hunger * 1.50 + no_food_mod;
+
+                if hunger_score >= MAX_ROUTINE_SCORE {
+                    hunger_score = MAX_ROUTINE_SCORE;
+                }
+            } else {
+                hunger_score = hunger.hunger + no_food_mod;
+
+                if hunger_score >= MAX_ROUTINE_SCORE {
+                    hunger_score = MAX_ROUTINE_SCORE;
+                }
+            }
+        }
+
+        let mut final_score = hunger_score / 100.0;
+
+        if final_score > 1.0 {
+            final_score = 1.0;
+        } else if final_score < 0.0 {
+            final_score = 0.0;
+        }
+
+        span.span().in_scope(|| {
+            villager_debug!(
+                *actor,
+                obj_id,
+                None,
+                "Hunger score={:.2} state={:?}",
+                final_score,
+                event_executing.state
+            );
+        });
+        score.set(final_score);
     }
 }
 
@@ -1146,49 +1149,51 @@ pub fn drowsy_scorer_system(
             continue;
         }
 
-        if let Ok(tired) = tired_query.get(*actor) {
-            let (event_executing, active_task) = event_query
-                .get(*actor)
-                .expect("Missing event executing or active task component");
-
-            // Skip calculating the score if the event is completed,
-            // as this will cause a cancellation of the action due to transition state
-            if event_executing.state == EventExecutingState::Completed {
-                continue;
-            }
-
-            let mut tired_score;
-            let mut no_shelter_mod = 0.0;
-
-            // If no shelter, subtract 10 f
-            if let Ok(_no_shelter) = no_shelter.get(*actor) {
-                no_shelter_mod = -50.0;
-            }
-
-            if *active_task == ActiveTask::FindingShelter {
-                tired_score = tired.tired * 1.50 + no_shelter_mod;
-
-                if tired_score >= MAX_ROUTINE_SCORE {
-                    tired_score = MAX_ROUTINE_SCORE;
-                }
-            } else {
-                tired_score = tired.tired;
-
-                if tired_score >= MAX_ROUTINE_SCORE {
-                    tired_score = MAX_ROUTINE_SCORE;
-                }
-            }
-
-            let mut final_score = tired_score / 100.0;
-
-            if final_score > 1.0 {
-                final_score = 1.0;
-            } else if final_score < 0.0 {
-                final_score = 0.0;
-            }
-
-            score.set(final_score);
+        let Ok(tired) = tired_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        let Ok((event_executing, active_task)) = event_query.get(*actor) else {
+            score.set(0.0);
+            continue;
+        };
+        // Skip calculating the score if the event is completed,
+        // as this will cause a cancellation of the action due to transition state
+        if event_executing.state == EventExecutingState::Completed {
+            continue;
         }
+
+        let mut tired_score;
+        let mut no_shelter_mod = 0.0;
+
+        // If no shelter, subtract 10 f
+        if let Ok(_no_shelter) = no_shelter.get(*actor) {
+            no_shelter_mod = -50.0;
+        }
+
+        if *active_task == ActiveTask::FindingShelter {
+            tired_score = tired.tired * 1.50 + no_shelter_mod;
+
+            if tired_score >= MAX_ROUTINE_SCORE {
+                tired_score = MAX_ROUTINE_SCORE;
+            }
+        } else {
+            tired_score = tired.tired;
+
+            if tired_score >= MAX_ROUTINE_SCORE {
+                tired_score = MAX_ROUTINE_SCORE;
+            }
+        }
+
+        let mut final_score = tired_score / 100.0;
+
+        if final_score > 1.0 {
+            final_score = 1.0;
+        } else if final_score < 0.0 {
+            final_score = 0.0;
+        }
+
+        score.set(final_score);
     }
 }
 
@@ -2523,6 +2528,19 @@ pub fn fight_back_system(
                     villager_debug!(*actor, obj_id, None, "FightBack requested");
                 });
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "FightBack actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 let Ok(last_attacker) = last_attacker_query.get(*actor) else {
                     span.span().in_scope(|| {
                         villager_warn!(*actor, obj_id, None, "FightBack had no LastAttacker");
@@ -2702,17 +2720,23 @@ pub fn fight_back_system(
                     VisibleEvent::CooldownEvent { duration: cooldown },
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "FightBack actor lost EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if !event_executing.state.is_finished() {
                     continue;
@@ -3299,6 +3323,14 @@ pub fn set_flee_destination_system(
     }
 }
 
+fn remove_pending_map_events(map_events: &mut MapEvents, obj_id: Option<i32>) {
+    let Some(obj_id) = obj_id else {
+        return;
+    };
+
+    map_events.retain(|_, event| event.obj_id != obj_id);
+}
+
 pub fn find_drink_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -3333,6 +3365,19 @@ pub fn find_drink_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Drink actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 // Create find event
                 map_events.new(
                     villager.id.0,
@@ -3342,17 +3387,24 @@ pub fn find_drink_system(
                     },
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Drink actor lost EventExecuting"
+                        );
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -3434,10 +3486,9 @@ pub fn find_drink_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "Cancelling Find Drink action");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
-                event_executing.state = EventExecutingState::None;
+                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                    event_executing.state = EventExecutingState::None;
+                }
 
                 commands.trigger(CancelEvents { entity: *actor });
 
@@ -3543,6 +3594,19 @@ pub fn move_to_system(
                     let (path, _c) = path_result;
                     let next_pos = &path[1];
 
+                    let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                        span.span().in_scope(|| {
+                            villager_error!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "MoveTo actor is missing EventExecuting"
+                            );
+                        });
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+
                     span.span().in_scope(|| {
                         villager_trace!(
                             *actor,
@@ -3574,9 +3638,6 @@ pub fn move_to_system(
                         move_event,
                     );
 
-                    let mut event_executing = event_executing_query
-                        .get_mut(*actor)
-                        .expect("Missing EventExecuting component");
                     event_executing.state = EventExecutingState::Executing;
                 } else {
                     span.span().in_scope(|| {
@@ -3591,9 +3652,13 @@ pub fn move_to_system(
                 span.span().in_scope(|| {
                     villager_trace!(*actor, obj_id, None, "MoveTo executing");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, None, "MoveTo actor lost EventExecuting");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 span.span().in_scope(|| {
                     villager_trace!(
@@ -3970,6 +4035,19 @@ pub fn drink_action_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Drink actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 *villager.state = State::Drinking;
 
                 commands.trigger(StateChange {
@@ -3989,9 +4067,6 @@ pub fn drink_action_system(
                     drink_event,
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
@@ -4009,9 +4084,21 @@ pub fn drink_action_system(
                     continue;
                 }
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, None, "Drink actor lost EventExecuting");
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                        *villager.state = State::None;
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::None,
+                        });
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -4091,6 +4178,19 @@ pub fn find_food_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Food actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 map_events.new(
                     villager.id.0,
                     game_tick.0 + FIND_FOOD_TICKS, // in the future
@@ -4099,17 +4199,24 @@ pub fn find_food_system(
                     },
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Food actor lost EventExecuting"
+                        );
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -4174,10 +4281,9 @@ pub fn find_food_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "Cancelling find food");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
-                event_executing.state = EventExecutingState::None;
+                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                    event_executing.state = EventExecutingState::None;
+                }
 
                 let Ok(mut villager) = villager_query.get_mut(*actor) else {
                     span.span().in_scope(|| {
@@ -4387,6 +4493,19 @@ pub fn eat_action_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Eat actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 *villager.state = State::Eating;
 
                 commands.trigger(StateChange {
@@ -4405,9 +4524,6 @@ pub fn eat_action_system(
                     eat_event,
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
@@ -4425,9 +4541,21 @@ pub fn eat_action_system(
                     continue;
                 }
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, None, "Eat actor lost EventExecuting");
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                        *villager.state = State::None;
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::None,
+                        });
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -4506,6 +4634,19 @@ pub fn find_shelter_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Shelter actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 // Create find event
                 map_events.new(
                     villager_id.0,
@@ -4515,17 +4656,24 @@ pub fn find_shelter_system(
                     },
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Find Shelter actor lost EventExecuting"
+                        );
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -4608,10 +4756,9 @@ pub fn find_shelter_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "Cancelling find shelter");
                 });
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
-                event_executing.state = EventExecutingState::None;
+                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                    event_executing.state = EventExecutingState::None;
+                }
 
                 let Ok((villager_id, villager_pos, _active_shelter)) = villager_query.get(*actor)
                 else {
@@ -4686,6 +4833,19 @@ pub fn sleep_action_system(
                     continue;
                 };
 
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Sleep actor is missing EventExecuting"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+
                 *villager.state = State::Sleeping;
 
                 commands.trigger(StateChange {
@@ -4701,9 +4861,6 @@ pub fn sleep_action_system(
                     },
                 );
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
                 event_executing.state = EventExecutingState::Executing;
 
                 *state = ActionState::Executing;
@@ -4721,9 +4878,21 @@ pub fn sleep_action_system(
                     continue;
                 }
 
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
+                let Ok(mut event_executing) = event_executing_query.get_mut(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_error!(*actor, obj_id, None, "Sleep actor lost EventExecuting");
+                    });
+                    remove_pending_map_events(&mut map_events, obj_id);
+                    if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                        *villager.state = State::None;
+                        commands.trigger(StateChange {
+                            entity: *actor,
+                            new_state: State::None,
+                        });
+                    }
+                    *state = ActionState::Failure;
+                    continue;
+                };
 
                 if event_executing.state != EventExecutingState::Completed {
                     span.span().in_scope(|| {
@@ -4742,10 +4911,9 @@ pub fn sleep_action_system(
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
-                let mut event_executing = event_executing_query
-                    .get_mut(*actor)
-                    .expect("Missing EventExecuting component");
-                event_executing.state = EventExecutingState::None;
+                if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                    event_executing.state = EventExecutingState::None;
+                }
 
                 // Reset activity
                 let Ok(mut villager) = villager_query.get_mut(*actor) else {

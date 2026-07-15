@@ -42,10 +42,12 @@ use crate::common::{
 };
 use crate::constants::*;
 use crate::crisis_balance::{
-    crisis_combat_telemetry_observer, phase_name as balance_phase_name, CrisisBalanceObservation,
-    CrisisBalanceObservationState, CrisisBalanceTelemetry, CrisisBalanceTelemetryConfig,
-    CrisisBalanceTelemetryState, CrisisPreparationSnapshot, CrisisPressureBreakdown,
-    CrisisPressureSnapshot, GoblinCrisisBalanceConfigSnapshot,
+    crisis_attack_telemetry_observer, crisis_combat_telemetry_observer,
+    crisis_engagement_snapshot_system, crisis_true_death_telemetry_system,
+    phase_name as balance_phase_name, CrisisBalanceObservation, CrisisBalanceObservationState,
+    CrisisBalanceTelemetry, CrisisBalanceTelemetryConfig, CrisisBalanceTelemetryState,
+    CrisisPreparationSnapshot, CrisisPressureBreakdown, CrisisPressureSnapshot,
+    GoblinCrisisBalanceConfigSnapshot,
 };
 use crate::database::DatabaseEvent;
 use crate::effect::{self, Effect, Effects};
@@ -3168,6 +3170,13 @@ impl Plugin for GamePlugin {
         app.init_resource::<CrisisStatusDeliveryState>();
         app.init_resource::<ResumeLoginSyncState>();
 
+        if !self.headless {
+            // The simulation harness must not exercise the live server's
+            // filesystem persistence path. Production keeps the existing
+            // fail-fast snapshot behavior unchanged.
+            app.add_systems(Update, snapshot_system.run_if(in_state(AppState::Running)));
+        }
+
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
@@ -3189,7 +3198,6 @@ impl Plugin for GamePlugin {
                     .after(stamina_recovery_system)
                     .run_if(in_state(AppState::Running)),
             )
-            .add_systems(Update, snapshot_system.run_if(in_state(AppState::Running)))
             .add_systems(
                 Update,
                 (move_event_system, move_event_completed_system)
@@ -3434,6 +3442,24 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                crisis_engagement_snapshot_system
+                    .after(crisis_balance_snapshot_system)
+                    .after(resurrect_system)
+                    .after(true_death_system)
+                    .before(crisis_status_delivery_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
+                crisis_true_death_telemetry_system
+                    .after(resurrect_system)
+                    .before(crisis_engagement_snapshot_system)
+                    .run_if(in_state(AppState::Running))
+                    .run_if(personal_survival_director),
+            )
+            .add_systems(
+                Update,
                 crisis_status_delivery_system
                     .after(game_event_system)
                     .after(personal_crisis_system)
@@ -3523,7 +3549,8 @@ impl Plugin for GamePlugin {
             .add_observer(update_obj_observer)
             .add_observer(add_light_effect_system)
             .add_observer(remove_light_effect_system)
-            .add_observer(crisis_combat_telemetry_observer);
+            .add_observer(crisis_combat_telemetry_observer)
+            .add_observer(crisis_attack_telemetry_observer);
     }
 }
 
@@ -4178,6 +4205,10 @@ fn game_event_belongs_to_ended_run(
     }
 }
 
+fn move_event_actor_is_dead(state: State, has_state_dead: bool) -> bool {
+    state == State::Dead || has_state_dead
+}
+
 fn move_event_system(
     mut commands: Commands,
     entity_map: ResMut<EntityObjMap>,
@@ -4195,7 +4226,7 @@ fn move_event_system(
         Option<&TaxCollector>,
     )>,
     mut set: ParamSet<(
-        Query<(&mut Position, &mut State)>, // for the chosen entity (mutable)
+        Query<(&mut Position, &mut State, Option<&StateDead>)>, // for the chosen entity (mutable)
         Query<(&PlayerId, &Id, &Position, &Class, &Subclass, &State)>, // for all entities (read-only)
     )>,
     mut event_executing_query: Query<&mut EventExecuting>,
@@ -4284,7 +4315,8 @@ fn move_event_system(
                     }
 
                     let mut mover_query = set.p0();
-                    let Ok((mut mover_pos, mut mover_state)) = mover_query.get_mut(mover_entity)
+                    let Ok((mut mover_pos, mut mover_state, mover_dead)) =
+                        mover_query.get_mut(mover_entity)
                     else {
                         // If reached, there is a legitimate error case
                         error!(
@@ -4294,6 +4326,14 @@ fn move_event_system(
                         event_executing.state = EventExecutingState::Failed;
                         continue;
                     };
+
+                    // A move can already be queued when ranged or spell damage
+                    // kills the mover. Consuming that stale event must not move the
+                    // corpse or reset its authoritative dead state.
+                    if move_event_actor_is_dead(*mover_state, mover_dead.is_some()) {
+                        event_executing.state = EventExecutingState::Failed;
+                        continue;
+                    }
 
                     // Check if mover position is adjacent to dst
                     if !Map::is_adjacent_excluding_source(*mover_pos, *dst) {
@@ -10069,6 +10109,7 @@ fn use_item_system(
                         continue;
                     };
 
+                    let hp_before_use = item_owner.stats.hp;
                     let mut successful_healing_use = false;
                     match (item.class.as_str(), item.subclass.as_str()) {
                         (item::POTION, item::HEALTH) => {
@@ -10115,20 +10156,46 @@ fn use_item_system(
                                 }
                             }
 
-                            if explore_cure_for_item(&item.name, &item.class, &item.subclass)
-                                == Some(Effect::Sickness)
-                                && clear_effect_with_item(
-                                    item_owner.player_id.0,
-                                    item_owner.id.0,
-                                    *item_owner.pos,
-                                    &mut item_owner.effects,
-                                    Effect::Sickness,
-                                    &clients,
-                                )
-                            {
+                            let cured_sickness =
+                                explore_cure_for_item(&item.name, &item.class, &item.subclass)
+                                    == Some(Effect::Sickness)
+                                    && clear_effect_with_item(
+                                        item_owner.player_id.0,
+                                        item_owner.id.0,
+                                        *item_owner.pos,
+                                        &mut item_owner.effects,
+                                        Effect::Sickness,
+                                        &clients,
+                                    );
+                            if cured_sickness {
                                 send_notice(
                                     item_owner.player_id.0,
                                     &format!("{} clears the sickness.", item.name),
+                                    &clients,
+                                );
+                            }
+
+                            // Health potions and poultices are consumables. The
+                            // previous path healed without decrementing quantity,
+                            // which allowed one starting potion to be reused for an
+                            // entire assault. Preserve the no-op behavior at full
+                            // health when no curable effect was removed.
+                            if consume_successful_healing_item(
+                                &mut item_owner.inventory,
+                                item.id,
+                                successful_healing_use || cured_sickness,
+                            ) {
+                                send_to_client(
+                                    item_owner.player_id.0,
+                                    ResponsePacket::InfoInventory {
+                                        id: item.owner,
+                                        cap: Obj::get_capacity(
+                                            &item_owner.template.0,
+                                            &templates.obj_templates,
+                                        ),
+                                        tw: item_owner.inventory.get_total_weight(),
+                                        items: item_owner.inventory.get_packet(),
+                                    },
                                     &clients,
                                 );
                             }
@@ -10549,20 +10616,29 @@ fn use_item_system(
                         _ => {}
                     }
 
-                    if successful_healing_use
-                        && is_preparation_phase(
-                            crisis_state
-                                .as_ref()
-                                .and_then(|state| state.get(&item_owner.player_id.0))
-                                .map(|crisis| crisis.phase),
-                        )
-                    {
+                    let crisis_phase = crisis_state
+                        .as_ref()
+                        .and_then(|state| state.get(&item_owner.player_id.0))
+                        .map(|crisis| crisis.phase);
+                    if successful_healing_use && is_preparation_phase(crisis_phase) {
                         if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
                             telemetry_state
                                 .entry(item_owner.player_id.0)
                                 .or_default()
                                 .preparation_actions
                                 .record_healing_item_used_before_launch(*map_event_id, game_tick.0);
+                        }
+                    } else if successful_healing_use
+                        && crisis_phase == Some(CrisisPhase::AssaultActive)
+                    {
+                        if let Some(telemetry_state) = balance_telemetry_state.as_deref_mut() {
+                            telemetry_state
+                                .entry(item_owner.player_id.0)
+                                .or_default()
+                                .engagement
+                                .record_healing_use(
+                                    item_owner.stats.hp.saturating_sub(hp_before_use),
+                                );
                         }
                     }
                 }
@@ -10599,6 +10675,23 @@ pub fn sleep_heal_amount(base_hp: i32, tired_fraction: f32) -> i32 {
 // Flat heal applied by using a bandage — the cheap, craftable counterpart to
 // the Health Potion's Healing attr.
 const BANDAGE_HEAL_HP: i32 = 10;
+
+fn consume_successful_healing_item(
+    inventory: &mut Inventory,
+    item_id: i32,
+    successful: bool,
+) -> bool {
+    if !successful
+        || !inventory
+            .items
+            .iter()
+            .any(|item| item.id == item_id && item.quantity > 0)
+    {
+        return false;
+    }
+    inventory.remove_quantity(item_id, 1);
+    true
+}
 
 fn hero_has_pending_map_event(obj_id: i32, map_events: &MapEvents) -> bool {
     map_events.iter().any(|(_, event)| event.obj_id == obj_id)
@@ -10802,15 +10895,23 @@ fn drink_eat_system(
                         continue;
                     };
 
-                    let Ok(mut obj_inventory) = query.get_mut(entity) else {
-                        error!("Query failed to find inventory entity {:?}", entity);
-                        continue;
-                    };
-
                     if !matches!(state_query.get(entity), Ok(state) if *state == State::Drinking) {
                         debug!("Skipping stale DrinkEvent for {:?}", obj_id);
                         continue;
                     }
+
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
+
+                    let Ok(mut obj_inventory) = query.get_mut(entity) else {
+                        error!("Query failed to find inventory entity {:?}", entity);
+                        continue;
+                    };
 
                     let Some(item) = obj_inventory.get_by_id(*item_id) else {
                         error!("Cannot find item from id: {:?}", item_id);
@@ -10864,13 +10965,6 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
-                        error!(
-                            "Missing EventExecuting component for entity {:?} (obj_id {})",
-                            entity, map_event.obj_id
-                        );
-                        continue;
-                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     // TODO move this to a Changed<Thirst, Hunger, Tired> system
@@ -10899,15 +10993,23 @@ fn drink_eat_system(
                         continue;
                     };
 
-                    let Ok(mut obj_inventory) = query.get_mut(entity) else {
-                        error!("Query failed to find inventory entity {:?}", entity);
-                        continue;
-                    };
-
                     if !matches!(state_query.get(entity), Ok(state) if *state == State::Eating) {
                         debug!("Skipping stale EatEvent for {:?}", obj_id);
                         continue;
                     }
+
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
+
+                    let Ok(mut obj_inventory) = query.get_mut(entity) else {
+                        error!("Query failed to find inventory entity {:?}", entity);
+                        continue;
+                    };
 
                     let Some(item) = obj_inventory.get_by_id(*item_id) else {
                         debug!("Failed to find item: {:?}", item_id);
@@ -10972,13 +11074,6 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
-                        error!(
-                            "Missing EventExecuting component for entity {:?} (obj_id {})",
-                            entity, map_event.obj_id
-                        );
-                        continue;
-                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     if ids.is_hero(map_event.obj_id) {
@@ -11010,6 +11105,14 @@ fn drink_eat_system(
                         debug!("Skipping stale SleepEvent for {:?}", obj_id);
                         continue;
                     }
+
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
 
                     // Update Tired, remove all tiredness
                     let Ok((thirst, hunger, mut tired)) = needs_query.get_mut(entity) else {
@@ -11071,13 +11174,6 @@ fn drink_eat_system(
                     });
 
                     info!("Setting EventExecutingState to Completed");
-                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
-                        error!(
-                            "Missing EventExecuting component for entity {:?} (obj_id {})",
-                            entity, map_event.obj_id
-                        );
-                        continue;
-                    };
                     event_executing.state = EventExecutingState::Completed;
 
                     // TODO move this to a Changed<Thirst, Hunger, Tired> system
@@ -11142,6 +11238,14 @@ fn find_shelter_system(
                         continue;
                     };
 
+                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
+                        error!(
+                            "Missing EventExecuting component for entity {:?} (obj_id {})",
+                            entity, map_event.obj_id
+                        );
+                        continue;
+                    };
+
                     let Ok((villager_player_id, villager_id, villager_pos, mut active_shelter)) =
                         villager_query.get_mut(entity)
                     else {
@@ -11180,13 +11284,6 @@ fn find_shelter_system(
                     }
 
                     info!("Setting EventExecutingState to Completed");
-                    let Ok(mut event_executing) = event_executing_query.get_mut(entity) else {
-                        error!(
-                            "Missing EventExecuting component for entity {:?} (obj_id {})",
-                            entity, map_event.obj_id
-                        );
-                        continue;
-                    };
                     event_executing.state = EventExecutingState::Completed;
                 }
                 _ => {}
@@ -14376,6 +14473,12 @@ struct AssaultMonolithInfo {
     sanctuary_level: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AssaultSanctuaryExclusion {
+    owner_player_id: i32,
+    pos: Position,
+}
+
 #[derive(Debug, Clone)]
 struct AssaultUnitSnapshot {
     id: i32,
@@ -14460,6 +14563,7 @@ fn personal_assault_spawn_positions(
     count: usize,
     occupied: &HashSet<Position>,
     structures: &[AssaultStructureInfo],
+    sanctuaries: &[AssaultSanctuaryExclusion],
     map: &Map,
 ) -> Option<Vec<Position>> {
     if count == 0 {
@@ -14505,6 +14609,9 @@ fn personal_assault_spawn_positions(
         if structures.iter().any(|structure| {
             structure.owner_player_id != owner_player_id
                 && Map::dist(pos, structure.pos) < PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE
+        }) || sanctuaries.iter().any(|sanctuary| {
+            sanctuary.owner_player_id != owner_player_id
+                && Map::dist(pos, sanctuary.pos) < PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE
         }) {
             continue;
         }
@@ -14796,6 +14903,16 @@ fn personal_crisis_assault_system(
             ))
         })
         .collect::<HashMap<_, _>>();
+    let sanctuary_exclusions = heroes
+        .iter()
+        .filter_map(|(owner_player_id, hero)| {
+            let monolith = monoliths.get(&hero.bound_monolith_id?)?;
+            Some(AssaultSanctuaryExclusion {
+                owner_player_id: *owner_player_id,
+                pos: monolith.pos,
+            })
+        })
+        .collect::<Vec<_>>();
     let occupied = occupied_query.iter().copied().collect::<HashSet<_>>();
     let unit_snapshots = assault_unit_query
         .iter()
@@ -14922,6 +15039,7 @@ fn personal_crisis_assault_system(
                     unit_templates.len(),
                     &occupied,
                     &structures,
+                    &sanctuary_exclusions,
                     &map,
                 ) else {
                     if !crisis.assault_spawn_warning_logged {

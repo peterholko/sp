@@ -5,7 +5,10 @@ use big_brain::thinker::ThinkerBuilder;
 use rand::Rng;
 
 use crate::constants::TICKS_PER_SEC;
-use crate::crisis_balance::CrisisCombatTelemetryEvent;
+use crate::crisis_balance::{
+    is_live_built_human_core_structure, CrisisAttackTelemetryEvent, CrisisAttackTelemetryStage,
+    CrisisCombatTelemetryEvent,
+};
 use crate::effect::{Effect, Effects};
 use crate::event::{MapEvents, Spell, VisibleEvent};
 use crate::game::{CrisisAssaultUnit, Fortified, GameTick};
@@ -14,9 +17,9 @@ use crate::item::{self, AttrKey, Inventory, Item};
 use crate::map::Map;
 use crate::obj::Obj;
 use crate::obj::{
-    is_peaceful_interruptible_state, CancelEvents, Class, HeroClass, Id, LastAttacker,
-    LastCombatTick, LastDamageTick, Misc, PlayerId, Position, State, StateChange, StateDead, Stats,
-    Subclass, Template,
+    is_peaceful_interruptible_state, CancelEvents, Class, ClassStructure, HeroClass, Id,
+    LastAttacker, LastCombatTick, LastDamageTick, Misc, PlayerId, Position, State, StateChange,
+    StateDead, Stats, Subclass, Template,
 };
 use crate::skill::{SkillUpdated, Skills};
 use crate::templates::{ComboTemplate, ObjTemplate, Templates};
@@ -96,6 +99,7 @@ pub struct CombatQuery {
     pub player_id: &'static PlayerId,
     pub pos: &'static Position,
     pub class: &'static Class,
+    pub class_structure: Option<&'static ClassStructure>,
     pub subclass: &'static Subclass,
     pub template: &'static Template,
     pub state: &'static mut State,
@@ -119,6 +123,7 @@ pub struct CombatSpellQuery {
     pub player_id: &'static PlayerId,
     pub pos: &'static Position,
     pub class: &'static Class,
+    pub class_structure: Option<&'static ClassStructure>,
     pub subclass: &'static Subclass,
     pub template: &'static Template,
     pub state: &'static mut State,
@@ -134,11 +139,49 @@ pub struct CombatSpellQuery {
 pub struct Combat;
 
 impl Combat {
+    pub(crate) fn emit_crisis_attack_telemetry(
+        commands: &mut Commands,
+        game_tick: i32,
+        stage: CrisisAttackTelemetryStage,
+        attacker: &CombatQueryItem,
+        target: &CombatQueryItem,
+    ) {
+        let attacker_crisis = attacker.crisis_assault.copied();
+        let target_crisis = target.crisis_assault.copied();
+        if attacker_crisis.is_none() && target_crisis.is_none() {
+            return;
+        }
+        commands.trigger(CrisisAttackTelemetryEvent {
+            entity: target.entity,
+            game_tick,
+            stage,
+            attacker_id: attacker.id.0,
+            attacker_player_id: attacker.player_id.0,
+            attacker_subclass: *attacker.subclass,
+            attacker_crisis,
+            target_id: target.id.0,
+            target_player_id: target.player_id.0,
+            target_subclass: *target.subclass,
+            target_is_structure: target.class.is_structure(),
+            target_is_core_structure: is_live_built_human_core_structure(
+                target.class_structure,
+                target.class,
+                target.player_id,
+                *target.subclass,
+                *target.state,
+                false,
+            ),
+            target_crisis,
+        });
+    }
+
     pub(crate) fn emit_crisis_combat_telemetry(
         commands: &mut Commands,
+        game_tick: i32,
         attacker: &CombatQueryItem,
         target: &CombatQueryItem,
         hp_before: i32,
+        target_was_core_structure: bool,
     ) {
         let attacker_crisis = attacker.crisis_assault.copied();
         let target_crisis = target.crisis_assault.copied();
@@ -148,6 +191,7 @@ impl Combat {
         let effective_damage = hp_before.max(0).saturating_sub(target.stats.hp.max(0));
         commands.trigger(CrisisCombatTelemetryEvent {
             entity: target.entity,
+            game_tick,
             attacker_id: attacker.id.0,
             attacker_player_id: attacker.player_id.0,
             attacker_subclass: *attacker.subclass,
@@ -156,6 +200,7 @@ impl Combat {
             target_player_id: target.player_id.0,
             target_subclass: *target.subclass,
             target_is_structure: target.class.is_structure(),
+            target_is_core_structure: target_was_core_structure,
             target_crisis,
             effective_damage,
             killed: target.stats.hp <= 0,
@@ -164,9 +209,11 @@ impl Combat {
 
     pub(crate) fn emit_crisis_spell_telemetry(
         commands: &mut Commands,
+        game_tick: i32,
         attacker: &CombatSpellQueryItem,
         target: &CombatSpellQueryItem,
         hp_before: i32,
+        target_was_core_structure: bool,
     ) {
         let attacker_crisis = attacker.crisis_assault.copied();
         let target_crisis = target.crisis_assault.copied();
@@ -176,6 +223,7 @@ impl Combat {
         let effective_damage = hp_before.max(0).saturating_sub(target.stats.hp.max(0));
         commands.trigger(CrisisCombatTelemetryEvent {
             entity: target.entity,
+            game_tick,
             attacker_id: attacker.id.0,
             attacker_player_id: attacker.player_id.0,
             attacker_subclass: *attacker.subclass,
@@ -184,6 +232,7 @@ impl Combat {
             target_player_id: target.player_id.0,
             target_subclass: *target.subclass,
             target_is_structure: target.class.is_structure(),
+            target_is_core_structure: target_was_core_structure,
             target_crisis,
             effective_damage,
             killed: target.stats.hp <= 0,
@@ -464,6 +513,14 @@ impl Combat {
         // 26 Update Hp and check if target is dead
         let dealt_damage = final_damage as i32;
         let target_hp_before = target.stats.hp;
+        let target_was_core_structure = is_live_built_human_core_structure(
+            target.class_structure,
+            target.class,
+            target.player_id,
+            *target.subclass,
+            *target.state,
+            false,
+        );
         target.stats.hp -= dealt_damage;
         if dealt_damage > 0 {
             commands
@@ -541,7 +598,14 @@ impl Combat {
             }
         }
 
-        Self::emit_crisis_combat_telemetry(commands, attacker, target, target_hp_before);
+        Self::emit_crisis_combat_telemetry(
+            commands,
+            game_tick.0,
+            attacker,
+            target,
+            target_hp_before,
+            target_was_core_structure,
+        );
 
         debug!("Total Damage: {:?}", total_damage);
 
@@ -686,6 +750,14 @@ impl Combat {
         // 26 Update Hp and check if target is dead
         let dealt_damage = final_damage as i32;
         let target_hp_before = target.stats.hp;
+        let target_was_core_structure = is_live_built_human_core_structure(
+            target.class_structure,
+            target.class,
+            target.player_id,
+            *target.subclass,
+            *target.state,
+            false,
+        );
         target.stats.hp -= dealt_damage;
         if dealt_damage > 0 {
             commands
@@ -764,7 +836,14 @@ impl Combat {
             }
         }
 
-        Self::emit_crisis_combat_telemetry(commands, attacker, target, target_hp_before);
+        Self::emit_crisis_combat_telemetry(
+            commands,
+            game_tick.0,
+            attacker,
+            target,
+            target_hp_before,
+            target_was_core_structure,
+        );
 
         debug!("Total Damage: {:?}", total_damage);
 
@@ -790,6 +869,14 @@ impl Combat {
             Spell::ArcaneBolt => 12,
         };
         let target_hp_before = target.stats.hp;
+        let target_was_core_structure = is_live_built_human_core_structure(
+            target.class_structure,
+            target.class,
+            target.player_id,
+            *target.subclass,
+            *target.state,
+            false,
+        );
         target.stats.hp -= damage;
         commands
             .entity(target.entity)
@@ -798,17 +885,27 @@ impl Combat {
         if target.stats.hp <= 0 {
             *target.state = State::Dead;
             debug!("Target {:?} is dead", target.entity);
-            commands.entity(target.entity).insert(StateDead {
-                dead_at: game_tick.0,
-                killer: caster.template.0.clone(),
-            });
+            commands
+                .entity(target.entity)
+                .try_insert(StateDead {
+                    dead_at: game_tick.0,
+                    killer: caster.template.0.clone(),
+                })
+                .try_remove::<ThinkerBuilder>();
             commands.trigger(StateChange {
                 entity: target.entity,
                 new_state: State::Dead,
             });
         }
 
-        Self::emit_crisis_spell_telemetry(commands, caster, target, target_hp_before);
+        Self::emit_crisis_spell_telemetry(
+            commands,
+            game_tick.0,
+            caster,
+            target,
+            target_hp_before,
+            target_was_core_structure,
+        );
 
         return damage;
     }
@@ -1143,6 +1240,74 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[derive(Component)]
+    struct TestSpellCaster;
+
+    #[derive(Component)]
+    struct TestSpellTarget;
+
+    fn cast_lethal_test_spell(
+        mut commands: Commands,
+        game_tick: Res<GameTick>,
+        mut casters: Query<CombatSpellQuery, (With<TestSpellCaster>, Without<TestSpellTarget>)>,
+        mut targets: Query<CombatSpellQuery, (With<TestSpellTarget>, Without<TestSpellCaster>)>,
+    ) {
+        let caster = casters.single_mut().expect("one spell caster");
+        let mut target = targets.single_mut().expect("one spell target");
+        Combat::process_spell_damage(
+            &mut commands,
+            &game_tick,
+            Spell::ArcaneBolt,
+            &caster,
+            &mut target,
+        );
+    }
+
+    fn spell_test_stats(hp: i32) -> Stats {
+        Stats {
+            hp,
+            base_hp: hp,
+            stamina: Some(100),
+            mana: Some(100),
+            base_stamina: Some(100),
+            base_mana: Some(100),
+            base_def: 0,
+            base_damage: Some(1),
+            damage_range: Some(0),
+            base_speed: Some(1),
+            base_vision: Some(5),
+        }
+    }
+
+    fn spawn_spell_test_actor(
+        world: &mut World,
+        id: i32,
+        position: Position,
+        marker: impl Bundle,
+        hp: i32,
+    ) -> Entity {
+        world
+            .spawn((
+                marker,
+                Id(id),
+                PlayerId(id),
+                position,
+                Class("unit".to_string()),
+                Subclass::Hero,
+                Template("Human".to_string()),
+                State::None,
+                Misc {
+                    image: String::new(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                spell_test_stats(hp),
+                Effects(HashMap::new()),
+                LastCombatTick(0),
+            ))
+            .id()
+    }
+
     fn effects(values: Vec<Effect>) -> Effects {
         Effects(
             values
@@ -1204,6 +1369,37 @@ mod tests {
             Combat::get_sanctuary_defense_from_effects(&weak, &templates),
             2.0
         );
+    }
+
+    #[test]
+    fn lethal_spell_damage_stops_the_target_thinker() {
+        let mut app = App::new();
+        app.insert_resource(GameTick(42));
+        app.add_systems(Update, cast_lethal_test_spell);
+        spawn_spell_test_actor(
+            app.world_mut(),
+            1,
+            Position { x: 0, y: 0 },
+            TestSpellCaster,
+            20,
+        );
+        let target = spawn_spell_test_actor(
+            app.world_mut(),
+            2,
+            Position { x: 1, y: 0 },
+            TestSpellTarget,
+            12,
+        );
+        app.world_mut()
+            .entity_mut(target)
+            .insert(ThinkerBuilder::default());
+
+        app.update();
+
+        let target = app.world().entity(target);
+        assert_eq!(*target.get::<State>().unwrap(), State::Dead);
+        assert_eq!(target.get::<StateDead>().unwrap().dead_at, 42);
+        assert!(target.get::<ThinkerBuilder>().is_none());
     }
 
     #[test]
