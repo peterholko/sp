@@ -2806,10 +2806,23 @@ fn undead_crisis_kind_names_sequence_and_explicit_construction_are_stable() {
 }
 
 #[test]
-fn undead_crisis_normal_goblin_resolution_records_history_exactly_once() {
+fn undead_crisis_sequence_records_each_kind_exactly_once_and_then_ends() {
     let player_id = 17;
     let mut run_scores = RunScoreState::default();
     let mut history = PersonalCrisisHistory::default();
+    let mut out_of_sequence_undead = SettlementCrisis::new(CrisisKind::Undead, 5);
+    out_of_sequence_undead.phase = CrisisPhase::AssaultActive;
+    assert!(!record_personal_assault_resolution(
+        player_id,
+        9,
+        &mut out_of_sequence_undead,
+        &mut run_scores,
+        &mut history,
+    ));
+    assert_eq!(out_of_sequence_undead.phase, CrisisPhase::AssaultActive);
+    assert!(history.by_player.get(&player_id).is_none());
+    assert!(run_scores.get(&player_id).is_none());
+
     let mut goblin = SettlementCrisis::new(CrisisKind::Goblin, 10);
     goblin.phase = CrisisPhase::AssaultActive;
     goblin.assault_id = Some(3);
@@ -2849,14 +2862,155 @@ fn undead_crisis_normal_goblin_resolution_records_history_exactly_once() {
 
     let mut undead = SettlementCrisis::new(CrisisKind::Undead, 30);
     undead.phase = CrisisPhase::AssaultActive;
-    assert!(!record_personal_assault_resolution(
+    undead.assault_id = Some(4);
+    assert!(record_personal_assault_resolution(
         player_id,
         40,
         &mut undead,
         &mut run_scores,
         &mut history,
     ));
-    assert_eq!(undead.phase, CrisisPhase::AssaultActive);
+    assert_eq!(undead.phase, CrisisPhase::Resolved);
+    assert!(undead.resolution_recorded);
+    assert_eq!(undead.resolved_at_tick, Some(40));
+    assert_eq!(history.by_player[&player_id].completed.len(), 2);
+    assert!(history.by_player[&player_id]
+        .completed
+        .contains(&CrisisKind::Undead));
+    assert_eq!(
+        run_scores.get(&player_id).unwrap().personal_crises_resolved,
+        2
+    );
+    assert_eq!(
+        next_personal_crisis_kind(&history.by_player[&player_id]),
+        None
+    );
+    assert!(!record_personal_assault_resolution(
+        player_id,
+        41,
+        &mut undead,
+        &mut run_scores,
+        &mut history,
+    ));
+    assert_eq!(history.by_player[&player_id].completed.len(), 2);
+    assert_eq!(
+        run_scores.get(&player_id).unwrap().personal_crises_resolved,
+        2
+    );
+}
+
+#[test]
+fn undead_crisis_delayed_spell_damage_revalidates_owner_at_final_boundary() {
+    let caster_id = 410;
+    let foreign_target_id = 420;
+    let owner_player_id = 41;
+    let foreign_player_id = 42;
+    let event_id = Uuid::from_u128(4_104_204_104_204);
+    let stats = |hp| Stats {
+        hp,
+        stamina: Some(100),
+        mana: Some(100),
+        base_hp: hp,
+        base_stamina: Some(100),
+        base_mana: Some(100),
+        base_def: 0,
+        damage_range: Some(1),
+        base_damage: Some(10),
+        base_speed: Some(10),
+        base_vision: Some(10),
+    };
+
+    let mut app = App::new();
+    app.add_systems(Update, spell_damage_event_system);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(MapEvents(HashMap::from([(
+        event_id,
+        MapEvent {
+            event_id,
+            obj_id: caster_id,
+            run_tick: 99,
+            event_type: VisibleEvent::SpellDamageEvent {
+                spell: Spell::ShadowBolt,
+                target_id: foreign_target_id,
+            },
+        },
+    )])));
+    app.insert_resource(GameEvents::default());
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let caster = app
+        .world_mut()
+        .spawn((
+            Id(caster_id),
+            PlayerId(NPC_PLAYER_ID),
+            Position { x: 10, y: 10 },
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Npc,
+            Template("Necromancer".to_string()),
+            State::Casting,
+            Misc::default(),
+            stats(100),
+            Effects(HashMap::new()),
+            LastCombatTick::default(),
+            CrisisAssaultUnit {
+                owner_player_id,
+                assault_id: 9,
+                spawn_generation: 2,
+            },
+            EventExecuting {
+                event_type: "spell_damage".to_string(),
+                state: EventExecutingState::Executing,
+            },
+        ))
+        .id();
+    let target = app
+        .world_mut()
+        .spawn((
+            Id(foreign_target_id),
+            PlayerId(foreign_player_id),
+            Position { x: 11, y: 10 },
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Hero,
+            Template("Human".to_string()),
+            State::None,
+            Misc::default(),
+            stats(250),
+            Effects(HashMap::new()),
+            LastCombatTick::default(),
+        ))
+        .id();
+
+    let mut ids = Ids::default();
+    ids.new_obj(caster_id, NPC_PLAYER_ID);
+    ids.new_obj(foreign_target_id, foreign_player_id);
+    app.insert_resource(ids);
+    app.insert_resource(EntityObjMap(HashMap::from([
+        (caster_id, caster),
+        (foreign_target_id, target),
+    ])));
+
+    let target_hp_before = app.world().get::<Stats>(target).unwrap().hp;
+    app.update();
+
+    assert_eq!(
+        app.world().get::<Stats>(target).unwrap().hp,
+        target_hp_before
+    );
+    assert_eq!(*app.world().get::<State>(caster).unwrap(), State::None);
+    assert_eq!(
+        app.world().get::<EventExecuting>(caster).unwrap().state,
+        EventExecutingState::Failed
+    );
+    let completion = app
+        .world()
+        .get::<EventCompleted>(caster)
+        .expect("rejected delayed spell completes as a failure");
+    assert_eq!(completion.event_id, event_id);
+    assert_eq!(completion.event_type, "spell_damage");
+    assert!(!completion.success);
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<VisibleEvents>().is_empty());
 }
 
 #[test]
@@ -2942,7 +3096,7 @@ fn undead_crisis_phases_are_ordered_timed_and_terminal_at_ready() {
 }
 
 #[test]
-fn undead_crisis_status_is_kind_correct_and_has_no_goblin_launch_fields() {
+fn undead_crisis_status_is_kind_correct_and_ready_uses_shared_launch_fields() {
     let expected = [
         (
             CrisisPhase::Dormant,
@@ -2986,10 +3140,35 @@ fn undead_crisis_status_is_kind_correct_and_has_no_goblin_launch_fields() {
             .unwrap_or_default()
             .to_ascii_lowercase()
             .contains("goblin"));
-        assert_eq!(status.preparation_seconds_remaining, None);
-        assert_eq!(status.preferred_launch_window, None);
+        if phase == CrisisPhase::AssaultReady {
+            assert_eq!(
+                status.preparation_seconds_remaining,
+                Some(ASSAULT_READY_GRACE_TICKS / TICKS_PER_SEC)
+            );
+            assert_eq!(
+                status.preferred_launch_window.as_deref(),
+                Some("dusk_or_night")
+            );
+        } else {
+            assert_eq!(status.preparation_seconds_remaining, None);
+            assert_eq!(status.preferred_launch_window, None);
+        }
         assert!(!status.continues_while_disconnected);
     }
+
+    let mut active = SettlementCrisis::new(CrisisKind::Undead, 0);
+    active.phase = CrisisPhase::AssaultActive;
+    active.assault_unit_ids = vec![11, 12, 13, 14, 15, 16];
+    let active_status = build_crisis_status(Some(&active));
+    assert_eq!(active_status.kind.as_deref(), Some("undead"));
+    assert_eq!(active_status.phase.as_deref(), Some("assault_active"));
+    assert_eq!(active_status.remaining_attackers, Some(6));
+    assert!(active_status.assault_active);
+    assert!(active_status.continues_while_disconnected);
+    assert_eq!(
+        active_status.action_hint.as_deref(),
+        Some("Defeat the remaining undead. This assault continues if you disconnect.")
+    );
 
     let goblin_ready =
         build_crisis_status(Some(&checkpoint4_crisis(CrisisPhase::AssaultReady, 80)));
@@ -3519,20 +3698,16 @@ fn checkpoint4_assault_spawn_commits_all_live_attributed_units() {
         }
         *ran = true;
 
-        let unit_templates = GOBLIN_ASSAULT_COMPOSITION
-            .iter()
-            .map(|template| (*template).to_string())
-            .collect::<Vec<_>>();
         let positions = vec![
             Position { x: 10, y: 10 },
             Position { x: 11, y: 10 },
             Position { x: 12, y: 10 },
         ];
-        let spawned = spawn_goblin_assault(
+        let spawned = spawn_personal_crisis_assault(
+            CrisisKind::Goblin,
             7,
             42,
             3,
-            &unit_templates,
             &positions,
             &mut commands,
             &mut ids,
@@ -3589,6 +3764,251 @@ fn checkpoint4_assault_spawn_commits_all_live_attributed_units() {
             .map(Vec::len),
         Some(3)
     );
+}
+
+#[test]
+fn undead_assault_spawn_has_exact_composition_and_active_necromancer_components() {
+    fn spawn_once(
+        mut commands: Commands,
+        mut ids: ResMut<Ids>,
+        mut entity_map: ResMut<EntityObjMap>,
+        templates: Res<Templates>,
+        mut run_spawned_objs: ResMut<RunSpawnedObjs>,
+        mut ran: Local<bool>,
+    ) {
+        if *ran {
+            return;
+        }
+        *ran = true;
+
+        let positions = [
+            Position { x: 20, y: 20 },
+            Position { x: 21, y: 20 },
+            Position { x: 22, y: 20 },
+            Position { x: 23, y: 20 },
+            Position { x: 24, y: 20 },
+            Position { x: 25, y: 20 },
+        ];
+        let spawned = spawn_personal_crisis_assault(
+            CrisisKind::Undead,
+            9,
+            77,
+            2,
+            &positions,
+            &mut commands,
+            &mut ids,
+            &mut entity_map,
+            &templates,
+            &mut run_spawned_objs,
+        )
+        .expect("fixed Undead assault composition must spawn atomically");
+        assert_eq!(spawned.len(), 6);
+    }
+
+    let mut app = App::new();
+    app.insert_resource(Ids::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+    app.insert_resource(RunSpawnedObjs::default());
+    app.add_systems(Update, spawn_once);
+    app.update();
+
+    let mut query = app.world_mut().query::<(
+        &Template,
+        &Position,
+        &State,
+        &CrisisAssaultUnit,
+        &Viewshed,
+        Option<&Home>,
+        Option<&Minions>,
+        Option<&ThinkerBuilder>,
+    )>();
+    let mut units = query
+        .iter(app.world())
+        .map(
+            |(template, pos, state, attr, viewshed, home, minions, thinker)| {
+                (
+                    template.0.clone(),
+                    *pos,
+                    *state,
+                    *attr,
+                    viewshed.range,
+                    home.map(|home| home.pos),
+                    minions.map(|minions| minions.ids.clone()),
+                    thinker.is_some(),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    units.sort_by_key(|unit| (unit.1.x, unit.1.y));
+
+    assert_eq!(units.len(), 6);
+    assert_eq!(
+        units.iter().map(|unit| unit.0.as_str()).collect::<Vec<_>>(),
+        [
+            "Zombie",
+            "Zombie",
+            "Zombie",
+            "Skeleton",
+            "Skeleton",
+            "Necromancer",
+        ]
+    );
+    assert!(units.iter().all(|unit| unit.2 == State::None));
+    assert!(units.iter().all(|unit| unit.3
+        == CrisisAssaultUnit {
+            owner_player_id: 9,
+            assault_id: 77,
+            spawn_generation: 2,
+        }));
+    assert!(units.iter().all(|unit| unit.4 == PERSONAL_ASSAULT_VISION));
+
+    let necromancer = units
+        .iter()
+        .find(|unit| unit.0 == "Necromancer")
+        .expect("fixed composition Necromancer");
+    assert_eq!(necromancer.5, Some(necromancer.1));
+    assert_eq!(necromancer.6.as_deref(), Some(&[][..]));
+    assert!(necromancer.7, "Necromancer must use its active thinker");
+    assert!(units
+        .iter()
+        .filter(|unit| unit.0 != "Necromancer")
+        .all(|unit| unit.5.is_none() && unit.6.is_none()));
+    assert_eq!(
+        app.world()
+            .resource::<RunSpawnedObjs>()
+            .get(&9)
+            .map(Vec::len),
+        Some(6)
+    );
+}
+
+#[test]
+fn undead_assault_spawn_validation_fails_before_partial_commit() {
+    fn reject_once(
+        mut commands: Commands,
+        mut ids: ResMut<Ids>,
+        mut entity_map: ResMut<EntityObjMap>,
+        templates: Res<Templates>,
+        mut run_spawned_objs: ResMut<RunSpawnedObjs>,
+        mut ran: Local<bool>,
+    ) {
+        if *ran {
+            return;
+        }
+        *ran = true;
+
+        let positions = [Position { x: 20, y: 20 }; 5];
+        let next_obj_id_before = ids.obj;
+        assert_eq!(
+            spawn_personal_crisis_assault(
+                CrisisKind::Undead,
+                9,
+                77,
+                2,
+                &positions,
+                &mut commands,
+                &mut ids,
+                &mut entity_map,
+                &templates,
+                &mut run_spawned_objs,
+            ),
+            Err(AssaultSpawnError::PositionCountMismatch)
+        );
+        assert_eq!(ids.obj, next_obj_id_before);
+        assert!(ids.obj_player_map.is_empty());
+        assert!(entity_map.is_empty());
+        assert!(run_spawned_objs.is_empty());
+    }
+
+    fn reject_missing_template_once(
+        mut commands: Commands,
+        mut ids: ResMut<Ids>,
+        mut entity_map: ResMut<EntityObjMap>,
+        templates: Res<Templates>,
+        mut run_spawned_objs: ResMut<RunSpawnedObjs>,
+        mut ran: Local<bool>,
+    ) {
+        if *ran {
+            return;
+        }
+        *ran = true;
+
+        let positions = [Position { x: 20, y: 20 }; 6];
+        let next_obj_id_before = ids.obj;
+        assert_eq!(
+            spawn_personal_crisis_assault(
+                CrisisKind::Undead,
+                9,
+                77,
+                2,
+                &positions,
+                &mut commands,
+                &mut ids,
+                &mut entity_map,
+                &templates,
+                &mut run_spawned_objs,
+            ),
+            Err(AssaultSpawnError::MissingTemplate(
+                "Necromancer".to_string()
+            ))
+        );
+        assert_eq!(ids.obj, next_obj_id_before);
+        assert!(ids.obj_player_map.is_empty());
+        assert!(entity_map.is_empty());
+        assert!(run_spawned_objs.is_empty());
+    }
+
+    let mut ids = Ids::default();
+    ids.obj = 41;
+    let mut app = App::new();
+    app.insert_resource(ids);
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+    app.insert_resource(RunSpawnedObjs::default());
+    app.add_systems(Update, reject_once);
+    app.update();
+
+    assert_eq!(app.world().resource::<Ids>().obj, 41);
+    assert!(app.world().resource::<Ids>().obj_player_map.is_empty());
+    assert!(app.world().resource::<EntityObjMap>().is_empty());
+    assert!(app.world().resource::<RunSpawnedObjs>().is_empty());
+    let mut spawned = app.world_mut().query::<&CrisisAssaultUnit>();
+    assert_eq!(spawned.iter(app.world()).count(), 0);
+
+    let mut missing_template_ids = Ids::default();
+    missing_template_ids.obj = 73;
+    let templates_without_necromancer = load_obj_templates()
+        .into_iter()
+        .filter(|template| template.template != "Necromancer")
+        .collect::<Vec<_>>();
+    let mut missing_template_app = App::new();
+    missing_template_app.insert_resource(missing_template_ids);
+    missing_template_app.insert_resource(EntityObjMap(HashMap::new()));
+    missing_template_app
+        .insert_resource(Templates::from_obj_templates(templates_without_necromancer));
+    missing_template_app.insert_resource(RunSpawnedObjs::default());
+    missing_template_app.add_systems(Update, reject_missing_template_once);
+    missing_template_app.update();
+
+    assert_eq!(missing_template_app.world().resource::<Ids>().obj, 73);
+    assert!(missing_template_app
+        .world()
+        .resource::<Ids>()
+        .obj_player_map
+        .is_empty());
+    assert!(missing_template_app
+        .world()
+        .resource::<EntityObjMap>()
+        .is_empty());
+    assert!(missing_template_app
+        .world()
+        .resource::<RunSpawnedObjs>()
+        .is_empty());
+    let mut spawned = missing_template_app
+        .world_mut()
+        .query::<&CrisisAssaultUnit>();
+    assert_eq!(spawned.iter(missing_template_app.world()).count(), 0);
 }
 
 fn personal_crisis_test_app() -> App {

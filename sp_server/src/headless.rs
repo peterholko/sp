@@ -4291,6 +4291,355 @@ mod tests {
         assault_id
     }
 
+    fn launch_undead_after_completed_goblin(game: &mut HeadlessGame) -> (u64, u32, Vec<i32>) {
+        use crate::game::{
+            CrisisKind, CrisisPhase, PersonalCrisisHistory, SettlementCrisisState,
+            ASSAULT_READY_GRACE_TICKS, NEXT_PERSONAL_CRISIS_DELAY_TICKS,
+            UNDEAD_PREPARING_MIN_ONLINE_TICKS, UNDEAD_PRESSURE_MIN_ONLINE_TICKS,
+            UNDEAD_SIGNS_MIN_ONLINE_TICKS,
+        };
+
+        let player_id = game.player_id();
+        resolve_goblin_normally_for_undead_smoke(game);
+        let resolved_ticks = game
+            .settlement_crisis()
+            .expect("resolved Goblin delay holder")
+            .phase_online_ticks;
+        assert!(resolved_ticks < NEXT_PERSONAL_CRISIS_DELAY_TICKS);
+        game.app.world_mut().resource_mut::<GameTick>().0 +=
+            NEXT_PERSONAL_CRISIS_DELAY_TICKS - resolved_ticks - 1;
+        game.tick(1);
+
+        let dormant = game
+            .settlement_crisis()
+            .expect("Undead crisis after the completed Goblin delay");
+        assert_eq!(dormant.kind, CrisisKind::Undead);
+        assert_eq!(dormant.phase, CrisisPhase::Dormant);
+        assert!(game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&player_id)
+            .is_some_and(|history| history.completed.contains(&CrisisKind::Goblin)));
+
+        game.tick(1);
+        assert_eq!(game.settlement_crisis().unwrap().phase, CrisisPhase::Signs);
+        for (minimum_ticks, expected_phase) in [
+            (UNDEAD_SIGNS_MIN_ONLINE_TICKS, CrisisPhase::Pressure),
+            (UNDEAD_PRESSURE_MIN_ONLINE_TICKS, CrisisPhase::Preparing),
+            (UNDEAD_PREPARING_MIN_ONLINE_TICKS, CrisisPhase::AssaultReady),
+        ] {
+            game.app.world_mut().resource_mut::<GameTick>().0 += minimum_ticks - 1;
+            game.tick(1);
+            assert_eq!(
+                game.settlement_crisis()
+                    .expect("progressing Undead crisis")
+                    .phase,
+                expected_phase
+            );
+        }
+
+        let preferred_tick = next_preferred_assault_tick(game.game_tick());
+        {
+            let mut crises = game.app.world_mut().resource_mut::<SettlementCrisisState>();
+            let crisis = crises.get_mut(&player_id).expect("Undead Ready crisis");
+            crisis.phase_online_ticks = 0;
+            crisis.last_evaluated_tick = preferred_tick - ASSAULT_READY_GRACE_TICKS;
+        }
+        advance_ready_clock_to_launch(game, preferred_tick);
+
+        let active = game.settlement_crisis().expect("active Undead assault");
+        assert_eq!(active.kind, CrisisKind::Undead);
+        assert_eq!(active.phase, CrisisPhase::AssaultActive);
+        let assault_id = active.assault_id.expect("Undead assault identity");
+        let generation = active.assault_spawn_generation;
+        assert_eq!(generation, 1);
+        assert_eq!(active.assault_unit_ids.len(), 6);
+        (assault_id, generation, active.assault_unit_ids)
+    }
+
+    fn assert_fixed_undead_assault(game: &mut HeadlessGame, assault_id: u64, generation: u32) {
+        use crate::game::{Home, Minions};
+        use crate::ids::EntityObjMap;
+        use crate::player_setup::RunSpawnedObjs;
+
+        let player_id = game.player_id();
+        let units = game.crisis_assault_units();
+        assert_eq!(units.len(), 6);
+        let mut templates = units
+            .iter()
+            .map(|unit| unit.template.as_str())
+            .collect::<Vec<_>>();
+        templates.sort_unstable();
+        assert_eq!(
+            templates,
+            [
+                "Necromancer",
+                "Skeleton",
+                "Skeleton",
+                "Zombie",
+                "Zombie",
+                "Zombie",
+            ]
+        );
+        assert!(units.iter().all(|unit| {
+            unit.owner_player_id == player_id
+                && unit.assault_id == assault_id
+                && unit.spawn_generation == generation
+                && unit.vision == 14
+        }));
+        assert!(units
+            .iter()
+            .filter(|unit| unit.template == "Necromancer")
+            .all(|unit| unit.has_thinker));
+
+        let necromancer_id = units
+            .iter()
+            .find(|unit| unit.template == "Necromancer")
+            .map(|unit| unit.obj_id)
+            .expect("fixed-composition Necromancer");
+        let necromancer_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(necromancer_id)
+            .expect("Necromancer entity");
+        let home = game
+            .world()
+            .get::<Home>(necromancer_entity)
+            .expect("active Necromancer Home");
+        let position = game
+            .world()
+            .get::<Position>(necromancer_entity)
+            .expect("Necromancer position");
+        assert_eq!(home.pos, *position);
+        assert!(game
+            .world()
+            .get::<Minions>(necromancer_entity)
+            .expect("active Necromancer Minions")
+            .ids
+            .is_empty());
+        let run_ids = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .expect("current-run spawned IDs");
+        assert!(units.iter().all(|unit| run_ids.contains(&unit.obj_id)));
+    }
+
+    fn trigger_same_assault_raise_dead(game: &mut HeadlessGame) -> (i32, i32, i32) {
+        use crate::event::{EventExecuting, EventExecutingState};
+        use crate::game::Minions;
+        use crate::ids::EntityObjMap;
+        use crate::npc::VisibleTarget;
+        use crate::player_setup::RunSpawnedObjs;
+
+        let player_id = game.player_id();
+        let active = game.settlement_crisis().expect("active Undead assault");
+        let initial_ids = active
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let units = game.crisis_assault_units();
+        let necromancer_id = units
+            .iter()
+            .find(|unit| unit.template == "Necromancer" && !unit.dead)
+            .map(|unit| unit.obj_id)
+            .expect("live Necromancer");
+        let corpse_id = units
+            .iter()
+            .find(|unit| unit.template == "Zombie" && !unit.dead)
+            .map(|unit| unit.obj_id)
+            .expect("same-assault Zombie for Raise Dead");
+
+        {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(&PlayerId, &mut Stats), With<SubclassHero>>();
+            let (_, mut stats) = heroes
+                .iter_mut(world)
+                .find(|(owner, _)| owner.0 == player_id)
+                .expect("owner hero");
+            stats.hp = 100_000;
+            stats.base_hp = 100_000;
+        }
+        kill_assault_unit_through_normal_combat(game, corpse_id);
+
+        let (corpse_entity, necromancer_entity, corpse_pos) = {
+            let world = game.app.world();
+            let entity_map = world.resource::<EntityObjMap>();
+            let corpse_entity = entity_map
+                .get_entity(corpse_id)
+                .expect("normal-combat Zombie corpse");
+            let necromancer_entity = entity_map
+                .get_entity(necromancer_id)
+                .expect("active Necromancer");
+            let corpse_pos = *world
+                .get::<Position>(corpse_entity)
+                .expect("same-assault corpse position");
+            (corpse_entity, necromancer_entity, corpse_pos)
+        };
+        {
+            let world = game.app.world_mut();
+            *world
+                .get_mut::<Position>(necromancer_entity)
+                .expect("Necromancer position") = corpse_pos;
+            *world
+                .get_mut::<State>(necromancer_entity)
+                .expect("Necromancer state") = State::None;
+            world
+                .get_mut::<VisibleTarget>(necromancer_entity)
+                .expect("Necromancer visible target")
+                .target = crate::constants::NO_TARGET;
+            world
+                .get_mut::<TaskTarget>(necromancer_entity)
+                .expect("Necromancer corpse target")
+                .target = crate::constants::NO_TARGET;
+            world.entity_mut(necromancer_entity).remove::<Target>();
+            world
+                .get_mut::<EventExecuting>(necromancer_entity)
+                .expect("Necromancer event state")
+                .state = EventExecutingState::None;
+            assert!(world.get::<StateDead>(corpse_entity).is_some());
+        }
+
+        let next_scorer_tick = ((game.game_tick() / 10) + 1) * 10;
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_scorer_tick - 1;
+        let scheduled_raise = (0..60)
+            .find_map(|_| {
+                game.tick(1);
+                game.world()
+                    .resource::<MapEvents>()
+                    .values()
+                    .find(|event| {
+                        event.obj_id == necromancer_id
+                            && matches!(
+                                event.event_type,
+                                VisibleEvent::SpellRaiseDeadEvent {
+                                    corpse_id: scheduled_corpse_id
+                                } if scheduled_corpse_id == corpse_id
+                            )
+                    })
+                    .cloned()
+            })
+            .expect("existing Necromancer AI must schedule Raise Dead within bound");
+        let duplicate_event_id = Uuid::from_u128(7_007_007_007);
+        let mut duplicate_raise = scheduled_raise.clone();
+        duplicate_raise.event_id = duplicate_event_id;
+        game.app
+            .world_mut()
+            .resource_mut::<MapEvents>()
+            .insert(duplicate_event_id, duplicate_raise);
+
+        let next_obj_id_before = game.world().resource::<Ids>().obj;
+        let run_spawned_len_before = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .map(Vec::len)
+            .unwrap_or_default();
+        let minions_len_before = game
+            .world()
+            .get::<Minions>(necromancer_entity)
+            .expect("Necromancer Minions before duplicate Raise Dead")
+            .ids
+            .len();
+        let raised_id = (0..180).find_map(|_| {
+            game.tick(1);
+            game.crisis_assault_units()
+                .into_iter()
+                .find(|unit| {
+                    !initial_ids.contains(&unit.obj_id) && unit.template == "Zombie" && !unit.dead
+                })
+                .map(|unit| unit.obj_id)
+        });
+        let raised_id = raised_id.expect("existing Necromancer AI must Raise Dead within bound");
+        assert_eq!(
+            game.world().resource::<Ids>().obj,
+            next_obj_id_before + 1,
+            "duplicate same-corpse events must allocate exactly one raised identity"
+        );
+        let remaining_events = game.world().resource::<MapEvents>();
+        assert!(remaining_events.get(&scheduled_raise.event_id).is_none());
+        assert!(remaining_events.get(&duplicate_event_id).is_none());
+
+        let current = game.settlement_crisis().expect("active extended roster");
+        assert!(current.assault_unit_ids.contains(&raised_id));
+        assert!(current.assault_defeated_unit_ids.contains(&corpse_id));
+        assert_eq!(current.assault_unit_ids.len(), initial_ids.len() + 1);
+        assert_eq!(
+            current
+                .assault_unit_ids
+                .iter()
+                .filter(|id| **id == raised_id)
+                .count(),
+            1,
+            "duplicate same-corpse events must append one roster entry"
+        );
+        let raised = game
+            .crisis_assault_units()
+            .into_iter()
+            .find(|unit| unit.obj_id == raised_id)
+            .expect("raised attributed Zombie");
+        assert_eq!(raised.owner_player_id, player_id);
+        assert_eq!(raised.assault_id, current.assault_id.unwrap());
+        assert_eq!(raised.spawn_generation, current.assault_spawn_generation);
+        assert!(!raised.dead);
+        let run_spawned = game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .expect("current-run spawned IDs after Raise Dead");
+        assert_eq!(run_spawned.len(), run_spawned_len_before + 1);
+        assert_eq!(
+            run_spawned.iter().filter(|id| **id == raised_id).count(),
+            1,
+            "duplicate same-corpse events must append one RunSpawned entry"
+        );
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(corpse_id)
+            .is_none());
+
+        let necromancer_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(necromancer_id)
+            .expect("Necromancer remains after raising");
+        let minions = game
+            .world()
+            .get::<Minions>(necromancer_entity)
+            .expect("Necromancer Minions");
+        assert_eq!(
+            minions.ids.iter().filter(|id| **id == raised_id).count(),
+            1,
+            "raised unit receives one new identity and one Minions entry"
+        );
+        assert_eq!(minions.ids.len(), minions_len_before + 1);
+
+        (corpse_id, raised_id, necromancer_id)
+    }
+
+    fn defeat_remaining_undead_after_necromancer(game: &mut HeadlessGame, necromancer_id: i32) {
+        if game
+            .crisis_assault_units()
+            .iter()
+            .any(|unit| unit.obj_id == necromancer_id && !unit.dead)
+        {
+            kill_assault_unit_through_normal_combat(game, necromancer_id);
+        }
+        let remaining_ids = game
+            .crisis_assault_units()
+            .into_iter()
+            .filter(|unit| !unit.dead)
+            .map(|unit| unit.obj_id)
+            .collect::<Vec<_>>();
+        for unit_id in remaining_ids {
+            kill_assault_unit_through_normal_combat(game, unit_id);
+        }
+        game.tick(2);
+    }
+
     fn kill_assault_unit_through_normal_combat(
         game: &mut HeadlessGame,
         target_id: i32,
@@ -8627,8 +8976,11 @@ mod tests {
             ready_status.title.as_deref(),
             Some("Undead Incursion Imminent")
         );
-        assert_eq!(ready_status.preparation_seconds_remaining, None);
-        assert_eq!(ready_status.preferred_launch_window, None);
+        assert!(ready_status.preparation_seconds_remaining.is_some());
+        assert_eq!(
+            ready_status.preferred_launch_window.as_deref(),
+            Some("dusk_or_night")
+        );
         assert!(!ready_status.continues_while_disconnected);
         assert!(!statuses
             .iter()
@@ -8832,6 +9184,626 @@ mod tests {
                 .by_player
                 .get(&neighbor_id),
             Some(&neighbor_history)
+        );
+    }
+
+    #[test]
+    fn undead_crisis_checkpoint2_smoke_full_lifecycle_and_raise_dead() {
+        use crate::game::{CrisisKind, CrisisPhase, PersonalCrisisHistory};
+
+        let mut game = HeadlessGame::new(120_000);
+        let player_id = game.spawn_hero("Warrior", "UndeadLifecycleSmokeBot");
+        let (assault_id, generation, initial_ids) = launch_undead_after_completed_goblin(&mut game);
+        assert_fixed_undead_assault(&mut game, assault_id, generation);
+
+        let active_statuses = crisis_statuses(game.take_crisis_status_packets());
+        let active_status = active_statuses
+            .iter()
+            .find(|status| {
+                status.kind.as_deref() == Some("undead")
+                    && status.phase.as_deref() == Some("assault_active")
+            })
+            .expect("Undead AssaultActive status");
+        assert_eq!(active_status.remaining_attackers, Some(6));
+        assert!(active_status.assault_active);
+        assert!(active_status.continues_while_disconnected);
+        assert_eq!(
+            active_status.action_hint.as_deref(),
+            Some("Defeat the remaining undead. This assault continues if you disconnect.")
+        );
+
+        let (corpse_id, raised_id, _) = trigger_same_assault_raise_dead(&mut game);
+        assert!(initial_ids.contains(&corpse_id));
+        assert!(!initial_ids.contains(&raised_id));
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive,
+            "a raised unit remains part of the unresolved assault"
+        );
+
+        for original_id in initial_ids.iter().copied() {
+            if game
+                .crisis_assault_units()
+                .iter()
+                .any(|unit| unit.obj_id == original_id && !unit.dead)
+            {
+                kill_assault_unit_through_normal_combat(&mut game, original_id);
+            }
+        }
+        game.tick(2);
+        let active_with_only_raised = game
+            .settlement_crisis()
+            .expect("raised unit keeps Undead assault active");
+        assert_eq!(active_with_only_raised.phase, CrisisPhase::AssaultActive);
+        assert!(initial_ids.iter().all(|id| active_with_only_raised
+            .assault_defeated_unit_ids
+            .contains(id)));
+        assert_eq!(
+            game.crisis_assault_units()
+                .into_iter()
+                .filter(|unit| !unit.dead)
+                .map(|unit| unit.obj_id)
+                .collect::<Vec<_>>(),
+            vec![raised_id]
+        );
+        let one_remaining_status = crisis_statuses(game.take_crisis_status_packets())
+            .into_iter()
+            .rev()
+            .find(|status| {
+                status.kind.as_deref() == Some("undead")
+                    && status.phase.as_deref() == Some("assault_active")
+            })
+            .expect("active status while only the raised unit remains");
+        assert_eq!(one_remaining_status.remaining_attackers, Some(1));
+
+        kill_assault_unit_through_normal_combat(&mut game, raised_id);
+        game.tick(2);
+        let resolved = game.settlement_crisis().expect("resolved Undead crisis");
+        assert_eq!(resolved.kind, CrisisKind::Undead);
+        assert_eq!(resolved.phase, CrisisPhase::Resolved);
+        assert!(resolved.resolution_recorded);
+        assert_eq!(resolved.assault_id, Some(assault_id));
+        assert_eq!(resolved.assault_spawn_generation, generation);
+        assert_eq!(game.personal_crises_resolved(), 2);
+        let history = game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&player_id)
+            .cloned()
+            .expect("two-kind personal crisis history");
+        assert_eq!(history.completed.len(), 2);
+        assert!(history.completed.contains(&CrisisKind::Goblin));
+        assert!(history.completed.contains(&CrisisKind::Undead));
+
+        let resolved_statuses = crisis_statuses(game.take_crisis_status_packets());
+        assert!(resolved_statuses.iter().any(|status| {
+            status.kind.as_deref() == Some("undead") && status.phase.as_deref() == Some("resolved")
+        }));
+        let stable = resolved.clone();
+        game.tick(20);
+        let after = game.settlement_crisis().expect("terminal Undead holder");
+        assert_eq!(after.kind, CrisisKind::Undead);
+        assert_eq!(after.phase, CrisisPhase::Resolved);
+        assert_eq!(after.resolved_at_tick, stable.resolved_at_tick);
+        assert_eq!(after.pressure, stable.pressure);
+        assert_eq!(after.phase_online_ticks, stable.phase_online_ticks);
+        assert_eq!(game.personal_crises_resolved(), 2);
+        assert_eq!(
+            game.world().resource::<PersonalCrisisHistory>().by_player[&player_id],
+            history
+        );
+    }
+
+    #[test]
+    fn undead_crisis_checkpoint2_smoke_disconnect_reconnect_and_helper() {
+        use crate::game::{CrisisKind, CrisisPhase, PersonalCrisisHistory, RunScoreState};
+
+        let mut game = HeadlessGame::new(120_000);
+        let owner_player_id = game.spawn_hero("Warrior", "UndeadOfflineOwnerSmokeBot");
+        let (assault_id, generation, _) = launch_undead_after_completed_goblin(&mut game);
+        let (_, raised_id, necromancer_id) = trigger_same_assault_raise_dead(&mut game);
+        let committed_ids = game
+            .settlement_crisis()
+            .unwrap()
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(committed_ids.contains(&raised_id));
+        let before_disconnect = game
+            .crisis_assault_units()
+            .into_iter()
+            .map(|unit| (unit.obj_id, (unit.hp, unit.dead)))
+            .collect::<BTreeMap<_, _>>();
+
+        let helper_player_id = spawn_connected_helper(&mut game, "UndeadHelperSmokeBot");
+        game.prepare_established_scenario_helper(helper_player_id);
+        let helper_score_before = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&helper_player_id)
+            .cloned()
+            .unwrap_or_default();
+        game.disconnect_player();
+        game.tick(20);
+
+        let offline = game
+            .settlement_crisis()
+            .expect("offline active Undead assault");
+        assert_eq!(offline.kind, CrisisKind::Undead);
+        assert_eq!(offline.phase, CrisisPhase::AssaultActive);
+        assert_eq!(offline.assault_id, Some(assault_id));
+        assert_eq!(offline.assault_spawn_generation, generation);
+        assert_eq!(
+            offline
+                .assault_unit_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            committed_ids
+        );
+        let after_disconnect = game
+            .crisis_assault_units()
+            .into_iter()
+            .map(|unit| (unit.obj_id, (unit.hp, unit.dead)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(after_disconnect, before_disconnect);
+
+        kill_assault_unit_through_normal_combat_as(&mut game, helper_player_id, necromancer_id);
+        let helper_score_after_kill = game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&helper_player_id)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            helper_score_after_kill.enemies_killed,
+            helper_score_before.enemies_killed + 1
+        );
+        assert_eq!(helper_score_after_kill.personal_crises_resolved, 0);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::AssaultActive
+        );
+
+        game.reconnect_player_with_login();
+        game.tick(3);
+        let reconnected = game
+            .settlement_crisis()
+            .expect("reconnected Undead assault");
+        assert_eq!(reconnected.assault_id, Some(assault_id));
+        assert_eq!(reconnected.assault_spawn_generation, generation);
+        assert_eq!(
+            reconnected
+                .assault_unit_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            committed_ids
+        );
+        assert!(game
+            .crisis_assault_units()
+            .iter()
+            .all(|unit| unit.owner_player_id == owner_player_id));
+
+        defeat_remaining_undead_after_necromancer(&mut game, necromancer_id);
+        assert_eq!(
+            game.settlement_crisis().unwrap().phase,
+            CrisisPhase::Resolved
+        );
+        assert_eq!(game.personal_crises_resolved(), 2);
+        assert!(game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&owner_player_id)
+            .is_some_and(|history| history.completed.contains(&CrisisKind::Undead)));
+        assert_eq!(
+            game.world()
+                .resource::<RunScoreState>()
+                .get(&helper_player_id)
+                .map(|score| score.personal_crises_resolved)
+                .unwrap_or_default(),
+            0,
+            "the connected helper can fight but cannot own the crisis reward"
+        );
+    }
+
+    #[test]
+    fn undead_crisis_checkpoint2_smoke_isolation_and_true_death_cleanup() {
+        use crate::event::{
+            EventExecuting, EventExecutingState, MapEvent, VisibleEvent, VisibleEvents,
+        };
+        use crate::game::{
+            CrisisKind, CrisisPhase, Minions, PersonalCrisisHistory, RunScoreState,
+            SettlementCrisisState,
+        };
+        use crate::ids::{EntityObjMap, Ids};
+        use crate::network::ChangeEvents;
+        use crate::npc::VisibleTarget;
+        use crate::player_setup::RunSpawnedObjs;
+
+        let mut game = HeadlessGame::new(120_000);
+        let owner_player_id = game.spawn_hero("Warrior", "UndeadIsolationSmokeBot");
+        let (assault_id, generation, _) = launch_undead_after_completed_goblin(&mut game);
+        let helper_player_id = spawn_connected_helper(&mut game, "UndeadNeighborSmokeBot");
+        game.prepare_established_scenario_helper(helper_player_id);
+        let (neighbor_villager_entity, neighbor_villager_id) = game
+            .app
+            .world_mut()
+            .run_system_once(
+                move |mut commands: Commands,
+                      mut ids: ResMut<Ids>,
+                      mut entity_map: ResMut<EntityObjMap>,
+                      templates: Res<Templates>,
+                      game_tick: Res<GameTick>| {
+                    Encounter::spawn_villager(
+                        helper_player_id,
+                        Position { x: 1, y: 1 },
+                        Vec::new(),
+                        &mut commands,
+                        &mut ids,
+                        &mut entity_map,
+                        &templates,
+                        &game_tick,
+                    )
+                },
+            )
+            .expect("ordinary neighboring villager spawn");
+        let neighbor_villager_id = neighbor_villager_id.0;
+        game.tick(1);
+
+        let units = game.crisis_assault_units();
+        let necromancer_id = units
+            .iter()
+            .find(|unit| unit.template == "Necromancer")
+            .map(|unit| unit.obj_id)
+            .expect("fixed-composition Necromancer");
+        let (necromancer_entity, neighbor_hero_id, neighbor_hero_entity) = {
+            let world = game.app.world_mut();
+            let entity_map = world.resource::<EntityObjMap>();
+            let necromancer_entity = entity_map
+                .get_entity(necromancer_id)
+                .expect("Necromancer entity");
+            let mut heroes = world.query_filtered::<(Entity, &Id, &PlayerId), With<SubclassHero>>();
+            let (neighbor_hero_entity, neighbor_hero_id, _) = heroes
+                .iter(world)
+                .find(|(_, _, owner)| owner.0 == helper_player_id)
+                .expect("neighbor hero");
+            (necromancer_entity, neighbor_hero_id.0, neighbor_hero_entity)
+        };
+        let necromancer_pos = *game
+            .world()
+            .get::<Position>(necromancer_entity)
+            .expect("Necromancer position");
+        {
+            let tick = game.game_tick();
+            let world = game.app.world_mut();
+            *world
+                .get_mut::<Position>(neighbor_villager_entity)
+                .expect("neighbor villager position") = necromancer_pos;
+            *world
+                .get_mut::<State>(neighbor_villager_entity)
+                .expect("neighbor villager state") = State::Dead;
+            world
+                .entity_mut(neighbor_villager_entity)
+                .insert(StateDead {
+                    dead_at: tick,
+                    killer: "Undead isolation fixture".to_string(),
+                });
+            *world
+                .get_mut::<Position>(neighbor_hero_entity)
+                .expect("neighbor hero position") = necromancer_pos;
+            world
+                .get_mut::<VisibleTarget>(necromancer_entity)
+                .expect("Necromancer visible target")
+                .target = crate::constants::NO_TARGET;
+            world
+                .get_mut::<TaskTarget>(necromancer_entity)
+                .expect("Necromancer task target")
+                .target = crate::constants::NO_TARGET;
+            world.entity_mut(necromancer_entity).remove::<Target>();
+            world
+                .get_mut::<EventExecuting>(necromancer_entity)
+                .expect("Necromancer event state")
+                .state = EventExecutingState::None;
+        }
+
+        let next_scorer_tick = ((game.game_tick() / 10) + 1) * 10;
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_scorer_tick - 1;
+        game.tick(2);
+        let necromancer = game
+            .crisis_assault_units()
+            .into_iter()
+            .find(|unit| unit.obj_id == necromancer_id)
+            .expect("Necromancer after isolation scoring");
+        for selected in [
+            necromancer.visible_target,
+            necromancer.target,
+            necromancer.task_target,
+        ] {
+            assert_ne!(selected, Some(neighbor_hero_id));
+            assert_ne!(selected, Some(neighbor_villager_id));
+        }
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(neighbor_villager_id)
+            .is_some());
+
+        let (_, raised_id, raised_by_necromancer_id) = trigger_same_assault_raise_dead(&mut game);
+        assert_eq!(raised_by_necromancer_id, necromancer_id);
+        let necromancer_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(necromancer_id)
+            .expect("Necromancer after same-assault raise");
+        let minions = game
+            .world()
+            .get::<Minions>(necromancer_entity)
+            .expect("Necromancer Minions");
+        assert!(minions.ids.contains(&raised_id));
+        assert!(!minions.ids.contains(&neighbor_villager_id));
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(neighbor_villager_id)
+            .is_some());
+
+        let committed = game.settlement_crisis().unwrap();
+        assert_eq!(committed.phase, CrisisPhase::AssaultActive);
+        assert_eq!(committed.assault_id, Some(assault_id));
+        assert_eq!(committed.assault_spawn_generation, generation);
+        assert!(committed.assault_unit_ids.contains(&raised_id));
+        let committed_ids = committed.assault_unit_ids.clone();
+        let score_before_cleanup = game.personal_crises_resolved();
+        assert_eq!(score_before_cleanup, 1);
+
+        // Queue a second production Raise Dead for the same update in which
+        // the owning run reaches True Death. Cleanup must win that race before
+        // the spell can allocate or commit a replacement unit.
+        let race_corpse_id = game
+            .crisis_assault_units()
+            .into_iter()
+            .find(|unit| unit.template == "Zombie" && !unit.dead && unit.obj_id != raised_id)
+            .map(|unit| unit.obj_id)
+            .expect("second same-assault Zombie corpse source");
+        kill_assault_unit_through_normal_combat(&mut game, race_corpse_id);
+        let (necromancer_entity, race_corpse_pos) = {
+            let world = game.app.world();
+            let entity_map = world.resource::<EntityObjMap>();
+            let necromancer_entity = entity_map
+                .get_entity(necromancer_id)
+                .expect("Necromancer before cleanup race");
+            let race_corpse_entity = entity_map
+                .get_entity(race_corpse_id)
+                .expect("same-assault corpse before cleanup race");
+            let race_corpse_pos = *world
+                .get::<Position>(race_corpse_entity)
+                .expect("same-assault corpse position");
+            (necromancer_entity, race_corpse_pos)
+        };
+        {
+            let world = game.app.world_mut();
+            *world
+                .get_mut::<Position>(necromancer_entity)
+                .expect("Necromancer position") = race_corpse_pos;
+            *world
+                .get_mut::<Position>(neighbor_hero_entity)
+                .expect("neighbor observer position") = race_corpse_pos;
+            world
+                .get_mut::<Viewshed>(neighbor_hero_entity)
+                .expect("neighbor observer viewshed")
+                .range = 100;
+            *world
+                .get_mut::<State>(necromancer_entity)
+                .expect("Necromancer state") = State::Casting;
+            world
+                .get_mut::<EventExecuting>(necromancer_entity)
+                .expect("Necromancer event state")
+                .state = EventExecutingState::Executing;
+        }
+
+        let queued_event_id = Uuid::from_u128(8_008_008_008);
+        let current_tick = game.game_tick();
+        game.app.world_mut().resource_mut::<MapEvents>().insert(
+            queued_event_id,
+            MapEvent {
+                event_id: queued_event_id,
+                obj_id: necromancer_id,
+                run_tick: current_tick - 1,
+                event_type: VisibleEvent::SpellRaiseDeadEvent {
+                    corpse_id: race_corpse_id,
+                },
+            },
+        );
+        let (other_generation_entity, other_generation_id) = {
+            let world = game.app.world_mut();
+            let other_generation_id = world.resource_mut::<Ids>().new_obj_id();
+            let other_generation_entity = world
+                .spawn((
+                    Id(other_generation_id),
+                    PlayerId(crate::constants::NPC_PLAYER_ID),
+                    Position { x: 40, y: 40 },
+                    State::None,
+                    CrisisAssaultUnit {
+                        owner_player_id,
+                        assault_id,
+                        spawn_generation: generation + 1,
+                    },
+                ))
+                .id();
+            world
+                .resource_mut::<Ids>()
+                .new_obj(other_generation_id, crate::constants::NPC_PLAYER_ID);
+            world
+                .resource_mut::<EntityObjMap>()
+                .new_obj(other_generation_id, other_generation_entity);
+            world
+                .resource_mut::<RunSpawnedObjs>()
+                .entry(owner_player_id)
+                .or_default()
+                .push(other_generation_id);
+            (other_generation_entity, other_generation_id)
+        };
+        let next_obj_id_before = game.world().resource::<Ids>().obj;
+
+        let owner_hero = {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == owner_player_id)
+                .map(|(entity, _)| entity)
+                .expect("owner hero")
+        };
+        let current_tick = game.game_tick();
+        game.app.world_mut().entity_mut(owner_hero).insert((
+            State::Dead,
+            StateDead {
+                dead_at: current_tick,
+                killer: "Undead cleanup fixture".to_string(),
+            },
+            TrueDeath {
+                true_death_at: current_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+        game.start_packet_capture();
+        game.tick(1);
+
+        assert_eq!(
+            game.world().resource::<Ids>().obj,
+            next_obj_id_before,
+            "the queued Raise Dead event must not allocate a replacement identity"
+        );
+        assert!(game
+            .world()
+            .resource::<MapEvents>()
+            .get(&queued_event_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<SettlementCrisisState>()
+            .get(&owner_player_id)
+            .is_none());
+        assert!(!game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&owner_player_id)
+            .is_some_and(|history| history.completed.contains(&CrisisKind::Undead)));
+        assert!(game
+            .world()
+            .resource::<RunScoreState>()
+            .get(&owner_player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<RunSpawnedObjs>()
+            .get(&owner_player_id)
+            .is_none());
+        assert!(committed_ids.iter().all(|id| game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(*id)
+            .is_none()));
+        let matching_units_after_cleanup = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&CrisisAssaultUnit>();
+            query
+                .iter(world)
+                .filter(|unit| {
+                    unit.owner_player_id == owner_player_id
+                        && unit.assault_id == assault_id
+                        && unit.spawn_generation == generation
+                })
+                .count()
+        };
+        assert_eq!(matching_units_after_cleanup, 0);
+        assert_eq!(game.personal_crises_resolved(), 0);
+        assert_eq!(
+            game.world()
+                .resource::<EntityObjMap>()
+                .get_entity(other_generation_id),
+            Some(other_generation_entity),
+            "same-owner attribution from another generation must survive exact assault cleanup"
+        );
+
+        let pending_remove_ids = game
+            .world()
+            .resource::<VisibleEvents>()
+            .iter()
+            .filter_map(|event| match event.event_type {
+                VisibleEvent::RemoveObjEvent { .. } => Some(event.obj_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert!(
+            pending_remove_ids.contains(&necromancer_id),
+            "same-update cleanup must queue canonical RemoveObj visibility for the Necromancer; pending={pending_remove_ids:?}"
+        );
+        assert!(
+            pending_remove_ids.contains(&race_corpse_id),
+            "same-update cleanup must queue canonical RemoveObj visibility for the corpse source; pending={pending_remove_ids:?}"
+        );
+        assert!(!pending_remove_ids.contains(&other_generation_id));
+
+        // Visibility currently runs before True Death cleanup, so the queued
+        // canonical events are delivered on the following production update.
+        game.tick(1);
+        let packets = game.finish_packet_capture();
+        let deleted_ids = packets
+            .into_iter()
+            .filter_map(|packet| match packet {
+                ResponsePacket::PerceptionChanges { events } => Some(events),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|event| match event {
+                ChangeEvents::ObjDelete { obj_id, .. } => Some(obj_id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert!(
+            deleted_ids.contains(&necromancer_id),
+            "canonical RemoveObj visibility must announce the cleaned Necromancer; deleted={deleted_ids:?}"
+        );
+        assert!(
+            deleted_ids.contains(&race_corpse_id),
+            "canonical RemoveObj visibility must announce the cleaned corpse source; deleted={deleted_ids:?}"
+        );
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(neighbor_villager_id)
+            .is_some());
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(neighbor_hero_id)
+            .is_some());
+
+        game.disconnect_player();
+        game.spawn_hero("Warrior", "UndeadFreshRunAfterCleanupSmokeBot");
+        let fresh = game.settlement_crisis().expect("fresh-run Goblin crisis");
+        assert_eq!(fresh.kind, CrisisKind::Goblin);
+        assert_eq!(fresh.phase, CrisisPhase::Dormant);
+        assert!(game
+            .world()
+            .resource::<PersonalCrisisHistory>()
+            .by_player
+            .get(&owner_player_id)
+            .map(|history| history.completed.is_empty())
+            .unwrap_or(true));
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(other_generation_id)
+            .is_none());
+        assert!(
+            game.world().get_entity(other_generation_entity).is_err(),
+            "the owner-scoped fresh-run orphan sweep must remove a stale generation"
         );
     }
 

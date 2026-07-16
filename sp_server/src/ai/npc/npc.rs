@@ -24,7 +24,7 @@ use crate::map::{Map, MapPos, TileType};
 use crate::network::{send_to_client, ResponsePacket};
 use crate::obj::{
     BaseQuery, BaseQueryMutState, Blocker, Class, Id, Obj, ObjStatQuery, PlayerId, Position, State,
-    StateChange, Stats, Subclass, SubclassNPC, Template, Viewshed,
+    StateChange, StateDead, Stats, Subclass, SubclassNPC, Template, Viewshed,
 };
 use crate::obj::{BaseQueryEffects, ClassStructure};
 use crate::player;
@@ -301,6 +301,21 @@ fn personal_assault_allows_target_owner(
 ) -> bool {
     assault
         .map(|assault| target_owner == Some(assault.owner_player_id))
+        .unwrap_or(true)
+}
+
+fn personal_assault_allows_target_entity(
+    assault: Option<&CrisisAssaultUnit>,
+    target_owner: Option<i32>,
+    target_assault: Option<&CrisisAssaultUnit>,
+    target_is_dead: bool,
+) -> bool {
+    assault
+        .map(|assault| {
+            target_assault
+                .map(|target_assault| target_is_dead && target_assault == assault)
+                .unwrap_or(target_owner == Some(assault.owner_player_id))
+        })
         .unwrap_or(true)
 }
 
@@ -1060,6 +1075,51 @@ mod tests {
     }
 
     #[test]
+    fn undead_crisis_target_boundary_allows_only_owner_assets_or_same_assault_dead_units() {
+        let assault = CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 11,
+            spawn_generation: 2,
+        };
+        let other_assault = CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 12,
+            spawn_generation: 2,
+        };
+
+        assert!(personal_assault_allows_target_entity(
+            Some(&assault),
+            Some(7),
+            None,
+            false,
+        ));
+        assert!(personal_assault_allows_target_entity(
+            Some(&assault),
+            Some(NPC_PLAYER_ID),
+            Some(&assault),
+            true,
+        ));
+        assert!(!personal_assault_allows_target_entity(
+            Some(&assault),
+            Some(NPC_PLAYER_ID),
+            Some(&assault),
+            false,
+        ));
+        assert!(!personal_assault_allows_target_entity(
+            Some(&assault),
+            Some(NPC_PLAYER_ID),
+            Some(&other_assault),
+            true,
+        ));
+        assert!(!personal_assault_allows_target_entity(
+            Some(&assault),
+            Some(8),
+            None,
+            false,
+        ));
+    }
+
+    #[test]
     fn checkpoint3_personal_assault_target_installation_rejects_every_foreign_target_kind() {
         for (kind, owner, class, subclass) in [
             ("hero", 8, CLASS_UNIT, Subclass::Hero),
@@ -1584,6 +1644,108 @@ mod tests {
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), 0.0);
+    }
+
+    #[test]
+    fn undead_crisis_corpse_scorer_selects_only_same_assault_normal_death() {
+        let mut app = App::new();
+        app.add_systems(Update, nearby_corpses_scorer_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+
+        let attribution = CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 21,
+            spawn_generation: 3,
+        };
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Position { x: 5, y: 5 },
+                Viewshed { range: 10 },
+                TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: String::new(),
+                    state: EventExecutingState::None,
+                },
+                attribution,
+                SubclassNPC,
+            ))
+            .id();
+        let scorer_entity = {
+            let mut commands = app.world_mut().commands();
+            spawn_scorer(&VisibleCorpseScorer, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+
+        let spawn_target =
+            |app: &mut App,
+             id: i32,
+             pos: Position,
+             class: &str,
+             target_attribution: Option<CrisisAssaultUnit>| {
+                let mut entity = app.world_mut().spawn((
+                    Id(id),
+                    PlayerId(NPC_PLAYER_ID),
+                    pos,
+                    Name("corpse".to_string()),
+                    Template("Zombie".to_string()),
+                    Class(class.to_string()),
+                    Subclass::Npc,
+                    State::Dead,
+                    StateDead {
+                        dead_at: 0,
+                        killer: "test".to_string(),
+                    },
+                    Misc {
+                        image: String::new(),
+                        hsl: Vec::new(),
+                        groups: Vec::new(),
+                    },
+                    SubclassNPC,
+                ));
+                if let Some(target_attribution) = target_attribution {
+                    entity.insert(target_attribution);
+                }
+            };
+
+        // Both ineligible bodies are closer than the valid source.
+        spawn_target(&mut app, 101, Position { x: 5, y: 6 }, CLASS_CORPSE, None);
+        spawn_target(
+            &mut app,
+            102,
+            Position { x: 6, y: 5 },
+            CLASS_UNIT,
+            Some(CrisisAssaultUnit {
+                assault_id: 22,
+                ..attribution
+            }),
+        );
+        spawn_target(
+            &mut app,
+            103,
+            Position { x: 7, y: 5 },
+            CLASS_UNIT,
+            Some(attribution),
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<TaskTarget>()
+                .unwrap()
+                .target,
+            103
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            PRIORITY2_SCORE / 100.0
+        );
     }
 
     #[test]
@@ -2331,6 +2493,97 @@ mod tests {
             .world()
             .entity(npc_entity)
             .get::<EventExecuting>()
+            .is_none());
+    }
+
+    #[test]
+    fn personal_assault_executing_move_rejects_foreign_target_and_cancels_queued_event() {
+        fn apply_state_change(state_change: On<StateChange>, mut states: Query<&mut State>) {
+            if let Ok(mut state) = states.get_mut(state_change.entity) {
+                *state = state_change.new_state;
+            }
+        }
+
+        let mut app = App::new();
+        app.add_observer(apply_state_change);
+        app.add_systems(Update, move_to_target_system);
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(GameEvents::default());
+        app.world_mut().insert_resource(minimal_templates());
+
+        let npc_pos = Position { x: 4, y: 4 };
+        let attribution = CrisisAssaultUnit {
+            owner_player_id: 7,
+            assault_id: 21,
+            spawn_generation: 3,
+        };
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                State::Moving,
+                SubclassNPC,
+                Target { id: 200 },
+                EventExecuting {
+                    event_type: "move".to_string(),
+                    state: EventExecutingState::Executing,
+                },
+                attribution,
+            ))
+            .id();
+        let foreign_target = app
+            .world_mut()
+            .spawn((Id(200), PlayerId(8), Position { x: 8, y: 4 }, State::None))
+            .id();
+        register_test_obj(&mut app, 100, NPC_PLAYER_ID, npc_entity);
+        register_test_obj(&mut app, 200, 8, foreign_target);
+
+        let queued_move = app.world_mut().resource_mut::<MapEvents>().new(
+            100,
+            TICKS_PER_SEC + 10,
+            VisibleEvent::MoveEvent {
+                src: npc_pos,
+                dst: Position { x: 5, y: 4 },
+            },
+        );
+        let move_action = {
+            let mut commands = app.world_mut().commands();
+            spawn_action(&NpcMoveToTarget, &mut commands, npc_entity)
+        };
+        app.world_mut().flush();
+        *app.world_mut()
+            .entity_mut(move_action)
+            .get_mut::<ActionState>()
+            .unwrap() = ActionState::Executing;
+
+        app.update();
+
+        assert_eq!(
+            *app.world()
+                .entity(move_action)
+                .get::<ActionState>()
+                .unwrap(),
+            ActionState::Failure
+        );
+        let npc = app.world().entity(npc_entity);
+        assert_eq!(*npc.get::<Position>().unwrap(), npc_pos);
+        assert_eq!(*npc.get::<State>().unwrap(), State::None);
+        assert!(npc.get::<Target>().is_none());
+        assert_eq!(
+            npc.get::<EventExecuting>().unwrap().state,
+            EventExecutingState::Failed
+        );
+        assert!(app
+            .world()
+            .resource::<MapEvents>()
+            .get(&queued_move.event_id)
             .is_none());
     }
 
@@ -3693,10 +3946,20 @@ pub fn nearby_corpses_scorer_system(
     protection: NpcProtection,
     invalidated_query: Query<(), With<ProtectedTargetInvalidated>>,
     mut npc_query: Query<
-        (&Position, &Viewshed, &mut TaskTarget, &EventExecuting),
+        (
+            &Position,
+            &Viewshed,
+            &mut TaskTarget,
+            &EventExecuting,
+            Option<&CrisisAssaultUnit>,
+        ),
         With<SubclassNPC>,
     >,
     target_query: Query<ObjQuery>,
+    personal_corpse_query: Query<
+        (&CrisisAssaultUnit, &State, Option<&StateDead>),
+        With<SubclassNPC>,
+    >,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<VisibleCorpseScorer>>,
 ) {
     if game_tick.0 % TICKS_PER_SEC == 0 {
@@ -3705,7 +3968,7 @@ pub fn nearby_corpses_scorer_system(
                 continue;
             }
 
-            let Ok((npc_pos, npc_viewshed, mut npc_task_target, event_executing)) =
+            let Ok((npc_pos, npc_viewshed, mut npc_task_target, event_executing, npc_assault)) =
                 npc_query.get_mut(*actor)
             else {
                 error!(
@@ -3739,7 +4002,19 @@ pub fn nearby_corpses_scorer_system(
                     continue;
                 }
 
-                if target.class.0 == CLASS_CORPSE.to_string() {
+                let eligible_corpse = if let Some(npc_assault) = npc_assault {
+                    personal_corpse_query
+                        .get(target.entity)
+                        .map(|(target_assault, target_state, target_dead)| {
+                            target_assault == npc_assault
+                                && (*target_state == State::Dead || target_dead.is_some())
+                        })
+                        .unwrap_or(false)
+                } else {
+                    target.class.0 == CLASS_CORPSE
+                };
+
+                if eligible_corpse {
                     let distance = Map::dist(*npc_pos, *target.pos);
 
                     if npc_viewshed.range >= distance {
@@ -4310,8 +4585,11 @@ pub fn set_steal_target_system(
 pub fn set_corpse_target_system(
     mut commands: Commands,
     ids: Option<Res<Ids>>,
+    entity_map: Res<EntityObjMap>,
     protection: NpcProtection,
     mut task_target_query: Query<&mut TaskTarget>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
+    dead_query: Query<(&State, Option<&StateDead>), With<SubclassNPC>>,
     mut query: Query<(&Actor, &mut ActionState, &SetCorpseTarget)>,
 ) {
     for (Actor(actor), mut state, _set_corpse_target) in &mut query {
@@ -4335,6 +4613,26 @@ pub fn set_corpse_target_system(
                     commands.entity(*actor).try_remove::<Target>();
                     *state = ActionState::Failure;
                     continue;
+                }
+
+                if let Ok(actor_assault) = crisis_assault_query.get(*actor) {
+                    let eligible = entity_map
+                        .get_entity(task_target.target)
+                        .and_then(|target_entity| {
+                            let target_assault = crisis_assault_query.get(target_entity).ok()?;
+                            let (target_state, target_dead) = dead_query.get(target_entity).ok()?;
+                            Some(
+                                target_assault == actor_assault
+                                    && (*target_state == State::Dead || target_dead.is_some()),
+                            )
+                        })
+                        .unwrap_or(false);
+                    if !eligible {
+                        task_target.target = NO_TARGET;
+                        commands.entity(*actor).try_remove::<Target>();
+                        *state = ActionState::Failure;
+                        continue;
+                    }
                 }
 
                 commands.entity(*actor).try_insert(Target {
@@ -5109,6 +5407,8 @@ pub fn move_to_target_system(
     templates: Res<Templates>,
     mut obj_query: Query<ObjStatQuery>,
     target_query: Query<&Target>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
+    dead_target_query: Query<(), With<StateDead>>,
     scripted_corpse_hunt_query: Query<(), With<ScriptedCorpseHunt>>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut query: Query<(&Actor, &mut ActionState, &NpcMoveToTarget, &ActionSpan)>,
@@ -5127,6 +5427,40 @@ pub fn move_to_target_system(
                 );
                 *state = ActionState::Failure;
                 continue;
+            }
+            if target.id != NO_TARGET {
+                let target_entity = entity_map.get_entity(target.id);
+                let actor_assault = crisis_assault_query.get(*actor).ok();
+                let target_assault =
+                    target_entity.and_then(|entity| crisis_assault_query.get(entity).ok());
+                if !personal_assault_allows_target_entity(
+                    actor_assault,
+                    ids.get_player(target.id),
+                    target_assault,
+                    target_entity
+                        .map(|entity| dead_target_query.contains(entity))
+                        .unwrap_or(false),
+                ) {
+                    if let Some(npc_id) = entity_map.get_obj_by_entity(*actor) {
+                        map_events.retain(|_, event| {
+                            event.obj_id != npc_id
+                                || !matches!(&event.event_type, VisibleEvent::MoveEvent { .. })
+                        });
+                    }
+                    if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                        event_executing.state = EventExecutingState::Failed;
+                    }
+                    commands
+                        .entity(*actor)
+                        .try_remove::<Target>()
+                        .try_remove::<EventInProgress>();
+                    commands.trigger(StateChange {
+                        entity: *actor,
+                        new_state: State::None,
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
             }
         }
 
@@ -5486,7 +5820,10 @@ pub fn move_near_target_system(
     templates: Res<Templates>,
     mut obj_query: Query<ObjStatQuery>,
     target_query: Query<&Target>,
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
+    dead_target_query: Query<(), With<StateDead>>,
     event_completed: Query<&EventCompleted>,
+    mut event_executing_query: Query<&mut EventExecuting>,
     mut query: Query<(&Actor, &mut ActionState, &NpcMoveNearTarget)>,
 ) {
     for (Actor(actor), mut state, move_near_target) in &mut query {
@@ -5503,6 +5840,40 @@ pub fn move_near_target_system(
                 );
                 *state = ActionState::Failure;
                 continue;
+            }
+            if target.id != NO_TARGET {
+                let target_entity = entity_map.get_entity(target.id);
+                let actor_assault = crisis_assault_query.get(*actor).ok();
+                let target_assault =
+                    target_entity.and_then(|entity| crisis_assault_query.get(entity).ok());
+                if !personal_assault_allows_target_entity(
+                    actor_assault,
+                    ids.get_player(target.id),
+                    target_assault,
+                    target_entity
+                        .map(|entity| dead_target_query.contains(entity))
+                        .unwrap_or(false),
+                ) {
+                    if let Some(npc_id) = entity_map.get_obj_by_entity(*actor) {
+                        map_events.retain(|_, event| {
+                            event.obj_id != npc_id
+                                || !matches!(&event.event_type, VisibleEvent::MoveEvent { .. })
+                        });
+                    }
+                    if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                        event_executing.state = EventExecutingState::Failed;
+                    }
+                    commands
+                        .entity(*actor)
+                        .try_remove::<Target>()
+                        .try_remove::<EventInProgress>();
+                    commands.trigger(StateChange {
+                        entity: *actor,
+                        new_state: State::None,
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
             }
         }
 
@@ -6779,6 +7150,11 @@ pub fn raise_dead_system(
     target_query: Query<&Target>,
     mut npc_query: Query<BaseQueryMutState, With<SubclassNPC>>,
     obj_query: Query<BaseQuery, Without<SubclassNPC>>, // Without required to prevent disjointed queries
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
+    personal_corpse_query: Query<
+        (&Id, &PlayerId, &Position, &CrisisAssaultUnit),
+        (With<SubclassNPC>, With<StateDead>),
+    >,
     mut query: Query<(&Actor, &mut ActionState, &mut RaiseDead)>,
 ) {
     for (Actor(actor), mut state, raise_dead) in &mut query {
@@ -6852,32 +7228,49 @@ pub fn raise_dead_system(
                     continue;
                 };
 
-                let Ok(corpse) = obj_query.get(target_entity) else {
+                let actor_assault = crisis_assault_query.get(*actor).ok().copied();
+                let corpse = if let Some(actor_assault) = actor_assault {
+                    personal_corpse_query.get(target_entity).ok().and_then(
+                        |(id, player_id, pos, target_assault)| {
+                            (*target_assault == actor_assault).then_some((
+                                id.0,
+                                player_id.clone(),
+                                *pos,
+                            ))
+                        },
+                    )
+                } else {
+                    obj_query
+                        .get(target_entity)
+                        .ok()
+                        .map(|corpse| (corpse.id.0, corpse.player_id.clone(), *corpse.pos))
+                };
+                let Some((corpse_id, corpse_player_id, corpse_pos)) = corpse else {
                     *state = ActionState::Failure;
                     npc_error!(
                         *actor,
                         obj_id,
                         npc_name,
-                        "Cannot find target obj for {:?}",
+                        "Cannot find eligible target corpse for {:?}",
                         target.id
                     );
                     continue;
                 };
 
-                if protection.owner_is_protected(corpse.player_id) {
+                if protection.owner_is_protected(&corpse_player_id) {
                     commands.entity(*actor).try_remove::<Target>().try_insert(
                         ProtectedTargetInvalidated {
-                            target_id: corpse.id.0,
+                            target_id: corpse_id,
                         },
                     );
                     *state = ActionState::Failure;
                     continue;
                 }
 
-                npc_info!(*actor, obj_id, npc_name, "Corpse: {:?}", corpse);
+                npc_info!(*actor, obj_id, npc_name, "Corpse id: {:?}", corpse_id);
 
                 // Check if target is adjacent to npc, this could happen if the home target scorer changes targets
-                if !Map::is_adjacent_including_source(*npc.pos, *corpse.pos) {
+                if !Map::is_adjacent_including_source(*npc.pos, corpse_pos) {
                     npc_info!(
                         *actor,
                         obj_id,
@@ -6906,9 +7299,7 @@ pub fn raise_dead_system(
                 map_events.new(
                     npc.id.0,
                     game_tick.0 + 30,
-                    VisibleEvent::SpellRaiseDeadEvent {
-                        corpse_id: corpse.id.0,
-                    },
+                    VisibleEvent::SpellRaiseDeadEvent { corpse_id },
                 );
 
                 *state = ActionState::Executing;
@@ -7719,6 +8110,7 @@ pub fn cast_spell_target_system(
     target_query: Query<&Target>,
     mut npc_query: Query<BaseQueryMutState, With<SubclassNPC>>,
     obj_query: Query<BaseQueryEffects, Without<SubclassNPC>>, // Without required to prevent disjointed queries
+    crisis_assault_query: Query<&CrisisAssaultUnit>,
     fortified_query: Query<&Fortified>,
     mut query: Query<(&Actor, &mut ActionState, &CastSpellTarget)>,
 ) {
@@ -7804,6 +8196,22 @@ pub fn cast_spell_target_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                let actor_assault = crisis_assault_query.get(*actor).ok();
+                if !personal_assault_allows_target_owner(actor_assault, Some(target.player_id.0)) {
+                    npc_warn!(
+                        *actor,
+                        obj_id,
+                        npc_name,
+                        "Rejecting personal-assault spell target id={} owner={} expected_owner={:?}",
+                        target.id.0,
+                        target.player_id.0,
+                        actor_assault.map(|assault| assault.owner_player_id)
+                    );
+                    commands.entity(*actor).try_remove::<Target>();
+                    *state = ActionState::Failure;
+                    continue;
+                }
 
                 if let Some(errmsg) = Combat::fortified_outbound_attack_error(
                     npc.effects,
