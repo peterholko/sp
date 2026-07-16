@@ -1494,6 +1494,9 @@ const PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE: u32 = 3;
 const PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT: usize = 96;
 pub(crate) const GOBLIN_ASSAULT_COMPOSITION: [&str; 3] =
     ["Wolf Rider", "Wolf Rider", "Goblin Pillager"];
+pub(crate) const UNDEAD_ASSAULT_STANDARD_UNITS: [&str; 5] =
+    ["Zombie", "Zombie", "Zombie", "Skeleton", "Skeleton"];
+const UNDEAD_ASSAULT_NECROMANCER: &str = "Necromancer";
 
 pub fn goblin_crisis_balance_config_snapshot() -> GoblinCrisisBalanceConfigSnapshot {
     GoblinCrisisBalanceConfigSnapshot {
@@ -1890,7 +1893,7 @@ fn undead_crisis_phase_presentation(
         CrisisPhase::AssaultActive => (
             "Settlement Under Undead Attack",
             "An undead incursion is attacking your settlement.",
-            "Defeat the remaining attackers.",
+            "Defeat the remaining undead. This assault continues if you disconnect.",
             "crisis",
         ),
         CrisisPhase::Resolved => (
@@ -2328,8 +2331,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         (None, None)
     };
 
-    let goblin_assault_ready = crisis.kind == CrisisKind::Goblin && assault_ready;
-    let preparation_seconds_remaining = goblin_assault_ready.then(|| {
+    let preparation_seconds_remaining = assault_ready.then(|| {
         let remaining_ticks = (ASSAULT_READY_GRACE_TICKS - crisis.phase_online_ticks).max(0);
         (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
     });
@@ -2352,7 +2354,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         remaining_attackers,
         total_attackers,
         preparation_seconds_remaining,
-        preferred_launch_window: goblin_assault_ready.then(|| "dusk_or_night".to_string()),
+        preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
         preparation_options: None,
         continues_while_disconnected: assault_active,
     }
@@ -2431,6 +2433,12 @@ fn crisis_transition_notice(kind: CrisisKind, phase: CrisisPhase) -> Option<&'st
             Some("The undead are gathering. Prepare your settlement.")
         }
         (CrisisKind::Undead, CrisisPhase::AssaultReady) => Some("An undead incursion is imminent."),
+        (CrisisKind::Undead, CrisisPhase::AssaultActive) => {
+            Some("The undead incursion has begun. It will continue if you disconnect.")
+        }
+        (CrisisKind::Undead, CrisisPhase::Resolved) => {
+            Some("The undead incursion has been defeated.")
+        }
         _ => None,
     }
 }
@@ -3513,7 +3521,9 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                spell_raise_dead_event_system.run_if(in_state(AppState::Running)),
+                spell_raise_dead_event_system
+                    .after(true_death_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -3531,6 +3541,7 @@ impl Plugin for GamePlugin {
                 Update,
                 personal_crisis_assault_system
                     .after(personal_crisis_system)
+                    .after(spell_raise_dead_event_system)
                     .after(sanctuary_zones_sync_system)
                     .after(hero_dead_system)
                     .after(resurrect_system)
@@ -9889,16 +9900,28 @@ fn spell_raise_dead_event_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     presence: Res<PlayerWorldPresenceState>,
-    run_spawned_objs: Res<RunSpawnedObjs>,
+    mut run_spawned_objs: ResMut<RunSpawnedObjs>,
     mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
     pos_query: Query<(&Position, &Template)>,
-    mut caster_query: Query<(&mut State, &mut Minions)>,
+    personal_corpse_query: Query<&CrisisAssaultUnit, With<StateDead>>,
+    mut caster_query: Query<(
+        &mut State,
+        &mut Minions,
+        Option<&CrisisAssaultUnit>,
+        Option<&StateDead>,
+    )>,
+    mut crisis_state: ResMut<SettlementCrisisState>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
-    mut visible_events: ResMut<VisibleEvents>,
     mut event_executing_query: Query<&mut EventExecuting>,
 ) {
     let mut events_to_remove = Vec::new();
+    // `RemoveObj` is deferred, so retain a same-pass claim set for attributed
+    // personal assaults. This makes their successful spell boundary
+    // one-corpse/one-minion even if duplicate map events were queued for the
+    // same source, without changing the retained legacy Raise Dead path.
+    let mut claimed_corpse_ids = HashSet::new();
 
     for (map_event_id, map_event) in map_events.iter_mut() {
         if map_event.run_tick < game_tick.0 {
@@ -9926,16 +9949,6 @@ fn spell_raise_dead_event_system(
                     debug!("Processing SpellRaiseDeadEvent {:?}", corpse_id);
                     events_to_remove.push(*map_event_id);
 
-                    let Some(corpse_entity) = entity_map.get_entity(*corpse_id) else {
-                        error!("Cannot find corpse from {:?}", corpse_id);
-                        continue;
-                    };
-
-                    let Ok((corpse_pos, corpse_template)) = pos_query.get(corpse_entity) else {
-                        error!("Cannot find corpse position {:?}", corpse_entity);
-                        continue;
-                    };
-
                     let Some(caster_entity) = entity_map.get_entity(map_event.obj_id) else {
                         error!("Cannot find caster from {:?}", map_event.obj_id);
                         continue;
@@ -9952,12 +9965,205 @@ fn spell_raise_dead_event_system(
 
                     event_executing.state = EventExecutingState::Executing;
 
-                    let Ok((mut caster_state, mut caster_minions)) =
+                    let Ok((mut caster_state, mut caster_minions, caster_assault, caster_dead)) =
                         caster_query.get_mut(caster_entity)
                     else {
                         error!("Cannot find caster state {:?}", caster_entity);
                         continue;
                     };
+                    let caster_assault = caster_assault.copied();
+
+                    let Some(corpse_entity) = entity_map.get_entity(*corpse_id) else {
+                        error!("Cannot find corpse from {:?}", corpse_id);
+                        event_executing.state = EventExecutingState::Failed;
+                        if caster_dead.is_none() && !Obj::is_dead(&*caster_state) {
+                            *caster_state = State::None;
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                        }
+                        commands.entity(caster_entity).insert(EventCompleted {
+                            event_id: map_event.event_id,
+                            event_type: "spell_raise_dead".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        continue;
+                    };
+
+                    let Ok((corpse_pos, corpse_template)) = pos_query.get(corpse_entity) else {
+                        error!("Cannot find corpse position {:?}", corpse_entity);
+                        event_executing.state = EventExecutingState::Failed;
+                        if caster_dead.is_none() && !Obj::is_dead(&*caster_state) {
+                            *caster_state = State::None;
+                            commands.trigger(StateChange {
+                                entity: caster_entity,
+                                new_state: State::None,
+                            });
+                        }
+                        commands.entity(caster_entity).insert(EventCompleted {
+                            event_id: map_event.event_id,
+                            event_type: "spell_raise_dead".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        continue;
+                    };
+
+                    if let Some(attribution) = caster_assault {
+                        if claimed_corpse_ids.contains(corpse_id) {
+                            warn!(
+                                "personal_crisis_raise_dead_rejected owner_player_id={} assault_id={} generation={} caster_id={} corpse_id={} reason=already_claimed",
+                                attribution.owner_player_id,
+                                attribution.assault_id,
+                                attribution.spawn_generation,
+                                map_event.obj_id,
+                                corpse_id
+                            );
+                            event_executing.state = EventExecutingState::Failed;
+                            if caster_dead.is_none() && !Obj::is_dead(&*caster_state) {
+                                *caster_state = State::None;
+                                commands.trigger(StateChange {
+                                    entity: caster_entity,
+                                    new_state: State::None,
+                                });
+                            }
+                            commands.entity(caster_entity).insert(EventCompleted {
+                                event_id: map_event.event_id,
+                                event_type: "spell_raise_dead".to_string(),
+                                at_tick: game_tick.0,
+                                success: false,
+                            });
+                            continue;
+                        }
+
+                        let source_matches = personal_corpse_query
+                            .get(corpse_entity)
+                            .map(|source_attribution| *source_attribution == attribution)
+                            .unwrap_or(false);
+                        let crisis_matches = crisis_state
+                            .get(&attribution.owner_player_id)
+                            .map(|crisis| {
+                                crisis.kind == CrisisKind::Undead
+                                    && crisis.phase == CrisisPhase::AssaultActive
+                                    && crisis.assault_id == Some(attribution.assault_id)
+                                    && crisis.assault_spawn_generation
+                                        == attribution.spawn_generation
+                                    && crisis.assault_unit_ids.contains(&map_event.obj_id)
+                                    && crisis.assault_unit_ids.contains(corpse_id)
+                                    && !crisis.assault_defeated_unit_ids.contains(&map_event.obj_id)
+                            })
+                            .unwrap_or(false);
+                        let zombie_template_exists = templates
+                            .obj_templates
+                            .iter()
+                            .any(|template| template.template == "Zombie");
+
+                        if caster_dead.is_some()
+                            || Obj::is_dead(&*caster_state)
+                            || !source_matches
+                            || !crisis_matches
+                            || !zombie_template_exists
+                        {
+                            warn!(
+                                "personal_crisis_raise_dead_rejected owner_player_id={} assault_id={} generation={} caster_id={} corpse_id={} source_matches={} crisis_matches={} template_exists={}",
+                                attribution.owner_player_id,
+                                attribution.assault_id,
+                                attribution.spawn_generation,
+                                map_event.obj_id,
+                                corpse_id,
+                                source_matches,
+                                crisis_matches,
+                                zombie_template_exists
+                            );
+                            event_executing.state = EventExecutingState::Failed;
+                            if caster_dead.is_none() && !Obj::is_dead(&*caster_state) {
+                                *caster_state = State::None;
+                                commands.trigger(StateChange {
+                                    entity: caster_entity,
+                                    new_state: State::None,
+                                });
+                            }
+                            commands
+                                .entity(caster_entity)
+                                .try_remove::<Target>()
+                                .insert(EventCompleted {
+                                    event_id: map_event.event_id,
+                                    event_type: "spell_raise_dead".to_string(),
+                                    at_tick: game_tick.0,
+                                    success: false,
+                                });
+                            continue;
+                        }
+
+                        *caster_state = State::None;
+                        commands.trigger(StateChange {
+                            entity: caster_entity,
+                            new_state: State::None,
+                        });
+
+                        claimed_corpse_ids.insert(*corpse_id);
+                        let minion_id = ids.new_obj_id();
+                        let (minion_entity, _, _, _) = Encounter::spawn_npc_with_id(
+                            minion_id,
+                            NPC_PLAYER_ID,
+                            *corpse_pos,
+                            "Zombie".to_string(),
+                            &mut commands,
+                            &mut ids,
+                            &mut entity_map,
+                            &templates,
+                        );
+                        commands.entity(minion_entity).insert((
+                            attribution,
+                            Viewshed {
+                                range: PERSONAL_ASSAULT_VISION,
+                            },
+                        ));
+                        commands.trigger(NewObj {
+                            entity: minion_entity,
+                        });
+
+                        if !caster_minions.ids.contains(&minion_id) {
+                            caster_minions.ids.push(minion_id);
+                        }
+                        let crisis = crisis_state
+                            .get_mut(&attribution.owner_player_id)
+                            .expect("validated active personal crisis disappeared");
+                        if !crisis.assault_defeated_unit_ids.contains(corpse_id) {
+                            crisis.assault_defeated_unit_ids.push(*corpse_id);
+                        }
+                        if !crisis.assault_unit_ids.contains(&minion_id) {
+                            crisis.assault_unit_ids.push(minion_id);
+                        }
+                        let spawned = run_spawned_objs
+                            .entry(attribution.owner_player_id)
+                            .or_default();
+                        if !spawned.contains(&minion_id) {
+                            spawned.push(minion_id);
+                        }
+
+                        info!(
+                            "personal_crisis_raise_dead_completed owner_player_id={} assault_id={} generation={} caster_id={} corpse_id={} minion_id={}",
+                            attribution.owner_player_id,
+                            attribution.assault_id,
+                            attribution.spawn_generation,
+                            map_event.obj_id,
+                            corpse_id,
+                            minion_id
+                        );
+                        commands.trigger(RemoveObj {
+                            entity: corpse_entity,
+                        });
+                        commands.entity(caster_entity).insert(EventCompleted {
+                            event_id: map_event.event_id,
+                            event_type: "spell_raise_dead".to_string(),
+                            at_tick: game_tick.0,
+                            success: true,
+                        });
+                        continue;
+                    }
 
                     // Change state to casting
                     *caster_state = State::None;
@@ -9970,7 +10176,9 @@ fn spell_raise_dead_event_system(
                     let minion_id = ids.new_obj_id();
 
                     // Add to list of minions
-                    caster_minions.ids.push(minion_id);
+                    if !caster_minions.ids.contains(&minion_id) {
+                        caster_minions.ids.push(minion_id);
+                    }
 
                     // Spawn weaker Shipwreck Zombie for Human Corpses (shipwreck sailors)
                     let zombie_type = if corpse_template.0 == "Human Corpse" {
@@ -10006,11 +10214,12 @@ fn spell_raise_dead_event_system(
                     game_events.insert(event.event_id, event);
 
                     info!("Removing corpse {:?}", corpse_entity);
-                    // Remove corpse
+                    // Preserve the legacy system's established removal
+                    // sequence. Personal-assault corpses use the canonical
+                    // observer-only path above because their same-pass claim
+                    // closes the deferred duplicate-event window.
                     commands.entity(corpse_entity).despawn();
                     entity_map.remove_obj(*corpse_id);
-
-                    // Remove obj observer event
                     commands.trigger(RemoveObj {
                         entity: corpse_entity,
                     });
@@ -10109,6 +10318,38 @@ fn spell_damage_event_system(
                     };
 
                     if Obj::is_dead(&caster.state) {
+                        continue;
+                    }
+
+                    if caster
+                        .crisis_assault
+                        .map(|attribution| target.player_id.0 != attribution.owner_player_id)
+                        .unwrap_or(false)
+                    {
+                        warn!(
+                            "personal_crisis_spell_damage_rejected caster_id={} target_id={} target_owner={} expected_owner={:?}",
+                            caster.id.0,
+                            target.id.0,
+                            target.player_id.0,
+                            caster
+                                .crisis_assault
+                                .map(|attribution| attribution.owner_player_id)
+                        );
+                        event_executing.state = EventExecutingState::Failed;
+                        *caster.state = State::None;
+                        commands.trigger(StateChange {
+                            entity: caster_entity,
+                            new_state: State::None,
+                        });
+                        commands
+                            .entity(caster_entity)
+                            .try_remove::<Target>()
+                            .insert(EventCompleted {
+                                event_id: map_event.event_id,
+                                event_type: "spell_damage".to_string(),
+                                at_tick: game_tick.0,
+                                success: false,
+                            });
                         continue;
                     }
 
@@ -13896,9 +14137,9 @@ fn rat_event_system(
     }
 }
 
-/// Evaluates the ordered personal-crisis sequence. Goblin retains its existing
-/// behavior; Checkpoint 1 advances Undead only through `AssaultReady` and has
-/// no Commands, combat spawning, rewards, or database I/O.
+/// Evaluates pressure and online-only phase clocks for the ordered personal
+/// crisis sequence. Assault launch, combat ownership, and resolution remain in
+/// the shared assault lifecycle system.
 fn personal_crisis_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
@@ -13984,14 +14225,18 @@ fn personal_crisis_system(
 
         let Some(intro) = player_intro_state.get(player_id) else {
             if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
-                advance_online_crisis_time(crisis, current_tick, false);
+                if !(crisis.kind == CrisisKind::Undead && crisis.phase == CrisisPhase::Resolved) {
+                    advance_online_crisis_time(crisis, current_tick, false);
+                }
             }
             continue;
         };
 
         if !valid_run {
             if let Some(crisis) = settlement_crisis_state.get_mut(player_id) {
-                advance_online_crisis_time(crisis, current_tick, false);
+                if !(crisis.kind == CrisisKind::Undead && crisis.phase == CrisisPhase::Resolved) {
+                    advance_online_crisis_time(crisis, current_tick, false);
+                }
             }
             continue;
         }
@@ -14059,6 +14304,13 @@ fn personal_crisis_system(
             }
             // The resolved Goblin and a newly-created Undead are both kept
             // observably unchanged for this evaluation.
+            continue;
+        }
+
+        // The configured sequence ends after Undead. Keep its final snapshot
+        // byte-for-byte stable instead of continuing to recompute pressure or
+        // credit phase/online clocks while the resolved status remains visible.
+        if crisis.kind == CrisisKind::Undead && crisis.phase == CrisisPhase::Resolved {
             continue;
         }
 
@@ -14173,7 +14425,9 @@ fn personal_crisis_system(
     // watermark up without crediting that interval, so a later recreation or
     // ECS repair cannot backfill missing-hero time.
     for (player_id, crisis) in settlement_crisis_state.iter_mut() {
-        if !hero_runs.contains_key(player_id) && !is_player_offline_protected(*player_id, &presence)
+        if !hero_runs.contains_key(player_id)
+            && !(crisis.kind == CrisisKind::Undead && crisis.phase == CrisisPhase::Resolved)
+            && !is_player_offline_protected(*player_id, &presence)
         {
             advance_online_crisis_time(crisis, current_tick, false);
         }
@@ -15010,26 +15264,31 @@ fn personal_assault_spawn_positions(
 
 #[derive(Debug, PartialEq, Eq)]
 enum AssaultSpawnError {
-    EmptyComposition,
     PositionCountMismatch,
     MissingTemplate(String),
 }
 
-fn spawn_goblin_assault(
-    owner_player_id: i32,
-    assault_id: u64,
-    spawn_generation: u32,
-    unit_templates: &[String],
-    spawn_positions: &[Position],
-    commands: &mut Commands,
-    ids: &mut ResMut<Ids>,
-    entity_map: &mut ResMut<EntityObjMap>,
-    templates: &Res<Templates>,
-    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
-) -> Result<Vec<i32>, AssaultSpawnError> {
-    if unit_templates.is_empty() {
-        return Err(AssaultSpawnError::EmptyComposition);
+fn personal_crisis_standard_unit_templates(kind: CrisisKind) -> &'static [&'static str] {
+    match kind {
+        CrisisKind::Goblin => &GOBLIN_ASSAULT_COMPOSITION,
+        CrisisKind::Undead => &UNDEAD_ASSAULT_STANDARD_UNITS,
     }
+}
+
+fn personal_crisis_assault_templates(kind: CrisisKind) -> Vec<&'static str> {
+    let mut templates = personal_crisis_standard_unit_templates(kind).to_vec();
+    if kind == CrisisKind::Undead {
+        templates.push(UNDEAD_ASSAULT_NECROMANCER);
+    }
+    templates
+}
+
+fn validate_personal_crisis_assault_spawn(
+    kind: CrisisKind,
+    spawn_positions: &[Position],
+    templates: &Templates,
+) -> Result<(), AssaultSpawnError> {
+    let unit_templates = personal_crisis_assault_templates(kind);
     if unit_templates.len() != spawn_positions.len() {
         return Err(AssaultSpawnError::PositionCountMismatch);
     }
@@ -15037,20 +15296,65 @@ fn spawn_goblin_assault(
         if !templates
             .obj_templates
             .iter()
-            .any(|candidate| candidate.template == *template)
+            .any(|candidate| candidate.template == template)
         {
-            return Err(AssaultSpawnError::MissingTemplate(template.clone()));
+            return Err(AssaultSpawnError::MissingTemplate(template.to_string()));
         }
     }
+    Ok(())
+}
+
+fn spawn_personal_crisis_assault(
+    kind: CrisisKind,
+    owner_player_id: i32,
+    assault_id: u64,
+    spawn_generation: u32,
+    spawn_positions: &[Position],
+    commands: &mut Commands,
+    ids: &mut ResMut<Ids>,
+    entity_map: &mut ResMut<EntityObjMap>,
+    templates: &Res<Templates>,
+    run_spawned_objs: &mut ResMut<RunSpawnedObjs>,
+) -> Result<Vec<i32>, AssaultSpawnError> {
+    validate_personal_crisis_assault_spawn(kind, spawn_positions, templates)?;
 
     // Template and position validation happens before the first deferred spawn,
     // so this loop is an all-or-nothing logical operation in the current ECS.
-    let mut spawned_ids = Vec::with_capacity(unit_templates.len());
-    for (template, spawn_pos) in unit_templates.iter().zip(spawn_positions.iter()) {
+    let standard_templates = personal_crisis_standard_unit_templates(kind);
+    let mut spawned_ids = Vec::with_capacity(personal_crisis_assault_templates(kind).len());
+    for (template, spawn_pos) in standard_templates.iter().zip(spawn_positions.iter()) {
         let (entity, id, _, _) = Encounter::spawn_npc(
             NPC_PLAYER_ID,
             *spawn_pos,
-            template.clone(),
+            (*template).to_string(),
+            commands,
+            ids,
+            entity_map,
+            templates,
+        );
+        commands.entity(entity).try_insert((
+            CrisisAssaultUnit {
+                owner_player_id,
+                assault_id,
+                spawn_generation,
+            },
+            Viewshed {
+                range: PERSONAL_ASSAULT_VISION,
+            },
+        ));
+        commands.trigger(NewObj { entity });
+        spawned_ids.push(id.0);
+    }
+
+    // The fixed Undead composition retains the active Necromancer's existing
+    // specialized thinker, Minions bookkeeping, spellcasting, Raise Dead, flee,
+    // and Home behavior. Its initial assault tile is also its Home.
+    if kind == CrisisKind::Undead {
+        let necromancer_pos = spawn_positions[standard_templates.len()];
+        let (entity, id, _, _) = Encounter::spawn_necromancer(
+            NPC_PLAYER_ID,
+            necromancer_pos,
+            necromancer_pos,
             commands,
             ids,
             entity_map,
@@ -15120,13 +15424,24 @@ fn record_personal_assault_resolution(
     run_score_state: &mut RunScoreState,
     personal_crisis_history: &mut PersonalCrisisHistory,
 ) -> bool {
-    if crisis.kind != CrisisKind::Goblin
-        || crisis.phase != CrisisPhase::AssaultActive
-        || crisis.resolution_recorded
-    {
+    if crisis.phase != CrisisPhase::AssaultActive || crisis.resolution_recorded {
         return false;
     }
 
+    let history = personal_crisis_history
+        .by_player
+        .get(&player_id)
+        .cloned()
+        .unwrap_or_default();
+    if next_personal_crisis_kind(&history) != Some(crisis.kind) {
+        warn!(
+            "personal_crisis_assault_resolution_rejected player_id={} kind={:?} phase={:?} reason=out_of_sequence game_tick={}",
+            player_id, crisis.kind, crisis.phase, game_tick
+        );
+        return false;
+    }
+
+    let resolved_kind = crisis.kind;
     crisis.resolution_recorded = true;
     crisis.resolved_at_tick = Some(game_tick);
     crisis.phase = CrisisPhase::Resolved;
@@ -15147,11 +15462,12 @@ fn record_personal_assault_resolution(
         .entry(player_id)
         .or_default()
         .completed
-        .insert(CrisisKind::Goblin);
+        .insert(resolved_kind);
 
     info!(
-        "personal_crisis_assault_resolved player_id={} phase={:?} assault_id={:?} generation={} game_tick={} completion_count={}",
+        "personal_crisis_assault_resolved player_id={} kind={:?} phase={:?} assault_id={:?} generation={} game_tick={} completion_count={}",
         player_id,
+        resolved_kind,
         crisis.phase,
         crisis.assault_id,
         crisis.assault_spawn_generation,
@@ -15164,9 +15480,10 @@ fn record_personal_assault_resolution(
     true
 }
 
-/// Owns the Checkpoint 3 transition from ready through committed launch and
-/// normal-combat resolution. A successful launch is the commitment point: an
-/// ordinary disconnect cannot remove, reset, or rebuild the active assault.
+/// Owns the shared personal-crisis transition from ready through committed
+/// launch and normal-combat resolution. A successful launch is the commitment
+/// point: an ordinary disconnect cannot remove, reset, or rebuild the active
+/// assault.
 fn personal_crisis_assault_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -15313,14 +15630,6 @@ fn personal_crisis_assault_system(
             continue;
         };
 
-        // Checkpoint 1 stops Undead at AssaultReady. This kind gate is the
-        // hard safety boundary preventing Goblin ID allocation, composition,
-        // spawning, recovery, or resolution logic from dispatching on a
-        // shared Undead phase value.
-        if crisis.kind != CrisisKind::Goblin {
-            continue;
-        }
-
         // An active assault is committed world state and deliberately keeps
         // running after an ordinary disconnect. Protection is only a launch
         // barrier for the pre-active state; the presence reconciler repairs
@@ -15333,6 +15642,22 @@ fn personal_crisis_assault_system(
 
         match crisis.phase {
             CrisisPhase::AssaultReady => {
+                let history = personal_crisis_history
+                    .by_player
+                    .get(&player_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if next_personal_crisis_kind(&history) != Some(crisis.kind) {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} kind={:?} phase={:?} reason=out_of_sequence game_tick={}",
+                            player_id, crisis.kind, crisis.phase, current_tick
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+
                 // Ready state never reuses a prior logical assault. Once an ID
                 // is committed the crisis must already be AssaultActive (or
                 // Resolved); anything else requires explicit recovery rather
@@ -15415,7 +15740,7 @@ fn personal_crisis_assault_system(
                 };
                 crisis.assault_anchor_warning_logged = false;
 
-                let unit_templates = GOBLIN_ASSAULT_COMPOSITION
+                let unit_templates = personal_crisis_assault_templates(crisis.kind)
                     .iter()
                     .map(|template| (*template).to_string())
                     .collect::<Vec<_>>();
@@ -15446,6 +15771,26 @@ fn personal_crisis_assault_system(
                     continue;
                 };
 
+                // Validate the complete kind-specific composition before an
+                // assault ID is consumed or the first deferred entity exists.
+                if let Err(error) =
+                    validate_personal_crisis_assault_spawn(crisis.kind, &unit_positions, &templates)
+                {
+                    if !crisis.assault_spawn_warning_logged {
+                        warn!(
+                            "personal_crisis_assault_spawn_failed player_id={} kind={:?} phase={:?} generation={} error={:?} game_tick={}",
+                            player_id,
+                            crisis.kind,
+                            crisis.phase,
+                            crisis.assault_spawn_generation.saturating_add(1),
+                            error,
+                            current_tick
+                        );
+                        crisis.assault_spawn_warning_logged = true;
+                    }
+                    continue;
+                }
+
                 let Some(assault_id) = next_assault_id.allocate() else {
                     if !crisis.assault_spawn_warning_logged {
                         error!(
@@ -15459,11 +15804,11 @@ fn personal_crisis_assault_system(
                     continue;
                 };
                 let generation = crisis.assault_spawn_generation.saturating_add(1);
-                match spawn_goblin_assault(
+                match spawn_personal_crisis_assault(
+                    crisis.kind,
                     player_id,
                     assault_id,
                     generation,
-                    &unit_templates,
                     &unit_positions,
                     &mut commands,
                     &mut ids,
@@ -15478,7 +15823,9 @@ fn personal_crisis_assault_system(
                         // final Ready interval at the successful launch
                         // commitment point before changing the phase. This is
                         // opt-in and runs at most once per committed assault.
-                        if balance_telemetry_config.sample_interval_ticks.is_some() {
+                        if crisis.kind == CrisisKind::Goblin
+                            && balance_telemetry_config.sample_interval_ticks.is_some()
+                        {
                             let (_, mut current) = crisis_preparation_snapshot(
                                 player_id,
                                 crisis,
@@ -15509,22 +15856,25 @@ fn personal_crisis_assault_system(
                         crisis.phase_online_ticks = 0;
                         crisis.assault_recovery_required = false;
                         crisis.assault_spawn_warning_logged = false;
-                        crisis_telemetry_state
-                            .entry(player_id)
-                            .or_default()
-                            .record_launch(current_tick);
-                        let balance = balance_telemetry_state.entry(player_id).or_default();
-                        balance.record_phase(
-                            CrisisPhase::AssaultActive,
-                            current_tick,
-                            crisis.online_active_ticks,
-                        );
-                        balance
-                            .assault_outcome
-                            .record_launch_units(&crisis.assault_unit_ids);
+                        if crisis.kind == CrisisKind::Goblin {
+                            crisis_telemetry_state
+                                .entry(player_id)
+                                .or_default()
+                                .record_launch(current_tick);
+                            let balance = balance_telemetry_state.entry(player_id).or_default();
+                            balance.record_phase(
+                                CrisisPhase::AssaultActive,
+                                current_tick,
+                                crisis.online_active_ticks,
+                            );
+                            balance
+                                .assault_outcome
+                                .record_launch_units(&crisis.assault_unit_ids);
+                        }
                         info!(
-                            "personal_crisis_assault_launched player_id={} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
+                            "personal_crisis_assault_launched player_id={} kind={:?} phase={:?} assault_id={} generation={} game_tick={} online=true unit_count={} templates={:?} anchor_kind={} anchor_id={} anchor=({}, {}) spawn_positions={:?}",
                             player_id,
+                            crisis.kind,
                             crisis.phase,
                             assault_id,
                             generation,
@@ -15555,6 +15905,22 @@ fn personal_crisis_assault_system(
                 }
             }
             CrisisPhase::AssaultActive => {
+                let history = personal_crisis_history
+                    .by_player
+                    .get(&player_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if next_personal_crisis_kind(&history) != Some(crisis.kind) {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} kind={:?} phase={:?} reason=out_of_sequence game_tick={}",
+                            player_id, crisis.kind, crisis.phase, current_tick
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
+
                 let Some(assault_id) = crisis.assault_id else {
                     if !crisis.assault_recovery_required {
                         warn!(
@@ -15639,6 +16005,36 @@ fn personal_crisis_assault_system(
                     crisis.assault_recovery_required = true;
                     continue;
                 }
+
+                // Raise Dead extends the committed roster. A matching live
+                // object that was not atomically appended to that roster is a
+                // recovery condition, never evidence that the assault ended.
+                let untracked_live_ids = unit_snapshots
+                    .iter()
+                    .filter(|unit| {
+                        unit.attribution.owner_player_id == player_id
+                            && unit.attribution.assault_id == assault_id
+                            && unit.attribution.spawn_generation == generation
+                            && !unit.normally_dead
+                            && !crisis.assault_unit_ids.contains(&unit.id)
+                    })
+                    .map(|unit| unit.id)
+                    .collect::<Vec<_>>();
+                if !untracked_live_ids.is_empty() {
+                    if !crisis.assault_recovery_required {
+                        warn!(
+                            "personal_crisis_assault_recovery_required player_id={} phase={:?} assault_id={} generation={} reason=untracked_live_units ids={:?} game_tick={}",
+                            player_id,
+                            crisis.phase,
+                            assault_id,
+                            generation,
+                            untracked_live_ids,
+                            current_tick
+                        );
+                    }
+                    crisis.assault_recovery_required = true;
+                    continue;
+                }
                 crisis.assault_recovery_required = false;
 
                 if crisis
@@ -15661,7 +16057,8 @@ fn personal_crisis_assault_system(
                         crisis,
                         &mut run_score_state,
                         &mut personal_crisis_history,
-                    ) {
+                    ) && crisis.kind == CrisisKind::Goblin
+                    {
                         crisis_telemetry_state
                             .entry(player_id)
                             .or_default()
@@ -20247,6 +20644,18 @@ fn true_death_system(
             player_intro_state.remove(&player_id.0);
             initial_encounter_state.remove(&player_id.0);
             intro_encounter_state.remove(&player_id.0);
+            let cleanup_assault =
+                settlement_crisis_state
+                    .get(&player_id.0)
+                    .and_then(|personal_crisis| {
+                        personal_crisis
+                            .assault_id
+                            .map(|assault_id| CrisisAssaultUnit {
+                                owner_player_id: player_id.0,
+                                assault_id,
+                                spawn_generation: personal_crisis.assault_spawn_generation,
+                            })
+                    });
             if let Some(personal_crisis) = settlement_crisis_state.get(&player_id.0) {
                 if personal_crisis.assault_id.is_some() {
                     info!(
@@ -20306,21 +20715,20 @@ fn true_death_system(
             for (obj_entity, obj_id, obj_player_id, _obj_pos, crisis_assault) in
                 cleanup_query.iter()
             {
-                // Another player's explicitly attributed personal assault is
-                // never collateral cleanup.
-                if crisis_assault
-                    .map(|assault| assault.owner_player_id != player_id.0)
-                    .unwrap_or(false)
-                {
+                // An attributed combatant belongs to this cleanup only when
+                // all three identity fields match the committed assault. This
+                // prevents a stale or neighbouring generation from becoming
+                // collateral merely because it shares an owner ID.
+                let matching_assault = crisis_assault
+                    .map(|assault| Some(*assault) == cleanup_assault)
+                    .unwrap_or(false);
+                if crisis_assault.is_some() && !matching_assault {
                     continue;
                 }
                 let owned_by_dead_player = obj_player_id.0 == player_id.0;
                 let spawned_for_this_run = run_objs.contains(&obj_id.0);
-                let attributed_to_dead_run = crisis_assault
-                    .map(|assault| assault.owner_player_id == player_id.0)
-                    .unwrap_or(false);
 
-                if owned_by_dead_player || spawned_for_this_run || attributed_to_dead_run {
+                if owned_by_dead_player || spawned_for_this_run || matching_assault {
                     removed_obj_ids.push(obj_id.0);
                     ids.remove_obj(obj_id.0);
                     if entity_map.get_entity(obj_id.0) == Some(obj_entity) {
