@@ -20,7 +20,6 @@ use crate::obj::{
 };
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
-use crate::world::get_time_of_day;
 
 use crate::common::{
     Destination, Drink, Eat, Heat, Hunger, Idle, MoveTo, Sleep, Thirst, Tired, Transport,
@@ -42,8 +41,8 @@ use crate::{
     obj::Obj,
     obj::{
         ActiveTask, Class, ClassStructure, HeroClass, HeroClassProfile, Id, Misc, Name, Order,
-        PlayerId, Position, State, StateAboard, Stats, Storage, Subclass, SubclassHero,
-        SubclassVillager, Template, Viewshed,
+        PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassHero, SubclassVillager,
+        Template, Viewshed,
     },
     recipe::Recipes,
     skill::Skills,
@@ -113,119 +112,6 @@ pub fn new(
 
     info!("Nearest monolith: {:?}", monolith_id);
     info!("Nearest monolith position: {:?}", monolith_pos);
-
-    let burrow_id = ids.new_obj_id();
-    let structure_name = "Burrow".to_string();
-    let structure_template = templates.obj_templates.get(structure_name.clone());
-
-    let mut burrow_inventory = Inventory {
-        owner: burrow_id,
-        items: Vec::new(),
-    };
-
-    // Burrow starting items (reward for checking storage)
-    let mut feed_attrs = HashMap::new();
-    feed_attrs.insert(item::AttrKey::Feed, item::AttrVal::Num(100.0));
-
-    burrow_inventory.new_with_attrs(
-        ids.new_item_id(),
-        burrow_id,
-        "Honeybell Berries".to_string(),
-        5,
-        feed_attrs,
-        &templates.item_templates,
-    );
-    // Keep starter gold under the 30-gold goblin-raid threshold
-    // (goblin_raid_system): 50 tripped the tier-3 crisis ~80s into every run
-    // before the player made any choice.
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Gold Coins".to_string(),
-        20,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Valleyrun Copper Ingot".to_string(),
-        3,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Timber".to_string(),
-        3,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Springbranch Maple Log".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Yurt Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        FISHING_ROD.to_string(),
-        1,
-        &templates.item_templates,
-    );
-    burrow_inventory.new(
-        ids.new_item_id(),
-        "Mine Deed".to_string(),
-        1,
-        &templates.item_templates,
-    );
-
-    let structure: Obj = Obj {
-        id: Id(burrow_id),
-        player_id: PlayerId(player_id),
-        position: Position {
-            x: start_location.burrow_pos[0],
-            y: start_location.burrow_pos[1],
-        },
-        name: Name("Burrow".into()),
-        template: Template("Burrow".into()),
-        class: Class("structure".into()),
-        subclass: Subclass::Storage,
-        state: State::None,
-        misc: Misc {
-            image: "burrow".into(),
-            hsl: Vec::new(),
-            groups: Vec::new(),
-        },
-        stats: Stats {
-            hp: structure_template.base_hp.unwrap_or(100),
-            base_hp: structure_template.base_hp.unwrap_or(100), // Convert option to non-option
-            stamina: None,
-            mana: None,
-            base_stamina: None,
-            base_mana: None,
-            base_def: 0,
-            base_damage: None,
-            damage_range: None,
-            base_speed: None,
-            base_vision: None,
-        },
-        effects: Effects(HashMap::new()),
-        inventory: burrow_inventory,
-        last_combat_tick: LastCombatTick::default(),
-    };
-
-    let structure_entity_id = commands.spawn((structure, ClassStructure, Storage)).id();
-
-    // New Obj mappings
-    ids.new_obj(burrow_id, player_id);
-    entity_map.new_obj(burrow_id, structure_entity_id);
-
-    // Create a new object event
-    commands.trigger(NewObj {
-        entity: structure_entity_id,
-    });
 
     /*
     let stockade_id = ids.new_obj_id();
@@ -302,57 +188,8 @@ pub fn new(
         owner: hero_id,
     };
 
-    // Hero starting inventory (immediate essentials only)
-    inventory.new(
-        ids.new_item_id(),
-        "Firewood".to_string(),
-        10,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Flint Shard".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Resin".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Stick".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Waterskin (Filled)".to_string(),
-        5,
-        &templates.item_templates,
-    );
-    inventory.new(
-        ids.new_item_id(),
-        "Salted Meat Strip".to_string(),
-        2,
-        &templates.item_templates,
-    );
-    // Bedroll enables auto-sleep (hero_auto_consume_system) — without one,
-    // tiredness has no automatic counter and Exhaustion silently ends the run.
-    inventory.new(
-        ids.new_item_id(),
-        "Bedroll".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    let sharpened_stick = inventory.new(
-        ids.new_item_id(),
-        "Sharpened Stick".to_string(),
-        1,
-        &templates.item_templates,
-    );
+    // A fresh hero reaches the wreck with clothing only. Survival supplies and
+    // class equipment are recovered manually from that run's Shipwreck below.
     let shirt = inventory.new(
         ids.new_item_id(),
         "Tattered Shirt".to_string(),
@@ -365,82 +202,9 @@ pub fn new(
         1,
         &templates.item_templates,
     );
-    let torch = inventory.new(
-        ids.new_item_id(),
-        "Crude Torch".to_string(),
-        1,
-        &templates.item_templates,
-    );
 
     inventory.equip(shirt.id, Some(Slot::Chest));
     inventory.equip(pants.id, Some(Slot::Pants));
-
-    // Equip torch for night spawns so the hero has visibility
-    let time_of_day = get_time_of_day(game_tick.0);
-    if time_of_day == crate::world::TimeOfDay::Dusk || time_of_day == crate::world::TimeOfDay::Night
-    {
-        inventory.equip(torch.id, Some(Slot::OffHand));
-    }
-
-    match hero_class {
-        HeroClass::Warrior => {
-            // The Copper Training Axe is no longer a starting item — the Warrior
-            // must craft it at a Crafting Tent (recipe granted below). Start with
-            // the crude Sharpened Stick as a stopgap melee weapon.
-            inventory.equip(sharpened_stick.id, Some(Slot::MainHand));
-
-            let mut armor_attrs = HashMap::new();
-            armor_attrs.insert(item::AttrKey::Defense, item::AttrVal::Num(3.0));
-
-            let helm = inventory.new_with_attrs(
-                ids.new_item_id(),
-                hero_id,
-                "Copper Helm".to_string(),
-                1,
-                armor_attrs,
-                &templates.item_templates,
-            );
-            inventory.equip(helm.0.id, Some(Slot::Helm));
-        }
-        HeroClass::Ranger => {
-            let mut bow_attrs = HashMap::new();
-            bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
-            bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
-            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(2.0));
-            bow_attrs.insert(item::AttrKey::Accuracy, item::AttrVal::Num(85.0));
-
-            let bow = inventory.new_with_attrs(
-                ids.new_item_id(),
-                hero_id,
-                "Training Bow".to_string(),
-                1,
-                bow_attrs,
-                &templates.item_templates,
-            );
-            inventory.equip(bow.0.id, Some(Slot::MainHand));
-        }
-        HeroClass::Mage => {
-            inventory.equip(sharpened_stick.id, Some(Slot::MainHand));
-            inventory.new(
-                ids.new_item_id(),
-                "Mana".to_string(),
-                5,
-                &templates.item_templates,
-            );
-        }
-    }
-
-    let mut item_attrs2 = HashMap::new();
-    item_attrs2.insert(item::AttrKey::Healing, item::AttrVal::Num(10.0));
-
-    inventory.new_with_attrs(
-        ids.new_item_id(),
-        hero_id,
-        "Health Potion".to_string(),
-        1,
-        item_attrs2.clone(),
-        &templates.item_templates,
-    );
 
     let hero = Obj {
         id: Id(hero_id),
@@ -537,7 +301,6 @@ pub fn new(
     // available from day 1 (not after ~5 days of gathering Stick+Resin to build
     // one). The bot-side hunt/cook/eat loop bugs that once made an early campfire
     // counterproductive (hunt spinning, cook errands preempting eating) are fixed.
-    let _ = time_of_day;
     {
         // Create campfire with inventory
         let campfire_id = ids.new_obj_id();
@@ -557,11 +320,12 @@ pub fn new(
             &templates,
         );
 
-        // Add 10 firewood items to campfire's inventory
+        // The starting fire remains ordinary inventory-backed fuel so it can be
+        // cooked with or transferred through the existing item systems.
         campfire.inventory.new(
             ids.new_item_id(),
             "Firewood".to_string(),
-            10,
+            5,
             &templates.item_templates,
         );
 
@@ -1156,17 +920,30 @@ pub fn new(
     ids.new_obj(villager_id2, merchant_player_id);
     entity_map.new_obj(villager_id2, villager_entity_id2);*/
 
-    // Create shipwreck with salvageable supplies
+    // Create the run-owned starter salvage cache. The POI remains neutral in
+    // ordinary object ownership; RunSpawnedObjs is the authoritative association
+    // used by the narrow investigation/transfer permission checks.
     let shipwreck_id = ids.new_obj_id();
     let mut shipwreck_inventory = Inventory {
         owner: shipwreck_id,
         items: Vec::new(),
     };
 
-    // Shipwreck items (reward for exploring the wreck)
+    // General survival supplies. The starter-only Sharpened Stick keeps its
+    // normal combat/hunting values and gains Logging 1 because the prescribed
+    // manifest otherwise leaves every class unable to gather the three Logs
+    // required for its first normal Burrow.
+    shipwreck_inventory.new_with_attrs(
+        ids.new_item_id(),
+        shipwreck_id,
+        "Sharpened Stick".to_string(),
+        1,
+        starter_shipwreck_stick_attrs(),
+        &templates.item_templates,
+    );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Training Pick Axe".to_string(),
+        "Crude Torch".to_string(),
         1,
         &templates.item_templates,
     );
@@ -1178,61 +955,124 @@ pub fn new(
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Sickle".to_string(),
+        "Waterskin (Filled)".to_string(),
+        3,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Salted Meat Strip".to_string(),
+        3,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Honeybell Berries".to_string(),
+        3,
+        &templates.item_templates,
+    );
+    let mut health_potion_attrs = HashMap::new();
+    health_potion_attrs.insert(item::AttrKey::Healing, item::AttrVal::Num(10.0));
+    shipwreck_inventory.new_with_attrs(
+        ids.new_item_id(),
+        shipwreck_id,
+        "Health Potion".to_string(),
+        1,
+        health_potion_attrs,
+        &templates.item_templates,
+    );
+
+    // Basic crafting materials.
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Flint Shard".to_string(),
         1,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Bucket".to_string(),
+        "Cragroot Maple Resin".to_string(),
         1,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Cragroot Maple Stick".to_string(),
+        1,
+        &templates.item_templates,
+    );
+
+    // Settlement salvage.
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Springbranch Maple Log".to_string(),
+        2,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Cragroot Maple Timber".to_string(),
-        10,
-        &templates.item_templates,
-    );
-    // Hull logs: the wreck is the early-game wood source. Logs (not Timber)
-    // are what the Stockade requires, and chopping fresh ones needs an axe
-    // that only the Warrior starts with — salvage covers the first walls.
-    shipwreck_inventory.new(
-        ids.new_item_id(),
-        "Cragroot Maple Log".to_string(),
-        10,
-        &templates.item_templates,
-    );
-    shipwreck_inventory.new(
-        ids.new_item_id(),
-        "Windstride Raw Hide".to_string(),
-        10,
-        &templates.item_templates,
-    );
-    shipwreck_inventory.new(
-        ids.new_item_id(),
-        "Seeds".to_string(),
-        25,
-        &templates.item_templates,
-    );
-    shipwreck_inventory.new(
-        ids.new_item_id(),
-        "Felled Bristleback Boar".to_string(),
         1,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Small Tent Deed".to_string(),
-        1,
+        "Valleyrun Copper Ingot".to_string(),
+        3,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Farm Deed".to_string(),
+        "Gold Coins".to_string(),
+        10,
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        FISHING_ROD.to_string(),
         1,
         &templates.item_templates,
     );
+
+    // Preserve each class's actual inventory equipment and per-instance values,
+    // but recover it from the wreck instead of spawning it on the hero.
+    match hero_class {
+        HeroClass::Warrior => {
+            let mut armor_attrs = HashMap::new();
+            armor_attrs.insert(item::AttrKey::Defense, item::AttrVal::Num(3.0));
+            shipwreck_inventory.new_with_attrs(
+                ids.new_item_id(),
+                shipwreck_id,
+                "Copper Helm".to_string(),
+                1,
+                armor_attrs,
+                &templates.item_templates,
+            );
+        }
+        HeroClass::Ranger => {
+            let mut bow_attrs = HashMap::new();
+            bow_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(8.0));
+            bow_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(2.0));
+            bow_attrs.insert(item::AttrKey::AttackRange, item::AttrVal::Num(2.0));
+            bow_attrs.insert(item::AttrKey::Accuracy, item::AttrVal::Num(85.0));
+            shipwreck_inventory.new_with_attrs(
+                ids.new_item_id(),
+                shipwreck_id,
+                "Training Bow".to_string(),
+                1,
+                bow_attrs,
+                &templates.item_templates,
+            );
+        }
+        HeroClass::Mage => {
+            shipwreck_inventory.new(
+                ids.new_item_id(),
+                "Mana".to_string(),
+                5,
+                &templates.item_templates,
+            );
+        }
+    }
 
     let shipwreck = Obj::create_nospawn(
         shipwreck_id,
@@ -1387,8 +1227,11 @@ pub fn new(
         InitialEncounterEntry {
             rat_ids,
             opening_enemy_templates,
+            opening_enemy_spawned: [false; 2],
+            opening_enemy_defeated: [false; 2],
             phase1_spawn,
             phase1_npc_id: None,
+            phase1_defeated: false,
             spawn_pos: shipwreck_pos,
             villager_spawn_pos,
             first_rat_spawn_tick: game_tick.0 + 900,
@@ -1412,7 +1255,7 @@ pub fn new(
         run_tick: game_tick.0 + 120,
         event_type: GameEventType::PlayerNotice {
             player_id,
-            message: "Survival thread started: inspect the shipwreck, check your burrow, then build fire before dusk.".to_string(),
+            message: "Survival thread started: search the Shipwreck, recover your supplies, and build a Burrow beside the lit Campfire.".to_string(),
             expiry: Some(10000),
         },
     };
@@ -1767,11 +1610,12 @@ pub fn new(
     Ok(())
 }
 
-fn warrior_starting_weapon_attrs() -> HashMap<item::AttrKey, item::AttrVal> {
+fn starter_shipwreck_stick_attrs() -> HashMap<item::AttrKey, item::AttrVal> {
     let mut weapon_attrs = HashMap::new();
-    weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(11.0));
-    weapon_attrs.insert(item::AttrKey::Logging, item::AttrVal::Num(2.0));
-    weapon_attrs.insert(item::AttrKey::DeepWoundChance, item::AttrVal::Num(0.9));
+    weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(1.0));
+    weapon_attrs.insert(item::AttrKey::Speed, item::AttrVal::Num(5.0));
+    weapon_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(1.0));
+    weapon_attrs.insert(item::AttrKey::Logging, item::AttrVal::Num(1.0));
     weapon_attrs
 }
 
@@ -1872,6 +1716,16 @@ pub struct AssignedStartLocations(pub HashMap<i32, StartLocation>);
 #[derive(Debug, Default, Resource, Deref, DerefMut)]
 pub struct RunSpawnedObjs(pub HashMap<i32, Vec<i32>>);
 
+impl RunSpawnedObjs {
+    /// Returns whether an object belongs to the player's current scripted run.
+    /// Neutral POIs such as the starter Shipwreck use this association instead
+    /// of ordinary PlayerId ownership.
+    pub fn contains_for_player(&self, player_id: i32, obj_id: i32) -> bool {
+        self.get(&player_id)
+            .is_some_and(|object_ids| object_ids.contains(&obj_id))
+    }
+}
+
 impl StartLocations {
     pub fn get_start_location(&mut self) -> Result<StartLocation, String> {
         if self.0.len() == 0 {
@@ -1896,25 +1750,33 @@ mod tests {
     use crate::item::{Item, LOG, WEAPON};
 
     #[test]
-    fn warrior_starting_axe_counts_as_log_gathering_tool() {
-        let axe = Item {
+    fn starter_shipwreck_stick_can_gather_the_three_missing_logs() {
+        let stick = Item {
             id: 1,
             owner: 1,
-            name: "Copper Training Axe".to_string(),
+            name: "Sharpened Stick".to_string(),
             quantity: 1,
             durability: None,
             class: WEAPON.to_string(),
-            subclass: "Axe".to_string(),
+            subclass: "Spear".to_string(),
             slot: Some(Slot::MainHand),
-            image: "trainingaxe".to_string(),
+            image: "sharpenedstick".to_string(),
             weight: 10.0,
             equipped: false,
             experiment: None,
             start_time: 0,
-            attrs: warrior_starting_weapon_attrs(),
+            attrs: starter_shipwreck_stick_attrs(),
             produces: Vec::new(),
         };
 
-        assert!(axe.is_gather_tool_for_res_type(LOG));
+        assert!(stick.is_gather_tool_for_res_type(LOG));
+        assert_eq!(
+            stick.attrs.get(&item::AttrKey::Damage),
+            Some(&item::AttrVal::Num(1.0))
+        );
+        assert_eq!(
+            stick.attrs.get(&item::AttrKey::Hunting),
+            Some(&item::AttrVal::Num(1.0))
+        );
     }
 }

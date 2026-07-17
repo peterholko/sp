@@ -880,6 +880,25 @@ fn is_discovery_action_state(state: &State) -> bool {
     )
 }
 
+fn can_access_run_shipwreck(
+    player_id: i32,
+    obj_id: i32,
+    template: &Template,
+    run_spawned_objs: &RunSpawnedObjs,
+) -> bool {
+    template.0 != "Shipwreck" || run_spawned_objs.contains_for_player(player_id, obj_id)
+}
+
+fn send_shipwreck_owner_error(player_id: i32, clients: &Res<Clients>) {
+    send_to_client(
+        player_id,
+        ResponsePacket::Error {
+            errmsg: "This Shipwreck belongs to another survivor.".to_string(),
+        },
+        clients,
+    );
+}
+
 #[derive(QueryData)]
 #[query_data(mutable, derive(Debug))]
 struct ItemTransferQuery {
@@ -4852,12 +4871,23 @@ fn info_monolith_system(
 fn info_poi_system(
     info_poi_event: On<InfoPOIEvent>,
     clients: Res<Clients>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     query: Query<CoreQuery>,
 ) {
     let Ok(obj) = query.get(info_poi_event.entity) else {
         error!("Cannot find obj for {:?}", info_poi_event.entity);
         return;
     };
+
+    if !can_access_run_shipwreck(
+        info_poi_event.player_id,
+        obj.id.0,
+        obj.template,
+        &run_spawned_objs,
+    ) {
+        send_shipwreck_owner_error(info_poi_event.player_id, &clients);
+        return;
+    }
 
     let items_packet = Some(obj.inventory.get_packet());
 
@@ -5452,6 +5482,7 @@ fn info_item_system(
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
     entity_map: Res<EntityObjMap>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     prices: Res<Prices>,
     templates: Res<Templates>,
     query: Query<(&PlayerId, &Name, &Template, &Inventory)>,
@@ -5474,6 +5505,11 @@ fn info_item_system(
                     error!("Cannot find obj template or inventory for {:?}", entity);
                     break;
                 };
+
+                if !can_access_run_shipwreck(*player_id, *id, obj_template, &run_spawned_objs) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
 
                 let capacity = Obj::get_capacity(&obj_template.0, &templates.obj_templates);
                 let total_weight = inventory.get_total_weight();
@@ -5504,6 +5540,11 @@ fn info_item_system(
                     error!("Cannot find obj template or inventory for {:?}", entity);
                     break;
                 };
+
+                if !can_access_run_shipwreck(*player_id, *id, obj_template, &run_spawned_objs) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
 
                 let capacity = Obj::get_capacity(&obj_template.0, &templates.obj_templates);
                 let total_weight = inventory.get_total_weight();
@@ -5536,10 +5577,15 @@ fn info_item_system(
                     break;
                 };
 
-                let Ok((_pid, _obj_name, _obj_template, inventory)) = query.get(entity) else {
+                let Ok((_pid, _obj_name, obj_template, inventory)) = query.get(entity) else {
                     error!("Cannot find obj template or inventory for {:?}", entity);
                     break;
                 };
+
+                if !can_access_run_shipwreck(*player_id, *obj_id, obj_template, &run_spawned_objs) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
 
                 if action == "player_selling_item" {
                     let item = inventory.get_item_packet(*item_id);
@@ -5812,6 +5858,7 @@ fn item_transfer_system(
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut active_infos: ResMut<ActiveInfos>,
     mut query: Query<ItemTransferQuery>,
     selected_upgrade_query: Query<&SelectedUpgrade>,
@@ -5851,6 +5898,21 @@ fn item_transfer_system(
                     error!("Cannot find owner or target from entities {:?}", entities);
                     continue;
                 };
+
+                if !can_access_run_shipwreck(
+                    *player_id,
+                    owner.id.0,
+                    owner.template,
+                    &run_spawned_objs,
+                ) || !can_access_run_shipwreck(
+                    *player_id,
+                    target.id.0,
+                    target.template,
+                    &run_spawned_objs,
+                ) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
 
                 if is_owner_offline_protected(owner.player_id, &presence)
                     || is_owner_offline_protected(target.player_id, &presence)
@@ -6383,6 +6445,21 @@ fn item_transfer_system(
                     continue;
                 };
 
+                if !can_access_run_shipwreck(
+                    *player_id,
+                    source.id.0,
+                    source.template,
+                    &run_spawned_objs,
+                ) || !can_access_run_shipwreck(
+                    *player_id,
+                    target.id.0,
+                    target.template,
+                    &run_spawned_objs,
+                ) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+
                 if !Map::is_adjacent_including_source(*source.pos, *target.pos) {
                     error!("Target is not nearby {:?}", target.id.0);
                     let packet = ResponsePacket::Error {
@@ -6496,7 +6573,8 @@ fn item_split_system(
     entity_map: ResMut<EntityObjMap>,
     clients: Res<Clients>,
     templates: Res<Templates>,
-    mut query: Query<&mut Inventory>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
+    mut query: Query<(&PlayerId, &Template, &mut Inventory)>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -6524,12 +6602,22 @@ fn item_split_system(
                     continue;
                 }
 
-                let Some(owner_player_id) = ids.get_player(*owner_id) else {
-                    error!("Cannot find hero for player {:?}", *player_id);
+                let Some(owner_entity) = entity_map.get_entity(*owner_id) else {
+                    error!("Cannot find owner entity for owner {:?}", *owner_id);
                     continue;
                 };
 
-                if owner_player_id != *player_id {
+                let Ok((owner_player_id, owner_template, mut owner_inventory)) =
+                    query.get_mut(owner_entity)
+                else {
+                    error!("Cannot find owner inventory for {:?}", owner_entity);
+                    continue;
+                };
+
+                let owns_object = owner_player_id.0 == *player_id;
+                let owns_run_shipwreck = owner_template.0 == "Shipwreck"
+                    && run_spawned_objs.contains_for_player(*player_id, *owner_id);
+                if !owns_object && !owns_run_shipwreck {
                     error!("Owner is not owned by player {:?}", *player_id);
                     let packet = ResponsePacket::Error {
                         errmsg: "Owner is not owned by player".to_string(),
@@ -6537,16 +6625,6 @@ fn item_split_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
-
-                let Some(owner_entity) = entity_map.get_entity(*owner_id) else {
-                    error!("Cannot find owner entity for owner {:?}", *owner_id);
-                    continue;
-                };
-
-                let Ok(mut owner_inventory) = query.get_mut(owner_entity) else {
-                    error!("Cannot find owner inventory for {:?}", owner_entity);
-                    continue;
-                };
 
                 let Some(item) = owner_inventory.get_by_id(*item_id) else {
                     error!("Cannot find item for {:?}", *item_id);
@@ -8101,6 +8179,7 @@ fn investigate_system(
     game_tick: Res<GameTick>,
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut map_events: ResMut<MapEvents>,
     query: Query<CoreQuery>,
 ) {
@@ -8160,6 +8239,16 @@ fn investigate_system(
                         errmsg: "You can only investigate points of interest.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !can_access_run_shipwreck(
+                    *player_id,
+                    target.id.0,
+                    target.template,
+                    &run_spawned_objs,
+                ) {
+                    send_shipwreck_owner_error(*player_id, &clients);
                     continue;
                 }
 
@@ -11051,7 +11140,9 @@ fn buy_sell_system(
     clients: Res<Clients>,
     mut prices: ResMut<Prices>,
     templates: Res<Templates>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut query: Query<(&mut Position, &mut Inventory)>,
+    template_query: Query<&Template>,
     mut merchant_query: Query<&mut Merchant>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
@@ -11085,6 +11176,26 @@ fn buy_sell_system(
                     error!("Cannot find entity for {:?}", *seller_id);
                     continue;
                 };
+
+                let Ok(seller_template) = template_query.get(merchant_entity) else {
+                    error!("Cannot find seller template for {:?}", merchant_entity);
+                    continue;
+                };
+                if seller_template.0 == "Shipwreck" {
+                    if !run_spawned_objs.contains_for_player(*player_id, *seller_id) {
+                        send_shipwreck_owner_error(*player_id, &clients);
+                    } else {
+                        send_to_client(
+                            *player_id,
+                            ResponsePacket::Error {
+                                errmsg: "Use item transfer to recover Shipwreck salvage."
+                                    .to_string(),
+                            },
+                            &clients,
+                        );
+                    }
+                    continue;
+                }
 
                 let Ok([(hero_pos, mut hero_inventory), (merchant_pos, mut merchant_inventory)]) =
                     query.get_many_mut([hero_entity, merchant_entity])
@@ -12340,6 +12451,18 @@ mod tests {
             Combat::non_attackable_class_template_error(&class, &template),
             Some("The shipwreck can only be inspected, not attacked.".to_string())
         );
+    }
+
+    #[test]
+    fn starter_shipwreck_access_uses_run_association_without_restricting_other_objects() {
+        let shipwreck = Template("Shipwreck".to_string());
+        let campfire = Template("Campfire".to_string());
+        let run_objects = RunSpawnedObjs(HashMap::from([(7, vec![101, 102])]));
+
+        assert!(can_access_run_shipwreck(7, 101, &shipwreck, &run_objects));
+        assert!(!can_access_run_shipwreck(8, 101, &shipwreck, &run_objects));
+        assert!(!can_access_run_shipwreck(7, 999, &shipwreck, &run_objects));
+        assert!(can_access_run_shipwreck(8, 101, &campfire, &run_objects));
     }
 
     #[test]

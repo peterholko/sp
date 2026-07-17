@@ -230,6 +230,7 @@ export interface ObjectiveProgress {
   target?: string;
   action_hint: string;
   lesson: string;
+  blocker?: string;
   reward: string;
   progress?: number;
   goal?: number;

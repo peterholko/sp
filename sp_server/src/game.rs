@@ -64,8 +64,8 @@ use crate::ids::{EntityObjMap, Ids};
 use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, SOULSHARD};
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
-    self, send_to_client, send_to_database, BroadcastEvents, CrisisPreparationOption,
-    CrisisStatusSnapshot, ObjAttr, RefiningItem,
+    self, send_to_client, send_to_database, BroadcastEvents, CrisisAssaultIntent,
+    CrisisPreparationOption, CrisisStatusSnapshot, ObjAttr, RefiningItem,
 };
 use crate::network::{ResponsePacket, StatsData};
 use crate::npc::{NPCPlugin, VisibleTarget};
@@ -1094,6 +1094,47 @@ pub struct CrisisAssaultUnit {
     pub spawn_generation: u32,
 }
 
+/// Stable jobs for the three attackers in the first personal Goblin raid.
+/// Roles change target priority, not faction ownership, stats, composition,
+/// loot, assault identity, or the normal combat/death lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CrisisAssaultRoleKind {
+    Hunter,
+    Harrier,
+    Breacher,
+}
+
+impl CrisisAssaultRoleKind {
+    pub(crate) const fn machine_name(self) -> &'static str {
+        match self {
+            Self::Hunter => "hunter",
+            Self::Harrier => "harrier",
+            Self::Breacher => "breacher",
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Hunter => "Hunter Rider",
+            Self::Harrier => "Harrier Rider",
+            Self::Breacher => "Breacher Pillager",
+        }
+    }
+
+    pub(crate) const fn intent(self) -> &'static str {
+        match self {
+            Self::Hunter => "Hunts your hero.",
+            Self::Harrier => "Pressures armed defenders, then other settlers.",
+            Self::Breacher => "Breaks through walls toward a settlement core.",
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrisisAssaultRole {
+    pub kind: CrisisAssaultRoleKind,
+}
+
 /// Monotonic process-local identity source for logical personal assaults.
 /// Checkpoint 2 state is runtime-only under the prototype snapshot path, so the
 /// matching identity source is intentionally runtime-only as well.
@@ -1128,6 +1169,10 @@ pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
                //"Moss Mite",
                //"Reef Skitter",
 ];
+
+/// A late Shipwreck search receives enough time to transfer and equip salvage
+/// before the first scheduled opening attacker can appear.
+pub const OPENING_POST_SALVAGE_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
 
 fn random_early_game_enemy_template() -> &'static str {
     let enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
@@ -1279,8 +1324,14 @@ pub struct IntroEncounterState(pub HashMap<i32, PlayerIntroEncounters>);
 pub struct InitialEncounterEntry {
     pub rat_ids: Vec<i32>, // IDs of the two starting enemies
     pub opening_enemy_templates: Vec<String>,
+    /// Runtime history for this run's two scheduled opening enemies. These
+    /// flags, rather than transient entity/corpse presence, are authoritative
+    /// for at-most-once spawn and first-fight completion.
+    pub opening_enemy_spawned: [bool; 2],
+    pub opening_enemy_defeated: [bool; 2],
     pub phase1_spawn: String,       // "Giant Crab" or "Wild Boar"
     pub phase1_npc_id: Option<i32>, // set when phase1 creature spawns
+    pub phase1_defeated: bool,
     pub spawn_pos: Position,
     pub villager_spawn_pos: Position,
     pub first_rat_spawn_tick: i32,
@@ -1300,6 +1351,27 @@ pub struct InitialEncounterEntry {
     pub necro_home: Position,
 }
 
+impl InitialEncounterEntry {
+    fn record_opening_enemy_defeats(&mut self, dead_ids: &HashSet<i32>) {
+        for (index, enemy_id) in self.rat_ids.iter().take(2).enumerate() {
+            if self.opening_enemy_spawned[index] && dead_ids.contains(enemy_id) {
+                self.opening_enemy_defeated[index] = true;
+            }
+        }
+    }
+
+    fn all_opening_enemies_defeated(&self) -> bool {
+        self.opening_enemy_defeated.iter().all(|defeated| *defeated)
+    }
+
+    fn opening_enemy_is_active(&self) -> bool {
+        self.opening_enemy_spawned
+            .iter()
+            .zip(self.opening_enemy_defeated.iter())
+            .any(|(spawned, defeated)| *spawned && !*defeated)
+    }
+}
+
 #[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct InitialEncounterState(pub HashMap<i32, InitialEncounterEntry>);
 
@@ -1311,6 +1383,10 @@ pub struct PlayerObjectives {
     pub win_first_fight: bool,
     pub build_3_structures: bool,
     pub recruit_villager: bool,
+    /// Records that the player has completed the first useful villager step.
+    /// This is observed from a real Assignment and is deliberately excluded
+    /// from crisis pressure and legacy objective scoring.
+    pub assign_first_villager: bool,
     pub explore_poi: bool,
     pub choose_expansion: bool,
     pub survive_5_nights: bool,
@@ -1494,6 +1570,11 @@ const PERSONAL_ASSAULT_NEIGHBOUR_EXCLUSION_DISTANCE: u32 = 3;
 const PERSONAL_ASSAULT_SPAWN_CANDIDATE_LIMIT: usize = 96;
 pub(crate) const GOBLIN_ASSAULT_COMPOSITION: [&str; 3] =
     ["Wolf Rider", "Wolf Rider", "Goblin Pillager"];
+pub(crate) const GOBLIN_ASSAULT_ROLES: [CrisisAssaultRoleKind; 3] = [
+    CrisisAssaultRoleKind::Hunter,
+    CrisisAssaultRoleKind::Harrier,
+    CrisisAssaultRoleKind::Breacher,
+];
 pub(crate) const UNDEAD_ASSAULT_STANDARD_UNITS: [&str; 5] =
     ["Zombie", "Zombie", "Zombie", "Skeleton", "Skeleton"];
 const UNDEAD_ASSAULT_NECROMANCER: &str = "Necromancer";
@@ -1843,8 +1924,8 @@ fn goblin_crisis_phase_presentation(
         ),
         CrisisPhase::AssaultActive => (
             "Settlement Under Attack",
-            "Goblin raiders are attacking your settlement.",
-            "Defeat the remaining attackers. This assault continues if you disconnect.",
+            "Goblin raiders have split their attack between you, your defenders, and the settlement core.",
+            "Intercept the role threatening what you cannot afford to lose. This assault continues if you disconnect.",
             "crisis",
         ),
         CrisisPhase::Resolved => (
@@ -2279,6 +2360,20 @@ fn derive_crisis_preparation_options(
     options
 }
 
+fn add_goblin_raid_role_guidance(options: &mut [CrisisPreparationOption]) {
+    for option in options {
+        match option.id.as_str() {
+            "defences" => option.detail.push_str(
+                " A completed wall on the route to your camp can pin the Breacher and buy time.",
+            ),
+            "defenders" => option.detail.push_str(
+                " An armed villager draws the Harrier away from your hero; an unarmed settler is still at risk.",
+            ),
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisStatusSnapshot {
     let Some(crisis) = crisis else {
         return CrisisStatusSnapshot {
@@ -2301,6 +2396,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
             preparation_seconds_remaining: None,
             preferred_launch_window: None,
             preparation_options: None,
+            assault_intents: None,
             continues_while_disconnected: false,
         };
     };
@@ -2336,6 +2432,26 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
     });
 
+    let assault_intents = (assault_active && crisis.kind == CrisisKind::Goblin).then(|| {
+        let defeated = crisis
+            .assault_defeated_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        crisis
+            .assault_unit_ids
+            .iter()
+            .copied()
+            .zip(GOBLIN_ASSAULT_ROLES)
+            .filter(|(unit_id, _)| !defeated.contains(unit_id))
+            .map(|(_, role)| CrisisAssaultIntent {
+                role: role.machine_name().to_string(),
+                label: role.label().to_string(),
+                intent: role.intent().to_string(),
+            })
+            .collect::<Vec<_>>()
+    });
+
     CrisisStatusSnapshot {
         version: CRISIS_STATUS_VERSION,
         exists: true,
@@ -2356,6 +2472,7 @@ pub(crate) fn build_crisis_status(crisis: Option<&SettlementCrisis>) -> CrisisSt
         preparation_seconds_remaining,
         preferred_launch_window: assault_ready.then(|| "dusk_or_night".to_string()),
         preparation_options: None,
+        assault_intents,
         continues_while_disconnected: assault_active,
     }
 }
@@ -2371,7 +2488,13 @@ fn build_crisis_status_with_preparation(
             CrisisPhase::Preparing | CrisisPhase::AssaultReady
         )
     }) {
-        status.preparation_options = facts.map(derive_crisis_preparation_options);
+        status.preparation_options = facts.map(|facts| {
+            let mut options = derive_crisis_preparation_options(facts);
+            if crisis.is_some_and(|crisis| crisis.kind == CrisisKind::Goblin) {
+                add_goblin_raid_role_guidance(&mut options);
+            }
+            options
+        });
     }
     status
 }
@@ -2424,7 +2547,7 @@ fn crisis_transition_notice(kind: CrisisKind, phase: CrisisPhase) -> Option<&'st
         }
         (CrisisKind::Goblin, CrisisPhase::AssaultReady) => Some("A goblin raid is imminent."),
         (CrisisKind::Goblin, CrisisPhase::AssaultActive) => {
-            Some("The goblin assault has begun. It will continue if you disconnect.")
+            Some("The goblin assault has split three ways: a Hunter seeks you, a Harrier pressures your settlers, and a Breacher moves on the settlement. It will continue if you disconnect.")
         }
         (CrisisKind::Goblin, CrisisPhase::Resolved) => {
             Some("The goblin assault has been defeated.")
@@ -2876,8 +2999,10 @@ fn shipwreck_inspection_can_spawn_villager(
     game_tick: i32,
     entry: &InitialEncounterEntry,
     objectives: Option<&PlayerObjectives>,
+    has_burrow: bool,
 ) -> bool {
     game_tick >= entry.villager_ready_tick
+        && has_burrow
         && objectives
             .map(|obj| obj.scavenge_shipwreck)
             .unwrap_or(false)
@@ -3618,7 +3743,9 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                objectives_system.run_if(in_state(AppState::Running)),
+                objectives_system
+                    .after(initial_encounter_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -4255,6 +4382,16 @@ fn initial_encounter_object_owner(
             || entry.rat_ids.contains(&object_id)
             || entry.phase1_npc_id == Some(object_id))
         .then_some(*player_id)
+    })
+}
+
+fn opening_encounter_enemy_owner(
+    object_id: i32,
+    encounters: &InitialEncounterState,
+) -> Option<i32> {
+    encounters.iter().find_map(|(player_id, entry)| {
+        (entry.rat_ids.contains(&object_id) || entry.phase1_npc_id == Some(object_id))
+            .then_some(*player_id)
     })
 }
 
@@ -7934,8 +8071,8 @@ fn structure_craft_event_system(
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut crafter_query: Query<(&State, &mut Skills)>,
-    mut query: Query<(&Template, &mut Inventory, &mut WorkQueue)>,
+    mut crafter_query: Query<(&Position, &State, &mut Skills, Has<SubclassVillager>)>,
+    mut query: Query<(&Position, &Template, &mut Inventory, &mut WorkQueue)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -7974,7 +8111,7 @@ fn structure_craft_event_system(
                         continue;
                     };
 
-                    let Ok((crafter_state, mut crafter_skills)) =
+                    let Ok((crafter_pos, crafter_state, mut crafter_skills, is_villager)) =
                         crafter_query.get_mut(crafter_entity)
                     else {
                         error!(
@@ -8002,12 +8139,41 @@ fn structure_craft_event_system(
                         new_state: State::None,
                     });
 
-                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
-                        query.get_mut(structure_entity)
+                    let Ok((
+                        structure_pos,
+                        structure_template,
+                        mut structure_inventory,
+                        mut work_queue_entries,
+                    )) = query.get_mut(structure_entity)
                     else {
                         error!("Cannot find structure from entity {:?}", structure_entity);
                         continue;
                     };
+
+                    // Crafting is structure-bound work. The villager AI already
+                    // walks to the assigned structure, but the completion event is
+                    // authoritative and must reject a worker that was displaced in
+                    // the meantime. Leave the ingredients untouched and make the
+                    // queue entry available so the villager can walk back and retry.
+                    if is_villager && *crafter_pos != *structure_pos {
+                        debug!(
+                            "Cancelling StructureCraftEvent for crafter {:?}: worker at {:?}, structure at {:?}",
+                            crafter_id, crafter_pos, structure_pos
+                        );
+                        for work_entry in work_queue_entries.0.iter_mut() {
+                            if work_entry.worker_id == *crafter_id {
+                                work_entry.worker_id = -1;
+                                work_entry.work_status = WorkStatus::Idle;
+                            }
+                        }
+                        commands.entity(crafter_entity).insert(EventCompleted {
+                            event_id: Uuid::new_v4(),
+                            event_type: "structure_work_position".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        continue;
+                    }
 
                     let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
                         error!(
@@ -8963,7 +9129,7 @@ fn schedule_early_merchant_signal(
     game_tick: i32,
     ids: &mut ResMut<Ids>,
     game_events: &mut ResMut<GameEvents>,
-    initial_encounter_state: &Res<InitialEncounterState>,
+    initial_encounter_state: &InitialEncounterState,
 ) -> bool {
     let Some(entry) = initial_encounter_state.get(&player_id) else {
         return false;
@@ -9018,7 +9184,7 @@ fn apply_explore_outcome(
     game_tick: &Res<GameTick>,
     map_events: &mut ResMut<MapEvents>,
     game_events: &mut ResMut<GameEvents>,
-    initial_encounter_state: &Res<InitialEncounterState>,
+    initial_encounter_state: &InitialEncounterState,
 ) {
     match outcome {
         ExploreOutcomeKind::ResourceGlimpse => {
@@ -9394,7 +9560,8 @@ fn investigate_event_system(
     mut resources: ResMut<Resources>,
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
-    initial_encounter_state: Res<InitialEncounterState>,
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
+    run_spawned_objs: Res<RunSpawnedObjs>,
     mut investigated_pois: ResMut<InvestigatedPOIs>,
     mut objectives: ResMut<Objectives>,
     mut query: Query<(
@@ -9474,6 +9641,22 @@ fn investigate_event_system(
         let target_is_poi = *target_subclass == Subclass::Poi;
         let target_is_monolith = target_subclass.is_monolith();
 
+        if target_template_name == "Shipwreck"
+            && !run_spawned_objs.contains_for_player(player_id, target_id_value)
+        {
+            *explorer_state = State::None;
+            commands.trigger(StateChange {
+                entity: explorer_entity,
+                new_state: State::None,
+            });
+            send_notice(
+                player_id,
+                "This Shipwreck belongs to another survivor.",
+                &clients,
+            );
+            continue;
+        }
+
         *explorer_state = State::None;
         commands.trigger(StateChange {
             entity: explorer_entity,
@@ -9512,23 +9695,22 @@ fn investigate_event_system(
 
             if target_template_name == "Shipwreck" && !player_obj.scavenge_shipwreck {
                 player_obj.scavenge_shipwreck = true;
+
+                if let Some(entry) = initial_encounter_state.get_mut(&player_id) {
+                    let delayed_first = game_tick.0 + OPENING_POST_SALVAGE_GRACE_TICKS;
+                    entry.first_rat_spawn_tick = entry.first_rat_spawn_tick.max(delayed_first);
+                    entry.second_rat_spawn_tick = entry
+                        .second_rat_spawn_tick
+                        .max(entry.first_rat_spawn_tick + OPENING_POST_SALVAGE_GRACE_TICKS);
+                }
+
                 // BB-A/BB-B: action-driven nudge toward the next objective.
                 send_to_client(
                     player_id,
                     ResponsePacket::Notice {
-                        noticemsg: "Supplies salvaged from the wreck. Build a campfire before dusk — light keeps the dark and its dangers at bay.".to_string(),
+                        noticemsg: "The wreck's supplies are within reach. Transfer and equip what you need, then gather three Logs for a Burrow before danger closes in.".to_string(),
                         expiry: Some(10000),
                     },
-                    &clients,
-                );
-                add_inventory_salvage(
-                    player_id,
-                    investigator_id,
-                    &explorer_template.0,
-                    STATE_INVESTIGATING,
-                    &mut explorer_inventory,
-                    &mut ids,
-                    &templates,
                     &clients,
                 );
             }
@@ -15322,7 +15504,11 @@ fn spawn_personal_crisis_assault(
     // so this loop is an all-or-nothing logical operation in the current ECS.
     let standard_templates = personal_crisis_standard_unit_templates(kind);
     let mut spawned_ids = Vec::with_capacity(personal_crisis_assault_templates(kind).len());
-    for (template, spawn_pos) in standard_templates.iter().zip(spawn_positions.iter()) {
+    for (index, (template, spawn_pos)) in standard_templates
+        .iter()
+        .zip(spawn_positions.iter())
+        .enumerate()
+    {
         let (entity, id, _, _) = Encounter::spawn_npc(
             NPC_PLAYER_ID,
             *spawn_pos,
@@ -15342,6 +15528,13 @@ fn spawn_personal_crisis_assault(
                 range: PERSONAL_ASSAULT_VISION,
             },
         ));
+        if kind == CrisisKind::Goblin {
+            if let Some(role) = GOBLIN_ASSAULT_ROLES.get(index).copied() {
+                commands
+                    .entity(entity)
+                    .try_insert(CrisisAssaultRole { kind: role });
+            }
+        }
         commands.trigger(NewObj { entity });
         spawned_ids.push(id.0);
     }
@@ -15503,6 +15696,7 @@ fn personal_crisis_assault_system(
         mut balance_telemetry_state,
         balance_telemetry_config,
         mut balance_observation_state,
+        mut map_events,
     ): (
         ResMut<Ids>,
         ResMut<EntityObjMap>,
@@ -15515,6 +15709,7 @@ fn personal_crisis_assault_system(
         ResMut<CrisisBalanceTelemetryState>,
         Res<CrisisBalanceTelemetryConfig>,
         ResMut<CrisisBalanceObservationState>,
+        ResMut<MapEvents>,
     ),
     spawn_positions: Res<SpawnPositions>,
     balance_snapshot_queries: CrisisBalanceSnapshotQueries,
@@ -15817,6 +16012,23 @@ fn personal_crisis_assault_system(
                     &mut run_spawned_objs,
                 ) {
                     Ok(spawned_ids) => {
+                        if crisis.kind == CrisisKind::Goblin {
+                            if let (Some(signal_id), Some(signal_pos)) =
+                                (spawned_ids.first(), unit_positions.first())
+                            {
+                                map_events.new(
+                                    *signal_id,
+                                    current_tick + 1,
+                                    VisibleEvent::SoundEvent {
+                                        pos: *signal_pos,
+                                        sound: "A goblin war horn answers from three directions."
+                                            .to_string(),
+                                        intensity: PERSONAL_ASSAULT_VISION as i32,
+                                    },
+                                );
+                            }
+                        }
+
                         // The periodic sampler normally runs after this system
                         // so it can capture launch readiness and outcomes from
                         // AssaultActive. Preserve that ordering, but close the
@@ -16107,6 +16319,7 @@ fn initial_encounter_system(
         (&PlayerId, &State, Option<&StateDead>, Option<&TrueDeath>),
         With<SubclassHero>,
     >,
+    structure_query: Query<(&PlayerId, &Template, &State), With<ClassStructure>>,
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -16121,6 +16334,12 @@ fn initial_encounter_system(
                 && state_dead.is_none()
                 && true_death.is_none())
             .then_some(player_id.0)
+        })
+        .collect();
+    let players_with_burrows: HashSet<i32> = structure_query
+        .iter()
+        .filter_map(|(player_id, template, state)| {
+            (template.0 == "Burrow" && Structure::is_built(*state)).then_some(player_id.0)
         })
         .collect();
 
@@ -16144,56 +16363,56 @@ fn initial_encounter_system(
         let intro_progress = intro_encounter_state
             .entry(*player_id)
             .or_insert_with(PlayerIntroEncounters::default);
-        let all_opening_enemies_dead = entry.rat_ids.iter().all(|id| dead_ids.contains(id));
-
-        if !intro_entry.shipwreck_chain_started && game_tick.0 >= entry.first_rat_spawn_tick {
-            let first_rat_id = entry.rat_ids[0];
-            let first_enemy_template = entry
-                .opening_enemy_templates
-                .get(0)
-                .map(String::as_str)
-                .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[0]);
-            let (entity, _, _, _) = Encounter::spawn_npc_with_id(
-                first_rat_id,
-                NPC_PLAYER_ID,
-                entry.spawn_pos,
-                first_enemy_template.to_string(),
-                &mut commands,
-                &mut ids,
-                &mut entity_map,
-                &templates,
-            );
-            commands.trigger(NewObj { entity });
-            intro_entry.shipwreck_chain_started = true;
-            info!(
-                "Initial Encounter: spawning first {} for player {}",
-                first_enemy_template, player_id
-            );
+        entry.record_opening_enemy_defeats(&dead_ids);
+        if !entry.phase1_defeated
+            && entry
+                .phase1_npc_id
+                .is_some_and(|phase1_id| dead_ids.contains(&phase1_id))
+        {
+            entry.phase1_defeated = true;
         }
+        let all_opening_enemies_defeated = entry.all_opening_enemies_defeated();
 
-        if game_tick.0 >= entry.second_rat_spawn_tick && !dead_ids.contains(&entry.rat_ids[1]) {
-            let second_rat_id = entry.rat_ids[1];
-            if entity_map.get_entity(second_rat_id).is_none() {
-                let second_enemy_template = entry
+        let shipwreck_searched = objectives
+            .get(player_id)
+            .map(|objectives| objectives.scavenge_shipwreck)
+            .unwrap_or(false);
+        if shipwreck_searched {
+            let spawn_ticks = [entry.first_rat_spawn_tick, entry.second_rat_spawn_tick];
+            for (index, due_tick) in spawn_ticks.into_iter().enumerate() {
+                if game_tick.0 < due_tick || entry.opening_enemy_spawned[index] {
+                    continue;
+                }
+                let Some(enemy_id) = entry.rat_ids.get(index).copied() else {
+                    warn!(
+                        "Initial Encounter: missing opening enemy id index={} player_id={}",
+                        index, player_id
+                    );
+                    continue;
+                };
+                let enemy_template = entry
                     .opening_enemy_templates
-                    .get(1)
+                    .get(index)
                     .map(String::as_str)
-                    .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[1]);
+                    .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[index]);
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
-                    second_rat_id,
+                    enemy_id,
                     NPC_PLAYER_ID,
                     entry.spawn_pos,
-                    second_enemy_template.to_string(),
+                    enemy_template.to_string(),
                     &mut commands,
                     &mut ids,
                     &mut entity_map,
                     &templates,
                 );
                 commands.trigger(NewObj { entity });
+                entry.opening_enemy_spawned[index] = true;
                 intro_entry.shipwreck_chain_started = true;
                 info!(
-                    "Initial Encounter: spawning second {} for player {}",
-                    second_enemy_template, player_id
+                    "Initial Encounter: spawning opening enemy {} ({}) for player {}",
+                    index + 1,
+                    enemy_template,
+                    player_id
                 );
             }
         }
@@ -16203,6 +16422,7 @@ fn initial_encounter_system(
                 game_tick.0,
                 entry,
                 objectives.get(player_id),
+                players_with_burrows.contains(player_id),
             )
         {
             let villager_event_id = ids.new_map_event_id();
@@ -16221,7 +16441,7 @@ fn initial_encounter_system(
 
         // Phase 0: waiting for both opening enemies to die, then spawn boar/crab
         if !intro_progress.initial_encounter {
-            if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_dead {
+            if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_defeated {
                 let npc_id = ids.new_obj_id();
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     npc_id,
@@ -16247,28 +16467,26 @@ fn initial_encounter_system(
 
         // Phase 1: waiting for the boar/crab to die → spawn spider
         if !intro_progress.spider_encounter {
-            if let Some(phase1_id) = entry.phase1_npc_id {
-                if game_tick.0 >= entry.spider_unlock_tick && dead_ids.contains(&phase1_id) {
-                    let (entity, spider_id, _, _) = Encounter::spawn_npc(
-                        NPC_PLAYER_ID,
-                        entry.spawn_pos,
-                        "Spider".to_string(),
-                        &mut commands,
-                        &mut ids,
-                        &mut entity_map,
-                        &templates,
-                    );
-                    commands.trigger(NewObj { entity });
-                    run_spawned_objs
-                        .entry(*player_id)
-                        .or_default()
-                        .push(spider_id.0);
-                    intro_progress.spider_encounter = true;
-                    info!(
-                        "Initial Encounter: spawning Spider after {} killed for player {}",
-                        entry.phase1_spawn, player_id
-                    );
-                }
+            if game_tick.0 >= entry.spider_unlock_tick && entry.phase1_defeated {
+                let (entity, spider_id, _, _) = Encounter::spawn_npc(
+                    NPC_PLAYER_ID,
+                    entry.spawn_pos,
+                    "Spider".to_string(),
+                    &mut commands,
+                    &mut ids,
+                    &mut entity_map,
+                    &templates,
+                );
+                commands.trigger(NewObj { entity });
+                run_spawned_objs
+                    .entry(*player_id)
+                    .or_default()
+                    .push(spider_id.0);
+                intro_progress.spider_encounter = true;
+                info!(
+                    "Initial Encounter: spawning Spider after {} killed for player {}",
+                    entry.phase1_spawn, player_id
+                );
             }
         }
     }
@@ -17760,12 +17978,21 @@ fn map_event_system(
 fn objectives_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
-    hero_query: Query<(&PlayerId, &Position), With<SubclassHero>>,
-    structure_query: Query<(&PlayerId, &Template), With<ClassStructure>>,
+    hero_query: Query<(&PlayerId, &Position, &State), With<SubclassHero>>,
+    structure_query: Query<(&PlayerId, &Template, &State), With<ClassStructure>>,
     storage_query: Query<(&PlayerId, &Position, &Inventory), With<Storage>>,
-    villager_query: Query<&PlayerId, With<SubclassVillager>>,
+    villager_query: Query<
+        (
+            &PlayerId,
+            &State,
+            &Stats,
+            &Inventory,
+            Option<&Assignment>,
+            Option<&StateDead>,
+        ),
+        With<SubclassVillager>,
+    >,
     initial_encounter_state: Res<InitialEncounterState>,
-    dead_query: Query<&Id, With<StateDead>>,
     spawn_positions: Res<SpawnPositions>,
     crisis_state: Res<CrisisState>,
     legendary_threat_state: Res<LegendaryThreatState>,
@@ -17779,33 +18006,78 @@ fn objectives_system(
         return;
     }
 
-    let dead_ids: HashSet<i32> = dead_query.iter().map(|id| id.0).collect();
-
-    for (player_id, hero_pos) in hero_query.iter() {
+    for (player_id, hero_pos, hero_state) in hero_query.iter() {
         if is_owner_offline_protected(player_id, &presence) {
             continue;
         }
         let player_day = player_survival_day(&game_tick, player_id.0, &player_intro_state);
-        let player_structures: Vec<String> = structure_query
+        let player_structures: Vec<(String, State)> = structure_query
             .iter()
-            .filter(|(pid, _)| pid.0 == player_id.0)
-            .map(|(_, template)| template.0.clone())
+            .filter(|(pid, _, _)| pid.0 == player_id.0)
+            .map(|(_, template, state)| (template.0.clone(), *state))
             .collect();
-        let structure_count = player_structures.len();
-        let has_campfire = player_structures.iter().any(|name| name == "Campfire");
-        let has_shelter = player_structures.iter().any(|name| {
-            name == "Small Tent" || name == "Large Tent" || name == "Yurt" || name == "Large Yurt"
-        });
-        let has_expansion = player_structures.iter().any(|name| {
+        let structure_count = player_structures
+            .iter()
+            .filter(|(_, state)| Structure::is_built(*state))
+            .count();
+        let has_campfire = player_structures.iter().any(|(name, _)| name == "Campfire");
+        let has_burrow = player_structures
+            .iter()
+            .any(|(name, state)| name == "Burrow" && Structure::is_built(*state));
+        // Preserve the existing choose-expansion completion fact in this
+        // checkpoint. Only the three-functioning-structures dead end changes.
+        let has_expansion = player_structures.iter().any(|(name, _)| {
             matches!(
                 name.as_str(),
                 "Crafting Tent" | "Mine" | "Lumbercamp" | "Quarry" | "Trapper" | "Farm"
             )
         });
-        let starting_enemies_dead = initial_encounter_state
-            .get(&player_id.0)
-            .map(|entry| entry.rat_ids.iter().all(|id| dead_ids.contains(id)))
+        let has_unfinished_structure = player_structures
+            .iter()
+            .any(|(_, state)| !Structure::is_built(*state) && *state != State::Dead);
+        let opening_entry = initial_encounter_state.get(&player_id.0);
+        let starting_enemies_defeated = opening_entry
+            .map(InitialEncounterEntry::all_opening_enemies_defeated)
             .unwrap_or(false);
+        let opening_enemy_active = opening_entry
+            .map(InitialEncounterEntry::opening_enemy_is_active)
+            .unwrap_or(false);
+        let opening_enemy_spawned = opening_entry
+            .map(|entry| {
+                entry
+                    .opening_enemy_spawned
+                    .iter()
+                    .filter(|spawned| **spawned)
+                    .count()
+            })
+            .unwrap_or(0);
+
+        let mut living_villagers = 0usize;
+        let mut assigned_villagers = 0usize;
+        let mut combat_capable_villagers = 0usize;
+        for (villager_player_id, villager_state, stats, inventory, assignment, dead) in
+            villager_query.iter()
+        {
+            if villager_player_id.0 != player_id.0
+                || !villager_state.is_alive()
+                || stats.hp <= 0
+                || dead.is_some()
+            {
+                continue;
+            }
+            living_villagers = living_villagers.saturating_add(1);
+            if assignment.is_some() {
+                assigned_villagers = assigned_villagers.saturating_add(1);
+            }
+            if stats.base_damage.unwrap_or(0) > 0
+                || inventory
+                    .items
+                    .iter()
+                    .any(|item| item.quantity > 0 && item.equipped && item.class == WEAPON)
+            {
+                combat_capable_villagers = combat_capable_villagers.saturating_add(1);
+            }
+        }
 
         let obj = objectives
             .entry(player_id.0)
@@ -17825,12 +18097,12 @@ fn objectives_system(
             );
         }
 
-        if !obj.win_first_fight && starting_enemies_dead {
+        if !obj.win_first_fight && starting_enemies_defeated {
             obj.win_first_fight = true;
             send_to_client(
                 player_id.0,
                 ResponsePacket::Notice {
-                    noticemsg: "You held your ground. Gather wood and food, then raise walls before night falls.".to_string(),
+                    noticemsg: "You held your ground. Use the lit Campfire, then return to the Shipwreck when the survivor calls.".to_string(),
                     expiry: Some(10000),
                 },
                 &clients,
@@ -17851,22 +18123,21 @@ fn objectives_system(
         }
 
         // Check: Recruit a Villager
-        if !obj.recruit_villager {
-            for villager_pid in villager_query.iter() {
-                if villager_pid.0 == player_id.0 {
-                    obj.recruit_villager = true;
-                    send_discovery_event(
-                        player_id.0,
-                        "villager",
-                        "A settler joins you",
-                        "Shipwreck rescue",
-                        None,
-                        "Villagers turn survival into a settlement: assign repeatable work and protect their needs.",
-                        &clients,
-                    );
-                    break;
-                }
-            }
+        if !obj.recruit_villager && living_villagers > 0 {
+            obj.recruit_villager = true;
+            send_discovery_event(
+                player_id.0,
+                "villager",
+                "A settler joins you",
+                "Shipwreck rescue",
+                None,
+                "Villagers turn survival into a settlement: assign repeatable work and protect their needs.",
+                &clients,
+            );
+        }
+
+        if obj.recruit_villager && !obj.assign_first_villager && assigned_villagers > 0 {
+            obj.assign_first_villager = true;
         }
 
         if !obj.choose_expansion && has_expansion {
@@ -17908,9 +18179,21 @@ fn objectives_system(
 
         let objective_state_packet = build_objective_state_packet(
             obj,
-            structure_count as i32,
-            has_shelter,
-            starting_enemies_dead,
+            &EarlyObjectiveFacts {
+                hero_idle: *hero_state == State::None,
+                opening_enemy_active,
+                opening_enemy_spawned,
+                villager_spawned: player_intro_state
+                    .get(&player_id.0)
+                    .map(|entry| entry.villager_spawned)
+                    .unwrap_or(false),
+                living_villagers,
+                combat_capable_villagers,
+                has_unfinished_structure,
+                completed_structures: structure_count as i32,
+                has_campfire,
+                has_burrow,
+            },
             player_day,
         );
         send_to_client(player_id.0, objective_state_packet, &clients);
@@ -17959,6 +18242,20 @@ fn send_discovery_event(
     send_to_client(player_id, packet, clients);
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EarlyObjectiveFacts {
+    hero_idle: bool,
+    opening_enemy_active: bool,
+    opening_enemy_spawned: usize,
+    villager_spawned: bool,
+    living_villagers: usize,
+    combat_capable_villagers: usize,
+    has_unfinished_structure: bool,
+    completed_structures: i32,
+    has_campfire: bool,
+    has_burrow: bool,
+}
+
 fn objective_progress(
     id: &str,
     title: &str,
@@ -17968,6 +18265,7 @@ fn objective_progress(
     target: Option<&str>,
     action_hint: &str,
     lesson: &str,
+    blocker: Option<String>,
     reward: &str,
     progress: Option<i32>,
     goal: Option<i32>,
@@ -17988,26 +18286,36 @@ fn objective_progress(
         target: target.map(|value| value.to_string()),
         action_hint: action_hint.to_string(),
         lesson: lesson.to_string(),
+        blocker: (id == current_id).then_some(blocker).flatten(),
         reward: reward.to_string(),
         progress,
         goal,
     }
 }
 
-fn first_incomplete_objective_id(obj: &PlayerObjectives, has_shelter: bool) -> String {
+fn first_incomplete_objective_id(obj: &PlayerObjectives, facts: &EarlyObjectiveFacts) -> String {
     if !obj.scavenge_shipwreck {
         return "scavenge_shipwreck".to_string();
     }
-    if !obj.build_campfire {
-        return "build_campfire".to_string();
+    if facts.opening_enemy_active && !obj.win_first_fight {
+        return "win_first_fight".to_string();
+    }
+    if !facts.has_burrow {
+        return "build_burrow".to_string();
     }
     if !obj.win_first_fight {
         return "win_first_fight".to_string();
     }
+    if !obj.build_campfire {
+        return "build_campfire".to_string();
+    }
     if !obj.recruit_villager {
         return "recruit_villager".to_string();
     }
-    if !has_shelter && !obj.build_3_structures {
+    if !obj.assign_first_villager && facts.living_villagers > 0 {
+        return "assign_first_villager".to_string();
+    }
+    if !obj.build_3_structures {
         return "build_shelter_storage".to_string();
     }
     if !obj.choose_expansion {
@@ -18028,76 +18336,150 @@ fn first_incomplete_objective_id(obj: &PlayerObjectives, has_shelter: bool) -> S
 
 fn build_objective_state_packet(
     obj: &PlayerObjectives,
-    structure_count: i32,
-    has_shelter: bool,
-    starting_enemies_dead: bool,
+    facts: &EarlyObjectiveFacts,
     day: i32,
 ) -> ResponsePacket {
-    let current_id = first_incomplete_objective_id(obj, has_shelter);
+    let current_id = first_incomplete_objective_id(obj, facts);
+    let scavenge_blocker = (!facts.hero_idle)
+        .then(|| "Finish the current action before inspecting the Shipwreck.".to_string());
+    let burrow_blocker = (!facts.hero_idle)
+        .then(|| "Finish the current hero action before working on the Burrow.".to_string());
+    let fight_blocker = (!facts.opening_enemy_active).then(|| {
+        if facts.opening_enemy_spawned == 0 {
+            "The opening threat has not appeared yet. Stay near the Shipwreck.".to_string()
+        } else {
+            "The next opening attacker has not appeared yet. Stay near the Shipwreck.".to_string()
+        }
+    });
+    let campfire_blocker = (!facts.has_campfire).then(|| {
+        "No Campfire is present. Use the existing Campfire plan with one Stick and one Resin."
+            .to_string()
+    });
+    let survivor_blocker = if facts.living_villagers > 0 {
+        None
+    } else if facts.villager_spawned {
+        Some("The shipwreck survivor is no longer available.".to_string())
+    } else {
+        Some(
+            "The survivor has not emerged yet. Inspect the Shipwreck and wait for the call."
+                .to_string(),
+        )
+    };
+    let assignment_blocker = if facts.living_villagers == 0 {
+        Some("A living owned settler is required before work can be assigned.".to_string())
+    } else if !facts.has_unfinished_structure {
+        Some(
+            "Place a Stockade or Crafting Tent foundation before assigning the settler to help build."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let assignment_lesson = if facts.living_villagers > 0 && facts.combat_capable_villagers == 0 {
+        "The rescued settler is unarmed; useful construction work is safer than treating them as a defender."
+    } else {
+        "A real assignment turns the rescued settler into useful help without taking the choice away from you."
+    };
+    let settlement_blocker = (!facts.hero_idle).then(|| {
+        "Finish the current hero action before placing another structure foundation.".to_string()
+    });
     let objectives = vec![
         objective_progress(
             "scavenge_shipwreck",
-            "Scavenge the shipwreck",
+            "Search the Shipwreck",
             obj.scavenge_shipwreck,
             &current_id,
             "First Hour",
             Some("Shipwreck"),
-            "Inspect the wreck and move useful supplies into your camp.",
-            "The island starts as a pattern hunt: inspect, learn, take what solves the next danger.",
+            "Move next to the Shipwreck, select it, and choose Investigate.",
+            "The wreck contains the tools and materials that make the first camp workable.",
+            scavenge_blocker,
             "Starting supplies, POI awareness, and your first survival clue.",
             None,
             None,
         ),
         objective_progress(
+            "build_burrow",
+            "Build your Burrow",
+            facts.has_burrow,
+            &current_id,
+            "Settlement",
+            Some("Burrow"),
+            "Recover and equip the Sharpened Stick, gather three additional Logs, then place, supply, and build the normal Burrow foundation.",
+            "The two wreck Logs plus three gathered Logs create your first real storage; keep the salvaged Timber for later work.",
+            burrow_blocker,
+            "Safe storage and the first permanent piece of your settlement.",
+            Some(i32::from(facts.has_burrow)),
+            Some(1),
+        ),
+        objective_progress(
+            "win_first_fight",
+            "Defeat the opening threat",
+            obj.win_first_fight,
+            &current_id,
+            "Combat",
+            Some("Opening attackers"),
+            "Stay near the Shipwreck and defeat each opening attacker when it appears.",
+            "Clearing the attackers makes the wreck and its survivor safe to approach.",
+            fight_blocker,
+            "XP, loot, and a safe opening camp.",
+            None,
+            None,
+        ),
+        objective_progress(
             "build_campfire",
-            "Build a campfire",
+            "Use the campfire",
             obj.build_campfire,
             &current_id,
             "Settlement",
             Some("Campfire"),
-            "Use Stick and Resin to place and build a Campfire near your burrow.",
-            "Light is safety: it expands what you can see and makes night pressure legible.",
+            "Use the lit Campfire beside your start to manage fuel or cook existing food.",
+            "Fire provides early light and supports the existing cooking workflow.",
+            campfire_blocker,
             "Warmth, vision, and a center for the first camp.",
             None,
             None,
         ),
         objective_progress(
-            "win_first_fight",
-            "Win the first fight",
-            obj.win_first_fight || starting_enemies_dead,
-            &current_id,
-            "Combat",
-            Some("Cave Bat"),
-            "Read the threat, use quick attacks for control, and block if you need time.",
-            "Combat is a grammar: quick, precise, fierce, and block each mean something.",
-            "XP, loot, and confidence to leave the firelight.",
-            None,
-            None,
-        ),
-        objective_progress(
             "recruit_villager",
-            "Rescue a settler",
+            "Meet the shipwreck survivor",
             obj.recruit_villager,
             &current_id,
             "Villager",
             Some("Shipwreck survivor"),
-            "Keep the survivor alive and use their lookout knowledge to improve camp safety.",
-            "Villagers are not just workers; they reveal needs, skills, and settlement loops.",
+            "Return to the Shipwreck when the survivor calls out.",
+            "The survivor brings the existing Watchtower plan and another pair of hands.",
+            survivor_blocker,
             "Watchtower plan and another pair of hands.",
             None,
             None,
         ),
         objective_progress(
+            "assign_first_villager",
+            "Put the settler to work",
+            obj.assign_first_villager,
+            &current_id,
+            "Villager",
+            Some("Owned structure foundation"),
+            "Select an unfinished owned structure, choose Assign, and select the rescued settler.",
+            assignment_lesson,
+            assignment_blocker,
+            "Useful help completing the settlement you chose to build.",
+            None,
+            None,
+        ),
+        objective_progress(
             "build_shelter_storage",
-            "Solve rest and storage",
-            has_shelter || obj.build_3_structures,
+            "Establish a working settlement",
+            obj.build_3_structures,
             &current_id,
             "Settlement",
-            Some("Shelter or storage"),
-            "Build shelter for fatigue and storage for supplies, then add a defensive structure.",
-            "Buildings should answer visible problems, not just fill space.",
+            Some("Third completed structure"),
+            "Finish one more owned structure after your Campfire and player-built Burrow.",
+            "Only completed structures provide the functions your settlement needs.",
+            settlement_blocker,
             "A camp that can survive work, weather, and the next night.",
-            Some(structure_count.min(3)),
+            Some(facts.completed_structures.min(3)),
             Some(3),
         ),
         objective_progress(
@@ -18109,6 +18491,10 @@ fn build_objective_state_packet(
             Some("Crafting Tent or resource camp"),
             "Build a Crafting Tent, Mine, Lumbercamp, Quarry, Trapper, or Farm.",
             "Expansion creates strategy: gather better, craft better, defend better.",
+            (!facts.hero_idle).then(|| {
+                "Finish the current hero action before placing an expansion foundation."
+                    .to_string()
+            }),
             "A repeatable resource or crafting loop.",
             None,
             None,
@@ -18122,6 +18508,7 @@ fn build_objective_state_packet(
             Some("Nightfall"),
             "Use warnings, walls, light, gear, and villagers to prepare before dusk.",
             "Threats are pressure signals. Mastery means preparing before the attack.",
+            None,
             "A stable foothold and a score worth remembering.",
             Some((day - 1).clamp(0, 5)),
             Some(5),
@@ -18135,6 +18522,7 @@ fn build_objective_state_packet(
             Some("Fire Dragon"),
             "Defeat captains, break follower waves, or scout inland until the hideout is revealed.",
             "Late survival is not only defense: pressure has a source, and veterans hunt it.",
+            None,
             "The Fire Dragon's hideout location.",
             None,
             None,
@@ -18148,6 +18536,7 @@ fn build_objective_state_packet(
             Some("Dragon Hideout"),
             "Prepare supplies, breach the hideout, and defeat the Fire Dragon to stop its followers.",
             "A legendary enemy is a campaign, not a single fight.",
+            None,
             "Follower raids stop and your final score gains a major valor bonus.",
             None,
             None,
@@ -19987,6 +20376,7 @@ fn start_work_observer(
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     mut query: Query<(&PlayerId, &Id, &mut WorkQueue)>,
+    position_query: Query<(&Id, &Position)>,
     inventory_query: Query<&Inventory>,
     mut active_task_query: Query<&mut ActiveTask>,
 ) {
@@ -20017,6 +20407,31 @@ fn start_work_observer(
         return;
     };
 
+    let Some(worker_entity) = entity_map.get_entity(start_work.worker_id) else {
+        error!("Cannot find worker from {:?}", start_work.worker_id);
+        return;
+    };
+
+    if worker_entity != start_work.entity || player_worker_id != player_structure_id {
+        error!(
+            "Invalid StartWork ownership or worker entity for worker {:?} and structure {:?}",
+            start_work.worker_id, start_work.structure_id
+        );
+        return;
+    }
+
+    let Ok([(_worker_id, worker_pos), (_structure_id, structure_pos)]) =
+        position_query.get_many([worker_entity, structure_entity])
+    else {
+        error!(
+            "Cannot find worker or structure position for {:?} and {:?}",
+            start_work.worker_id, start_work.structure_id
+        );
+        return;
+    };
+
+    let worker_is_on_structure = *worker_pos == *structure_pos;
+
     let Ok(mut active_task) = active_task_query.get_mut(start_work.entity) else {
         error!("No active task component for {:?}", start_work.entity);
         return;
@@ -20025,7 +20440,7 @@ fn start_work_observer(
     // Get assigned work entry from work queue that matches worker_id
     for (player_id, id, mut work_queue) in query.iter_mut() {
         // Skip if player id does not match worker id
-        if player_id.0 != player_worker_id {
+        if player_id.0 != player_worker_id || id.0 != start_work.structure_id {
             continue;
         }
 
@@ -20038,6 +20453,26 @@ fn start_work_observer(
             // Process the work entry here where the reference is valid
             match work_queue_entry.work_type {
                 WorkType::Craft => {
+                    // Do not trust the behavior-tree movement step as the
+                    // authority boundary. A delayed trigger or displacement
+                    // must not start remote crafting. Reset the claim so the
+                    // villager can return and retry.
+                    if !worker_is_on_structure {
+                        debug!(
+                            "Rejecting StartWork for worker {:?}: worker at {:?}, structure at {:?}",
+                            start_work.worker_id, worker_pos, structure_pos
+                        );
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        commands.entity(worker_entity).insert(EventCompleted {
+                            event_id: Uuid::new_v4(),
+                            event_type: "structure_work_position".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        return;
+                    }
+
                     // Add State Change Event to None
                     commands.trigger(StateChange {
                         entity: start_work.entity,
@@ -20862,6 +21297,7 @@ fn despawn_wandering_npc_system(
     game_tick: ResMut<GameTick>,
     mut ids: ResMut<Ids>,
     presence: Res<PlayerWorldPresenceState>,
+    initial_encounter_state: Res<InitialEncounterState>,
     wandering_behavior_query: Query<(Entity, &Id, &Position, &WanderingBehavior)>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -20871,6 +21307,12 @@ fn despawn_wandering_npc_system(
         trace!("Attempting to despawn NPCs that have been wandering for 10 moves...");
         for (entity, id, pos, wandering_behavior) in wandering_behavior_query.iter() {
             if object_belongs_to_protected_run(id.0, &ids, &presence) {
+                continue;
+            }
+            // Scripted introduction entities are at-most-once encounters. The
+            // generic ambient-wander cleanup must not remove one alive and make
+            // its run permanently unable to record a genuine defeat.
+            if opening_encounter_enemy_owner(id.0, &initial_encounter_state).is_some() {
                 continue;
             }
             if wandering_behavior.num_moves > 10 {

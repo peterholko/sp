@@ -31,6 +31,13 @@ export interface CrisisPreparationOption {
   [futureField: string]: unknown;
 }
 
+export interface CrisisAssaultIntent {
+  role: string;
+  label: string;
+  intent: string;
+  [futureField: string]: unknown;
+}
+
 /**
  * Authoritative personal-crisis snapshot sent by the server. Optional values
  * are omitted by serde when they do not apply. The index signature keeps this
@@ -58,6 +65,7 @@ export interface CrisisStatusPacket {
   preferred_launch_window?: string;
   continues_while_disconnected: boolean;
   preparation_options?: CrisisPreparationOption[];
+  assault_intents?: CrisisAssaultIntent[];
   [futureField: string]: unknown;
 }
 
@@ -154,6 +162,12 @@ export interface CrisisPreparationOptionView {
   actionHint: string;
 }
 
+export interface CrisisAssaultIntentView {
+  role: string;
+  label: string;
+  intent: string;
+}
+
 export interface CrisisStatusView {
   status: CrisisStatusPacket;
   phase: string;
@@ -174,6 +188,7 @@ export interface CrisisStatusView {
   preparationLabel: string | null;
   preparationOptions: CrisisPreparationOptionView[];
   attackersLabel: string | null;
+  assaultIntents: CrisisAssaultIntentView[];
   disconnectedWarning: string | null;
 }
 
@@ -255,6 +270,53 @@ export function crisisPreparationOptionsView(
       detail: typeof option.detail === 'string' ? option.detail.trim() : '',
       actionHint: typeof option.action_hint === 'string' ? option.action_hint.trim() : '',
     });
+  }
+
+  return result;
+}
+
+/**
+ * Bounds and validates the optional live-assault role summary. Stable roles
+ * are intentionally not enumerated here so a future server can add a role
+ * without requiring a client release. Stale rows never leak into preparation
+ * or resolution phases.
+ */
+export function crisisAssaultIntentsView(
+  phase?: string,
+  intents?: unknown,
+): CrisisAssaultIntentView[] {
+  if (phase !== 'assault_active' || !Array.isArray(intents)) {
+    return [];
+  }
+
+  const result: CrisisAssaultIntentView[] = [];
+  const seenRoles = new Set<string>();
+  const seenLabels = new Set<string>();
+
+  // The first Goblin assault has three roles. Bound before parsing so a
+  // malformed or future packet cannot expand the compact Survival Thread.
+  for (const rawIntent of intents.slice(0, 3)) {
+    if (!rawIntent || typeof rawIntent !== 'object') {
+      continue;
+    }
+
+    const intentRow = rawIntent as Partial<CrisisAssaultIntent>;
+    const role = nonEmptyString(intentRow.role);
+    const label = nonEmptyString(intentRow.label);
+    const intent = nonEmptyString(intentRow.intent);
+    if (!role || !label || !intent) {
+      continue;
+    }
+
+    const roleKey = role.toLowerCase();
+    const labelKey = label.toLowerCase();
+    if (seenRoles.has(roleKey) || seenLabels.has(labelKey)) {
+      continue;
+    }
+
+    seenRoles.add(roleKey);
+    seenLabels.add(labelKey);
+    result.push({ role, label, intent });
   }
 
   return result;
@@ -362,6 +424,7 @@ export function crisisStatusView(
     phase,
     status.preparation_options,
   );
+  const assaultIntents = crisisAssaultIntentsView(phase, status.assault_intents);
   let attackersLabel: string | null = null;
 
   if (assaultActive && finiteNumber(status.remaining_attackers)) {
@@ -395,6 +458,7 @@ export function crisisStatusView(
     preparationLabel,
     preparationOptions,
     attackersLabel,
+    assaultIntents,
     disconnectedWarning: assaultActive
       ? 'The assault continues while disconnected.'
       : null,
