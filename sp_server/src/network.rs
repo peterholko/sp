@@ -370,6 +370,17 @@ pub struct CrisisPreparationOption {
     pub action_hint: String,
 }
 
+/// A readable battlefield job for one living attacker in the personal Goblin
+/// assault. This deliberately exposes no entity or target IDs: the role tells
+/// the player what is at risk while moment-to-moment targeting remains world
+/// state that can change as units move, die, or become unreachable.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CrisisAssaultIntent {
+    pub role: String,
+    pub label: String,
+    pub intent: String,
+}
+
 /// Versioned, player-facing personal-crisis state. Gameplay systems remain
 /// authoritative; this snapshot deliberately excludes ECS/object IDs,
 /// generation bookkeeping, and cleanup/debug state.
@@ -397,6 +408,9 @@ pub struct CrisisStatusSnapshot {
     /// Additive v1 presentation field. Omitted outside Preparing and
     /// AssaultReady so older clients retain their existing compact payload.
     pub preparation_options: Option<Vec<CrisisPreparationOption>>,
+    /// Additive v1 Goblin-assault presentation. Omitted outside an active
+    /// role-bearing assault and shrinks as its assigned attackers are defeated.
+    pub assault_intents: Option<Vec<CrisisAssaultIntent>>,
     pub continues_while_disconnected: bool,
 }
 
@@ -1367,6 +1381,8 @@ pub struct ObjectiveProgress {
     pub target: Option<String>,
     pub action_hint: String,
     pub lesson: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
     pub reward: String,
     pub progress: Option<i32>,
     pub goal: Option<i32>,
@@ -4525,6 +4541,7 @@ mod tests {
             preparation_seconds_remaining: None,
             preferred_launch_window: None,
             preparation_options: None,
+            assault_intents: None,
             continues_while_disconnected: false,
         }
     }
@@ -4615,6 +4632,29 @@ mod tests {
         assert!(value.get("pressure").is_none());
         assert!(value.get("remaining_attackers").is_none());
         assert!(value.get("preparation_options").is_none());
+        assert!(value.get("assault_intents").is_none());
+    }
+
+    #[test]
+    fn goblin_assault_intents_are_additive_flat_v1_fields() {
+        let mut status = no_crisis_status();
+        status.exists = true;
+        status.kind = Some("goblin".to_string());
+        status.phase = Some("assault_active".to_string());
+        status.assault_active = true;
+        status.assault_intents = Some(vec![CrisisAssaultIntent {
+            role: "hunter".to_string(),
+            label: "Hunter Rider".to_string(),
+            intent: "Hunts your hero.".to_string(),
+        }]);
+
+        let value = serde_json::to_value(ResponsePacket::CrisisStatus { status }).unwrap();
+
+        assert_eq!(value["packet"], "crisis_status");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["assault_intents"][0]["role"], "hunter");
+        assert_eq!(value["assault_intents"][0]["label"], "Hunter Rider");
+        assert!(value.get("status").is_none(), "payload must remain flat");
     }
 
     #[test]

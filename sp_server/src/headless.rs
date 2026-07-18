@@ -52,7 +52,7 @@ use crate::obj::{
     StateBuilding, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, SubclassVillager,
     Template, TrueDeath, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
-use crate::player_setup::StartLocations;
+use crate::player_setup::{RunSpawnedObjs, StartLocations};
 use crate::resource::Resources;
 use crate::safe_logout::{
     is_player_offline_protected, record_player_combat_activity, CancelSafeLogout,
@@ -617,7 +617,7 @@ impl WorldView {
     }
 
     // The hero's "home" anchor for retreat: prefer the campfire, else any owned
-    // built structure (the starter Burrow), else None.
+    // built structure (including a player-built Burrow), else None.
     pub fn home(&self) -> Option<Position> {
         self.structures
             .iter()
@@ -707,6 +707,7 @@ pub struct ItemView {
     pub is_healing: bool,
     pub is_weapon: bool,
     pub is_hunting: bool, // weapon/tool with a Hunting attr (can take down game)
+    pub is_logging: bool, // weapon/tool with a Logging attr (can gather Logs)
     pub attack_range: u32, // 1 for ordinary melee/non-weapons
     pub feed: f32,        // Feed value (0 if not edible)
     pub food_poisoning: bool, // eating it risks food poisoning (raw meat)
@@ -751,6 +752,11 @@ pub struct PoiView {
     pub id: i32,
     pub pos: Position,
     pub template: String, // e.g. "Shipwreck"
+    /// True when this neutral POI belongs to the observed player's current run.
+    pub run_owned: bool,
+    /// Only run-associated starter salvage is exposed to the bot. Other POIs
+    /// remain opaque just as they are until the player opens their own panel.
+    pub inventory: Vec<ItemView>,
 }
 
 #[derive(Clone)]
@@ -852,7 +858,10 @@ pub struct ProtectedIntroSnapshot {
     pub villager_spawned: bool,
     pub danger_unlocked: bool,
     pub rat_ids: Vec<i32>,
+    pub opening_enemy_spawned: [bool; 2],
+    pub opening_enemy_defeated: [bool; 2],
     pub phase1_npc_id: Option<i32>,
+    pub phase1_defeated: bool,
     pub first_rat_spawn_tick: i32,
     pub second_rat_spawn_tick: i32,
     pub villager_ready_tick: i32,
@@ -874,6 +883,8 @@ pub struct ResTileView {
     pub game_revealed: bool,   // ...and it's revealed -> huntable with a Hunting tool
     pub has_plant: bool,       // a Plant resource exists here (maybe hidden)
     pub plant_revealed: bool,  // ...and it's revealed -> villagers gather it tool-free
+    pub has_log: bool,         // a Log resource exists here (maybe hidden)
+    pub log_revealed: bool,    // ...and it's revealed -> gatherable with a Logging tool
 }
 
 fn to_item_view(item: &crate::item::Item) -> ItemView {
@@ -887,6 +898,7 @@ fn to_item_view(item: &crate::item::Item) -> ItemView {
         is_healing: item.attrs.contains_key(&AttrKey::Healing),
         is_weapon: item.class == "Weapon",
         is_hunting: item.attrs.contains_key(&AttrKey::Hunting),
+        is_logging: item.attrs.contains_key(&AttrKey::Logging),
         attack_range: match item.attrs.get(&AttrKey::AttackRange) {
             Some(AttrVal::Num(value)) if *value > 1.0 => *value as u32,
             _ => 1,
@@ -1318,6 +1330,35 @@ impl HeadlessGame {
         const FIXTURE_GOLD: i32 = 100;
 
         self.set_sanctuary_at_base(FIXTURE_SANCTUARY_LEVEL);
+        // Fresh production runs no longer receive a completed Burrow. Balance
+        // scenarios that intentionally start from established progression must
+        // therefore declare their storage explicitly instead of depending on
+        // the removed starter structure.
+        if !self.observe().has_built("storage") {
+            let view = self.observe();
+            let origin = view
+                .home()
+                .or_else(|| view.hero.map(|hero| hero.pos))
+                .expect("balance fixture settlement anchor");
+            let occupied = {
+                let world = self.app.world_mut();
+                let mut positioned = world.query::<&Position>();
+                positioned
+                    .iter(world)
+                    .map(|position| (position.x, position.y))
+                    .collect::<HashSet<_>>()
+            };
+            let storage_anchor = Map::range((origin.x, origin.y), 3)
+                .into_iter()
+                .map(|(x, y)| Position { x, y })
+                .find(|position| {
+                    !occupied.contains(&(position.x, position.y))
+                        && Map::is_passable(position.x, position.y, self.map())
+                })
+                .expect("balance fixture has a nearby storage tile");
+            self.spawn_completed_preparation_structure("Burrow", storage_anchor)
+                .expect("balance fixture explicit completed Burrow");
+        }
         let player_id = self.player_id;
         let world = self.app.world_mut();
         if let Some(intro) = world.resource_mut::<PlayerIntroState>().get_mut(&player_id) {
@@ -1770,14 +1811,34 @@ impl HeadlessGame {
         let templates = world.resource::<Templates>().item_templates.clone();
         let hide_wraps_id = world.resource_mut::<Ids>().new_item_id();
         let bandage_id = add_bandage.then(|| world.resource_mut::<Ids>().new_item_id());
+        let potion_id = world.resource_mut::<Ids>().new_item_id();
         let mut heroes = world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
         let (_, mut inventory) = heroes
             .iter_mut(world)
             .find(|(owner, _)| owner.0 == player_id)
             .ok_or_else(|| "missing hero inventory".to_string())?;
-        // Preserve the production one-use starting Health Potion identically in
-        // both legs. Only remove pre-existing bandages so the declared treatment
-        // adds exactly one controlled Crude Bandage.
+        // Fresh runs recover their potion manually from the Shipwreck. These
+        // established-progression comparisons still require the same one-use
+        // healing baseline in both legs, so declare it as fixture inventory.
+        if !inventory
+            .items
+            .iter()
+            .any(|item| item.name == "Health Potion" && item.quantity > 0)
+        {
+            let mut potion_attrs = std::collections::HashMap::new();
+            potion_attrs.insert(AttrKey::Healing, AttrVal::Num(10.0));
+            let inventory_owner = inventory.owner;
+            inventory.new_with_attrs(
+                potion_id,
+                inventory_owner,
+                "Health Potion".to_string(),
+                1,
+                potion_attrs,
+                &templates,
+            );
+        }
+        // Only remove pre-existing bandages so the declared treatment adds
+        // exactly one controlled Crude Bandage.
         inventory
             .items
             .retain(|item| !(item.class == "Medical" && item.subclass == "Bandage"));
@@ -1852,6 +1913,7 @@ impl HeadlessGame {
             },
             last_combat_tick: LastCombatTick::default(),
         };
+        let is_storage = template.subclass == crate::structure::STORAGE;
         let entity = world
             .spawn((
                 object,
@@ -1866,6 +1928,9 @@ impl HeadlessGame {
                 ClassStructure,
             ))
             .id();
+        if is_storage {
+            world.entity_mut(entity).insert(crate::obj::Storage);
+        }
         world.resource_mut::<Ids>().new_obj(obj_id, player_id);
         world.resource_mut::<EntityObjMap>().new_obj(obj_id, entity);
         Ok(())
@@ -2990,7 +3055,10 @@ impl HeadlessGame {
             villager_spawned: intro.villager_spawned,
             danger_unlocked: intro.danger_unlocked,
             rat_ids: initial.rat_ids.clone(),
+            opening_enemy_spawned: initial.opening_enemy_spawned,
+            opening_enemy_defeated: initial.opening_enemy_defeated,
             phase1_npc_id: initial.phase1_npc_id,
+            phase1_defeated: initial.phase1_defeated,
             first_rat_spawn_tick: initial.first_rat_spawn_tick,
             second_rat_spawn_tick: initial.second_rat_spawn_tick,
             villager_ready_tick: initial.villager_ready_tick,
@@ -3001,6 +3069,29 @@ impl HeadlessGame {
             spider_encounter_completed: progress.spider_encounter,
             run_object_ids,
         }
+    }
+
+    /// Defer the scripted Shipwreck attackers and follow-up unlocks for a
+    /// headless fixture whose subject is unrelated to intro combat. This does
+    /// not mark any encounter complete, remove an encounter entity, or grant
+    /// any item/resource; the player must still use the ordinary production
+    /// events to investigate, recover salvage, gather, and build.
+    pub fn defer_intro_encounter_deadlines_for_fixture(&mut self) -> Result<(), String> {
+        let player_id = self.player_id;
+        let deferred_tick = i32::MAX / 4;
+        let mut initial = self
+            .app
+            .world_mut()
+            .resource_mut::<crate::game::InitialEncounterState>();
+        let entry = initial
+            .get_mut(&player_id)
+            .ok_or_else(|| "missing initial encounter state for fixture deferral".to_string())?;
+        entry.first_rat_spawn_tick = deferred_tick;
+        entry.second_rat_spawn_tick = deferred_tick;
+        entry.villager_ready_tick = deferred_tick;
+        entry.phase1_unlock_tick = deferred_tick;
+        entry.spider_unlock_tick = deferred_tick;
+        Ok(())
     }
 
     pub fn protected_stored_resource_quantity(&mut self) -> i32 {
@@ -3620,15 +3711,41 @@ impl HeadlessGame {
         // Points of interest (e.g. the Shipwreck — investigating it recruits the
         // first villager).
         let pois = {
-            let mut q = world.query::<(&Id, &Position, &Subclass, &Template)>();
-            q.iter(world)
-                .filter(|(_, _, subclass, _)| **subclass == Subclass::Poi)
-                .map(|(id, pos, _subclass, template)| PoiView {
-                    id: id.0,
-                    pos: *pos,
-                    template: template.0.clone(),
+            let mut q = world.query::<(&Id, &Position, &Subclass, &Template, Option<&Inventory>)>();
+            let poi_rows = q
+                .iter(world)
+                .filter(|(_, _, subclass, _, _)| **subclass == Subclass::Poi)
+                .map(|(id, pos, _subclass, template, inventory)| {
+                    (
+                        id.0,
+                        *pos,
+                        template.0.clone(),
+                        inventory
+                            .map(|inventory| {
+                                inventory.items.iter().map(to_item_view).collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                    )
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let run_spawned_objs = world.resource::<RunSpawnedObjs>();
+            poi_rows
+                .into_iter()
+                .map(|(id, pos, template, inventory)| {
+                    let run_owned = run_spawned_objs.contains_for_player(pid, id);
+                    PoiView {
+                        id,
+                        pos,
+                        inventory: if run_owned && template == "Shipwreck" {
+                            inventory
+                        } else {
+                            Vec::new()
+                        },
+                        template,
+                        run_owned,
+                    }
+                })
+                .collect()
         };
 
         // The travelling merchant (if any). Its `Transport.hauling` are the
@@ -3736,6 +3853,10 @@ impl HeadlessGame {
                     .values()
                     .filter(|r| r.res_type == PLANT)
                     .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
+                let (has_log, log_revealed) = res_on_tile
+                    .values()
+                    .filter(|r| r.res_type == crate::constants::LOG)
+                    .fold((false, false), |acc, r| (true, acc.1 || r.reveal));
                 ResTileView {
                     pos: *pos,
                     revealed: res_on_tile.values().any(|r| r.reveal),
@@ -3745,6 +3866,8 @@ impl HeadlessGame {
                     game_revealed,
                     has_plant,
                     plant_revealed,
+                    has_log,
+                    log_revealed,
                 }
             })
             .collect::<Vec<_>>();
@@ -4141,6 +4264,209 @@ mod tests {
         let check_tick = ((due_tick + 9) / 10) * 10;
         game.app.world_mut().resource_mut::<GameTick>().0 = check_tick - 2;
         game.tick(15);
+    }
+
+    fn capture_current_objective_id(game: &mut HeadlessGame) -> String {
+        let next_objective_tick = (game.game_tick().div_euclid(50) + 1) * 50;
+        game.start_packet_capture();
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_objective_tick - 2;
+        game.tick(10);
+        game.finish_packet_capture()
+            .into_iter()
+            .rev()
+            .find_map(|packet| match packet {
+                ResponsePacket::ObjectiveState { current_id, .. } => Some(current_id),
+                _ => None,
+            })
+            .expect("the production objective system should emit its current recommendation")
+    }
+
+    fn investigate_shipwreck_for_smoke(game: &mut HeadlessGame, player_id: i32) -> i32 {
+        let shipwreck_id = {
+            let world = game.app.world_mut();
+            let run_object_ids = world
+                .resource::<crate::player_setup::RunSpawnedObjs>()
+                .get(&player_id)
+                .cloned()
+                .expect("headless run objects");
+            let hero_id = world
+                .resource::<Ids>()
+                .get_hero(player_id)
+                .expect("headless hero id");
+            let hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hero_id)
+                .expect("headless hero entity");
+            let hero_pos = *world
+                .get::<Position>(hero_entity)
+                .expect("headless hero position");
+            let mut shipwrecks = world.query::<(&Id, &Template, &Position)>();
+            let (id, _, shipwreck_pos) = shipwrecks
+                .iter(world)
+                .find(|(id, template, _)| {
+                    template.0 == "Shipwreck" && run_object_ids.contains(&id.0)
+                })
+                .expect("fresh run Shipwreck");
+            assert!(Map::is_adjacent_including_source(hero_pos, *shipwreck_pos));
+            id.0
+        };
+
+        game.inject(PlayerEvent::InvestigatePOI {
+            player_id,
+            target_id: shipwreck_id,
+        });
+        // The production action queues an InvestigateEvent for +20 ticks and
+        // completes only after that strict deadline has passed.
+        game.tick(25);
+        assert!(
+            game.world()
+                .resource::<Objectives>()
+                .get(&player_id)
+                .expect("Shipwreck investigation objective")
+                .scavenge_shipwreck
+        );
+        shipwreck_id
+    }
+
+    fn run_shipwreck_id(game: &mut HeadlessGame, player_id: i32) -> i32 {
+        let world = game.app.world_mut();
+        let mut shipwrecks = world.query::<(&Id, &Template)>();
+        let shipwreck_ids = shipwrecks
+            .iter(world)
+            .filter(|(_, template)| template.0 == "Shipwreck")
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        let run_spawned_objs = world.resource::<RunSpawnedObjs>();
+        shipwreck_ids
+            .into_iter()
+            .find(|id| run_spawned_objs.contains_for_player(player_id, *id))
+            .expect("player-associated Shipwreck")
+    }
+
+    fn spawn_explicit_completed_burrow(game: &mut HeadlessGame, player_id: i32) -> Position {
+        assert_eq!(player_id, game.player_id());
+        let origin = game
+            .observe_for_player(player_id)
+            .hero
+            .expect("hero for explicit Burrow fixture")
+            .pos;
+        let occupied = {
+            let world = game.app.world_mut();
+            let mut positioned = world.query::<&Position>();
+            positioned
+                .iter(world)
+                .map(|position| (position.x, position.y))
+                .collect::<HashSet<_>>()
+        };
+        let anchor = Map::range((origin.x, origin.y), 3)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                !occupied.contains(&(position.x, position.y))
+                    && Map::is_passable(position.x, position.y, game.map())
+            })
+            .expect("nearby unoccupied Burrow fixture tile");
+        game.spawn_completed_preparation_structure("Burrow", anchor)
+            .expect("explicit completed Burrow fixture");
+        anchor
+    }
+
+    fn add_test_health_potion(
+        game: &mut HeadlessGame,
+        player_id: i32,
+        quantity: i32,
+    ) -> (i32, i32) {
+        let world = game.app.world_mut();
+        let item_templates = world.resource::<Templates>().item_templates.clone();
+        let potion_id = world.resource_mut::<Ids>().new_item_id();
+        let mut heroes = world.query_filtered::<(&PlayerId, &mut Inventory), With<SubclassHero>>();
+        let (_, mut inventory) = heroes
+            .iter_mut(world)
+            .find(|(owner, _)| owner.0 == player_id)
+            .expect("hero inventory for explicit potion fixture");
+        let hero_id = inventory.owner;
+        inventory.new(
+            potion_id,
+            "Health Potion".to_string(),
+            quantity,
+            &item_templates,
+        );
+        (hero_id, potion_id)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct OpeningSpawnFingerprint {
+        hero_ids: Vec<i32>,
+        hero_items: Vec<(i32, String, i32, bool)>,
+        structure_ids: Vec<(i32, String)>,
+        shipwreck_id: i32,
+        shipwreck_items: Vec<(i32, String, i32)>,
+        run_object_ids: Vec<i32>,
+    }
+
+    fn opening_spawn_fingerprint(
+        game: &mut HeadlessGame,
+        player_id: i32,
+    ) -> OpeningSpawnFingerprint {
+        let shipwreck_id = run_shipwreck_id(game, player_id);
+        let world = game.app.world_mut();
+        let (mut hero_ids, mut hero_items) = {
+            let mut heroes =
+                world.query_filtered::<(&Id, &PlayerId, &Inventory), With<SubclassHero>>();
+            let owned = heroes
+                .iter(world)
+                .filter(|(_, owner, _)| owner.0 == player_id)
+                .collect::<Vec<_>>();
+            let hero_ids = owned.iter().map(|(id, ..)| id.0).collect::<Vec<_>>();
+            let hero_items = owned
+                .iter()
+                .flat_map(|(_, _, inventory)| {
+                    inventory
+                        .items
+                        .iter()
+                        .map(|item| (item.id, item.name.clone(), item.quantity, item.equipped))
+                })
+                .collect::<Vec<_>>();
+            (hero_ids, hero_items)
+        };
+        let mut structure_ids = {
+            let mut structures =
+                world.query_filtered::<(&Id, &PlayerId, &Template), With<ClassStructure>>();
+            structures
+                .iter(world)
+                .filter(|(_, owner, _)| owner.0 == player_id)
+                .map(|(id, _, template)| (id.0, template.0.clone()))
+                .collect::<Vec<_>>()
+        };
+        let shipwreck_entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(shipwreck_id)
+            .expect("fingerprinted Shipwreck entity");
+        let mut shipwreck_items = world
+            .get::<Inventory>(shipwreck_entity)
+            .expect("fingerprinted Shipwreck inventory")
+            .items
+            .iter()
+            .map(|item| (item.id, item.name.clone(), item.quantity))
+            .collect::<Vec<_>>();
+        let mut run_object_ids = world
+            .resource::<RunSpawnedObjs>()
+            .get(&player_id)
+            .cloned()
+            .expect("fingerprinted run objects");
+        hero_ids.sort_unstable();
+        hero_items.sort_by_key(|item| item.0);
+        structure_ids.sort_by_key(|structure| structure.0);
+        shipwreck_items.sort_by_key(|item| item.0);
+        run_object_ids.sort_unstable();
+        OpeningSpawnFingerprint {
+            hero_ids,
+            hero_items,
+            structure_ids,
+            shipwreck_id,
+            shipwreck_items,
+            run_object_ids,
+        }
     }
 
     fn mark_obj_ids_dead(game: &mut HeadlessGame, obj_ids: &[i32], dead_at: i32) {
@@ -7948,25 +8274,722 @@ mod tests {
     }
 
     #[test]
+    fn revised_opening_starter_setup_is_exact_for_every_class() {
+        use crate::obj::{Campfire, Storage};
+
+        for (class, class_salvage) in [
+            ("Warrior", ("Copper Helm", 1)),
+            ("Ranger", ("Training Bow", 1)),
+            ("Mage", ("Mana", 5)),
+        ] {
+            let mut game = HeadlessGame::new(10_000);
+            let player_id = game.spawn_hero(class, &format!("{class}OpeningManifestBot"));
+            let shipwreck_id = run_shipwreck_id(&mut game, player_id);
+
+            {
+                let world = game.app.world_mut();
+                let hero_id = world
+                    .resource::<Ids>()
+                    .get_hero(player_id)
+                    .expect("new hero id");
+                let hero_entity = world
+                    .resource::<EntityObjMap>()
+                    .get_entity(hero_id)
+                    .expect("new hero entity");
+                let hero_inventory = world
+                    .get::<Inventory>(hero_entity)
+                    .expect("new hero inventory");
+                let mut hero_items = hero_inventory
+                    .items
+                    .iter()
+                    .map(|item| item.name.as_str())
+                    .collect::<Vec<_>>();
+                hero_items.sort_unstable();
+                assert_eq!(hero_items, ["Tattered Pants", "Tattered Shirt"]);
+                assert!(hero_inventory.items.iter().all(|item| item.equipped));
+                assert_eq!(
+                    hero_inventory
+                        .items
+                        .iter()
+                        .find(|item| item.name == "Tattered Shirt")
+                        .and_then(|item| item.slot),
+                    Some(Slot::Chest)
+                );
+                assert_eq!(
+                    hero_inventory
+                        .items
+                        .iter()
+                        .find(|item| item.name == "Tattered Pants")
+                        .and_then(|item| item.slot),
+                    Some(Slot::Pants)
+                );
+                assert!(hero_inventory.items.iter().all(|item| {
+                    item.class != crate::item::DEED
+                        && item.name != "Firewood"
+                        && item.name != "Health Potion"
+                }));
+
+                let shipwreck_entity = world
+                    .resource::<EntityObjMap>()
+                    .get_entity(shipwreck_id)
+                    .expect("associated Shipwreck entity");
+                assert_eq!(
+                    world
+                        .get::<PlayerId>(shipwreck_entity)
+                        .expect("Shipwreck neutral owner")
+                        .0,
+                    crate::constants::MERCHANT_PLAYER_ID
+                );
+                assert_eq!(
+                    world
+                        .get::<Subclass>(shipwreck_entity)
+                        .expect("Shipwreck subclass"),
+                    &Subclass::Poi
+                );
+                assert!(world.get::<ClassStructure>(shipwreck_entity).is_none());
+                assert!(world.get::<Storage>(shipwreck_entity).is_none());
+                assert!(world
+                    .resource::<RunSpawnedObjs>()
+                    .contains_for_player(player_id, shipwreck_id));
+
+                let shipwreck_inventory = world
+                    .get::<Inventory>(shipwreck_entity)
+                    .expect("Shipwreck salvage inventory");
+                let mut actual_manifest = BTreeMap::new();
+                for item in &shipwreck_inventory.items {
+                    assert!(
+                        actual_manifest
+                            .insert(item.name.clone(), item.quantity)
+                            .is_none(),
+                        "starter manifest unexpectedly duplicated {}",
+                        item.name
+                    );
+                    assert_ne!(item.class, crate::item::DEED);
+                }
+                let mut expected_manifest = BTreeMap::from([
+                    ("Bedroll".to_string(), 1),
+                    ("Cragroot Maple Resin".to_string(), 1),
+                    ("Cragroot Maple Stick".to_string(), 1),
+                    ("Cragroot Maple Timber".to_string(), 1),
+                    ("Crude Torch".to_string(), 1),
+                    ("Fishing Rod".to_string(), 1),
+                    ("Flint Shard".to_string(), 1),
+                    ("Gold Coins".to_string(), 10),
+                    ("Health Potion".to_string(), 1),
+                    ("Honeybell Berries".to_string(), 3),
+                    ("Salted Meat Strip".to_string(), 3),
+                    ("Sharpened Stick".to_string(), 1),
+                    ("Springbranch Maple Log".to_string(), 2),
+                    ("Valleyrun Copper Ingot".to_string(), 3),
+                    ("Waterskin (Filled)".to_string(), 3),
+                ]);
+                expected_manifest.insert(class_salvage.0.to_string(), class_salvage.1);
+                assert_eq!(actual_manifest, expected_manifest, "{class} manifest");
+
+                let starter_stick = shipwreck_inventory
+                    .items
+                    .iter()
+                    .find(|item| item.name == "Sharpened Stick")
+                    .expect("starter logging stick");
+                assert!(matches!(
+                    starter_stick.attrs.get(&AttrKey::Logging),
+                    Some(AttrVal::Num(value)) if *value == 1.0
+                ));
+                match class {
+                    "Warrior" => assert!(matches!(
+                        shipwreck_inventory
+                            .items
+                            .iter()
+                            .find(|item| item.name == "Copper Helm")
+                            .and_then(|item| item.attrs.get(&AttrKey::Defense)),
+                        Some(AttrVal::Num(value)) if *value == 3.0
+                    )),
+                    "Ranger" => {
+                        let bow = shipwreck_inventory
+                            .items
+                            .iter()
+                            .find(|item| item.name == "Training Bow")
+                            .expect("Ranger salvage bow");
+                        assert!(matches!(
+                            bow.attrs.get(&AttrKey::Damage),
+                            Some(AttrVal::Num(value)) if *value == 8.0
+                        ));
+                        assert!(matches!(
+                            bow.attrs.get(&AttrKey::AttackRange),
+                            Some(AttrVal::Num(value)) if *value == 2.0
+                        ));
+                    }
+                    "Mage" => {}
+                    _ => unreachable!(),
+                }
+
+                let mut campfires = world.query_filtered::<
+                    (&PlayerId, &Template, &State, &Campfire, &Inventory),
+                    With<ClassStructure>,
+                >();
+                let (_, _, state, campfire, inventory) = campfires
+                    .iter(world)
+                    .find(|(owner, template, ..)| owner.0 == player_id && template.0 == "Campfire")
+                    .expect("one starting Campfire");
+                assert!(Structure::is_built(*state));
+                assert!(campfire.is_lit);
+                assert_eq!(inventory.items.len(), 1);
+                assert_eq!(inventory.items[0].name, "Firewood");
+                assert_eq!(inventory.items[0].quantity, 5);
+
+                let mut structures =
+                    world.query_filtered::<(&PlayerId, &Template), With<ClassStructure>>();
+                assert_eq!(
+                    structures
+                        .iter(world)
+                        .filter(|(owner, template)| {
+                            owner.0 == player_id && template.0 == "Burrow"
+                        })
+                        .count(),
+                    0,
+                    "fresh runs must not receive a Burrow"
+                );
+            }
+
+            game.start_packet_capture();
+            game.inject(PlayerEvent::StructureList { player_id });
+            game.tick(3);
+            let mut plan_names = game
+                .finish_packet_capture()
+                .into_iter()
+                .find_map(|packet| match packet {
+                    ResponsePacket::StructureList(list) => Some(
+                        list.result
+                            .into_iter()
+                            .map(|structure| structure.name)
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .expect("starting structure-plan packet");
+            plan_names.sort();
+            assert_eq!(
+                plan_names,
+                ["Burrow", "Campfire", "Crafting Tent", "Stockade"]
+            );
+        }
+    }
+
+    #[test]
+    fn revised_opening_shipwreck_is_accessible_only_to_its_run_owner() {
+        let mut game = HeadlessGame::new(10_000);
+        let owner_id = game.spawn_hero("Warrior", "ShipwreckOwnerBot");
+        let foreign_id = spawn_connected_helper(&mut game, "ShipwreckNeighborBot");
+        let shipwreck_id = run_shipwreck_id(&mut game, owner_id);
+        let (owner_hero_id, foreign_hero_id, salvage_item_id, salvage_before) = {
+            let world = game.app.world_mut();
+            let owner_hero_id = world
+                .resource::<Ids>()
+                .get_hero(owner_id)
+                .expect("owner hero id");
+            let foreign_hero_id = world
+                .resource::<Ids>()
+                .get_hero(foreign_id)
+                .expect("foreign hero id");
+            let owner_hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(owner_hero_id)
+                .expect("owner hero entity");
+            let foreign_hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(foreign_hero_id)
+                .expect("foreign hero entity");
+            let owner_pos = *world
+                .get::<Position>(owner_hero_entity)
+                .expect("owner hero position");
+            *world
+                .get_mut::<Position>(foreign_hero_entity)
+                .expect("foreign hero position") = owner_pos;
+            let shipwreck_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(shipwreck_id)
+                .expect("owner Shipwreck entity");
+            let salvage = world
+                .get::<Inventory>(shipwreck_entity)
+                .expect("owner Shipwreck inventory")
+                .items
+                .iter()
+                .find(|item| item.name == "Crude Torch")
+                .expect("test salvage item");
+            (owner_hero_id, foreign_hero_id, salvage.id, salvage.quantity)
+        };
+
+        game.start_packet_capture();
+        game.inject(PlayerEvent::InfoInventory {
+            player_id: foreign_id,
+            id: shipwreck_id,
+        });
+        game.tick(3);
+        assert!(game.finish_packet_capture().iter().all(|packet| !matches!(
+            packet,
+            ResponsePacket::InfoInventory { id, .. } if *id == shipwreck_id
+        )));
+
+        game.inject(PlayerEvent::InvestigatePOI {
+            player_id: foreign_id,
+            target_id: shipwreck_id,
+        });
+        game.tick(25);
+        assert!(!game
+            .world()
+            .resource::<Objectives>()
+            .get(&foreign_id)
+            .map(|objectives| objectives.scavenge_shipwreck)
+            .unwrap_or(false));
+
+        game.inject(PlayerEvent::ItemTransfer {
+            player_id: foreign_id,
+            item_id: salvage_item_id,
+            source_id: shipwreck_id,
+            target_id: foreign_hero_id,
+        });
+        game.tick(3);
+        {
+            let world = game.app.world_mut();
+            let shipwreck_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(shipwreck_id)
+                .expect("owner Shipwreck after rejected transfer");
+            assert_eq!(
+                world
+                    .get::<Inventory>(shipwreck_entity)
+                    .expect("owner Shipwreck inventory")
+                    .get_by_id(salvage_item_id)
+                    .expect("salvage remains after foreign transfer")
+                    .quantity,
+                salvage_before
+            );
+            let foreign_hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(foreign_hero_id)
+                .expect("foreign hero after rejected transfer");
+            assert!(world
+                .get::<Inventory>(foreign_hero_entity)
+                .expect("foreign hero inventory")
+                .get_by_id(salvage_item_id)
+                .is_none());
+        }
+
+        game.start_packet_capture();
+        game.inject(PlayerEvent::InfoInventory {
+            player_id: owner_id,
+            id: shipwreck_id,
+        });
+        game.tick(3);
+        assert!(game.finish_packet_capture().iter().any(|packet| matches!(
+            packet,
+            ResponsePacket::InfoInventory { id, .. } if *id == shipwreck_id
+        )));
+
+        assert_eq!(
+            investigate_shipwreck_for_smoke(&mut game, owner_id),
+            shipwreck_id
+        );
+        game.inject(PlayerEvent::ItemTransfer {
+            player_id: owner_id,
+            item_id: salvage_item_id,
+            source_id: shipwreck_id,
+            target_id: owner_hero_id,
+        });
+        game.tick(3);
+        let world = game.app.world_mut();
+        let owner_hero_entity = world
+            .resource::<EntityObjMap>()
+            .get_entity(owner_hero_id)
+            .expect("owner hero after transfer");
+        assert_eq!(
+            world
+                .get::<Inventory>(owner_hero_entity)
+                .expect("owner hero inventory")
+                .get_by_id(salvage_item_id)
+                .expect("owner recovered salvage")
+                .quantity,
+            salvage_before
+        );
+    }
+
+    #[test]
+    fn revised_opening_waits_for_search_and_preserves_post_search_grace() {
+        use crate::game::{InitialEncounterState, OPENING_POST_SALVAGE_GRACE_TICKS};
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "OpeningGraceBot");
+        let before_search = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening encounter before search")
+            .clone();
+
+        run_intro_check_at_or_after(&mut game, before_search.second_rat_spawn_tick + 100);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening encounter held before search")
+                .opening_enemy_spawned,
+            [false, false]
+        );
+
+        let search_started_at = game.game_tick();
+        investigate_shipwreck_for_smoke(&mut game, player_id);
+        let after_search = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening encounter after search")
+            .clone();
+        assert!(
+            after_search.first_rat_spawn_tick
+                >= search_started_at + OPENING_POST_SALVAGE_GRACE_TICKS,
+            "first hostile must leave the full post-salvage grace"
+        );
+        assert!(after_search.second_rat_spawn_tick > after_search.first_rat_spawn_tick);
+
+        game.app.world_mut().resource_mut::<GameTick>().0 = after_search.first_rat_spawn_tick - 12;
+        game.tick(5);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening encounter during grace")
+                .opening_enemy_spawned,
+            [false, false]
+        );
+
+        run_intro_check_at_or_after(&mut game, after_search.first_rat_spawn_tick);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening encounter after grace")
+                .opening_enemy_spawned,
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn revised_opening_reconnect_and_duplicate_new_player_do_not_duplicate_spawns() {
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "OpeningReconnectBot");
+        let original = opening_spawn_fingerprint(&mut game, player_id);
+        assert_eq!(original.hero_ids.len(), 1);
+        assert_eq!(original.hero_items.len(), 2);
+        assert_eq!(
+            original
+                .structure_ids
+                .iter()
+                .filter(|(_, template)| template == "Campfire")
+                .count(),
+            1
+        );
+        assert!(original
+            .structure_ids
+            .iter()
+            .all(|(_, template)| template != "Burrow"));
+
+        game.disconnect_player();
+        game.tick(3);
+        game.reconnect_player_with_login();
+        assert_eq!(opening_spawn_fingerprint(&mut game, player_id), original);
+
+        game.inject(PlayerEvent::NewPlayer {
+            player_id,
+            hero_name: "RejectedDuplicateOpeningBot".to_string(),
+            class_name: "Mage".to_string(),
+        });
+        game.tick(8);
+        assert_eq!(opening_spawn_fingerprint(&mut game, player_id), original);
+    }
+
+    #[test]
+    fn revised_opening_salvages_gathers_and_builds_a_normal_burrow() {
+        use crate::constants::{GATHER_TIME_SEC, LOG, TICKS_PER_SEC};
+        use crate::game::InitialEncounterState;
+        use crate::obj::Storage;
+        use crate::resource::Resource;
+
+        let mut game = HeadlessGame::new(20_000);
+        let player_id = game.spawn_hero("Warrior", "OpeningBurrowBot");
+        let shipwreck_id = investigate_shipwreck_for_smoke(&mut game, player_id);
+        {
+            // This test owns the economic path; the separate grace/intro tests
+            // own encounter timing and combat. Keep those ordinary deadlines
+            // out of the way without changing any production system.
+            let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
+            let entry = encounters
+                .get_mut(&player_id)
+                .expect("opening encounter fixture");
+            entry.first_rat_spawn_tick = i32::MAX / 4;
+            entry.second_rat_spawn_tick = i32::MAX / 4;
+            entry.phase1_unlock_tick = i32::MAX / 4;
+            entry.spider_unlock_tick = i32::MAX / 4;
+        }
+
+        let (hero_id, hero_pos, stick_id, salvaged_logs_id) = {
+            let world = game.app.world_mut();
+            let hero_id = world
+                .resource::<Ids>()
+                .get_hero(player_id)
+                .expect("opening hero id");
+            let hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hero_id)
+                .expect("opening hero entity");
+            let hero_pos = *world
+                .get::<Position>(hero_entity)
+                .expect("opening hero position");
+            let shipwreck_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(shipwreck_id)
+                .expect("opening Shipwreck entity");
+            let inventory = world
+                .get::<Inventory>(shipwreck_entity)
+                .expect("opening Shipwreck inventory");
+            let stick_id = inventory
+                .items
+                .iter()
+                .find(|item| item.name == "Sharpened Stick")
+                .expect("starter logging stick")
+                .id;
+            let salvaged_logs = inventory
+                .items
+                .iter()
+                .find(|item| item.name == "Springbranch Maple Log")
+                .expect("two starter Logs");
+            assert_eq!(salvaged_logs.quantity, 2);
+            (hero_id, hero_pos, stick_id, salvaged_logs.id)
+        };
+
+        for item_id in [stick_id, salvaged_logs_id] {
+            game.inject(PlayerEvent::ItemTransfer {
+                player_id,
+                item_id,
+                source_id: shipwreck_id,
+                target_id: hero_id,
+            });
+            game.tick(3);
+        }
+        game.inject(PlayerEvent::Equip {
+            player_id,
+            obj_id: hero_id,
+            item_id: stick_id,
+            status: true,
+        });
+        game.tick(3);
+        assert!(game
+            .observe()
+            .inventory
+            .iter()
+            .any(|item| item.id == stick_id && item.equipped && item.is_logging));
+
+        game.app
+            .world_mut()
+            .resource_mut::<Resources>()
+            .remove(&hero_pos);
+        Resource::create(
+            "Springbranch Maple Log".to_string(),
+            LOG.to_string(),
+            "maplelog".to_string(),
+            1,
+            1.0,
+            1,
+            100,
+            hero_pos,
+            Vec::new(),
+            None,
+            &mut game.app.world_mut().resource_mut::<Resources>(),
+        );
+        game.app.world_mut().resource_mut::<Resources>().set_reveal(
+            hero_pos,
+            LOG.to_string(),
+            true,
+        );
+
+        let log_quantity = |game: &mut HeadlessGame| {
+            game.observe()
+                .inventory
+                .iter()
+                .filter(|item| item.class == LOG)
+                .map(|item| item.quantity)
+                .sum::<i32>()
+        };
+        assert_eq!(log_quantity(&mut game), 2);
+        for _attempt in 0..20 {
+            if log_quantity(&mut game) >= 5 {
+                break;
+            }
+            game.inject(PlayerEvent::Gather { player_id });
+            game.tick((GATHER_TIME_SEC * TICKS_PER_SEC + 4) as u32);
+        }
+        assert_eq!(
+            log_quantity(&mut game),
+            5,
+            "the production gather path should supply the three missing Logs"
+        );
+
+        let burrow_pos = passable_unoccupied_adjacent_position(&mut game, hero_pos);
+        game.move_hero_for_test(burrow_pos);
+        game.inject(PlayerEvent::CreateFoundation {
+            player_id,
+            source_id: hero_id,
+            structure_name: "Burrow".to_string(),
+        });
+        game.tick(3);
+        let (burrow_entity, burrow_id) = {
+            let world = game.app.world_mut();
+            let mut burrows = world.query_filtered::<
+                (Entity, &Id, &PlayerId, &Template, &Position, &State),
+                With<ClassStructure>,
+            >();
+            burrows
+                .iter(world)
+                .find(|(_, _, owner, template, pos, state)| {
+                    owner.0 == player_id
+                        && template.0 == "Burrow"
+                        && **pos == burrow_pos
+                        && **state == State::Founded
+                })
+                .map(|(entity, id, ..)| (entity, id.0))
+                .expect("normal Burrow foundation")
+        };
+
+        loop {
+            let staged_logs = game
+                .world()
+                .get::<Inventory>(burrow_entity)
+                .expect("Burrow construction inventory")
+                .items
+                .iter()
+                .filter(|item| item.class == LOG)
+                .map(|item| item.quantity)
+                .sum::<i32>();
+            if staged_logs >= 5 {
+                break;
+            }
+            let next_log_id = game
+                .observe()
+                .inventory
+                .iter()
+                .find(|item| item.class == LOG)
+                .expect("unstaged gathered Log")
+                .id;
+            game.inject(PlayerEvent::ItemTransfer {
+                player_id,
+                item_id: next_log_id,
+                source_id: hero_id,
+                target_id: burrow_id,
+            });
+            game.tick(3);
+        }
+        assert_eq!(log_quantity(&mut game), 0);
+
+        game.inject(PlayerEvent::Build {
+            player_id,
+            builder_id: hero_id,
+            structure_id: burrow_id,
+        });
+        for _ in 0..10 {
+            game.tick(50);
+            if game
+                .world()
+                .get::<State>(burrow_entity)
+                .is_some_and(|state| Structure::is_built(*state))
+            {
+                break;
+            }
+        }
+        assert!(Structure::is_built(
+            *game
+                .world()
+                .get::<State>(burrow_entity)
+                .expect("completed Burrow state")
+        ));
+        assert!(game.world().get::<Storage>(burrow_entity).is_some());
+
+        let shipwreck_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(shipwreck_id)
+            .expect("Shipwreck after Burrow completion");
+        assert!(game.world().get::<Storage>(shipwreck_entity).is_none());
+        assert!(game
+            .world()
+            .get::<ClassStructure>(shipwreck_entity)
+            .is_none());
+
+        // A recovered valuable follows the ordinary manual salvage route into
+        // the completed Burrow; the neutral Shipwreck itself never becomes a
+        // villager/storage destination.
+        let gold_id = game
+            .world()
+            .get::<Inventory>(shipwreck_entity)
+            .expect("Shipwreck valuables")
+            .items
+            .iter()
+            .find(|item| item.name == "Gold Coins")
+            .expect("starter Gold salvage")
+            .id;
+        game.move_hero_for_test(hero_pos);
+        game.inject(PlayerEvent::ItemTransfer {
+            player_id,
+            item_id: gold_id,
+            source_id: shipwreck_id,
+            target_id: hero_id,
+        });
+        game.tick(3);
+        game.move_hero_for_test(burrow_pos);
+        game.inject(PlayerEvent::ItemTransfer {
+            player_id,
+            item_id: gold_id,
+            source_id: hero_id,
+            target_id: burrow_id,
+        });
+        game.tick(3);
+        assert_eq!(
+            game.world()
+                .get::<Inventory>(burrow_entity)
+                .expect("completed Burrow inventory")
+                .items
+                .iter()
+                .find(|item| item.id == gold_id && item.name == "Gold Coins")
+                .expect("manually stored Gold salvage")
+                .quantity,
+            10
+        );
+
+        let storage_ids = {
+            let world = game.app.world_mut();
+            let mut storages = world.query_filtered::<(&Id, &PlayerId), With<Storage>>();
+            storages
+                .iter(world)
+                .filter(|(_, owner)| owner.0 == player_id)
+                .map(|(id, _)| id.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(storage_ids, [burrow_id]);
+    }
+
+    #[test]
     fn personal_crisis_mode_preserves_the_introductory_encounter() {
         use crate::event::{GameEventType, GameEvents};
         use crate::game::{InitialEncounterState, IntroEncounterState, PlayerIntroState};
 
         let mut game = HeadlessGame::new(10_000);
         let player_id = game.spawn_hero("Warrior", "IntroBot");
+        investigate_shipwreck_for_smoke(&mut game, player_id);
+        spawn_explicit_completed_burrow(&mut game, player_id);
         let entry = game
             .world()
             .resource::<InitialEncounterState>()
             .get(&player_id)
-            .expect("initial encounter state")
+            .expect("initial encounter state after Shipwreck search")
             .clone();
-
-        game.app
-            .world_mut()
-            .resource_mut::<Objectives>()
-            .entry(player_id)
-            .or_default()
-            .scavenge_shipwreck = true;
 
         run_intro_check_at_or_after(&mut game, entry.second_rat_spawn_tick);
 
@@ -8045,6 +9068,707 @@ mod tests {
             "Wild Boar" | "Giant Crab"
         ));
         assert!(entry.phase1_unlock_tick < entry.spider_unlock_tick);
+    }
+
+    #[test]
+    fn core_gameplay_checkpoint1_smoke_opening_chain_records_history_across_corpse_cleanup() {
+        use crate::game::{InitialEncounterState, IntroEncounterState};
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "OpeningHistorySmokeBot");
+        investigate_shipwreck_for_smoke(&mut game, player_id);
+        let original = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter state after Shipwreck search")
+            .clone();
+        {
+            let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
+            let entry = encounters.get_mut(&player_id).expect("opening entry");
+            entry.phase1_unlock_tick = original.phase1_unlock_tick + 5_000;
+            entry.spider_unlock_tick = original.spider_unlock_tick + 10_000;
+        }
+
+        run_intro_check_at_or_after(&mut game, original.first_rat_spawn_tick);
+        let after_first = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening entry after first spawn");
+        assert_eq!(after_first.opening_enemy_spawned, [true, false]);
+        assert_eq!(after_first.opening_enemy_defeated, [false, false]);
+        {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&Id>();
+            assert_eq!(
+                query
+                    .iter(world)
+                    .filter(|id| id.0 == original.rat_ids[0])
+                    .count(),
+                1
+            );
+        }
+
+        run_intro_check_at_or_after(&mut game, original.first_rat_spawn_tick + 50);
+        {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&Id>();
+            assert_eq!(
+                query
+                    .iter(world)
+                    .filter(|id| id.0 == original.rat_ids[0])
+                    .count(),
+                1,
+                "re-evaluating the first deadline must not duplicate the first attacker"
+            );
+        }
+
+        run_intro_check_at_or_after(&mut game, original.second_rat_spawn_tick);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening entry after both spawns")
+                .opening_enemy_spawned,
+            [true, true]
+        );
+        let opening_dead_at = game.game_tick();
+        mark_obj_ids_dead(&mut game, &original.rat_ids, opening_dead_at);
+        run_intro_check_at_or_after(&mut game, opening_dead_at + 1);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening entry after genuine defeats")
+                .opening_enemy_defeated,
+            [true, true]
+        );
+
+        run_intro_check_at_or_after(&mut game, opening_dead_at + 510);
+        {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&Id>();
+            assert_eq!(
+                query
+                    .iter(world)
+                    .filter(|id| original.rat_ids.contains(&id.0))
+                    .count(),
+                0,
+                "ordinary corpse cleanup should be allowed after defeat history is recorded"
+            );
+        }
+        let repeated_opening_check = game.game_tick() + 100;
+        run_intro_check_at_or_after(&mut game, repeated_opening_check);
+        {
+            let world = game.app.world_mut();
+            let mut query = world.query::<&Id>();
+            assert_eq!(
+                query
+                    .iter(world)
+                    .filter(|id| original.rat_ids.contains(&id.0))
+                    .count(),
+                0,
+                "removed opening corpses must not make either attacker eligible again"
+            );
+        }
+
+        let phase1_due = game.game_tick() + 1;
+        {
+            let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
+            let entry = encounters.get_mut(&player_id).expect("opening entry");
+            entry.phase1_unlock_tick = phase1_due;
+            entry.spider_unlock_tick = phase1_due + 5_000;
+        }
+        run_intro_check_at_or_after(&mut game, phase1_due);
+        let phase1_id = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .and_then(|entry| entry.phase1_npc_id)
+            .expect("the existing boar/crab follow-up should spawn");
+        assert!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&player_id)
+                .expect("follow-up encounter progress")
+                .initial_encounter
+        );
+
+        let phase1_dead_at = game.game_tick();
+        mark_obj_ids_dead(&mut game, &[phase1_id], phase1_dead_at);
+        run_intro_check_at_or_after(&mut game, phase1_dead_at + 1);
+        assert!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("opening entry after phase-one defeat")
+                .phase1_defeated
+        );
+        run_intro_check_at_or_after(&mut game, phase1_dead_at + 510);
+        assert!(game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(phase1_id)
+            .is_none());
+
+        let spider_due = game.game_tick() + 1;
+        game.app
+            .world_mut()
+            .resource_mut::<InitialEncounterState>()
+            .get_mut(&player_id)
+            .expect("opening entry before Spider follow-up")
+            .spider_unlock_tick = spider_due;
+        run_intro_check_at_or_after(&mut game, spider_due);
+        let spider_ids = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<(&Id, &Template, &Position, Option<&StateDead>)>();
+            query
+                .iter(world)
+                .filter(|(_, template, pos, dead)| {
+                    template.0 == "Spider" && *pos == &original.spawn_pos && dead.is_none()
+                })
+                .map(|(id, ..)| id.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spider_ids.len(), 1);
+        assert!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&player_id)
+                .expect("follow-up encounter progress")
+                .spider_encounter
+        );
+        let repeated_spider_check = game.game_tick() + 100;
+        run_intro_check_at_or_after(&mut game, repeated_spider_check);
+        let repeated_spider_count = {
+            let world = game.app.world_mut();
+            let mut query = world.query::<(&Template, &Position, Option<&StateDead>)>();
+            query
+                .iter(world)
+                .filter(|(template, pos, dead)| {
+                    template.0 == "Spider" && *pos == &original.spawn_pos && dead.is_none()
+                })
+                .count()
+        };
+        assert_eq!(
+            repeated_spider_count, 1,
+            "re-evaluation must not spawn a second live Spider under a fresh object id"
+        );
+    }
+
+    #[test]
+    fn core_gameplay_checkpoint1_smoke_early_settlement_uses_existing_economy() {
+        use crate::game::InitialEncounterState;
+        use crate::obj::Campfire;
+
+        let mut game = HeadlessGame::new(10_000);
+        game.restrict_to_preparation_pair_start_location()
+            .expect("fixed settlement-growth start");
+        let player_id = game.spawn_hero("Warrior", "SettlementGrowthSmokeBot");
+        // This legacy objective-chain smoke intentionally starts from an
+        // established settlement. Declare its former assumptions as explicit
+        // test fixtures now that production new runs start without a Burrow or
+        // bulk hull Logs; the revised-opening economic path is covered above.
+        spawn_explicit_completed_burrow(&mut game, player_id);
+        {
+            let shipwreck_id = run_shipwreck_id(&mut game, player_id);
+            let world = game.app.world_mut();
+            let shipwreck_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(shipwreck_id)
+                .expect("legacy objective fixture Shipwreck");
+            let item_templates = world.resource::<Templates>().item_templates.clone();
+            let log_item_id = world.resource_mut::<Ids>().new_item_id();
+            world
+                .get_mut::<Inventory>(shipwreck_entity)
+                .expect("legacy objective fixture Shipwreck inventory")
+                .new(
+                    log_item_id,
+                    "Cragroot Maple Log".to_string(),
+                    10,
+                    &item_templates,
+                );
+        }
+        let (hero_id, hero_pos, shipwreck_id, log_item_id, initial_logs) = {
+            let world = game.app.world_mut();
+            let hero_id = world
+                .resource::<Ids>()
+                .get_hero(player_id)
+                .expect("headless hero id");
+            let hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hero_id)
+                .expect("headless hero entity");
+            let hero_pos = *world
+                .get::<Position>(hero_entity)
+                .expect("headless hero position");
+            let mut shipwrecks = world.query::<(&Id, &Template, &Position, &Inventory)>();
+            let (shipwreck_id, _, shipwreck_pos, inventory) = shipwrecks
+                .iter(world)
+                .find(|(_, template, _, _)| template.0 == "Shipwreck")
+                .expect("fresh run shipwreck");
+            assert!(Map::is_adjacent_including_source(hero_pos, *shipwreck_pos));
+            let logs = inventory
+                .get_by_name("Cragroot Maple Log".to_string())
+                .expect("existing shipwreck hull logs");
+            (hero_id, hero_pos, shipwreck_id.0, logs.id, logs.quantity)
+        };
+        {
+            let world = game.app.world_mut();
+            let mut campfires = world
+                .query_filtered::<(&PlayerId, &State, &Position, &Campfire), With<ClassStructure>>(
+                );
+            let (_, campfire_state, campfire_pos, campfire) = campfires
+                .iter(world)
+                .find(|(owner, _, _, _)| owner.0 == player_id)
+                .expect("the existing starting Campfire");
+            assert!(Structure::is_built(*campfire_state));
+            assert_eq!(*campfire_pos, hero_pos);
+            assert!(campfire.is_lit);
+        }
+
+        assert_eq!(
+            investigate_shipwreck_for_smoke(&mut game, player_id),
+            shipwreck_id
+        );
+        let opening_start = game.game_tick();
+        let first_opening_due = opening_start + 1;
+        let second_opening_due = opening_start + 11;
+        {
+            let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
+            let entry = encounters
+                .get_mut(&player_id)
+                .expect("initial encounter state");
+            entry.first_rat_spawn_tick = first_opening_due;
+            entry.second_rat_spawn_tick = second_opening_due;
+            entry.phase1_unlock_tick = opening_start + 10_000;
+            entry.spider_unlock_tick = opening_start + 10_000;
+            entry.villager_ready_tick = opening_start;
+        }
+        run_intro_check_at_or_after(&mut game, second_opening_due);
+        let opening_ids = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("spawned opening encounter")
+            .rat_ids
+            .clone();
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("spawned opening encounter")
+                .opening_enemy_spawned,
+            [true, true]
+        );
+        let opening_dead_at = game.game_tick();
+        mark_obj_ids_dead(&mut game, &opening_ids, opening_dead_at);
+        run_intro_check_at_or_after(&mut game, opening_dead_at + 1);
+        assert_eq!(
+            game.world()
+                .resource::<InitialEncounterState>()
+                .get(&player_id)
+                .expect("defeated opening encounter")
+                .opening_enemy_defeated,
+            [true, true]
+        );
+        // Leave the short combat-action lock before starting construction.
+        game.tick(crate::obj::COMBAT_LOCK_TICKS as u32 + 1);
+        let villager_id = {
+            let world = game.app.world_mut();
+            let mut villagers = world.query_filtered::<
+                (&Id, &PlayerId, &State, &Stats, Option<&StateDead>),
+                With<SubclassVillager>,
+            >();
+            let (id, _, _, stats, _) = villagers
+                .iter(world)
+                .find(|(_, owner, state, _, dead)| {
+                    owner.0 == player_id && state.is_alive() && dead.is_none()
+                })
+                .expect("rescued shipwreck villager");
+            assert_eq!(stats.base_damage.unwrap_or(0), 0);
+            id.0
+        };
+
+        game.inject(PlayerEvent::CreateFoundation {
+            player_id,
+            source_id: hero_id,
+            structure_name: "Stockade".to_string(),
+        });
+        game.tick(3);
+        let (stockade_entity, stockade_id) = {
+            let world = game.app.world_mut();
+            let mut stockades = world.query_filtered::<
+                (Entity, &Id, &PlayerId, &Template, &Position, &State),
+                With<ClassStructure>,
+            >();
+            stockades
+                .iter(world)
+                .find(|(_, _, owner, template, pos, state)| {
+                    owner.0 == player_id
+                        && template.0 == "Stockade"
+                        && **pos == hero_pos
+                        && **state == State::Founded
+                })
+                .map(|(entity, id, ..)| (entity, id.0))
+                .expect("real Stockade foundation")
+        };
+
+        game.inject(PlayerEvent::ItemTransfer {
+            player_id,
+            item_id: log_item_id,
+            source_id: shipwreck_id,
+            target_id: stockade_id,
+        });
+        game.tick(3);
+        assert!(game
+            .world()
+            .get::<Inventory>(stockade_entity)
+            .expect("Stockade construction inventory")
+            .has_by_class(crate::item::LOG.to_string()));
+
+        game.inject(PlayerEvent::Assign {
+            player_id,
+            worker_id: villager_id,
+            structure_id: stockade_id,
+        });
+        game.tick(3);
+        let villager_entity = game
+            .world()
+            .resource::<EntityObjMap>()
+            .get_entity(villager_id)
+            .expect("rescued villager entity");
+        let assignment = game
+            .world()
+            .get::<Assignment>(villager_entity)
+            .expect("real villager assignment");
+        assert_eq!(assignment.structure_id, stockade_id);
+
+        game.inject(PlayerEvent::Build {
+            player_id,
+            builder_id: hero_id,
+            structure_id: stockade_id,
+        });
+        // The assigned villager now has to reach the Stockade tile before its
+        // work counts. Pathing cadence can vary with the generated fixture, so
+        // wait for the normal bounded completion instead of assuming 120 ticks.
+        for _ in 0..20 {
+            game.tick(30);
+            if game
+                .world()
+                .get::<State>(stockade_entity)
+                .is_some_and(|state| Structure::is_built(*state))
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            *game
+                .world()
+                .get::<State>(stockade_entity)
+                .expect("completed Stockade state"),
+            State::None
+        );
+        assert!(game.world().get::<StateBuilding>(stockade_entity).is_none());
+        assert_eq!(
+            game.world()
+                .get::<BuildUpgradeState>(stockade_entity)
+                .expect("Stockade build progress")
+                .work_done,
+            30.0
+        );
+        // Completion may land just after the 50-tick objective sampler. Give
+        // the production objective system one full sampling interval.
+        game.tick(50);
+
+        let (remaining_logs, completed_structures) = {
+            let world = game.app.world_mut();
+            let shipwreck_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(shipwreck_id)
+                .expect("shipwreck after partial salvage");
+            let remaining_logs = world
+                .get::<Inventory>(shipwreck_entity)
+                .expect("shipwreck inventory")
+                .get_by_name("Cragroot Maple Log".to_string())
+                .expect("remaining hull logs")
+                .quantity;
+            let mut structures =
+                world.query_filtered::<(&PlayerId, &State), With<ClassStructure>>();
+            let completed_structures = structures
+                .iter(world)
+                .filter(|(owner, state)| owner.0 == player_id && Structure::is_built(**state))
+                .count();
+            (remaining_logs, completed_structures)
+        };
+        assert_eq!(initial_logs - remaining_logs, 3);
+        assert_eq!(completed_structures, 3);
+
+        let objectives = game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .expect("observed early objectives");
+        assert!(objectives.build_campfire);
+        assert!(objectives.win_first_fight);
+        assert!(objectives.recruit_villager);
+        assert!(objectives.assign_first_villager);
+        assert!(objectives.build_3_structures);
+        assert_eq!(capture_current_objective_id(&mut game), "choose_expansion");
+    }
+
+    #[test]
+    fn core_gameplay_checkpoint1_smoke_reconnect_and_true_death_reset() {
+        use crate::game::{
+            InitialEncounterState, IntroEncounterState, PlayerIntroEncounters, PlayerIntroEntry,
+            PlayerIntroState,
+        };
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "ReconnectCleanupSmokeBot");
+        game.app
+            .world_mut()
+            .resource_mut::<Objectives>()
+            .entry(player_id)
+            .or_default()
+            .scavenge_shipwreck = true;
+        let first_due = {
+            let encounters = game.world().resource::<InitialEncounterState>();
+            encounters
+                .get(&player_id)
+                .expect("initial encounter state")
+                .first_rat_spawn_tick
+        };
+        run_intro_check_at_or_after(&mut game, first_due);
+        let opening_ids = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter after first spawn")
+            .rat_ids
+            .clone();
+        let first_opening_dead_at = game.game_tick();
+        mark_obj_ids_dead(&mut game, &[opening_ids[0]], first_opening_dead_at);
+        let record_first_defeat_at = game.game_tick() + 1;
+        run_intro_check_at_or_after(&mut game, record_first_defeat_at);
+
+        let recommendation_before = capture_current_objective_id(&mut game);
+        assert_eq!(recommendation_before, "build_burrow");
+        let encounter_before = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter before disconnect")
+            .clone();
+        let objectives_before = game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .expect("objectives before disconnect")
+            .clone();
+
+        game.disconnect_player();
+        game.tick(5);
+        assert!(!game
+            .world()
+            .resource::<Clients>()
+            .is_player_online(player_id));
+        game.reconnect_player_with_login();
+        let recommendation_after = capture_current_objective_id(&mut game);
+        assert_eq!(recommendation_after, recommendation_before);
+        let encounter_after = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("initial encounter after reconnect");
+        assert_eq!(
+            encounter_after.opening_enemy_spawned,
+            encounter_before.opening_enemy_spawned
+        );
+        assert_eq!(
+            encounter_after.opening_enemy_defeated,
+            encounter_before.opening_enemy_defeated
+        );
+        let objectives_after = game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .expect("objectives after reconnect");
+        assert_eq!(
+            objectives_after.scavenge_shipwreck,
+            objectives_before.scavenge_shipwreck
+        );
+        assert_eq!(
+            objectives_after.win_first_fight,
+            objectives_before.win_first_fight
+        );
+
+        // A neighboring run's non-default introduction state must survive the
+        // owner's keyed True Death cleanup unchanged.
+        let other_player_id = player_id + 1_000;
+        let other_rat_ids = {
+            let mut ids = game.app.world_mut().resource_mut::<Ids>();
+            vec![ids.new_obj_id(), ids.new_obj_id()]
+        };
+        let mut other_encounter = encounter_before.clone();
+        other_encounter.rat_ids = other_rat_ids.clone();
+        other_encounter.opening_enemy_spawned = [true, true];
+        other_encounter.opening_enemy_defeated = [true, false];
+        other_encounter.phase1_defeated = true;
+        other_encounter.first_rat_spawn_tick = i32::MAX / 2;
+        other_encounter.second_rat_spawn_tick = i32::MAX / 2;
+        other_encounter.phase1_unlock_tick = i32::MAX / 2;
+        other_encounter.spider_unlock_tick = i32::MAX / 2;
+        let other_intro = PlayerIntroEntry {
+            start_tick: 123,
+            shipwreck_chain_started: true,
+            villager_spawned: true,
+            danger_unlocked: true,
+        };
+        let other_progress = PlayerIntroEncounters {
+            initial_encounter: true,
+            spider_encounter: false,
+        };
+        let other_objectives = PlayerObjectives {
+            scavenge_shipwreck: true,
+            build_campfire: true,
+            win_first_fight: true,
+            ..PlayerObjectives::default()
+        };
+        {
+            let world = game.app.world_mut();
+            world
+                .resource_mut::<InitialEncounterState>()
+                .insert(other_player_id, other_encounter);
+            world
+                .resource_mut::<PlayerIntroState>()
+                .insert(other_player_id, other_intro);
+            world
+                .resource_mut::<IntroEncounterState>()
+                .insert(other_player_id, other_progress.clone());
+            world
+                .resource_mut::<Objectives>()
+                .insert(other_player_id, other_objectives);
+        }
+
+        let cleanup_tick = game.game_tick();
+        let hero_entity = {
+            let world = game.app.world_mut();
+            let mut heroes = world.query_filtered::<(Entity, &PlayerId), With<SubclassHero>>();
+            heroes
+                .iter(world)
+                .find(|(_, owner)| owner.0 == player_id)
+                .map(|(entity, _)| entity)
+                .expect("hero before True Death")
+        };
+        game.app.world_mut().entity_mut(hero_entity).insert((
+            State::Dead,
+            StateDead {
+                dead_at: cleanup_tick,
+                killer: "Checkpoint 1 cleanup smoke".to_string(),
+            },
+            TrueDeath {
+                true_death_at: cleanup_tick - (10 * crate::constants::TICKS_PER_SEC) - 1,
+            },
+        ));
+        game.tick(3);
+
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<IntroEncounterState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<PlayerIntroState>()
+            .get(&player_id)
+            .is_none());
+        assert!(game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .is_none());
+        for opening_id in &opening_ids {
+            assert!(game
+                .world()
+                .resource::<EntityObjMap>()
+                .get_entity(*opening_id)
+                .is_none());
+        }
+        let other_encounter_after = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&other_player_id)
+            .expect("neighbor encounter survives another owner's cleanup");
+        assert_eq!(other_encounter_after.rat_ids, other_rat_ids);
+        assert_eq!(other_encounter_after.opening_enemy_spawned, [true, true]);
+        assert_eq!(other_encounter_after.opening_enemy_defeated, [true, false]);
+        assert!(other_encounter_after.phase1_defeated);
+        let other_intro_after = game
+            .world()
+            .resource::<PlayerIntroState>()
+            .get(&other_player_id)
+            .expect("neighbor intro survives another owner's cleanup");
+        assert_eq!(other_intro_after.start_tick, 123);
+        assert!(other_intro_after.shipwreck_chain_started);
+        assert!(other_intro_after.villager_spawned);
+        assert!(other_intro_after.danger_unlocked);
+        assert_eq!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&other_player_id),
+            Some(&other_progress)
+        );
+        let other_objectives_after = game
+            .world()
+            .resource::<Objectives>()
+            .get(&other_player_id)
+            .expect("neighbor objectives survive another owner's cleanup");
+        assert!(other_objectives_after.scavenge_shipwreck);
+        assert!(other_objectives_after.build_campfire);
+        assert!(other_objectives_after.win_first_fight);
+
+        // Production class selection creates the next hero on the existing
+        // authenticated connection; do not replace the reconnect fixture's
+        // connection with HeadlessGame::spawn_hero's fresh-run-only UUID.
+        game.inject(PlayerEvent::NewPlayer {
+            player_id,
+            hero_name: "FreshRunCleanupSmokeBot".to_string(),
+            class_name: "Warrior".to_string(),
+        });
+        game.tick(8);
+        assert!(game.observe().hero.is_some());
+        let fresh_encounter = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("fresh-run initial encounter");
+        assert_eq!(fresh_encounter.opening_enemy_spawned, [false, false]);
+        assert_eq!(fresh_encounter.opening_enemy_defeated, [false, false]);
+        assert!(!fresh_encounter.phase1_defeated);
+        assert_eq!(
+            game.world()
+                .resource::<IntroEncounterState>()
+                .get(&player_id),
+            Some(&PlayerIntroEncounters::default())
+        );
+        assert_eq!(
+            capture_current_objective_id(&mut game),
+            "scavenge_shipwreck"
+        );
+        let fresh_objectives = game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .expect("fresh objectives");
+        assert!(!fresh_objectives.scavenge_shipwreck);
+        assert!(!fresh_objectives.assign_first_villager);
     }
 
     #[test]
@@ -8559,7 +10283,7 @@ mod tests {
             matches!(
                 packet,
                 ResponsePacket::Notice { noticemsg, .. }
-                    if noticemsg == "The goblin assault has begun. It will continue if you disconnect."
+                    if noticemsg == "The goblin assault has split three ways: a Hunter seeks you, a Harrier pressures your settlers, and a Breacher moves on the settlement. It will continue if you disconnect."
             )
         });
         assert!(!repeated_launch_notice);
@@ -11310,8 +13034,7 @@ mod tests {
         );
     }
 
-    // Hand-crafting Firewood from a Log — the cook economy's fuel chain. The bot
-    // relies on this to keep cooking past the 10 starting Firewood.
+    // Hand-crafting Firewood from a Log — the cook economy's ordinary fuel chain.
     #[test]
     fn craft_firewood_from_log() {
         use crate::ids::Ids;
@@ -12224,7 +13947,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_fixture_preserves_one_starting_potion_in_both_legs() {
+    fn preparation_fixture_declares_one_baseline_potion_in_both_legs() {
         let fixture_for = |add_bandage: bool, name: &str| {
             let mut game = HeadlessGame::new(100);
             game.spawn_hero("Warrior", name);
@@ -12373,6 +14096,7 @@ mod tests {
     fn production_health_potion_use_consumes_exactly_one_and_duplicate_cannot_overconsume() {
         let mut game = HeadlessGame::new(100);
         let player_id = game.spawn_hero("Warrior", "ProductionPotionUse");
+        add_test_health_potion(&mut game, player_id, 2);
         let (hero_id, potion_id, base_hp) = {
             let world = game.app.world_mut();
             let mut heroes = world
@@ -12380,16 +14104,15 @@ mod tests {
             let (_, mut stats, mut inventory) = heroes
                 .iter_mut(world)
                 .find(|(owner, ..)| owner.0 == player_id)
-                .expect("hero with starting Health Potion");
+                .expect("hero with explicit Health Potion fixture");
             let hero_id = inventory.owner;
             let potion_id = {
                 let potion = inventory
                     .items
                     .iter_mut()
                     .find(|item| item.name == "Health Potion")
-                    .expect("starting Health Potion");
-                assert_eq!(potion.quantity, 1);
-                potion.quantity = 2;
+                    .expect("explicit Health Potion fixture");
+                assert_eq!(potion.quantity, 2);
                 potion.id
             };
             stats.hp = stats.base_hp - 10;
@@ -12432,13 +14155,14 @@ mod tests {
     fn production_health_potion_use_at_full_health_without_sickness_is_non_consuming() {
         let mut game = HeadlessGame::new(100);
         let player_id = game.spawn_hero("Warrior", "ProductionPotionNoop");
+        add_test_health_potion(&mut game, player_id, 1);
         let before = game.observe();
         let hero = before.hero.expect("hero");
         let potion = before
             .inventory
             .iter()
             .find(|item| item.name == "Health Potion")
-            .expect("starting Health Potion");
+            .expect("explicit Health Potion fixture");
         assert_eq!(hero.hp, hero.base_hp);
         {
             let world = game.app.world_mut();

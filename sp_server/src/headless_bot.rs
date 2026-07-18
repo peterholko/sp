@@ -9,11 +9,13 @@
 //   2. Retreat — when wounded and an enemy is close, fall back toward home.
 //   3. Heal up — when wounded and safe, use a healing item.
 //   4. Fight — attack adjacent enemies / close on nearby ones while healthy.
-//   5. Build — drive the current build job (campfire first, then walls), pulling
-//      resources from the Burrow and depositing them into the foundation.
-//   6. Fortify — once the campfire stands, ring the base with palisade walls.
-//   7. Economy — order idle villagers to gather; forage resource tiles.
-//   8. Explore — range out to deterministic waypoints when nothing else to do.
+//   5. Opening — search the run-owned Shipwreck, recover its salvage, gather
+//      three additional Logs, and build the normal Burrow foundation.
+//   6. Build — drive later build jobs, pulling resources from the Burrow and
+//      depositing them into the foundation.
+//   7. Fortify — once the campfire stands, ring the base with palisade walls.
+//   8. Economy — order idle villagers to gather; forage resource tiles.
+//   9. Explore — range out to deterministic waypoints when nothing else to do.
 //
 // Survival model (from the game): there is NO passive HP regen, so survival is
 // about avoiding damage (retreat + walls + heal items); hunger/thirst/tiredness
@@ -82,8 +84,10 @@ const HIRE_WAGE: i32 = 25; // Gold Coins charged per hire (matches the server)
 const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
 // Structure recipes the bot builds (req type -> quantity), matching the
-// obj_template.yaml `req` fields. Campfire uses the hero's starting Stick+Resin;
-// Stockade walls use Logs.
+// obj_template.yaml `req` fields. The revised opening builds a Burrow from two
+// recovered Logs plus three gathered Logs; later emergency Campfires use the
+// recovered Stick+Resin, and Stockade walls use Logs.
+const BURROW_REQS: &[(&str, i32)] = &[("Log", 5)];
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 3)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
@@ -217,8 +221,8 @@ impl BalanceBotPolicy {
 
 // A multi-step structure build the bot is currently driving.
 struct BuildJob {
-    structure_name: String, // "Campfire" / "Stockade"
-    subclass: String,       // expected subclass: "campfire" / "wall"
+    structure_name: String, // "Burrow" / "Campfire" / "Stockade"
+    subclass: String,       // expected subclass: "storage" / "campfire" / "wall"
     reqs: Vec<(String, i32)>,
     site: Position,
     structure_id: Option<i32>, // discovered once the foundation is placed
@@ -233,10 +237,10 @@ pub struct Bot {
     explore_cursor: usize,
     job: Option<BuildJob>,
     walls_attempted: usize,
-    recruit_attempted: bool, // investigated the shipwreck to recruit a villager
-    upgrade_enabled: bool,   // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
-    dbg_last_day: i32,       // last day a FOOD_DEBUG line was emitted
-    hunts: u32,              // hunt actions issued (diagnostic)
+    shipwreck_search_issued: bool, // sent this run's one opening investigation
+    upgrade_enabled: bool, // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
+    dbg_last_day: i32,     // last day a FOOD_DEBUG line was emitted
+    hunts: u32,            // hunt actions issued (diagnostic)
     balance_policy: BalanceBotPolicy,
     // Dedicated multiplayer helper destination. When set, the hero travels by
     // ordinary Move events until adjacent to the owner's settlement, then holds
@@ -292,7 +296,7 @@ impl Bot {
             explore_cursor: 0,
             job: None,
             walls_attempted: 0,
-            recruit_attempted: false,
+            shipwreck_search_issued: false,
             // A/B toggle for measuring the sanctuary loop's contribution.
             upgrade_enabled: balance_policy.upgrade_sanctuary
                 && std::env::var("BOT_NO_UPGRADE").is_err(),
@@ -461,7 +465,7 @@ impl Bot {
             self.phase = Phase::Done;
             return;
         }
-        self.phase = if !view.has_built("campfire") {
+        self.phase = if !view.has_built("storage") || !view.has_built("campfire") {
             Phase::Build
         } else if view
             .structures
@@ -646,6 +650,15 @@ impl Bot {
             return None;
         }
 
+        // Every active solo policy follows the production opening before it
+        // assumes a storage settlement exists. The Shipwreck remains a neutral
+        // POI, so the observation explicitly marks the one associated with this
+        // run and exposes only that wreck's inventory. Investigation and each
+        // transfer still travel through ordinary server-authoritative events.
+        if !self.balance_policy.passive && !self.opening_complete(view) {
+            return self.opening_action(&hero, view, map);
+        }
+
         let crisis_hold = self.balance_policy.stay_near_settlement_after_warning
             && matches!(
                 view.crisis_phase,
@@ -696,47 +709,17 @@ impl Bot {
             }
         }
 
-        // Needs gating for the expansion steps below. Recruiting the shipwreck
-        // villager is a cheap one-time trip right by spawn and that villager then
-        // farms food into the larder, so it gets a LOOSE gate (just "not about to
-        // need something"). Hiring is a longer trip to the merchant, so it stays
-        // moderately gated.
-        let needs_ok =
-            hero.hunger < CONSUME_AT && hero.thirst < CONSUME_AT && hero.tired < CONSUME_AT;
+        // Hiring is a longer expansion trip, so it remains moderately needs-gated.
         let needs_comfortable = hero.hunger < 55.0 && hero.thirst < 55.0 && hero.tired < 55.0;
 
-        // 4c. Recruit the shipwreck villager EARLY — before building. It's the
-        //     settlement's first farmer (and one-time), so getting it on day 1 is
-        //     worth more than rushing the campfire. The wreck sits next to spawn, so
-        //     a loose safe + not-critically-needy gate makes this fire reliably.
+        // Passive policies deliberately stop before opening/economy actions.
         if self.balance_policy.passive {
             return None;
         }
 
-        if self.balance_policy.recruit_shipwreck_villager
-            && safe
-            && !crisis_hold
-            && needs_ok
-            && !self.recruit_attempted
-            && view.villagers.is_empty()
-        {
-            if let Some(ship) = view.pois.iter().find(|p| p.template == "Shipwreck") {
-                if hex_dist(hero.pos, ship.pos) <= 1 {
-                    self.recruit_attempted = true;
-                    return Some(PlayerEvent::InvestigatePOI {
-                        player_id: self.player_id,
-                        target_id: ship.id,
-                    });
-                }
-                if let Some(mv) = self.step_adjacent_to(hero.pos, ship.pos, view, map) {
-                    return Some(mv);
-                }
-            }
-        }
-
-        // 5. Build the base. The campfire gates the cook-and-stockpile economy, so
-        //    it goes up early (the hero starts with the Stick+Resin) — just after
-        //    securing the first villager.
+        // 5. Build the base after the opening Burrow. The normal setup already
+        //    supplies a lit Campfire; this fallback can still replace a missing one
+        //    from the recovered Stick+Resin before later Stockades.
         if self.job.is_some() {
             if let Some(action) = self.advance_job(view, map) {
                 return Some(action);
@@ -751,14 +734,15 @@ impl Bot {
 
         // 4e. Hire more villagers from the travelling merchant, up to the
         //     Prosperity goal. Only when safe + needs comfortable (same as recruit).
-        //     The hero pays in Gold Coins, which start in the Burrow, so it first
-        //     withdraws gold, then walks to the docked merchant and hires.
+        //     The hero pays in Gold Coins recovered from the wreck or later banked
+        //     in the Burrow, then walks to the docked merchant and hires.
         if self.balance_policy.hire_villagers
             && safe
             && !crisis_hold
             && needs_comfortable
             && view.villagers.len() < TARGET_VILLAGERS
-            && self.recruit_attempted
+            && self.shipwreck_search_issued
+            && self.balance_policy.recruit_shipwreck_villager
         {
             if let Some(action) = self.hire_action(&hero, view, map) {
                 return Some(action);
@@ -812,18 +796,182 @@ impl Bot {
 
     // ---- Build-job state machine -------------------------------------------
 
-    // Pick the next structure to build: a campfire if none exists yet, then a
-    // ring of palisade walls around home. Returns None when nothing to build.
+    fn opening_complete(&self, view: &WorldView) -> bool {
+        let Some(shipwreck) = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+        else {
+            return false;
+        };
+        self.shipwreck_search_issued && shipwreck.inventory.is_empty() && view.has_built("storage")
+    }
+
+    // Drive only the revised new-run opening. Combat and emergency survival
+    // decisions remain above this method, so a delayed build never suppresses an
+    // immediate threat. Returning None while incomplete deliberately holds the
+    // bot out of downstream economy code that assumes a Burrow exists.
+    fn opening_action(
+        &mut self,
+        hero: &HeroView,
+        view: &WorldView,
+        map: &Map,
+    ) -> Option<PlayerEvent> {
+        let (shipwreck_id, shipwreck_pos, salvage_item_id) = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+            .map(|poi| (poi.id, poi.pos, poi.inventory.first().map(|item| item.id)))?;
+
+        if !self.shipwreck_search_issued {
+            if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
+                self.shipwreck_search_issued = true;
+                return Some(PlayerEvent::InvestigatePOI {
+                    player_id: self.player_id,
+                    target_id: shipwreck_id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
+        }
+
+        // Transfer one ordinary inventory stack per decision. This is the same
+        // manual POI-to-hero operation available to a player; no bot-only item
+        // grant or synthetic storage path is used.
+        if let Some(item_id) = salvage_item_id {
+            if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
+                return Some(PlayerEvent::ItemTransfer {
+                    player_id: self.player_id,
+                    source_id: shipwreck_id,
+                    target_id: hero.id,
+                    item_id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
+        }
+
+        // Preserve the Warrior's recovered class protection. Ranger weapon
+        // selection remains combat-driven; the shared starter stick is equipped
+        // below because Logging is required before any class can build a Burrow.
+        if let Some(helm_id) = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Copper Helm" && !item.equipped)
+            .map(|item| item.id)
+        {
+            return Some(PlayerEvent::Equip {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id: helm_id,
+                status: true,
+            });
+        }
+
+        if !view.has_built("storage") {
+            if actual_burrow_log_supply(view) < BURROW_REQS[0].1 {
+                return self.logging_action(hero, view, map);
+            }
+
+            // A stale later-stage job must never leapfrog the opening shelter.
+            if self
+                .job
+                .as_ref()
+                .is_some_and(|job| job.structure_name != "Burrow")
+            {
+                self.job = None;
+            }
+            if self.job.is_none() {
+                self.job = self.next_build_job(view, map);
+            }
+            return self.advance_job(view, map);
+        }
+
+        None
+    }
+
+    // Equip the starter-only Logging stick, reveal a real Log node through the
+    // ordinary Prospect event, then gather it through the production timer and
+    // yield rules until five actual Logs are carried (two salvage + three more).
+    fn logging_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
+        if !view
+            .inventory
+            .iter()
+            .any(|item| item.equipped && item.is_logging)
+        {
+            let item_id = view
+                .inventory
+                .iter()
+                .find(|item| item.is_logging && item.quantity > 0)
+                .map(|item| item.id)?;
+            return Some(PlayerEvent::Equip {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id,
+                status: true,
+            });
+        }
+
+        let here = view
+            .resource_tiles
+            .iter()
+            .find(|resource| resource.pos == hero.pos);
+        if here.is_some_and(|resource| resource.log_revealed) {
+            return Some(PlayerEvent::Gather {
+                player_id: self.player_id,
+            });
+        }
+        if here.is_some_and(|resource| resource.has_log) {
+            return Some(PlayerEvent::Prospect {
+                player_id: self.player_id,
+            });
+        }
+
+        let target = view
+            .resource_tiles
+            .iter()
+            .filter(|resource| resource.has_log)
+            .min_by_key(|resource| hex_dist(hero.pos, resource.pos))?;
+        self.step_toward(hero.pos, target.pos, view, map)
+    }
+
+    // Pick the next structure to build: the opening Burrow, a replacement
+    // Campfire if needed, then a ring of palisade walls around home.
     fn next_build_job(&mut self, view: &WorldView, map: &Map) -> Option<BuildJob> {
         let hero = view.hero?;
         let home = view.home().or(self.anchor).unwrap_or(hero.pos);
+
+        if !view.has_built("storage") {
+            if let Some(foundation) = view
+                .structures
+                .iter()
+                .find(|structure| structure.subclass == "storage")
+            {
+                return Some(BuildJob::new(
+                    "Burrow",
+                    "storage",
+                    BURROW_REQS,
+                    foundation.pos,
+                    view.game_tick,
+                ));
+            }
+            if actual_log_count(&view.inventory) < BURROW_REQS[0].1 {
+                return None;
+            }
+            let site = self.next_burrow_site(view, home, map)?;
+            return Some(BuildJob::new(
+                "Burrow",
+                "storage",
+                BURROW_REQS,
+                site,
+                view.game_tick,
+            ));
+        }
 
         // Campfire first (also a survival objective). Skip if one already exists.
         if self.balance_policy.build_campfire
             && !view.structures.iter().any(|s| s.subclass == "campfire")
         {
             let site = self.anchor.unwrap_or(hero.pos);
-            // Only start if we can actually supply it (hero carries Stick+Resin).
+            // Only start if we can actually supply it (recovered Stick+Resin).
             if has_all_reqs(&view.inventory, CAMPFIRE_REQS) {
                 return Some(BuildJob::new(
                     "Campfire",
@@ -869,6 +1017,26 @@ impl Bot {
         }
 
         None
+    }
+
+    fn next_burrow_site(&self, view: &WorldView, home: Position, map: &Map) -> Option<Position> {
+        let mut adjacent = Map::range((home.x, home.y), 1)
+            .into_iter()
+            .collect::<Vec<_>>();
+        adjacent.sort_unstable();
+        adjacent
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .find(|position| {
+                *position != home
+                    && Map::is_valid_pos((position.x, position.y))
+                    && Map::is_passable(position.x, position.y, map)
+                    && !view.occupied.contains(&(position.x, position.y))
+                    && !view
+                        .structures
+                        .iter()
+                        .any(|structure| structure.pos == *position)
+            })
     }
 
     fn advance_job(&mut self, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
@@ -920,11 +1088,20 @@ impl Bot {
         let foundation_filled = foundation
             .map(|f| f.building || has_all_reqs(&f.inventory, &as_req_slice(&job.reqs)))
             .unwrap_or(false);
+        let carries_remaining_reqs = foundation
+            .map(|foundation| {
+                has_all_remaining_reqs(
+                    &view.inventory,
+                    &foundation.inventory,
+                    &as_req_slice(&job.reqs),
+                )
+            })
+            .unwrap_or_else(|| has_all_reqs(&view.inventory, &as_req_slice(&job.reqs)));
 
-        if !foundation_filled && !has_all_reqs(&view.inventory, &as_req_slice(&job.reqs)) {
+        if !foundation_filled && !carries_remaining_reqs {
             // Need more resources in hand — fetch from a storage (the Burrow).
             if let Some((storage_pos, storage_id, item_id)) =
-                storage_item_for_missing(view, &job.reqs)
+                storage_item_for_missing(view, foundation, &job.reqs)
             {
                 if Map::is_adjacent_including_source(hero_pos, storage_pos) {
                     return Some(PlayerEvent::ItemTransfer {
@@ -1049,9 +1226,9 @@ impl Bot {
     }
 
     // Hire a villager from the docked merchant. The wage is paid in Gold Coins from
-    // the hero's pack; the starting gold sits in the Burrow, so the hero withdraws a
-    // gold stack first, then walks to the merchant and hires. Returns None when no
-    // merchant is docked, nothing is for hire, or there is no gold to be had.
+    // the hero's pack; if later-earned gold was banked in the Burrow, the hero
+    // withdraws it first. Returns None when no merchant is docked, nothing is for
+    // hire, or there is no gold to be had.
     fn hire_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         const HIRE_MAX_DIST: u32 = 22; // don't trek across the map to the merchant
         let merchant = view.merchant.as_ref()?;
@@ -1272,8 +1449,8 @@ impl Bot {
         //    campfire, so a hero-inventory-only check abandoned the cook the moment
         //    the meat left the pack (staged meat rotted unattended while the bot
         //    wandered off to hunt more).
-        //    COOK FIRST: the campfire carries its own firewood stock (it starts with
-        //    10), so cooking usually needs no hero-side fuel at all — only fall back
+        //    COOK FIRST: the campfire carries its own five Firewood, so cooking
+        //    usually needs no hero-side fuel at all — only fall back
         //    to ensure_firewood (split a Burrow Log into 5 Firewood) when the cook
         //    can't proceed for lack of fuel anywhere.
         let has_raw_meat = view.inventory.iter().any(|i| i.subclass == "Raw Meat");
@@ -1409,10 +1586,8 @@ impl Bot {
     }
 
     // Keep cooking fuel flowing when low: split a Log into Firewood (1 -> 5) if one
-    // is in hand, otherwise withdraw a Log from the Burrow first. Returns the action
-    // to take, or None if firewood is fine / no logs are anywhere. This is why the
-    // hero stops starving: the Burrow's logs become a long firewood supply instead
-    // of the cook stalling once the 10 starting Firewood run out.
+    // is in hand, otherwise withdraw a later-banked Log from the Burrow. Returns the
+    // action to take, or None if firewood is fine / no logs are anywhere.
     fn ensure_firewood(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         if firewood_count(&view.inventory) >= LOW_FIREWOOD {
             return None;
@@ -1446,7 +1621,7 @@ impl Bot {
         self.step_adjacent_to(hero.pos, spos, view, map)
     }
 
-    // Hunt a Game Animal: equip the Hunting weapon (the starting Sharpened Stick),
+    // Hunt a Game Animal: equip the recovered Hunting weapon (Sharpened Stick),
     // then gather a revealed game tile (prospect to reveal one — game spawns under
     // grassland/plains hexes near the base). Yields a carcass to butcher in (1).
     fn hunt_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
@@ -1781,7 +1956,7 @@ impl Bot {
         }
     }
 
-    /// Equip the production starting bow even though it also carries the Hunting
+    /// Equip the recovered production bow even though it also carries the Hunting
     /// attribute. The old generic combat selector excluded all hunting weapons and
     /// therefore swapped Rangers away from their only legitimate ranged weapon.
     fn equip_training_bow(&self, view: &WorldView) -> Option<PlayerEvent> {
@@ -2077,27 +2252,80 @@ fn count_matching(items: &[ItemView], req_type: &str) -> i32 {
         .sum()
 }
 
+fn actual_log_count(items: &[ItemView]) -> i32 {
+    items
+        .iter()
+        .filter(|item| item.class == "Log")
+        .map(|item| item.quantity)
+        .sum()
+}
+
+fn actual_burrow_log_supply(view: &WorldView) -> i32 {
+    actual_log_count(&view.inventory)
+        + view
+            .structures
+            .iter()
+            .filter(|structure| structure.subclass == "storage" && !structure.built)
+            .map(|structure| actual_log_count(&structure.inventory))
+            .sum::<i32>()
+}
+
+fn matches_req_exactly(item: &ItemView, req_type: &str) -> bool {
+    req_type == item.name || req_type == item.class || req_type == item.subclass
+}
+
+// Construction permits Timber as a Log substitute, but the opening should
+// consume its five actual Logs first and preserve the single valuable Timber.
+fn preferred_item_for_req<'a>(items: &'a [ItemView], req_type: &str) -> Option<&'a ItemView> {
+    items
+        .iter()
+        .find(|item| matches_req_exactly(item, req_type))
+        .or_else(|| items.iter().find(|item| item.matches_req(req_type)))
+}
+
 fn has_all_reqs(items: &[ItemView], reqs: &[(&str, i32)]) -> bool {
     reqs.iter().all(|(t, q)| count_matching(items, t) >= *q)
+}
+
+fn has_all_remaining_reqs(carried: &[ItemView], staged: &[ItemView], reqs: &[(&str, i32)]) -> bool {
+    reqs.iter().all(|(req_type, quantity)| {
+        let remaining = quantity.saturating_sub(count_matching(staged, req_type));
+        count_matching(carried, req_type) >= remaining
+    })
 }
 
 // Find a still-missing requirement that some owned storage holds; return
 // (storage_pos, storage_id, item_id) to pull one matching stack to the hero.
 fn storage_item_for_missing(
     view: &WorldView,
+    foundation: Option<&StructureView>,
     reqs: &[(String, i32)],
 ) -> Option<(Position, i32, i32)> {
     for (req_type, need) in reqs {
-        if count_matching(&view.inventory, req_type) >= *need {
+        let staged = foundation
+            .map(|foundation| count_matching(&foundation.inventory, req_type))
+            .unwrap_or(0);
+        if count_matching(&view.inventory, req_type) + staged >= *need {
             continue;
         }
-        for s in view
-            .structures
-            .iter()
-            .filter(|s| s.subclass == "storage" && s.built)
-        {
-            if let Some(item) = s.inventory.iter().find(|i| i.matches_req(req_type)) {
-                return Some((s.pos, s.id, item.id));
+
+        // Search every storage for an exact item before accepting a legal
+        // substitute from any storage.
+        for exact_only in [true, false] {
+            for s in view
+                .structures
+                .iter()
+                .filter(|s| s.subclass == "storage" && s.built)
+            {
+                if let Some(item) = s.inventory.iter().find(|item| {
+                    if exact_only {
+                        matches_req_exactly(item, req_type)
+                    } else {
+                        item.matches_req(req_type)
+                    }
+                }) {
+                    return Some((s.pos, s.id, item.id));
+                }
             }
         }
     }
@@ -2202,8 +2430,8 @@ fn storage_log(view: &WorldView) -> Option<(Position, i32, i32)> {
     None
 }
 
-// A Gold Coins stack sitting in an owned storage (the Burrow starts with 50) to
-// withdraw for hiring. Returns (storage_pos, storage_id, item_id).
+// A Gold Coins stack sitting in an owned storage to withdraw for hiring. Returns
+// (storage_pos, storage_id, item_id).
 fn storage_gold(view: &WorldView) -> Option<(Position, i32, i32)> {
     for s in view
         .structures
@@ -2253,6 +2481,177 @@ mod tests {
             BalanceBotPolicy::for_scenario(CrisisBalanceScenario::HelperSupported),
             BalanceBotPolicy::standard(),
             "helper support is an additive second hero, not extra primary preparation"
+        );
+    }
+
+    #[test]
+    fn active_bot_searches_its_run_owned_shipwreck() {
+        let mut game = HeadlessGame::new(1_000);
+        let player_id = game.spawn_hero("Warrior", "OwnedShipwreckSearchBot");
+        let foreign_player_id = game.spawn_connected_scenario_helper("ForeignShipwreckSearchBot");
+        let view = game.observe_for_player(player_id);
+        let hero = view.hero.expect("opening hero");
+        let shipwreck = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+            .expect("run-associated Shipwreck");
+        assert!(Map::is_adjacent_including_source(hero.pos, shipwreck.pos));
+        let foreign_shipwreck = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && !poi.run_owned)
+            .expect("foreign Shipwreck remains observable but opaque");
+        assert!(foreign_shipwreck.inventory.is_empty());
+        assert_ne!(foreign_player_id, player_id);
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::InvestigatePOI {
+                player_id: event_player_id,
+                target_id,
+            }) if event_player_id == player_id && target_id == shipwreck.id
+        ));
+        assert!(bot.shipwreck_search_issued);
+    }
+
+    #[test]
+    fn searched_opening_uses_manual_transfer_from_owned_shipwreck() {
+        let mut game = HeadlessGame::new(1_000);
+        let player_id = game.spawn_hero("Warrior", "OwnedShipwreckTransferBot");
+        let view = game.observe_for_player(player_id);
+        let hero = view.hero.expect("opening hero");
+        let shipwreck = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+            .expect("run-associated Shipwreck");
+        let first_salvage_id = shipwreck.inventory.first().expect("starter salvage").id;
+
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        bot.shipwreck_search_issued = true;
+        assert!(matches!(
+            bot.step(&view, game.map()),
+            Some(PlayerEvent::ItemTransfer {
+                player_id: event_player_id,
+                source_id,
+                target_id,
+                item_id,
+            }) if event_player_id == player_id
+                && source_id == shipwreck.id
+                && target_id == hero.id
+                && item_id == first_salvage_id
+        ));
+    }
+
+    #[test]
+    fn burrow_requirement_prefers_actual_log_over_timber_substitute() {
+        let mut game = HeadlessGame::new(1_000);
+        let player_id = game.spawn_hero("Warrior", "BurrowLogPreferenceBot");
+        let view = game.observe_for_player(player_id);
+        let mut salvage = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+            .expect("run-associated Shipwreck")
+            .inventory
+            .clone();
+        assert!(salvage.iter().any(|item| item.class == "Timber"));
+        salvage.sort_by_key(|item| i32::from(item.class != "Timber"));
+
+        let selected = preferred_item_for_req(&salvage, "Log").expect("build material");
+        assert_eq!(selected.class, "Log");
+    }
+
+    #[test]
+    fn active_bot_completes_revised_opening_through_production_events() {
+        const DECISION_TICKS: u32 = 8;
+        const MAX_DECISIONS: usize = 1_500;
+
+        let mut game = HeadlessGame::new((DECISION_TICKS as i32) * (MAX_DECISIONS as i32));
+        game.restrict_to_preparation_pair_start_location()
+            .expect("fixed production-opening start");
+        let player_id = game.spawn_hero("Warrior", "ProductionOpeningBot");
+        // Intro timing and post-search grace have dedicated integration tests.
+        // Keep their randomized combat out of this production-economy proof;
+        // only deadlines move, while every salvage/build action remains real.
+        game.defer_intro_encounter_deadlines_for_fixture()
+            .expect("deferred unrelated intro encounter deadlines");
+        let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        let mut investigated_owned_wreck = false;
+        let mut manual_salvage_transfers = 0;
+        let mut production_gathers = 0;
+        let mut max_actual_logs = 0;
+        let mut normal_burrow_foundation = false;
+
+        for _ in 0..MAX_DECISIONS {
+            let view = game.observe_for_player(player_id);
+            max_actual_logs = max_actual_logs.max(actual_log_count(&view.inventory));
+            if view.has_built("storage") {
+                assert!(investigated_owned_wreck);
+                assert!(manual_salvage_transfers > 0);
+                assert!(production_gathers > 0);
+                assert!(max_actual_logs >= BURROW_REQS[0].1);
+                assert!(normal_burrow_foundation);
+                assert!(view.inventory.iter().any(|item| item.class == "Timber"));
+                assert!(view
+                    .pois
+                    .iter()
+                    .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+                    .is_some_and(|poi| poi.inventory.is_empty()));
+                assert_eq!(
+                    game.protected_intro_snapshot().opening_enemy_spawned,
+                    [false, false]
+                );
+                return;
+            }
+            assert!(
+                view.hero.is_some_and(|hero| !hero.true_death),
+                "opening bot suffered True Death before its Burrow"
+            );
+
+            if let Some(event) = bot.step(&view, game.map()) {
+                match &event {
+                    PlayerEvent::InvestigatePOI { target_id, .. } => {
+                        investigated_owned_wreck = view
+                            .pois
+                            .iter()
+                            .any(|poi| poi.id == *target_id && poi.run_owned);
+                    }
+                    PlayerEvent::ItemTransfer { source_id, .. }
+                        if view
+                            .pois
+                            .iter()
+                            .any(|poi| poi.id == *source_id && poi.run_owned) =>
+                    {
+                        manual_salvage_transfers += 1;
+                    }
+                    PlayerEvent::Gather { .. } => production_gathers += 1,
+                    PlayerEvent::CreateFoundation { structure_name, .. }
+                        if structure_name == "Burrow" =>
+                    {
+                        normal_burrow_foundation = true;
+                    }
+                    _ => {}
+                }
+                game.inject(event);
+            }
+            bot.advance_phase(&view);
+            game.tick(DECISION_TICKS);
+        }
+
+        let view = game.observe_for_player(player_id);
+        panic!(
+            "opening bot did not finish a normal Burrow in {MAX_DECISIONS} decisions: tick={}, hero={:?}, wreck_items={}, logs={}, structures={}",
+            view.game_tick,
+            view.hero.map(|hero| (hero.hp, hero.state, hero.true_death)),
+            view.pois
+                .iter()
+                .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+                .map_or(0, |poi| poi.inventory.len()),
+            actual_log_count(&view.inventory),
+            view.structures.len(),
         );
     }
 
@@ -2477,6 +2876,30 @@ mod tests {
         let mut game = HeadlessGame::new(1_000);
         let player_id = game.spawn_hero(class_name, hero_name);
         let mut view = game.observe_for_player(player_id);
+        let recovered_salvage = view
+            .pois
+            .iter()
+            .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+            .expect("class test run-associated Shipwreck")
+            .inventory
+            .clone();
+        view.inventory.extend(recovered_salvage);
+        for item in &mut view.inventory {
+            item.equipped = match class_name {
+                "Ranger" => item.name == "Training Bow" || item.equipped,
+                "Warrior" => {
+                    item.name == "Sharpened Stick" || item.name == "Copper Helm" || item.equipped
+                }
+                "Mage" => item.name == "Sharpened Stick" || item.equipped,
+                _ => item.equipped,
+            };
+            if item.is_weapon {
+                item.equipped = match class_name {
+                    "Ranger" => item.name == "Training Bow",
+                    _ => item.name == "Sharpened Stick",
+                };
+            }
+        }
         let hero = view.hero.as_mut().expect("headless hero");
         hero.state = State::None;
         hero.hp = hero.base_hp;
@@ -2625,7 +3048,7 @@ mod tests {
             .iter()
             .find(|item| item.name == "Training Bow")
             .map(|item| item.id)
-            .expect("Ranger starting Training Bow");
+            .expect("Ranger recovered Training Bow");
         for item in &mut view.inventory {
             if item.name == "Training Bow" {
                 assert_eq!(item.attack_range, 2);
@@ -2981,6 +3404,83 @@ mod tests {
         }
     }
 
+    fn complete_production_opening_for_class_combat(
+        game: &mut HeadlessGame,
+        player_id: i32,
+        bot: &mut Bot,
+    ) -> bool {
+        const DECISION_TICKS: u32 = 8;
+        const MAX_DECISIONS: usize = 1_500;
+
+        for _ in 0..MAX_DECISIONS {
+            let view = game.observe_for_player(player_id);
+            if view.has_built("storage") {
+                assert!(
+                    view.pois
+                        .iter()
+                        .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
+                        .is_some_and(|poi| poi.inventory.is_empty()),
+                    "production opening must manually recover the run-owned Shipwreck before the Burrow"
+                );
+                assert_eq!(
+                    game.protected_intro_snapshot().opening_enemy_spawned,
+                    [false, false],
+                    "class-combat fixture setup must finish during the production post-salvage warning grace"
+                );
+                bot.advance_phase(&view);
+                return true;
+            }
+            if view.hero.is_none_or(|hero| hero.true_death) {
+                return false;
+            }
+
+            if let Some(event) = bot.step(&view, game.map()) {
+                game.inject(event);
+            }
+            bot.advance_phase(&view);
+            game.tick(DECISION_TICKS);
+        }
+
+        false
+    }
+
+    fn equip_recovered_class_weapon_for_combat(
+        class: HeroClass,
+        game: &mut HeadlessGame,
+        bot: &Bot,
+    ) -> bool {
+        if class != HeroClass::Ranger {
+            return true;
+        }
+
+        let view = game.observe();
+        if view
+            .inventory
+            .iter()
+            .any(|item| item.name == "Training Bow" && item.equipped)
+        {
+            return true;
+        }
+        let Some(event) = bot.equip_training_bow(&view) else {
+            return false;
+        };
+        assert!(matches!(
+            event,
+            PlayerEvent::Equip {
+                player_id,
+                status: true,
+                ..
+            } if player_id == bot.player_id
+        ));
+        game.inject(event);
+        game.tick(2);
+
+        game.observe()
+            .inventory
+            .iter()
+            .any(|item| item.name == "Training Bow" && item.equipped)
+    }
+
     fn integrated_class_combat_evidence(class: HeroClass) -> IntegratedClassCombatEvidence {
         const DECISION_TICKS: u32 = 8;
         const OBSERVATION_TICKS: i32 = 2_000;
@@ -2994,6 +3494,19 @@ mod tests {
                 .expect("fixed class-combat start");
             let player_id =
                 game.spawn_hero(class_name, &format!("Cp4Integrated{class_name}{attempt}"));
+            // Intro combat has dedicated production coverage. Keep its random
+            // attackers out of this class-assault regression while retaining
+            // the complete authoritative Shipwreck -> salvage -> logging ->
+            // Burrow path that establishes legitimate class inventory.
+            game.defer_intro_encounter_deadlines_for_fixture()
+                .expect("deferred unrelated intro encounter deadlines");
+            let mut bot =
+                Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+            if !complete_production_opening_for_class_combat(&mut game, player_id, &mut bot)
+                || !equip_recovered_class_weapon_for_combat(class, &mut game, &bot)
+            {
+                continue;
+            }
             game.set_crisis_balance_sample_interval(Some(1));
             let launch = game
                 .prepare_checkpoint4_preparation_pair_launch(
@@ -3010,8 +3523,6 @@ mod tests {
             let launch_view = game.observe();
             assert_legitimate_class_setup(class, &launch_view);
             let launch_tick = game.game_tick();
-            let mut bot =
-                Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
             let mut evidence = IntegratedClassCombatEvidence::default();
             game.start_packet_capture();
 
@@ -3256,7 +3767,7 @@ fn hero_item_for_missing(
         if count_matching(&foundation.inventory, req_type) >= *need {
             continue;
         }
-        if let Some(item) = inventory.iter().find(|i| i.matches_req(req_type)) {
+        if let Some(item) = preferred_item_for_req(inventory, req_type) {
             return Some(item.id);
         }
     }

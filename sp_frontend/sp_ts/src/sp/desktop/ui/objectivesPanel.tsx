@@ -38,6 +38,7 @@ interface ObjectiveProgress {
   target?: string;
   action_hint: string;
   lesson: string;
+  blocker?: string;
   reward: string;
   progress?: number;
   goal?: number;
@@ -291,6 +292,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.safeLogoutRequestLocked = false;
     this.safeLogoutCancelLocked = false;
     this.setState((state) => ({
+      build_campfire: false,
+      build_3_structures: false,
+      recruit_villager: false,
+      explore_poi: false,
+      survive_5_nights: false,
+      objectiveState: null,
+      threatState: null,
+      discoveryEvent: null,
       ...clearCrisisStatus(state),
       ...clearSafeLogoutStatus(),
     }));
@@ -309,6 +318,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       this.safeLogoutRequestLocked = false;
       this.safeLogoutCancelLocked = false;
       this.setState((state) => ({
+        build_campfire: false,
+        build_3_structures: false,
+        recruit_villager: false,
+        explore_poi: false,
+        survive_5_nights: false,
+        objectiveState: null,
+        threatState: null,
+        discoveryEvent: null,
         ...clearCrisisStatus(state),
         ...clearSafeLogoutStatus(),
       }));
@@ -321,10 +338,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     return [
       {
         id: 'build_campfire',
-        title: 'Build a campfire',
+        title: 'Use the campfire',
         state: this.state.build_campfire ? 'complete' : 'active',
         category: 'Settlement',
-        action_hint: 'Build a campfire before dusk.',
+        action_hint: 'Use the lit campfire beside your start.',
         lesson: 'Fire makes night danger easier to read.',
         reward: 'Warmth and vision.',
       },
@@ -586,6 +603,26 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             <span>Attackers remaining</span>
             <span>{crisis.attackersLabel || 'Updating'}</span>
           </div>}
+
+        {crisis.assaultIntents.length > 0 &&
+          <section
+            style={preparationSectionStyle}
+            aria-labelledby="personal-crisis-intents-title"
+          >
+            <div
+              id="personal-crisis-intents-title"
+              style={preparationHeadingStyle}
+            >
+              Raid intents
+            </div>
+            <dl style={{ margin: 0 }}>
+              {crisis.assaultIntents.map((intent) =>
+                <div key={intent.role} style={preparationRowStyle}>
+                  <dt style={preparationRowHeaderStyle}>{intent.label}</dt>
+                  <dd style={{ ...labelStyle, marginLeft: 0 }}>{intent.intent}</dd>
+                </div>)}
+            </dl>
+          </section>}
 
         {crisis.disconnectedWarning &&
           <div style={urgentTextStyle}>{crisis.disconnectedWarning}</div>}
@@ -951,13 +988,21 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         {(!compactDesktop || compactExpanded) && activeObjective &&
           <div>
             <div style={activeTitleStyle}>{activeObjective.title}</div>
-            <div style={bodyStyle}>{activeObjective.action_hint}</div>
+            <div style={bodyStyle}><strong>Why:</strong> {activeObjective.lesson}</div>
+            <div style={bodyStyle}><strong>Next:</strong> {activeObjective.action_hint}</div>
+            {activeObjective.blocker &&
+              <div style={bodyStyle}><strong>Blocked:</strong> {activeObjective.blocker}</div>}
             {this.renderProgress(activeObjective, labelStyle)}
           </div>}
 
         {(!compactDesktop || compactExpanded) && <div style={sectionStyle}>
           {objectives.map(obj => {
-            const rowTooltip = [obj.action_hint, obj.lesson, obj.reward ? `Reward: ${obj.reward}` : '']
+            const rowTooltip = [
+              obj.action_hint,
+              obj.lesson,
+              obj.blocker ? `Blocked: ${obj.blocker}` : '',
+              obj.reward ? `Reward: ${obj.reward}` : '',
+            ]
               .filter(Boolean)
               .join('\n');
             return (

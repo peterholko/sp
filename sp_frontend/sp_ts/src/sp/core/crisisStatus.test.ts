@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import {
+  CrisisAssaultIntent,
   CrisisPreparationOption,
   CrisisStatusPacket,
   CrisisUiState,
   clearCrisisStatus,
+  crisisAssaultIntentsView,
   crisisPreparationOptionsView,
   formatCrisisCountdown,
   crisisPressureView,
@@ -37,6 +39,17 @@ function preparationOption(
     state: 'needs_attention',
     detail: 'Two defensive structures are damaged.',
     action_hint: 'Repair walls before the raid begins.',
+    ...overrides,
+  };
+}
+
+function assaultIntent(
+  overrides: Partial<CrisisAssaultIntent> = {},
+): CrisisAssaultIntent {
+  return {
+    role: 'hunter',
+    label: 'Hunter Rider',
+    intent: 'Pressuring your hero.',
     ...overrides,
   };
 }
@@ -169,10 +182,53 @@ const active = crisisStatusView(status({
   assault_active: true,
   remaining_attackers: 2,
   total_attackers: 3,
+  assault_intents: [
+    assaultIntent(),
+    assaultIntent({
+      role: 'breacher',
+      label: 'Breacher Rider',
+      intent: 'Breaking settlement walls.',
+    }),
+    assaultIntent({
+      role: 'pillager',
+      label: 'Goblin Pillager',
+      intent: 'Raiding completed structures.',
+    }),
+  ],
   continues_while_disconnected: true,
 }));
 assert.equal(active?.attackersLabel, '2 / 3');
+assert.deepEqual(active?.assaultIntents, [
+  { role: 'hunter', label: 'Hunter Rider', intent: 'Pressuring your hero.' },
+  { role: 'breacher', label: 'Breacher Rider', intent: 'Breaking settlement walls.' },
+  { role: 'pillager', label: 'Goblin Pillager', intent: 'Raiding completed structures.' },
+]);
 assert.equal(active?.disconnectedWarning, 'The assault continues while disconnected.');
+
+assert.deepEqual(
+  crisisAssaultIntentsView('assault_active', [
+    assaultIntent(),
+    assaultIntent({ role: 'HUNTER', label: 'Duplicate role' }),
+    assaultIntent({ role: 'breacher', label: 'Hunter Rider' }),
+    assaultIntent({ role: 'outside-bound', label: 'Outside bound' }),
+  ]),
+  [{ role: 'hunter', label: 'Hunter Rider', intent: 'Pressuring your hero.' }],
+  'duplicate role/label and out-of-bound rows fail safely',
+);
+assert.deepEqual(
+  crisisAssaultIntentsView('assault_active', [
+    { role: '', label: 'Missing role', intent: 'Ignored.' },
+    { role: 'missing-label', label: ' ', intent: 'Ignored.' },
+    { role: 'missing-intent', label: 'Missing intent', intent: null },
+  ]),
+  [],
+  'malformed assault-intent rows fail safely',
+);
+assert.deepEqual(
+  crisisAssaultIntentsView('preparing', [assaultIntent()]),
+  [],
+  'assault intents are visible only during the active phase',
+);
 assert.deepEqual(
   crisisStatusView(status({
     phase: 'assault_active',
@@ -199,6 +255,15 @@ assert.deepEqual(
   }))?.preparationOptions,
   [],
   'resolved crises hide preparation guidance',
+);
+assert.deepEqual(
+  crisisStatusView(status({
+    phase: 'resolved',
+    resolved: true,
+    assault_intents: [assaultIntent()],
+  }))?.assaultIntents,
+  [],
+  'resolved crises hide stale raid intents',
 );
 
 assert.equal(

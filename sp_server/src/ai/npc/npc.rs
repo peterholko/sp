@@ -33,6 +33,7 @@ use crate::safe_logout::{
     is_owner_offline_protected, object_belongs_to_protected_run, protected_player_for_object,
     PlayerWorldPresenceState, SafeLogoutTelemetryState,
 };
+use crate::structure::Structure;
 use crate::templates::Templates;
 use crate::AppState;
 use crate::{constants::*, ids};
@@ -71,6 +72,47 @@ struct WallTargetCandidate {
     pos: Position,
     hp: i32,
     distance: u32,
+}
+
+#[derive(Clone, Copy)]
+struct AssaultRoleTargetCandidate {
+    id: i32,
+    player_id: i32,
+    pos: Position,
+    state: State,
+    subclass: Subclass,
+    is_unit: bool,
+    is_structure: bool,
+    hp: i32,
+    base_hp: i32,
+    fortified: bool,
+    combat_capable: bool,
+    has_death_marker: bool,
+}
+
+impl AssaultRoleTargetCandidate {
+    fn is_live_unit(self) -> bool {
+        self.is_unit && self.state.is_alive() && self.hp > 0 && !self.has_death_marker
+    }
+
+    fn is_healthy_completed_core(self) -> bool {
+        self.is_structure
+            && self.subclass != Subclass::Wall
+            && Structure::is_built(self.state)
+            && self.state.is_alive()
+            // Stop focused core pressure at half health. Integer comparison
+            // avoids rounding ambiguity: exactly 50% is already ravaged.
+            && self.hp.saturating_mul(2) > self.base_hp.max(0)
+            && !self.has_death_marker
+    }
+
+    fn core_priority(self) -> u8 {
+        if matches!(self.subclass, Subclass::Campfire | Subclass::Storage) {
+            0
+        } else {
+            1
+        }
+    }
 }
 
 #[derive(Debug, Clone, Component, ActionBuilder)]
@@ -694,6 +736,78 @@ mod tests {
         app
     }
 
+    fn attach_personal_assault_role(
+        app: &mut App,
+        npc_entity: Entity,
+        owner_player_id: i32,
+        kind: CrisisAssaultRoleKind,
+    ) {
+        app.world_mut().entity_mut(npc_entity).insert((
+            CrisisAssaultUnit {
+                owner_player_id,
+                assault_id: 11,
+                spawn_generation: 1,
+            },
+            CrisisAssaultRole { kind },
+        ));
+    }
+
+    fn spawn_role_target_unit(
+        app: &mut App,
+        id: i32,
+        player_id: i32,
+        pos: Position,
+        subclass: Subclass,
+        combat_capable: bool,
+    ) {
+        let mut stats = test_stats();
+        if !combat_capable {
+            stats.base_damage = Some(0);
+            stats.damage_range = Some(0);
+        }
+        app.world_mut().spawn((
+            Id(id),
+            PlayerId(player_id),
+            pos,
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            subclass,
+            empty_effects(),
+            stats,
+            empty_inventory(id),
+        ));
+    }
+
+    fn spawn_role_target_structure(
+        app: &mut App,
+        id: i32,
+        player_id: i32,
+        pos: Position,
+        subclass: Subclass,
+        state: State,
+    ) {
+        app.world_mut().spawn((
+            Id(id),
+            PlayerId(player_id),
+            pos,
+            state,
+            Class(CLASS_STRUCTURE.to_string()),
+            subclass,
+            empty_effects(),
+            wall_stats(100),
+            empty_inventory(id),
+        ));
+    }
+
+    fn set_test_hp(app: &mut App, id: i32, hp: i32) {
+        let mut query = app.world_mut().query::<(&Id, &mut Stats)>();
+        let (_, mut stats) = query
+            .iter_mut(app.world_mut())
+            .find(|(candidate_id, _)| candidate_id.0 == id)
+            .expect("test object with requested id");
+        stats.hp = hp;
+    }
+
     fn spawn_rat_blocked_wander_scorer(
         app: &mut App,
         npc_state: State,
@@ -910,6 +1024,262 @@ mod tests {
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn goblin_hunter_role_prioritizes_owner_hero_over_closer_villager() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Hunter);
+        // A preferred target outside the unchanged viewshed guard cannot lock
+        // the role or prevent its ordinary combat fallback.
+        spawn_role_target_unit(
+            &mut app,
+            2,
+            1,
+            Position { x: 15, y: 0 },
+            Subclass::Hero,
+            true,
+        );
+        spawn_role_target_unit(
+            &mut app,
+            1,
+            1,
+            Position { x: 1, y: 0 },
+            Subclass::Villager,
+            true,
+        );
+        spawn_role_target_unit(
+            &mut app,
+            2,
+            1,
+            Position { x: 4, y: 0 },
+            Subclass::Hero,
+            true,
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .expect("hunter visible target")
+                .target,
+            2
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .expect("hunter target score")
+                .get(),
+            NORMAL_SCORE / 100.0
+        );
+    }
+
+    #[test]
+    fn goblin_harrier_role_prioritizes_armed_owner_villager() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, _scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Harrier);
+        spawn_role_target_unit(
+            &mut app,
+            1,
+            1,
+            Position { x: 1, y: 0 },
+            Subclass::Hero,
+            true,
+        );
+        spawn_role_target_unit(
+            &mut app,
+            2,
+            1,
+            Position { x: 2, y: 0 },
+            Subclass::Villager,
+            false,
+        );
+        spawn_role_target_unit(
+            &mut app,
+            3,
+            1,
+            Position { x: 4, y: 0 },
+            Subclass::Villager,
+            true,
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .expect("harrier visible target")
+                .target,
+            3
+        );
+    }
+
+    #[test]
+    fn goblin_role_without_a_valid_preferred_target_falls_back_to_generic_targeting() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, _scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 10);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Hunter);
+        spawn_role_target_unit(
+            &mut app,
+            1,
+            1,
+            Position { x: 2, y: 0 },
+            Subclass::Villager,
+            false,
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .expect("fallback visible target")
+                .target,
+            1
+        );
+    }
+
+    #[test]
+    fn goblin_breacher_role_prefers_owner_campfire_or_storage_core() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, _scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 20);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Breacher);
+        spawn_role_target_unit(
+            &mut app,
+            1,
+            1,
+            Position { x: 1, y: 0 },
+            Subclass::Hero,
+            true,
+        );
+        spawn_role_target_structure(
+            &mut app,
+            2,
+            1,
+            Position { x: 3, y: 0 },
+            Subclass::Craft,
+            State::None,
+        );
+        spawn_role_target_structure(
+            &mut app,
+            3,
+            1,
+            Position { x: 6, y: 0 },
+            Subclass::Storage,
+            State::None,
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .expect("breacher visible target")
+                .target,
+            3
+        );
+    }
+
+    #[test]
+    fn goblin_breacher_skips_nearer_half_health_core_for_farther_healthy_core() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, _scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 20);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Breacher);
+        spawn_role_target_structure(
+            &mut app,
+            20,
+            1,
+            Position { x: 2, y: 0 },
+            Subclass::Storage,
+            State::None,
+        );
+        set_test_hp(&mut app, 20, 50);
+        spawn_role_target_structure(
+            &mut app,
+            21,
+            1,
+            Position { x: 6, y: 0 },
+            Subclass::Storage,
+            State::None,
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(npc_entity)
+                .get::<VisibleTarget>()
+                .expect("breacher visible target")
+                .target,
+            21
+        );
+    }
+
+    #[test]
+    fn goblin_breacher_role_selects_completed_wall_on_real_path_to_core() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 25 }, 40);
+        attach_personal_assault_role(&mut app, npc_entity, 1, CrisisAssaultRoleKind::Breacher);
+
+        let core_pos = Position { x: 10, y: 25 };
+        spawn_role_target_structure(&mut app, 10, 1, core_pos, Subclass::Storage, State::None);
+        let wall_ids = Map::ring((core_pos.x, core_pos.y), 1)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (x, y))| {
+                let id = 4_000 + index as i32;
+                spawn_stockade_wall(&mut app, id, Position { x, y }, 20);
+                id
+            })
+            .collect::<Vec<_>>();
+
+        app.update();
+
+        let selected = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .expect("breacher visible target")
+            .target;
+        assert!(
+            wall_ids.contains(&selected),
+            "breacher should select a completed wall on the route to core, selected {selected}"
+        );
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .expect("breacher target score")
+                .get(),
+            NORMAL_SCORE / 100.0
+        );
+    }
+
+    #[test]
+    fn goblin_assault_role_barks_leave_roleless_alert_unchanged() {
+        for (kind, bark) in [
+            (CrisisAssaultRoleKind::Hunter, "HUNT"),
+            (CrisisAssaultRoleKind::Harrier, "SCATTER"),
+            (CrisisAssaultRoleKind::Breacher, "BREAK"),
+        ] {
+            let role = CrisisAssaultRole { kind };
+            assert_eq!(crisis_assault_role_bark(Some(&role)), bark);
+        }
+        assert_eq!(crisis_assault_role_bark(None), "!");
     }
 
     #[test]
@@ -2960,6 +3330,7 @@ pub fn target_scorer_system(
             &Stats,
             &EventExecuting,
             Option<&CrisisAssaultUnit>,
+            Option<&CrisisAssaultRole>,
             Option<&ProtectedTargetInvalidated>,
         ),
         With<SubclassNPC>,
@@ -2973,6 +3344,8 @@ pub fn target_scorer_system(
         &Subclass,
         &Effects,
         &Stats,
+        Option<&Inventory>,
+        Option<&StateDead>,
     )>, // Added April 2025 to prevent targeting NPCs
     blocking_query: Query<BaseQuery>,
     fortified_query: Query<&Fortified>,
@@ -2998,6 +3371,7 @@ pub fn target_scorer_system(
             npc_stats,
             event_executing,
             crisis_assault,
+            crisis_assault_role,
             protected_target_invalidated,
         )) = npc_query.get_mut(*actor)
         else {
@@ -3078,6 +3452,8 @@ pub fn target_scorer_system(
                     target_subclass,
                     _target_effects,
                     target_stats,
+                    _target_inventory,
+                    _target_dead,
                 )| {
                     if !player::is_player(target_player.0)
                         || protection.owner_is_protected(target_player)
@@ -3114,6 +3490,100 @@ pub fn target_scorer_system(
             continue;
         }
 
+        if let (Some(assault), Some(role)) = (crisis_assault, crisis_assault_role) {
+            let role_candidates = target_query
+                .iter()
+                .filter_map(
+                    |(
+                        target_id,
+                        target_player,
+                        target_pos,
+                        target_state,
+                        target_class,
+                        target_subclass,
+                        target_effects,
+                        target_stats,
+                        target_inventory,
+                        target_dead,
+                    )| {
+                        if target_player.0 != assault.owner_player_id
+                            || !player::is_player(target_player.0)
+                            || protection.owner_is_protected(target_player)
+                            || Map::dist(*npc_pos, *target_pos) > npc_viewshed.range
+                        {
+                            return None;
+                        }
+
+                        let combat_capable = target_stats.base_damage.unwrap_or(0) > 0
+                            || target_inventory.is_some_and(|inventory| {
+                                inventory.items.iter().any(|item| {
+                                    item.quantity > 0 && item.equipped && item.class == item::WEAPON
+                                })
+                            });
+
+                        Some(AssaultRoleTargetCandidate {
+                            id: target_id.0,
+                            player_id: target_player.0,
+                            pos: *target_pos,
+                            state: *target_state,
+                            subclass: *target_subclass,
+                            is_unit: target_class.0 == CLASS_UNIT,
+                            is_structure: target_class.0 == CLASS_STRUCTURE,
+                            hp: target_stats.hp,
+                            base_hp: target_stats.base_hp,
+                            fortified: target_effects.has(Effect::Fortified),
+                            combat_capable,
+                            has_death_marker: target_dead.is_some(),
+                        })
+                    },
+                )
+                .collect::<Vec<_>>();
+            let completed_visible_walls = role_candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.is_structure
+                        && candidate.subclass == Subclass::Wall
+                        && Structure::is_built(candidate.state)
+                        && candidate.state.is_alive()
+                        && candidate.hp > 0
+                        && !candidate.has_death_marker
+                })
+                .map(|candidate| WallTargetCandidate {
+                    id: candidate.id,
+                    player_id: candidate.player_id,
+                    pos: candidate.pos,
+                    hp: candidate.hp,
+                    distance: Map::dist(*npc_pos, candidate.pos),
+                })
+                .collect::<Vec<_>>();
+            let blocking_list = Obj::blocking_list_basequery(npc_player_id.0, &blocking_query);
+
+            if let Some(role_target) = select_assault_role_target(
+                role.kind,
+                *npc_pos,
+                npc_player_id.0,
+                &map,
+                blocking_list,
+                &role_candidates,
+                &completed_visible_walls,
+                smart_breach,
+            ) {
+                span.span().in_scope(|| {
+                    npc_info!(
+                        *actor,
+                        obj_id,
+                        Some(npc_template_name.0.as_str()),
+                        "Selected {:?} role target_id={}",
+                        role.kind,
+                        role_target.id
+                    );
+                });
+                selected_target = role_target;
+            }
+        }
+
+        let use_generic_targeting = selected_target.id == NO_TARGET;
+
         for (
             target_id,
             target_player,
@@ -3123,8 +3593,13 @@ pub fn target_scorer_system(
             target_subclass,
             target_effects,
             target_stats,
+            _target_inventory,
+            _target_dead,
         ) in target_query.iter()
         {
+            if !use_generic_targeting {
+                break;
+            }
             let mut target_fortified = false;
             let target_stronger = false;
 
@@ -4329,6 +4804,7 @@ pub fn set_attack_target_system(
     mut map_events: ResMut<MapEvents>,
     mut visible_target_query: Query<(&mut VisibleTarget, &Id), With<SubclassNPC>>,
     crisis_assault_query: Query<&CrisisAssaultUnit>,
+    crisis_assault_role_query: Query<&CrisisAssaultRole>,
     mut query: Query<(&Actor, &mut ActionState, &SetAttackTarget)>,
     mut alerted_npcs: Local<std::collections::HashSet<Entity>>,
 ) {
@@ -4394,14 +4870,19 @@ pub fn set_attack_target_system(
                     id: visible_target.target,
                 });
 
-                // Emit alert "!" once per engagement
+                // Emit one short, readable intent bark per engagement. The
+                // established neutral alert remains unchanged for role-less
+                // NPCs, including the personal Undead assault.
                 if !alerted_npcs.contains(actor) {
                     alerted_npcs.insert(*actor);
                     map_events.new(
                         npc_id.0,
                         game_tick.0,
                         VisibleEvent::SpeechEvent {
-                            speech: "!".to_string(),
+                            speech: crisis_assault_role_bark(
+                                crisis_assault_role_query.get(*actor).ok(),
+                            )
+                            .to_string(),
                             intensity: 3,
                         },
                     );
@@ -4423,6 +4904,15 @@ pub fn set_attack_target_system(
             }
             _ => {}
         }
+    }
+}
+
+fn crisis_assault_role_bark(role: Option<&CrisisAssaultRole>) -> &'static str {
+    match role.map(|role| role.kind) {
+        Some(CrisisAssaultRoleKind::Hunter) => "HUNT",
+        Some(CrisisAssaultRoleKind::Harrier) => "SCATTER",
+        Some(CrisisAssaultRoleKind::Breacher) => "BREAK",
+        None => "!",
     }
 }
 
@@ -8528,6 +9018,105 @@ fn can_bypass_fortified_wall(template: &str) -> bool {
 
 fn should_batter_walls(int: &String, _template: &str) -> bool {
     is_mindless(int) || is_cunning(int)
+}
+
+fn select_assault_role_target(
+    role: CrisisAssaultRoleKind,
+    npc_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: Vec<Blocker>,
+    candidates: &[AssaultRoleTargetCandidate],
+    completed_visible_walls: &[WallTargetCandidate],
+    smart_breach: bool,
+) -> Option<NPCTarget> {
+    let mut preferred = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| match role {
+            CrisisAssaultRoleKind::Hunter => {
+                candidate.is_live_unit() && candidate.subclass == Subclass::Hero
+            }
+            CrisisAssaultRoleKind::Harrier => {
+                candidate.is_live_unit() && candidate.subclass == Subclass::Villager
+            }
+            CrisisAssaultRoleKind::Breacher => candidate.is_healthy_completed_core(),
+        })
+        .collect::<Vec<_>>();
+
+    preferred.sort_by_key(|candidate| {
+        let role_priority = match role {
+            CrisisAssaultRoleKind::Hunter => 0,
+            CrisisAssaultRoleKind::Harrier => u8::from(!candidate.combat_capable),
+            CrisisAssaultRoleKind::Breacher => candidate.core_priority(),
+        };
+        (
+            role_priority,
+            Map::dist(npc_pos, candidate.pos),
+            candidate.id,
+        )
+    });
+
+    preferred.into_iter().find_map(|candidate| {
+        select_role_candidate_or_breach(
+            npc_pos,
+            npc_player_id,
+            map,
+            &blocking_list,
+            candidate,
+            completed_visible_walls,
+            smart_breach,
+        )
+    })
+}
+
+fn select_role_candidate_or_breach(
+    npc_pos: Position,
+    npc_player_id: i32,
+    map: &Map,
+    blocking_list: &[Blocker],
+    candidate: AssaultRoleTargetCandidate,
+    completed_visible_walls: &[WallTargetCandidate],
+    smart_breach: bool,
+) -> Option<NPCTarget> {
+    let distance = Map::dist(npc_pos, candidate.pos);
+    let directly_reachable = Map::find_path(
+        npc_pos,
+        candidate.pos,
+        map,
+        npc_player_id,
+        blocking_list.to_vec(),
+        true,
+        false,
+        false,
+        true,
+        false,
+    )
+    .is_some();
+
+    if directly_reachable {
+        return Some(NPCTarget {
+            id: candidate.id,
+            player_id: candidate.player_id,
+            pos: candidate.pos,
+            distance,
+            fortified: candidate.fortified,
+        });
+    }
+
+    // Personal-assault role targeting uses the complete map search, matching
+    // the generic personal-assault breach path. Only a live completed wall
+    // that lies on the actual attackable path may replace the preferred target.
+    select_wall_target_from_blocked_path(
+        npc_pos,
+        candidate.pos,
+        npc_player_id,
+        map,
+        blocking_list.to_vec(),
+        completed_visible_walls,
+        smart_breach,
+        true,
+    )
 }
 
 fn select_wall_target_from_blocked_path(

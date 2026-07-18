@@ -7,6 +7,8 @@ use crate::npc::{ScriptedCorpseHunt, VisibleTarget};
 use crate::recipe::Recipe;
 use crate::skill::WEAPONSMITHING;
 use crate::templates::{EffectTemplate, ResReq, SkillTemplate, SkillTemplates, Templates};
+use big_brain::actions::spawn_action;
+use big_brain::prelude::ActionState;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
@@ -2088,6 +2090,386 @@ fn craft_event_system_creates_crafted_item_and_updates_skill() {
     assert!(skills.get_all().keys().any(|name| name == WEAPONSMITHING));
 }
 
+fn structure_craft_test_recipe() -> Recipe {
+    Recipe {
+        name: "Test Item".to_string(),
+        class: item::WEAPON.to_string(),
+        subclass: "axe".to_string(),
+        image: "axe.png".to_string(),
+        weight: 1.0,
+        durability: None,
+        attrs: None,
+        owner: 1,
+        tier: None,
+        slot: None,
+        damage: None,
+        speed: None,
+        armor: None,
+        crafting_time: Some(5),
+        structure_req: Some(vec!["Crafting Tent".to_string()]),
+        stamina_req: None,
+        skill_req: None,
+        amount: Some(1),
+        req: vec![ResReq {
+            req_type: "Wood".to_string(),
+            quantity: 1,
+            cquantity: None,
+        }],
+        item_name_from_req: None,
+    }
+}
+
+fn structure_craft_test_material(owner: i32) -> Item {
+    Item {
+        id: 10,
+        owner,
+        name: "Wood".to_string(),
+        quantity: 1,
+        durability: None,
+        class: "Resource".to_string(),
+        subclass: "wood".to_string(),
+        slot: None,
+        image: "wood.png".to_string(),
+        weight: 1.0,
+        equipped: false,
+        experiment: None,
+        start_time: 0,
+        attrs: HashMap::new(),
+        produces: Vec::new(),
+    }
+}
+
+fn structure_craft_test_templates() -> Templates {
+    let mut skill_templates = HashMap::new();
+    skill_templates.insert(
+        WEAPONSMITHING.to_string(),
+        SkillTemplate {
+            name: WEAPONSMITHING.to_string(),
+            class: "crafting".to_string(),
+            xp: vec![0, 100],
+        },
+    );
+
+    let mut templates = Templates::from_obj_templates(Vec::new());
+    templates.skill_templates = SkillTemplates::from_map(skill_templates);
+    templates
+}
+
+fn structure_craft_test_work_entry(worker_id: i32, status: WorkStatus) -> WorkEntry {
+    WorkEntry {
+        worker_id,
+        work_type: WorkType::Craft,
+        work_status: status,
+        recipe_name: Some("Test Item".to_string()),
+        recipe_image: Some("axe.png".to_string()),
+        refine_item_id: None,
+        refine_item_image: None,
+        refine_item_class: None,
+    }
+}
+
+fn setup_structure_craft_event_test(
+    crafter_pos: Position,
+    structure_pos: Position,
+) -> (App, Entity, Entity) {
+    let mut app = App::new();
+    app.add_systems(Update, structure_craft_event_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(10));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+    app.insert_resource(Recipes::from_recipes(vec![structure_craft_test_recipe()]));
+    app.insert_resource(structure_craft_test_templates());
+    app.insert_resource(ActiveInfos(HashMap::new()));
+
+    let crafter = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            crafter_pos,
+            State::Crafting,
+            Skills::new(),
+            SubclassVillager,
+        ))
+        .id();
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            structure_pos,
+            Template("Crafting Tent".to_string()),
+            Inventory {
+                owner: 2,
+                items: vec![structure_craft_test_material(2)],
+            },
+            WorkQueue(vec![structure_craft_test_work_entry(
+                1,
+                WorkStatus::InProgress,
+            )]),
+        ))
+        .id();
+
+    let mut ids = Ids::default();
+    ids.new_obj(1, 1);
+    ids.new_obj(2, 1);
+    app.insert_resource(ids);
+
+    let mut entity_map = EntityObjMap(HashMap::new());
+    entity_map.new_obj(1, crafter);
+    entity_map.new_obj(2, structure);
+    app.insert_resource(entity_map);
+
+    app.insert_resource(GameEvents(HashMap::from([(
+        1,
+        GameEvent {
+            event_id: 1,
+            start_tick: 0,
+            run_tick: 0,
+            event_type: GameEventType::StructureCraftEvent {
+                crafter_id: 1,
+                structure_id: 2,
+                recipe_name: "Test Item".to_string(),
+            },
+        },
+    )])));
+
+    (app, crafter, structure)
+}
+
+#[test]
+fn start_work_observer_rejects_worker_off_structure_tile() {
+    let mut app = App::new();
+    app.add_observer(start_work_observer);
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(10));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(GameEvents(HashMap::new()));
+    app.insert_resource(Recipes::from_recipes(vec![structure_craft_test_recipe()]));
+    app.insert_resource(structure_craft_test_templates());
+
+    let worker = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 2, y: 2 },
+            ActiveTask::None,
+        ))
+        .id();
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            Position { x: 5, y: 2 },
+            Inventory {
+                owner: 2,
+                items: vec![structure_craft_test_material(2)],
+            },
+            WorkQueue(vec![structure_craft_test_work_entry(1, WorkStatus::Idle)]),
+        ))
+        .id();
+
+    let mut ids = Ids::default();
+    ids.new_obj(1, 1);
+    ids.new_obj(2, 1);
+    app.insert_resource(ids);
+
+    let mut entity_map = EntityObjMap(HashMap::new());
+    entity_map.new_obj(1, worker);
+    entity_map.new_obj(2, structure);
+    app.insert_resource(entity_map);
+
+    app.world_mut().trigger(StartWork {
+        entity: worker,
+        worker_id: 1,
+        structure_id: 2,
+    });
+    app.world_mut().flush();
+
+    assert!(app.world().resource::<GameEvents>().is_empty());
+    let work_queue = app.world().entity(structure).get::<WorkQueue>().unwrap();
+    assert_eq!(work_queue.0[0].worker_id, -1);
+    assert_eq!(work_queue.0[0].work_status, WorkStatus::Idle);
+    assert_eq!(
+        *app.world().entity(worker).get::<ActiveTask>().unwrap(),
+        ActiveTask::None
+    );
+    let completion = app
+        .world()
+        .entity(worker)
+        .get::<EventCompleted>()
+        .expect("rejected work releases the ProcessOrder action");
+    assert_eq!(completion.event_type, "structure_work_position");
+    assert!(!completion.success);
+}
+
+#[test]
+fn rejected_off_tile_work_releases_process_order_to_retry() {
+    let mut app = App::new();
+    app.add_systems(Update, crate::villager::process_order_system);
+    app.add_observer(start_work_observer);
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(10));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(GameEvents(HashMap::new()));
+    app.insert_resource(Recipes::from_recipes(vec![structure_craft_test_recipe()]));
+    app.insert_resource(structure_craft_test_templates());
+
+    let worker_pos = Position { x: 2, y: 2 };
+    let structure_pos = Position { x: 5, y: 2 };
+    let worker = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            worker_pos,
+            State::None,
+            SubclassVillager,
+            Order::WorkQueue,
+            Assignment {
+                structure_id: 2,
+                structure_name: "Crafting Tent".to_string(),
+                structure_pos,
+            },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
+            },
+            ActiveTask::None,
+            EventExecuting {
+                event_type: String::new(),
+                state: EventExecutingState::None,
+            },
+        ))
+        .id();
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            structure_pos,
+            Name("Crafting Tent".to_string()),
+            Template("Crafting Tent".to_string()),
+            Inventory {
+                owner: 2,
+                items: vec![structure_craft_test_material(2)],
+            },
+            WorkQueue(vec![structure_craft_test_work_entry(-1, WorkStatus::Idle)]),
+        ))
+        .id();
+
+    let mut ids = Ids::default();
+    ids.new_obj(1, 1);
+    ids.new_obj(2, 1);
+    app.insert_resource(ids);
+
+    let mut entity_map = EntityObjMap(HashMap::new());
+    entity_map.new_obj(1, worker);
+    entity_map.new_obj(2, structure);
+    app.insert_resource(entity_map);
+
+    let action = {
+        let mut commands = app.world_mut().commands();
+        spawn_action(&crate::villager::ProcessOrder, &mut commands, worker)
+    };
+    app.world_mut().flush();
+    *app.world_mut()
+        .entity_mut(action)
+        .get_mut::<ActionState>()
+        .unwrap() = ActionState::Requested;
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Executing
+    );
+    assert!(app.world().entity(worker).contains::<EventCompleted>());
+    let work_queue = app.world().entity(structure).get::<WorkQueue>().unwrap();
+    assert_eq!(work_queue.0[0].worker_id, -1);
+    assert_eq!(work_queue.0[0].work_status, WorkStatus::Idle);
+    assert!(app.world().resource::<GameEvents>().is_empty());
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert!(!app.world().entity(worker).contains::<EventCompleted>());
+}
+
+#[test]
+fn structure_craft_event_rejects_worker_off_structure_tile() {
+    let (mut app, crafter, structure) =
+        setup_structure_craft_event_test(Position { x: 2, y: 2 }, Position { x: 5, y: 2 });
+
+    app.update();
+
+    assert!(app.world().resource::<GameEvents>().is_empty());
+    assert_eq!(
+        *app.world().entity(crafter).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app
+        .world()
+        .entity(crafter)
+        .get::<Skills>()
+        .unwrap()
+        .get_all()
+        .is_empty());
+    let completion = app
+        .world()
+        .entity(crafter)
+        .get::<EventCompleted>()
+        .expect("displaced worker is released to retry");
+    assert_eq!(completion.event_type, "structure_work_position");
+    assert!(!completion.success);
+
+    let structure_ref = app.world().entity(structure);
+    let inventory = structure_ref.get::<Inventory>().unwrap();
+    assert_eq!(inventory.items.len(), 1);
+    assert_eq!(inventory.items[0].name, "Wood");
+    assert_eq!(inventory.items[0].quantity, 1);
+    let work_queue = structure_ref.get::<WorkQueue>().unwrap();
+    assert_eq!(work_queue.0.len(), 1);
+    assert_eq!(work_queue.0[0].worker_id, -1);
+    assert_eq!(work_queue.0[0].work_status, WorkStatus::Idle);
+}
+
+#[test]
+fn structure_craft_event_completes_when_worker_is_on_structure_tile() {
+    let pos = Position { x: 5, y: 2 };
+    let (mut app, crafter, structure) = setup_structure_craft_event_test(pos, pos);
+
+    app.update();
+
+    assert!(app.world().resource::<GameEvents>().is_empty());
+    assert_eq!(
+        *app.world().entity(crafter).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app
+        .world()
+        .entity(crafter)
+        .get::<Skills>()
+        .unwrap()
+        .get_all()
+        .contains_key(WEAPONSMITHING));
+
+    let structure_ref = app.world().entity(structure);
+    let inventory = structure_ref.get::<Inventory>().unwrap();
+    assert!(inventory.items.iter().all(|item| item.name != "Wood"));
+    assert!(inventory.items.iter().any(|item| item.name == "Test Item"));
+    assert!(structure_ref.get::<WorkQueue>().unwrap().0.is_empty());
+}
+
 #[test]
 fn gather_event_system_marks_gatherer_event_completed() {
     let mut app = App::new();
@@ -3163,6 +3545,7 @@ fn undead_crisis_status_is_kind_correct_and_ready_uses_shared_launch_fields() {
     assert_eq!(active_status.kind.as_deref(), Some("undead"));
     assert_eq!(active_status.phase.as_deref(), Some("assault_active"));
     assert_eq!(active_status.remaining_attackers, Some(6));
+    assert_eq!(active_status.assault_intents, None);
     assert!(active_status.assault_active);
     assert!(active_status.continues_while_disconnected);
     assert_eq!(
@@ -3728,12 +4111,18 @@ fn checkpoint4_assault_spawn_commits_all_live_attributed_units() {
 
     app.update();
 
-    let mut query = app
-        .world_mut()
-        .query::<(&Template, &Position, &State, &CrisisAssaultUnit)>();
+    let mut query = app.world_mut().query::<(
+        &Template,
+        &Position,
+        &State,
+        &CrisisAssaultUnit,
+        &CrisisAssaultRole,
+    )>();
     let mut units = query
         .iter(app.world())
-        .map(|(template, pos, state, attribution)| (template.0.clone(), *pos, *state, *attribution))
+        .map(|(template, pos, state, attribution, role)| {
+            (template.0.clone(), *pos, *state, *attribution, role.kind)
+        })
         .collect::<Vec<_>>();
     units.sort_by_key(|unit| (unit.1.x, unit.1.y));
 
@@ -3757,6 +4146,10 @@ fn checkpoint4_assault_spawn_commits_all_live_attributed_units() {
             assault_id: 42,
             spawn_generation: 3,
         }));
+    assert_eq!(
+        units.iter().map(|unit| unit.4).collect::<Vec<_>>(),
+        GOBLIN_ASSAULT_ROLES
+    );
     assert_eq!(
         app.world()
             .resource::<RunSpawnedObjs>()
@@ -3822,11 +4215,12 @@ fn undead_assault_spawn_has_exact_composition_and_active_necromancer_components(
         Option<&Home>,
         Option<&Minions>,
         Option<&ThinkerBuilder>,
+        Option<&CrisisAssaultRole>,
     )>();
     let mut units = query
         .iter(app.world())
         .map(
-            |(template, pos, state, attr, viewshed, home, minions, thinker)| {
+            |(template, pos, state, attr, viewshed, home, minions, thinker, role)| {
                 (
                     template.0.clone(),
                     *pos,
@@ -3836,6 +4230,7 @@ fn undead_assault_spawn_has_exact_composition_and_active_necromancer_components(
                     home.map(|home| home.pos),
                     minions.map(|minions| minions.ids.clone()),
                     thinker.is_some(),
+                    role.is_some(),
                 )
             },
         )
@@ -3862,6 +4257,10 @@ fn undead_assault_spawn_has_exact_composition_and_active_necromancer_components(
             spawn_generation: 2,
         }));
     assert!(units.iter().all(|unit| unit.4 == PERSONAL_ASSAULT_VISION));
+    assert!(
+        units.iter().all(|unit| !unit.8),
+        "Undead attackers must retain their existing role-less targeting"
+    );
 
     let necromancer = units
         .iter()
@@ -4855,11 +5254,256 @@ fn crisis_timeline_is_ordered() {
     );
 }
 
-#[test]
-fn survival_thread_begins_with_shipwreck_and_advances_in_order() {
-    let mut objectives = PlayerObjectives::default();
+fn core_gameplay_objective_facts() -> EarlyObjectiveFacts {
+    EarlyObjectiveFacts {
+        hero_idle: true,
+        ..EarlyObjectiveFacts::default()
+    }
+}
 
-    let packet = build_objective_state_packet(&objectives, 0, false, false, 1);
+fn core_gameplay_initial_encounter_entry() -> InitialEncounterEntry {
+    InitialEncounterEntry {
+        rat_ids: vec![1, 2],
+        opening_enemy_templates: EARLY_GAME_ENEMY_TEMPLATES
+            .iter()
+            .map(|template| (*template).to_string())
+            .collect(),
+        opening_enemy_spawned: [false; 2],
+        opening_enemy_defeated: [false; 2],
+        phase1_spawn: "Wild Boar".to_string(),
+        phase1_npc_id: None,
+        phase1_defeated: false,
+        spawn_pos: Position { x: 10, y: 10 },
+        villager_spawn_pos: Position { x: 11, y: 10 },
+        first_rat_spawn_tick: 900,
+        second_rat_spawn_tick: 1200,
+        villager_ready_tick: 1110,
+        phase1_unlock_tick: 2600,
+        spider_unlock_tick: 3600,
+        villager_event_scheduled: false,
+        merchant_id: 0,
+        necromancer_id: 0,
+        mausoleum_id: 0,
+        necro_spawn_anchor: Position { x: 0, y: 0 },
+        necro_corpse_anchor: Position { x: 0, y: 0 },
+        necro_home: Position { x: 0, y: 0 },
+    }
+}
+
+fn core_gameplay_objective_state(
+    packet: ResponsePacket,
+) -> (String, Vec<crate::network::ObjectiveProgress>) {
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => (current_id, objectives),
+        _ => panic!("expected objective_state packet"),
+    }
+}
+
+#[test]
+fn core_gameplay_checkpoint1_opening_history_records_spawn_and_defeat_once() {
+    let mut entry = core_gameplay_initial_encounter_entry();
+    let mut spawn_counts = [0usize; 2];
+
+    for current_tick in [899, 900, 900, 1199, 1200, 1200] {
+        let due_ticks = [entry.first_rat_spawn_tick, entry.second_rat_spawn_tick];
+        for (index, due_tick) in due_ticks.into_iter().enumerate() {
+            if current_tick >= due_tick && !entry.opening_enemy_spawned[index] {
+                entry.opening_enemy_spawned[index] = true;
+                spawn_counts[index] += 1;
+            }
+        }
+    }
+
+    assert_eq!(spawn_counts, [1, 1]);
+    assert_eq!(entry.opening_enemy_spawned, [true, true]);
+    assert!(entry.opening_enemy_is_active());
+
+    let first_corpse = HashSet::from([entry.rat_ids[0]]);
+    entry.record_opening_enemy_defeats(&first_corpse);
+    entry.record_opening_enemy_defeats(&first_corpse);
+    assert_eq!(entry.opening_enemy_defeated, [true, false]);
+
+    entry.record_opening_enemy_defeats(&HashSet::new());
+    assert_eq!(
+        entry.opening_enemy_defeated,
+        [true, false],
+        "removing corpse evidence must not erase run history or permit a respawn"
+    );
+    assert_eq!(entry.opening_enemy_spawned, [true, true]);
+
+    let second_corpse = HashSet::from([entry.rat_ids[1]]);
+    entry.record_opening_enemy_defeats(&second_corpse);
+    entry.record_opening_enemy_defeats(&HashSet::new());
+    assert_eq!(entry.opening_enemy_defeated, [true, true]);
+    assert!(entry.all_opening_enemies_defeated());
+    assert!(!entry.opening_enemy_is_active());
+}
+
+#[test]
+fn core_gameplay_checkpoint1_both_opening_defeats_gate_first_fight_progress() {
+    let mut entry = core_gameplay_initial_encounter_entry();
+    entry.opening_enemy_spawned = [true, true];
+    let first_enemy_id = entry.rat_ids[0];
+    let second_enemy_id = entry.rat_ids[1];
+
+    entry.record_opening_enemy_defeats(&HashSet::from([first_enemy_id]));
+    assert!(!entry.all_opening_enemies_defeated());
+
+    let mut objectives = PlayerObjectives {
+        scavenge_shipwreck: true,
+        ..PlayerObjectives::default()
+    };
+    let mut facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        opening_enemy_active: entry.opening_enemy_is_active(),
+        opening_enemy_spawned: 2,
+        ..EarlyObjectiveFacts::default()
+    };
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "win_first_fight");
+
+    entry.record_opening_enemy_defeats(&HashSet::from([second_enemy_id]));
+    assert!(entry.all_opening_enemies_defeated());
+    objectives.win_first_fight = entry.all_opening_enemies_defeated();
+    facts.opening_enemy_active = entry.opening_enemy_is_active();
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "build_burrow");
+
+    facts.has_burrow = true;
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "build_campfire");
+}
+
+#[test]
+fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritative() {
+    let mut objectives = PlayerObjectives {
+        build_campfire: true,
+        recruit_villager: true,
+        choose_expansion: true,
+        ..PlayerObjectives::default()
+    };
+    let mut facts = EarlyObjectiveFacts::default();
+
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "scavenge_shipwreck");
+    let active = packet_objectives
+        .iter()
+        .find(|objective| objective.state == "active")
+        .expect("one objective is recommended");
+    assert_eq!(active.id, "scavenge_shipwreck");
+    assert_eq!(
+        active.blocker.as_deref(),
+        Some("Finish the current action before inspecting the Shipwreck.")
+    );
+
+    objectives.scavenge_shipwreck = true;
+    facts.hero_idle = true;
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "build_burrow");
+    let active = packet_objectives
+        .iter()
+        .find(|objective| objective.state == "active")
+        .expect("Burrow construction is recommended after salvaging the Shipwreck");
+    assert_eq!(active.id, "build_burrow");
+    assert_eq!(active.blocker, None);
+
+    facts.has_burrow = true;
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "win_first_fight");
+    let active = packet_objectives
+        .iter()
+        .find(|objective| objective.state == "active")
+        .expect("opening fight is recommended after the Burrow is complete");
+    assert_eq!(
+        active.blocker.as_deref(),
+        Some("The opening threat has not appeared yet. Stay near the Shipwreck.")
+    );
+    assert_eq!(
+        packet_objectives
+            .iter()
+            .find(|objective| objective.id == "recruit_villager")
+            .unwrap()
+            .state,
+        "complete",
+        "completed facts stay complete without bypassing an earlier prerequisite"
+    );
+
+    facts.opening_enemy_spawned = 1;
+    let (_, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(
+        packet_objectives
+            .iter()
+            .find(|objective| objective.id == "win_first_fight")
+            .unwrap()
+            .blocker
+            .as_deref(),
+        Some("The next opening attacker has not appeared yet. Stay near the Shipwreck.")
+    );
+}
+
+#[test]
+fn core_gameplay_checkpoint1_reconnect_and_fresh_run_reconstruct_without_cache() {
+    let progressed = PlayerObjectives {
+        scavenge_shipwreck: true,
+        win_first_fight: true,
+        build_campfire: true,
+        recruit_villager: true,
+        ..PlayerObjectives::default()
+    };
+    let facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        opening_enemy_spawned: 2,
+        villager_spawned: true,
+        living_villagers: 1,
+        has_unfinished_structure: true,
+        completed_structures: 2,
+        has_campfire: true,
+        has_burrow: true,
+        ..EarlyObjectiveFacts::default()
+    };
+
+    let first = build_objective_state_packet(&progressed, &facts, 2);
+    let reconnect = build_objective_state_packet(&progressed, &facts, 2);
+    assert_eq!(
+        first, reconnect,
+        "reconnect rebuilds from the same pure state"
+    );
+    assert_eq!(
+        first_incomplete_objective_id(&progressed, &facts),
+        "assign_first_villager"
+    );
+
+    let fresh_objectives = PlayerObjectives::default();
+    let fresh_facts = core_gameplay_objective_facts();
+    let (fresh_current, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &fresh_objectives,
+        &fresh_facts,
+        1,
+    ));
+    assert_eq!(fresh_current, "scavenge_shipwreck");
+    assert_eq!(
+        first_incomplete_objective_id(&progressed, &facts),
+        "assign_first_villager"
+    );
+}
+
+#[test]
+fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_in_order() {
+    let mut objectives = PlayerObjectives::default();
+    let mut facts = core_gameplay_objective_facts();
+
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState {
             current_id,
@@ -4867,6 +5511,22 @@ fn survival_thread_begins_with_shipwreck_and_advances_in_order() {
             ..
         } => {
             assert_eq!(current_id, "scavenge_shipwreck");
+            assert_eq!(
+                objectives
+                    .iter()
+                    .take(7)
+                    .map(|objective| objective.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "scavenge_shipwreck",
+                    "build_burrow",
+                    "win_first_fight",
+                    "build_campfire",
+                    "recruit_villager",
+                    "assign_first_villager",
+                    "build_shelter_storage",
+                ]
+            );
             assert_eq!(
                 objectives
                     .iter()
@@ -4880,30 +5540,71 @@ fn survival_thread_begins_with_shipwreck_and_advances_in_order() {
     }
 
     objectives.scavenge_shipwreck = true;
-    let packet = build_objective_state_packet(&objectives, 1, false, false, 1);
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState {
             current_id,
             objectives,
             ..
         } => {
-            assert_eq!(current_id, "build_campfire");
+            assert_eq!(current_id, "build_burrow");
             assert_eq!(
                 objectives
                     .iter()
                     .find(|obj| obj.state == "active")
                     .unwrap()
                     .id,
-                "build_campfire"
+                "build_burrow"
+            );
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.id == "build_campfire")
+                    .unwrap()
+                    .state,
+                "locked",
+                "the campfire must not become primary before the Burrow and opening fight"
             );
         }
         _ => panic!("expected objective_state packet"),
     }
 
-    objectives.build_campfire = true;
+    facts.has_burrow = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "win_first_fight");
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.state == "active")
+                    .unwrap()
+                    .id,
+                "win_first_fight"
+            );
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
     objectives.win_first_fight = true;
+    facts.has_campfire = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState { current_id, .. } => {
+            assert_eq!(current_id, "build_campfire");
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.build_campfire = true;
     objectives.recruit_villager = true;
-    let packet = build_objective_state_packet(&objectives, 2, false, true, 1);
+    objectives.assign_first_villager = true;
+    facts.completed_structures = 2;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState {
             current_id,
@@ -4920,17 +5621,29 @@ fn survival_thread_begins_with_shipwreck_and_advances_in_order() {
 }
 
 #[test]
-fn survival_thread_progresses_to_expansion_after_basic_camp() {
+fn core_gameplay_checkpoint1_survival_thread_progresses_to_expansion_after_basic_camp() {
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,
         build_campfire: true,
         win_first_fight: true,
         recruit_villager: true,
+        assign_first_villager: true,
         build_3_structures: true,
         ..Default::default()
     };
+    let facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        opening_enemy_spawned: 2,
+        villager_spawned: true,
+        living_villagers: 1,
+        has_unfinished_structure: true,
+        completed_structures: 3,
+        has_campfire: true,
+        has_burrow: true,
+        ..EarlyObjectiveFacts::default()
+    };
 
-    let packet = build_objective_state_packet(&objectives, 3, true, true, 3);
+    let packet = build_objective_state_packet(&objectives, &facts, 3);
     match packet {
         ResponsePacket::ObjectiveState {
             current_id,
@@ -4947,6 +5660,257 @@ fn survival_thread_progresses_to_expansion_after_basic_camp() {
         }
         _ => panic!("expected objective_state packet"),
     }
+}
+
+#[test]
+fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
+    let mut objectives = PlayerObjectives {
+        scavenge_shipwreck: true,
+        win_first_fight: true,
+        build_campfire: true,
+        ..PlayerObjectives::default()
+    };
+    let player_a_facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        villager_spawned: true,
+        living_villagers: 1,
+        combat_capable_villagers: 0,
+        has_unfinished_structure: true,
+        completed_structures: 2,
+        has_campfire: true,
+        has_burrow: true,
+        ..EarlyObjectiveFacts::default()
+    };
+
+    let pre_rescue_facts = EarlyObjectiveFacts {
+        living_villagers: 0,
+        villager_spawned: false,
+        ..player_a_facts.clone()
+    };
+    let (before_recruitment_current, before_recruitment) = core_gameplay_objective_state(
+        build_objective_state_packet(&objectives, &pre_rescue_facts, 1),
+    );
+    assert_eq!(before_recruitment_current, "recruit_villager");
+    assert_eq!(
+        before_recruitment
+            .iter()
+            .find(|objective| objective.id == "assign_first_villager")
+            .unwrap()
+            .state,
+        "locked",
+        "assignment must not be recommended before recruitment"
+    );
+
+    objectives.recruit_villager = true;
+    let objectives_before = serde_json::to_value(&objectives).unwrap();
+    let facts_before = player_a_facts.clone();
+    let (current_id, after_recruitment) = core_gameplay_objective_state(
+        build_objective_state_packet(&objectives, &player_a_facts, 1),
+    );
+    assert_eq!(current_id, "assign_first_villager");
+    let assignment = after_recruitment
+        .iter()
+        .find(|objective| objective.id == "assign_first_villager")
+        .unwrap();
+    assert_eq!(assignment.state, "active");
+    assert!(assignment.lesson.contains("unarmed"));
+    assert!(assignment
+        .lesson
+        .contains("safer than treating them as a defender"));
+    assert_eq!(assignment.blocker, None);
+    assert_eq!(
+        serde_json::to_value(&objectives).unwrap(),
+        objectives_before
+    );
+    assert_eq!(player_a_facts, facts_before);
+    assert!(!objectives.assign_first_villager);
+
+    let player_b_facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        villager_spawned: true,
+        living_villagers: 0,
+        combat_capable_villagers: 0,
+        has_unfinished_structure: true,
+        completed_structures: 2,
+        has_campfire: true,
+        has_burrow: true,
+        ..EarlyObjectiveFacts::default()
+    };
+    let (player_b_current, player_b_packet) = core_gameplay_objective_state(
+        build_objective_state_packet(&objectives, &player_b_facts, 1),
+    );
+    let player_b_assignment = player_b_packet
+        .iter()
+        .find(|objective| objective.id == "assign_first_villager")
+        .unwrap();
+    assert_eq!(player_b_current, "build_shelter_storage");
+    assert_eq!(
+        player_b_assignment.state, "locked",
+        "a dead or absent settler must make assignment guidance irrelevant"
+    );
+    assert_eq!(player_b_assignment.blocker, None);
+    assert!(!player_b_assignment
+        .lesson
+        .contains("rescued settler is unarmed"));
+
+    objectives.assign_first_villager = true;
+    let (current_id, completed_packet) = core_gameplay_objective_state(
+        build_objective_state_packet(&objectives, &player_a_facts, 1),
+    );
+    assert_eq!(current_id, "build_shelter_storage");
+    assert_eq!(
+        completed_packet
+            .iter()
+            .find(|objective| objective.id == "assign_first_villager")
+            .unwrap()
+            .state,
+        "complete",
+        "only the observed Assignment completion fact completes this step"
+    );
+}
+
+#[test]
+fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_states() {
+    let player_a_states = [
+        State::None,
+        State::Operating,
+        State::Crafting,
+        State::Burning,
+    ];
+    let player_b_states = [
+        State::Founded,
+        State::Progressing,
+        State::Building,
+        State::PlanningUpgrade,
+        State::Upgrading,
+        State::Stalled,
+        State::Dead,
+    ];
+
+    let player_a_completed = player_a_states
+        .into_iter()
+        .filter(|state| Structure::is_built(*state))
+        .count();
+    let player_b_completed = player_b_states
+        .into_iter()
+        .filter(|state| Structure::is_built(*state))
+        .count();
+
+    assert_eq!(player_a_completed, 4);
+    assert_eq!(player_b_completed, 0);
+    assert_eq!(
+        player_a_states
+            .into_iter()
+            .filter(|state| Structure::is_built(*state))
+            .count(),
+        4,
+        "another player's incomplete states do not alter this player's count"
+    );
+
+    let objectives = PlayerObjectives {
+        scavenge_shipwreck: true,
+        win_first_fight: true,
+        build_campfire: true,
+        recruit_villager: true,
+        assign_first_villager: true,
+        ..PlayerObjectives::default()
+    };
+    let facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        completed_structures: player_a_completed as i32,
+        has_campfire: true,
+        has_burrow: true,
+        ..EarlyObjectiveFacts::default()
+    };
+    let (current_id, packet) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "build_shelter_storage");
+    assert_eq!(
+        packet
+            .iter()
+            .find(|objective| objective.id == "build_shelter_storage")
+            .unwrap()
+            .progress,
+        Some(3),
+        "presentation clamps a functioning settlement count to its three-structure goal"
+    );
+}
+
+#[test]
+fn core_gameplay_checkpoint1_early_structure_costs_and_requirements_are_unchanged() {
+    let templates = load_obj_templates();
+    let stockade = templates
+        .iter()
+        .find(|template| template.template == "Stockade")
+        .expect("Stockade template exists");
+    assert_eq!(stockade.build_cost, Some(30));
+    assert_eq!(
+        stockade
+            .req
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
+            .collect::<Vec<_>>(),
+        vec![("Log", 3)]
+    );
+
+    let crafting_tent = templates
+        .iter()
+        .find(|template| template.template == "Crafting Tent")
+        .expect("Crafting Tent template exists");
+    assert_eq!(crafting_tent.build_cost, Some(100));
+    assert_eq!(crafting_tent.workspaces, Some(2));
+    assert_eq!(
+        crafting_tent
+            .req
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
+            .collect::<Vec<_>>(),
+        vec![("Log", 5), ("Hide", 5)]
+    );
+}
+
+#[test]
+fn core_gameplay_checkpoint1_assignment_flag_does_not_change_crisis_pressure() {
+    let before = PlayerObjectives {
+        explore_poi: true,
+        choose_expansion: true,
+        ..PlayerObjectives::default()
+    };
+    let after = PlayerObjectives {
+        assign_first_villager: true,
+        ..before.clone()
+    };
+
+    let goblin_pressure_for = |objectives: &PlayerObjectives| {
+        calculate_goblin_pressure(&GoblinPressureFacts {
+            danger_unlocked: true,
+            completed_structures: 3,
+            living_villagers: 1,
+            stored_gold: 25,
+            sanctuary_level: 2,
+            explore_poi: objectives.explore_poi,
+            choose_expansion: objectives.choose_expansion,
+            online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS,
+        })
+    };
+    let undead_pressure_for = |objectives: &PlayerObjectives| {
+        calculate_undead_pressure(&UndeadPressureFacts {
+            goblin_completed: true,
+            danger_unlocked: true,
+            explore_poi: objectives.explore_poi,
+            choose_expansion: objectives.choose_expansion,
+            sanctuary_level: 2,
+            hero_deaths: 1,
+            online_active_ticks: UNDEAD_ONLINE_PRESSURE_TIER_ONE_TICKS,
+        })
+    };
+
+    assert_eq!(goblin_pressure_for(&before), goblin_pressure_for(&after));
+    assert_eq!(undead_pressure_for(&before), undead_pressure_for(&after));
 }
 
 #[test]
@@ -5095,27 +6059,8 @@ fn rescue_victory_uses_player_survival_day() {
 }
 
 #[test]
-fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
-    let entry = InitialEncounterEntry {
-        rat_ids: vec![1, 2],
-        opening_enemy_templates: vec!["Cave Bat".to_string(), "Thorn Beetle".to_string()],
-        phase1_spawn: "Wild Boar".to_string(),
-        phase1_npc_id: None,
-        spawn_pos: Position { x: 10, y: 10 },
-        villager_spawn_pos: Position { x: 11, y: 10 },
-        first_rat_spawn_tick: 900,
-        second_rat_spawn_tick: 1200,
-        villager_ready_tick: 1110,
-        phase1_unlock_tick: 2600,
-        spider_unlock_tick: 3600,
-        villager_event_scheduled: false,
-        merchant_id: 0,
-        necromancer_id: 0,
-        mausoleum_id: 0,
-        necro_spawn_anchor: Position { x: 0, y: 0 },
-        necro_corpse_anchor: Position { x: 0, y: 0 },
-        necro_home: Position { x: 0, y: 0 },
-    };
+fn shipwreck_inspection_triggers_villager_only_after_help_speech_and_completed_burrow() {
+    let entry = core_gameplay_initial_encounter_entry();
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,
         ..Default::default()
@@ -5124,17 +6069,26 @@ fn shipwreck_inspection_triggers_villager_only_after_help_speech() {
     assert!(!shipwreck_inspection_can_spawn_villager(
         2000,
         &entry,
-        Some(&PlayerObjectives::default())
+        Some(&PlayerObjectives::default()),
+        true,
     ));
     assert!(!shipwreck_inspection_can_spawn_villager(
         1100,
         &entry,
-        Some(&objectives)
+        Some(&objectives),
+        true,
+    ));
+    assert!(!shipwreck_inspection_can_spawn_villager(
+        1110,
+        &entry,
+        Some(&objectives),
+        false,
     ));
     assert!(shipwreck_inspection_can_spawn_villager(
         1110,
         &entry,
-        Some(&objectives)
+        Some(&objectives),
+        true,
     ));
 }
 
@@ -5699,6 +6653,12 @@ fn checkpoint4_preparing_ready_active_and_resolved_fields_are_authoritative() {
     assert_eq!(active.remaining_attackers, Some(2));
     assert_eq!(active.total_attackers, Some(3));
     assert!(active.continues_while_disconnected);
+    let intents = active
+        .assault_intents
+        .expect("living Goblin attackers expose their stable roles");
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[0].role, "harrier");
+    assert_eq!(intents[1].role, "breacher");
 
     let resolved = build_crisis_status(Some(&checkpoint4_crisis(CrisisPhase::Resolved, 96)));
     assert!(resolved.resolved);
@@ -6147,7 +7107,7 @@ fn checkpoint4_major_transition_notices_emit_once() {
         (CrisisPhase::AssaultReady, "A goblin raid is imminent."),
         (
             CrisisPhase::AssaultActive,
-            "The goblin assault has begun. It will continue if you disconnect.",
+            "The goblin assault has split three ways: a Hunter seeks you, a Harrier pressures your settlers, and a Breacher moves on the settlement. It will continue if you disconnect.",
         ),
         (
             CrisisPhase::Resolved,

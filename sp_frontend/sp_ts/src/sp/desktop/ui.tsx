@@ -1837,7 +1837,7 @@ export default class UI extends React.Component<any, UIState> {
     if (!this.firstActionNudgeShown) {
       this.firstActionNudgeShown = true;
       this.enqueueNotice(
-        "Search the shipwreck and burrow for supplies, then build a campfire before dusk.",
+        "Inspect the Shipwreck first. Your Campfire is already lit; stay near it when threats approach.",
         15000
       );
     }

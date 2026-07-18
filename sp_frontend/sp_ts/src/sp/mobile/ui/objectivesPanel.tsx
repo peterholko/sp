@@ -1,6 +1,13 @@
 import * as React from "react";
 import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
+import {
+  CrisisStatusPacket,
+  CrisisStatusView,
+  CrisisTone,
+  crisisStatusView,
+  normalizeCrisisStatus,
+} from "../../core/crisisStatus";
 
 interface ObjectiveProgress {
   id: string;
@@ -10,6 +17,7 @@ interface ObjectiveProgress {
   target?: string;
   action_hint: string;
   lesson: string;
+  blocker?: string;
   reward: string;
   progress?: number;
   goal?: number;
@@ -45,6 +53,7 @@ interface ObjectivesState {
   objectiveState: any;
   threatState: any;
   discoveryEvent: any;
+  crisisStatus: CrisisStatusPacket | null;
   expanded: boolean;
 }
 
@@ -54,6 +63,16 @@ const severityRank = {
   medium: 3,
   low: 2,
   quiet: 1,
+};
+
+const crisisToneColor: Record<CrisisTone, string> = {
+  neutral: '#9aa0a6',
+  low: '#a7c59a',
+  warning: '#e2bd67',
+  high: '#e49a52',
+  imminent: '#e66d4e',
+  urgent: '#e05252',
+  resolved: '#78b978',
 };
 
 export default class ObjectivesPanel extends React.Component<{}, ObjectivesState> {
@@ -68,6 +87,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       objectiveState: null,
       threatState: null,
       discoveryEvent: null,
+      crisisStatus: null,
       expanded: false,
     };
     this.toggleExpanded = this.toggleExpanded.bind(this);
@@ -82,6 +102,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.on(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+    Global.gameEmitter.on(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
+    Global.gameEmitter.on(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
+    Global.gameEmitter.on(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
   }
 
   componentWillUnmount() {
@@ -89,6 +113,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
     Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.off(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
+    Global.gameEmitter.off(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
+    Global.gameEmitter.off(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
+    Global.gameEmitter.off(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
   }
 
   handleObjectives(message) {
@@ -113,14 +141,32 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.setState({ discoveryEvent: message });
   }
 
+  handleCrisisStatus(message: CrisisStatusPacket) {
+    this.setState({ crisisStatus: normalizeCrisisStatus(message) });
+  }
+
+  handleRunReset() {
+    this.setState({
+      build_campfire: false,
+      build_3_structures: false,
+      recruit_villager: false,
+      explore_poi: false,
+      survive_5_nights: false,
+      objectiveState: null,
+      threatState: null,
+      discoveryEvent: null,
+      crisisStatus: null,
+    });
+  }
+
   legacyObjectives(): ObjectiveProgress[] {
     return [
       {
         id: 'build_campfire',
-        title: 'Build a campfire',
+        title: 'Use the campfire',
         state: this.state.build_campfire ? 'complete' : 'active',
         category: 'Settlement',
-        action_hint: 'Build a campfire before dusk.',
+        action_hint: 'Use the lit campfire beside your start.',
         lesson: 'Fire makes night danger easier to read.',
         reward: 'Warmth and vision.',
       },
@@ -208,12 +254,171 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     );
   }
 
+  renderCrisisSection(
+    crisis: CrisisStatusView,
+    sectionStyle: React.CSSProperties,
+    bodyStyle: React.CSSProperties,
+    labelStyle: React.CSSProperties,
+  ) {
+    const accent = crisisToneColor[crisis.tone];
+    const crisisSectionStyle: React.CSSProperties = {
+      ...sectionStyle,
+      border: `1px solid ${accent}`,
+      borderLeft: `3px solid ${accent}`,
+      borderRadius: '4px',
+      background: 'rgba(255,255,255,0.035)',
+      padding: '8px 9px',
+      marginTop: 0,
+      marginBottom: '10px',
+    };
+    const crisisHeaderStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'space-between',
+      gap: '8px',
+      marginBottom: '5px',
+    };
+    const crisisTitleStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '13px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+    };
+    const phaseStyle: React.CSSProperties = {
+      color: accent,
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      fontWeight: 'bold',
+      lineHeight: 1.2,
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    };
+    const detailSectionStyle: React.CSSProperties = {
+      borderTop: '1px solid rgba(255,255,255,0.12)',
+      marginTop: '7px',
+      paddingTop: '6px',
+    };
+    const detailHeadingStyle: React.CSSProperties = {
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      fontWeight: 'bold',
+      marginBottom: '3px',
+    };
+    const statusRowStyle: React.CSSProperties = {
+      ...labelStyle,
+      color: '#d4d4d4',
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: '8px',
+      marginTop: '5px',
+    };
+    const optionRowStyle: React.CSSProperties = {
+      padding: '4px 0',
+      borderTop: '1px solid rgba(255,255,255,0.07)',
+    };
+    const optionHeaderStyle: React.CSSProperties = {
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: '8px',
+      color: '#e2dacb',
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      fontWeight: 'bold',
+      lineHeight: 1.25,
+    };
+    const preparationStateColor = (state: string) => {
+      if (state === 'ready') return '#8fbf88';
+      if (state === 'needs_attention') return '#f2d27a';
+      return '#a9adb1';
+    };
+    const urgentStyle: React.CSSProperties = {
+      ...bodyStyle,
+      color: crisis.assaultActive ? '#ffaaaa' : accent,
+      fontWeight: 'bold',
+      marginTop: '6px',
+      marginBottom: 0,
+    };
+
+    return (
+      <section
+        style={crisisSectionStyle}
+        role="region"
+        aria-label={crisis.statusAriaLabel}
+      >
+        <div
+          style={crisisHeaderStyle}
+          aria-live={crisis.urgent ? 'assertive' : 'polite'}
+          aria-atomic="true"
+        >
+          <div style={crisisTitleStyle}>{crisis.title}</div>
+          <div style={phaseStyle}>
+            {crisis.phaseLabel}{crisis.warning ? ' · Warning' : ''}
+          </div>
+        </div>
+
+        {crisis.summary && <div style={bodyStyle}>{crisis.summary}</div>}
+        {crisis.actionHint &&
+          <div style={labelStyle}><strong>Next:</strong> {crisis.actionHint}</div>}
+
+        {crisis.preparationLabel &&
+          <div style={statusRowStyle}>
+            <span>Minimum warning</span>
+            <span>{crisis.preparationLabel}</span>
+          </div>}
+
+        {crisis.preparationOptions.length > 0 &&
+          <section style={detailSectionStyle} aria-label="Settlement preparation">
+            <div style={detailHeadingStyle}>Prepare your settlement</div>
+            {crisis.preparationOptions.map((option) =>
+              <div key={option.id} style={optionRowStyle}>
+                <div style={optionHeaderStyle}>
+                  <span>{option.label}</span>
+                  <span style={{ color: preparationStateColor(option.state) }}>
+                    {option.stateLabel}
+                  </span>
+                </div>
+                {option.detail && <div style={labelStyle}>{option.detail}</div>}
+                {option.actionHint &&
+                  <div style={labelStyle}><strong>Action:</strong> {option.actionHint}</div>}
+              </div>)}
+          </section>}
+
+        {crisis.assaultActive &&
+          <div style={statusRowStyle}>
+            <span>Attackers remaining</span>
+            <span>{crisis.attackersLabel || 'Updating'}</span>
+          </div>}
+
+        {crisis.assaultIntents.length > 0 &&
+          <section style={detailSectionStyle} aria-label="Raid intents">
+            <div style={detailHeadingStyle}>Raid intents</div>
+            <dl style={{ margin: 0 }}>
+              {crisis.assaultIntents.map((intent) =>
+                <div key={intent.role} style={optionRowStyle}>
+                  <dt style={optionHeaderStyle}>{intent.label}</dt>
+                  <dd style={{ ...labelStyle, marginLeft: 0 }}>{intent.intent}</dd>
+                </div>)}
+            </dl>
+          </section>}
+
+        {crisis.disconnectedWarning &&
+          <div style={urgentStyle}>{crisis.disconnectedWarning}</div>}
+
+        {crisis.resolved &&
+          <div style={urgentStyle}>Crisis resolved. Recover, repair, and rebuild.</div>}
+      </section>
+    );
+  }
+
   render() {
     const packetObjectives = this.state.objectiveState && this.state.objectiveState.objectives
       ? this.state.objectiveState.objectives
       : null;
     const objectives: ObjectiveProgress[] = packetObjectives || this.legacyObjectives();
     const activeObjective = this.activeObjective(objectives);
+    const crisis = crisisStatusView(this.state.crisisStatus);
     const threatState = this.state.threatState;
     const discoveryEvent = this.state.discoveryEvent;
     const sortedRisks = this.sortedRisks();
@@ -223,7 +428,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       ? threatState.legendary_threats
       : [];
 
-    if (!activeObjective && !threatState && !discoveryEvent) {
+    if (!activeObjective && !threatState && !discoveryEvent && !crisis) {
       return null;
     }
 
@@ -372,6 +577,15 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       return '#9aa0a6';
     };
 
+    const crisisChipLabel = crisis
+      ? crisis.compactLabel || crisis.phaseLabel || crisis.title
+      : '';
+    const chipLabel = crisis && crisis.urgent
+      ? crisisChipLabel
+      : activeObjective
+        ? activeObjective.title
+        : crisisChipLabel;
+
     if (!expanded) {
       return (
         <button
@@ -381,7 +595,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           aria-expanded={false}
         >
           <div style={{ color: '#c9aa71', fontWeight: 'bold', textTransform: 'uppercase' }}>Survival</div>
-          {activeObjective && <div>{activeObjective.title}</div>}
+          {chipLabel && <div>{chipLabel}</div>}
         </button>
       );
     }
@@ -394,10 +608,15 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         </div>
 
         <div style={bodyStylePanel}>
+            {crisis && this.renderCrisisSection(crisis, sectionStyle, bodyStyle, labelStyle)}
+
             {activeObjective &&
               <div>
                 <div style={activeTitleStyle}>{activeObjective.title}</div>
-                <div style={bodyStyle}>{activeObjective.action_hint}</div>
+                <div style={bodyStyle}><strong>Why:</strong> {activeObjective.lesson}</div>
+                <div style={bodyStyle}><strong>Next:</strong> {activeObjective.action_hint}</div>
+                {activeObjective.blocker &&
+                  <div style={bodyStyle}><strong>Blocked:</strong> {activeObjective.blocker}</div>}
                 {this.renderProgress(activeObjective, labelStyle)}
               </div>}
 

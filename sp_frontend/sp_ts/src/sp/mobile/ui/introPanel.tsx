@@ -37,7 +37,7 @@ export default class IntroPanel extends React.Component<IntroProps, IntroState> 
 In this untamed land of peril and opportunity, survival is your first challenge.
 
 Welcome to Perilous.`,
-      `Search the shipwreck for salvaged supplies. Build a campfire before nightfall.
+      `Your campfire is already lit. Search the shipwreck for salvaged supplies, then face the opening threats near the wreck.
 
 The wilderness here is unforgiving.`,
     ];
