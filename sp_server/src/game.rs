@@ -1173,6 +1173,15 @@ pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
 /// A late Shipwreck search receives enough time to transfer and equip salvage
 /// before the first scheduled opening attacker can appear.
 pub const OPENING_POST_SALVAGE_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
+pub const OPENING_RAT_TEMPLATE: &str = "Giant Rat";
+pub const OPENING_RAT_MIN_COUNT: usize = 1;
+pub const OPENING_RAT_MAX_COUNT: usize = 3;
+pub const INTRO_FOLLOWUP_MIN_RADIUS: i32 = 2;
+pub const INTRO_FOLLOWUP_MAX_RADIUS: i32 = 4;
+
+pub(crate) fn random_opening_rat_count<R: Rng + ?Sized>(rng: &mut R) -> usize {
+    rng.gen_range(OPENING_RAT_MIN_COUNT..=OPENING_RAT_MAX_COUNT)
+}
 
 fn random_early_game_enemy_template() -> &'static str {
     let enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
@@ -1322,20 +1331,18 @@ pub struct IntroEncounterState(pub HashMap<i32, PlayerIntroEncounters>);
 // Tracks the initial shipwreck encounter chain.
 #[derive(Debug, Clone)]
 pub struct InitialEncounterEntry {
-    pub rat_ids: Vec<i32>, // IDs of the two starting enemies
-    pub opening_enemy_templates: Vec<String>,
-    /// Runtime history for this run's two scheduled opening enemies. These
-    /// flags, rather than transient entity/corpse presence, are authoritative
-    /// for at-most-once spawn and first-fight completion.
-    pub opening_enemy_spawned: [bool; 2],
-    pub opening_enemy_defeated: [bool; 2],
+    pub rat_ids: Vec<i32>,
+    /// Runtime history for this run's randomized opening rat wave. These flags,
+    /// rather than transient entity/corpse presence, are authoritative for
+    /// at-most-once spawn and first-fight completion.
+    pub opening_enemy_spawned: Vec<bool>,
+    pub opening_enemy_defeated: Vec<bool>,
     pub phase1_spawn: String,       // "Giant Crab" or "Wild Boar"
     pub phase1_npc_id: Option<i32>, // set when phase1 creature spawns
     pub phase1_defeated: bool,
     pub spawn_pos: Position,
     pub villager_spawn_pos: Position,
-    pub first_rat_spawn_tick: i32,
-    pub second_rat_spawn_tick: i32,
+    pub opening_rat_spawn_tick: i32,
     pub villager_ready_tick: i32,
     pub phase1_unlock_tick: i32,
     pub spider_unlock_tick: i32,
@@ -1353,15 +1360,27 @@ pub struct InitialEncounterEntry {
 
 impl InitialEncounterEntry {
     fn record_opening_enemy_defeats(&mut self, dead_ids: &HashSet<i32>) {
-        for (index, enemy_id) in self.rat_ids.iter().take(2).enumerate() {
-            if self.opening_enemy_spawned[index] && dead_ids.contains(enemy_id) {
-                self.opening_enemy_defeated[index] = true;
+        for (index, enemy_id) in self.rat_ids.iter().enumerate() {
+            if self
+                .opening_enemy_spawned
+                .get(index)
+                .copied()
+                .unwrap_or(false)
+                && dead_ids.contains(enemy_id)
+            {
+                if let Some(defeated) = self.opening_enemy_defeated.get_mut(index) {
+                    *defeated = true;
+                }
             }
         }
     }
 
     fn all_opening_enemies_defeated(&self) -> bool {
-        self.opening_enemy_defeated.iter().all(|defeated| *defeated)
+        !self.rat_ids.is_empty()
+            && self.opening_enemy_spawned.len() == self.rat_ids.len()
+            && self.opening_enemy_defeated.len() == self.rat_ids.len()
+            && self.opening_enemy_spawned.iter().all(|spawned| *spawned)
+            && self.opening_enemy_defeated.iter().all(|defeated| *defeated)
     }
 
     fn opening_enemy_is_active(&self) -> bool {
@@ -5002,6 +5021,7 @@ fn move_event_completed_system(
     (
         mover_query,
         map_obj_query,
+        campfire_query,
         mut effect_query,
         sanctuary_query,
         weak_sanctuary_query,
@@ -5028,6 +5048,7 @@ fn move_event_completed_system(
             With<MoveEventCompleted>,
         >,
         Query<MapObjQuery>,
+        Query<(&PlayerId, &Position, &State, &Campfire, Option<&StateDead>)>,
         Query<&mut Effects>,
         Query<&Sanctuary>,
         Query<&WeakSanctuary>,
@@ -5109,6 +5130,24 @@ fn move_event_completed_system(
                 if Map::dist(*mover_pos, *obj.pos) < 1 {
                     is_dst_shelter = Some(obj.id.0);
                 }
+            }
+        }
+
+        let is_on_owned_lit_campfire = campfire_query.iter().any(
+            |(campfire_player_id, campfire_pos, campfire_state, campfire, state_dead)| {
+                campfire_player_id.0 == mover_player_id.0
+                    && *campfire_pos == *mover_pos
+                    && campfire.is_lit
+                    && campfire_state.is_alive()
+                    && state_dead.is_none()
+            },
+        );
+        if let Ok(mut effects) = effect_query.get_mut(mover_entity) {
+            if sync_campfire_light_effect(&mut effects, is_on_owned_lit_campfire, game_tick.0) {
+                commands.trigger(UpdateObj {
+                    entity: mover_entity,
+                    attrs: vec![(VISION.to_string(), "Pending".to_string())],
+                });
             }
         }
 
@@ -5579,6 +5618,25 @@ fn move_event_completed_system(
             };
             send_to_client(mover_player_id.0, map_packet, &clients);
         }
+    }
+}
+
+fn sync_campfire_light_effect(
+    effects: &mut Effects,
+    is_on_owned_lit_campfire: bool,
+    game_tick: i32,
+) -> bool {
+    if is_on_owned_lit_campfire {
+        if effects.has(Effect::CampfireLight) {
+            false
+        } else {
+            effects
+                .0
+                .insert(Effect::CampfireLight, (game_tick + 1, 0.0, 1));
+            true
+        }
+    } else {
+        effects.0.remove(&Effect::CampfireLight).is_some()
     }
 }
 
@@ -9697,18 +9755,16 @@ fn investigate_event_system(
                 player_obj.scavenge_shipwreck = true;
 
                 if let Some(entry) = initial_encounter_state.get_mut(&player_id) {
-                    let delayed_first = game_tick.0 + OPENING_POST_SALVAGE_GRACE_TICKS;
-                    entry.first_rat_spawn_tick = entry.first_rat_spawn_tick.max(delayed_first);
-                    entry.second_rat_spawn_tick = entry
-                        .second_rat_spawn_tick
-                        .max(entry.first_rat_spawn_tick + OPENING_POST_SALVAGE_GRACE_TICKS);
+                    let delayed_opening = game_tick.0 + OPENING_POST_SALVAGE_GRACE_TICKS;
+                    entry.opening_rat_spawn_tick =
+                        entry.opening_rat_spawn_tick.max(delayed_opening);
                 }
 
                 // BB-A/BB-B: action-driven nudge toward the next objective.
                 send_to_client(
                     player_id,
                     ResponsePacket::Notice {
-                        noticemsg: "The wreck's supplies are within reach. Transfer and equip what you need, then gather three Logs for a Burrow before danger closes in.".to_string(),
+                        noticemsg: "The wreck's supplies are within reach. Transfer the five Logs and any equipment you need, then build a Burrow before danger closes in.".to_string(),
                         expiry: Some(10000),
                     },
                     &clients,
@@ -16300,7 +16356,52 @@ fn personal_crisis_assault_system(
     }
 }
 
-// Watches for the initial enemy kills and chains boar/crab into spider spawns
+fn intro_followup_spawn_candidates(
+    start_pos: Position,
+    occupied: &HashSet<Position>,
+    map: &Map,
+) -> Vec<Position> {
+    let mut candidates = Vec::new();
+    for radius in INTRO_FOLLOWUP_MIN_RADIUS..=INTRO_FOLLOWUP_MAX_RADIUS {
+        candidates.extend(Map::ring((start_pos.x, start_pos.y), radius));
+    }
+
+    candidates
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .filter(|pos| {
+            Map::is_valid_pos((pos.x, pos.y))
+                && Map::is_passable(pos.x, pos.y, map)
+                && !occupied.contains(pos)
+                && Map::find_path(
+                    *pos,
+                    start_pos,
+                    map,
+                    NPC_PLAYER_ID,
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                    true,
+                    true,
+                )
+                .is_some()
+        })
+        .collect()
+}
+
+fn random_intro_followup_spawn_position<R: Rng + ?Sized>(
+    start_pos: Position,
+    occupied: &HashSet<Position>,
+    map: &Map,
+    rng: &mut R,
+) -> Option<Position> {
+    intro_followup_spawn_candidates(start_pos, occupied, map)
+        .choose(rng)
+        .copied()
+}
+
+// Watches for the opening rat kills and chains boar/crab into spider spawns.
 fn initial_encounter_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -16311,15 +16412,19 @@ fn initial_encounter_system(
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
     mut intro_encounter_state: ResMut<IntroEncounterState>,
-    objectives: Res<Objectives>,
-    presence: Res<PlayerWorldPresenceState>,
+    (objectives, presence, map, spawn_positions): (
+        Res<Objectives>,
+        Res<PlayerWorldPresenceState>,
+        Res<Map>,
+        Res<SpawnPositions>,
+    ),
     mut run_spawned_objs: ResMut<RunSpawnedObjs>,
-    dead_query: Query<&Id, With<StateDead>>,
-    hero_query: Query<
-        (&PlayerId, &State, Option<&StateDead>, Option<&TrueDeath>),
-        With<SubclassHero>,
-    >,
-    structure_query: Query<(&PlayerId, &Template, &State), With<ClassStructure>>,
+    (dead_query, hero_query, structure_query, blocking_query): (
+        Query<&Id, With<StateDead>>,
+        Query<(&PlayerId, &State, Option<&StateDead>, Option<&TrueDeath>), With<SubclassHero>>,
+        Query<(&PlayerId, &Template, &State), With<ClassStructure>>,
+        Query<(&Position, &Class, &State, Option<&StateDead>)>,
+    ),
 ) {
     if game_tick.0 % 10 != 0 {
         return;
@@ -16340,6 +16445,12 @@ fn initial_encounter_system(
         .iter()
         .filter_map(|(player_id, template, state)| {
             (template.0 == "Burrow" && Structure::is_built(*state)).then_some(player_id.0)
+        })
+        .collect();
+    let mut occupied_positions: HashSet<Position> = blocking_query
+        .iter()
+        .filter_map(|(pos, class, state, dead)| {
+            (dead.is_none() && class.is_blocking() && state.is_blocking()).then_some(*pos)
         })
         .collect();
 
@@ -16377,41 +16488,35 @@ fn initial_encounter_system(
             .get(player_id)
             .map(|objectives| objectives.scavenge_shipwreck)
             .unwrap_or(false);
-        if shipwreck_searched {
-            let spawn_ticks = [entry.first_rat_spawn_tick, entry.second_rat_spawn_tick];
-            for (index, due_tick) in spawn_ticks.into_iter().enumerate() {
-                if game_tick.0 < due_tick || entry.opening_enemy_spawned[index] {
-                    continue;
-                }
-                let Some(enemy_id) = entry.rat_ids.get(index).copied() else {
+        if shipwreck_searched && game_tick.0 >= entry.opening_rat_spawn_tick {
+            for (index, enemy_id) in entry.rat_ids.iter().copied().enumerate() {
+                let Some(spawned) = entry.opening_enemy_spawned.get_mut(index) else {
                     warn!(
-                        "Initial Encounter: missing opening enemy id index={} player_id={}",
+                        "Initial Encounter: missing opening spawn history index={} player_id={}",
                         index, player_id
                     );
-                    continue;
+                    break;
                 };
-                let enemy_template = entry
-                    .opening_enemy_templates
-                    .get(index)
-                    .map(String::as_str)
-                    .unwrap_or(EARLY_GAME_ENEMY_TEMPLATES[index]);
+                if *spawned {
+                    continue;
+                }
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     enemy_id,
                     NPC_PLAYER_ID,
                     entry.spawn_pos,
-                    enemy_template.to_string(),
+                    OPENING_RAT_TEMPLATE.to_string(),
                     &mut commands,
                     &mut ids,
                     &mut entity_map,
                     &templates,
                 );
                 commands.trigger(NewObj { entity });
-                entry.opening_enemy_spawned[index] = true;
+                *spawned = true;
                 intro_entry.shipwreck_chain_started = true;
                 info!(
-                    "Initial Encounter: spawning opening enemy {} ({}) for player {}",
+                    "Initial Encounter: spawning opening rat {} ({}) for player {}",
                     index + 1,
-                    enemy_template,
+                    OPENING_RAT_TEMPLATE,
                     player_id
                 );
             }
@@ -16439,14 +16544,33 @@ fn initial_encounter_system(
             entry.villager_event_scheduled = true;
         }
 
-        // Phase 0: waiting for both opening enemies to die, then spawn boar/crab
+        // Phase 0: wait for the complete opening rat wave, then spawn boar/crab.
         if !intro_progress.initial_encounter {
             if game_tick.0 >= entry.phase1_unlock_tick && all_opening_enemies_defeated {
+                let Some(start_pos) = spawn_positions.get(player_id).copied() else {
+                    warn!(
+                        "Initial Encounter: missing assigned start for player_id={}",
+                        player_id
+                    );
+                    continue;
+                };
+                let Some(spawn_pos) = random_intro_followup_spawn_position(
+                    start_pos,
+                    &occupied_positions,
+                    &map,
+                    &mut rand::thread_rng(),
+                ) else {
+                    warn!(
+                        "Initial Encounter: no valid phase-one spawn around start for player_id={}",
+                        player_id
+                    );
+                    continue;
+                };
                 let npc_id = ids.new_obj_id();
                 let (entity, _, _, _) = Encounter::spawn_npc_with_id(
                     npc_id,
                     NPC_PLAYER_ID,
-                    entry.spawn_pos,
+                    spawn_pos,
                     entry.phase1_spawn.clone(),
                     &mut commands,
                     &mut ids,
@@ -16457,9 +16581,10 @@ fn initial_encounter_system(
                 entry.phase1_npc_id = Some(npc_id);
                 run_spawned_objs.entry(*player_id).or_default().push(npc_id);
                 intro_progress.initial_encounter = true;
+                occupied_positions.insert(spawn_pos);
                 info!(
-                    "Initial Encounter: spawning {} after opening enemies killed for player {}",
-                    entry.phase1_spawn, player_id
+                    "Initial Encounter: spawning {} at {:?} after opening rats killed for player {}",
+                    entry.phase1_spawn, spawn_pos, player_id
                 );
             }
             continue;
@@ -16468,9 +16593,28 @@ fn initial_encounter_system(
         // Phase 1: waiting for the boar/crab to die → spawn spider
         if !intro_progress.spider_encounter {
             if game_tick.0 >= entry.spider_unlock_tick && entry.phase1_defeated {
+                let Some(start_pos) = spawn_positions.get(player_id).copied() else {
+                    warn!(
+                        "Initial Encounter: missing assigned start for player_id={}",
+                        player_id
+                    );
+                    continue;
+                };
+                let Some(spawn_pos) = random_intro_followup_spawn_position(
+                    start_pos,
+                    &occupied_positions,
+                    &map,
+                    &mut rand::thread_rng(),
+                ) else {
+                    warn!(
+                        "Initial Encounter: no valid Spider spawn around start for player_id={}",
+                        player_id
+                    );
+                    continue;
+                };
                 let (entity, spider_id, _, _) = Encounter::spawn_npc(
                     NPC_PLAYER_ID,
-                    entry.spawn_pos,
+                    spawn_pos,
                     "Spider".to_string(),
                     &mut commands,
                     &mut ids,
@@ -16483,9 +16627,10 @@ fn initial_encounter_system(
                     .or_default()
                     .push(spider_id.0);
                 intro_progress.spider_encounter = true;
+                occupied_positions.insert(spawn_pos);
                 info!(
-                    "Initial Encounter: spawning Spider after {} killed for player {}",
-                    entry.phase1_spawn, player_id
+                    "Initial Encounter: spawning Spider at {:?} after {} killed for player {}",
+                    spawn_pos, entry.phase1_spawn, player_id
                 );
             }
         }
@@ -18348,7 +18493,7 @@ fn build_objective_state_packet(
         if facts.opening_enemy_spawned == 0 {
             "The opening threat has not appeared yet. Stay near the Shipwreck.".to_string()
         } else {
-            "The next opening attacker has not appeared yet. Stay near the Shipwreck.".to_string()
+            "The opening fight is resolving. Stay near the Shipwreck.".to_string()
         }
     });
     let campfire_blocker = (!facts.has_campfire).then(|| {
@@ -18405,8 +18550,8 @@ fn build_objective_state_packet(
             &current_id,
             "Settlement",
             Some("Burrow"),
-            "Recover and equip the Sharpened Stick, gather three additional Logs, then place, supply, and build the normal Burrow foundation.",
-            "The two wreck Logs plus three gathered Logs create your first real storage; keep the salvaged Timber for later work.",
+            "Recover the five Logs from the Shipwreck, then place, supply, and build the normal Burrow foundation.",
+            "The wreck contains all five Logs needed for your first real storage; keep the salvaged Timber for later work.",
             burrow_blocker,
             "Safe storage and the first permanent piece of your settlement.",
             Some(i32::from(facts.has_burrow)),
@@ -18818,6 +18963,11 @@ fn weather_effects_system(
     mut crops: ResMut<Crops>,
     mut last_weather_notice: Local<HashMap<i32, i32>>,
 ) {
+    // Weather notices are temporarily disabled below. Keep these parameters wired so
+    // restoring the commented notification blocks does not require changing the
+    // system signature.
+    let _ = (&clients, &mut last_weather_notice);
+
     // Check every 50 ticks (5 seconds)
     if game_tick.0 % 50 != 0 {
         return;
@@ -18856,6 +19006,7 @@ fn weather_effects_system(
                     .try_insert(LastDamageTick(game_tick.0));
             }
 
+            /* Weather notifications are temporarily disabled.
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 300 {
                 let packet = ResponsePacket::Notice {
@@ -18868,9 +19019,11 @@ fn weather_effects_system(
                 send_to_client(player_id.0, packet, &clients);
                 last_weather_notice.insert(player_id.0, game_tick.0);
             }
+            */
         }
 
         // Heatwave: notice about increased thirst (actual thirst is handled per-tick elsewhere)
+        /* Weather notifications are temporarily disabled.
         if weather.is_hot() {
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 600 {
@@ -18882,8 +19035,10 @@ fn weather_effects_system(
                 last_weather_notice.insert(player_id.0, game_tick.0);
             }
         }
+        */
 
         // Fog: reduced vision notice
+        /* Weather notifications are temporarily disabled.
         if weather.is_fog() {
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 600 {
@@ -18895,8 +19050,10 @@ fn weather_effects_system(
                 last_weather_notice.insert(player_id.0, game_tick.0);
             }
         }
+        */
 
         // Rain: can extinguish campfires (small chance per check)
+        /* Weather notifications are temporarily disabled.
         if weather.is_rainy() {
             let last_tick = last_weather_notice.get(&player_id.0).copied().unwrap_or(0);
             if game_tick.0 - last_tick >= 600 {
@@ -18908,6 +19065,7 @@ fn weather_effects_system(
                 last_weather_notice.insert(player_id.0, game_tick.0);
             }
         }
+        */
     }
 
     // Storm damage to structures

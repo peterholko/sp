@@ -858,12 +858,11 @@ pub struct ProtectedIntroSnapshot {
     pub villager_spawned: bool,
     pub danger_unlocked: bool,
     pub rat_ids: Vec<i32>,
-    pub opening_enemy_spawned: [bool; 2],
-    pub opening_enemy_defeated: [bool; 2],
+    pub opening_enemy_spawned: Vec<bool>,
+    pub opening_enemy_defeated: Vec<bool>,
     pub phase1_npc_id: Option<i32>,
     pub phase1_defeated: bool,
-    pub first_rat_spawn_tick: i32,
-    pub second_rat_spawn_tick: i32,
+    pub opening_rat_spawn_tick: i32,
     pub villager_ready_tick: i32,
     pub phase1_unlock_tick: i32,
     pub spider_unlock_tick: i32,
@@ -3055,12 +3054,11 @@ impl HeadlessGame {
             villager_spawned: intro.villager_spawned,
             danger_unlocked: intro.danger_unlocked,
             rat_ids: initial.rat_ids.clone(),
-            opening_enemy_spawned: initial.opening_enemy_spawned,
-            opening_enemy_defeated: initial.opening_enemy_defeated,
+            opening_enemy_spawned: initial.opening_enemy_spawned.clone(),
+            opening_enemy_defeated: initial.opening_enemy_defeated.clone(),
             phase1_npc_id: initial.phase1_npc_id,
             phase1_defeated: initial.phase1_defeated,
-            first_rat_spawn_tick: initial.first_rat_spawn_tick,
-            second_rat_spawn_tick: initial.second_rat_spawn_tick,
+            opening_rat_spawn_tick: initial.opening_rat_spawn_tick,
             villager_ready_tick: initial.villager_ready_tick,
             phase1_unlock_tick: initial.phase1_unlock_tick,
             spider_unlock_tick: initial.spider_unlock_tick,
@@ -3086,8 +3084,7 @@ impl HeadlessGame {
         let entry = initial
             .get_mut(&player_id)
             .ok_or_else(|| "missing initial encounter state for fixture deferral".to_string())?;
-        entry.first_rat_spawn_tick = deferred_tick;
-        entry.second_rat_spawn_tick = deferred_tick;
+        entry.opening_rat_spawn_tick = deferred_tick;
         entry.villager_ready_tick = deferred_tick;
         entry.phase1_unlock_tick = deferred_tick;
         entry.spider_unlock_tick = deferred_tick;
@@ -4266,6 +4263,12 @@ mod tests {
         game.tick(15);
     }
 
+    fn run_intro_spawn_check_at_or_after(game: &mut HeadlessGame, due_tick: i32) {
+        let check_tick = ((due_tick + 9) / 10) * 10;
+        game.app.world_mut().resource_mut::<GameTick>().0 = check_tick - 2;
+        game.tick(3);
+    }
+
     fn capture_current_objective_id(game: &mut HeadlessGame) -> String {
         let next_objective_tick = (game.game_tick().div_euclid(50) + 1) * 50;
         game.start_packet_capture();
@@ -4494,6 +4497,53 @@ mod tests {
                 },
             ));
         }
+    }
+
+    fn assert_intro_followup_spawn_position(
+        game: &mut HeadlessGame,
+        player_id: i32,
+        obj_id: i32,
+    ) -> Position {
+        use crate::game::SpawnPositions;
+
+        let (position, start, passable, other_blockers) = {
+            let world = game.app.world_mut();
+            let entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(obj_id)
+                .expect("scripted intro follow-up entity");
+            let position = *world
+                .get::<Position>(entity)
+                .expect("scripted intro follow-up position");
+            let start = *world
+                .resource::<SpawnPositions>()
+                .get(&player_id)
+                .expect("player start position");
+            let passable = Map::is_passable(position.x, position.y, world.resource::<Map>());
+            let mut positioned = world.query::<(Entity, &Position, &Class, &State)>();
+            let other_blockers = positioned
+                .iter(world)
+                .filter(|(other, other_pos, class, state)| {
+                    *other != entity
+                        && **other_pos == position
+                        && class.is_blocking()
+                        && state.is_blocking()
+                })
+                .count();
+            (position, start, passable, other_blockers)
+        };
+
+        assert!(Map::is_valid_pos((position.x, position.y)));
+        assert!(passable, "intro follow-up must use a passable map tile");
+        assert!(
+            (2..=4).contains(&Map::distance((start.x, start.y), (position.x, position.y))),
+            "intro follow-up must spawn 2-4 tiles from the player's assigned start"
+        );
+        assert_eq!(
+            other_blockers, 0,
+            "intro follow-up must not share a tile with another live blocking object"
+        );
+        position
     }
 
     fn next_preferred_assault_tick(current_tick: i32) -> i32 {
@@ -5592,6 +5642,51 @@ mod tests {
                     && !occupied.contains(&(position.x, position.y))
             })
             .expect("passable unoccupied adjacent test position")
+    }
+
+    fn primary_hero_light_snapshot(
+        game: &mut HeadlessGame,
+    ) -> (Entity, Position, u32, Option<(i32, f32, i32)>) {
+        let player_id = game.player_id();
+        let world = game.app.world_mut();
+        let mut heroes = world.query_filtered::<
+            (Entity, &PlayerId, &Position, &Viewshed, &Effects),
+            With<SubclassHero>,
+        >();
+        heroes
+            .iter(world)
+            .find(|(_, owner, ..)| owner.0 == player_id)
+            .map(|(entity, _, pos, viewshed, effects)| {
+                (
+                    entity,
+                    *pos,
+                    viewshed.range,
+                    effects.0.get(&Effect::CampfireLight).copied(),
+                )
+            })
+            .expect("primary headless hero light snapshot")
+    }
+
+    fn move_primary_hero_and_wait(game: &mut HeadlessGame, destination: Position) {
+        let player_id = game.player_id();
+        game.inject(PlayerEvent::Move {
+            player_id,
+            x: destination.x,
+            y: destination.y,
+        });
+
+        for _ in 0..40 {
+            game.tick(1);
+            if game
+                .observe()
+                .hero
+                .is_some_and(|hero| hero.pos == destination)
+            {
+                return;
+            }
+        }
+
+        panic!("headless hero did not reach {destination:?} within 40 ticks");
     }
 
     fn expire_safe_logout_activity_cooldown(game: &mut HeadlessGame) {
@@ -7573,11 +7668,8 @@ mod tests {
         assert_eq!(resumed_record.protected_run_key, None);
         let mut expected_intro = intro_before.clone();
         expected_intro.start_tick = expected_intro.start_tick.saturating_add(protected_duration);
-        expected_intro.first_rat_spawn_tick = expected_intro
-            .first_rat_spawn_tick
-            .saturating_add(protected_duration);
-        expected_intro.second_rat_spawn_tick = expected_intro
-            .second_rat_spawn_tick
+        expected_intro.opening_rat_spawn_tick = expected_intro
+            .opening_rat_spawn_tick
             .saturating_add(protected_duration);
         expected_intro.villager_ready_tick = expected_intro
             .villager_ready_tick
@@ -8379,7 +8471,7 @@ mod tests {
                     ("Honeybell Berries".to_string(), 3),
                     ("Salted Meat Strip".to_string(), 3),
                     ("Sharpened Stick".to_string(), 1),
-                    ("Springbranch Maple Log".to_string(), 2),
+                    ("Springbranch Maple Log".to_string(), 5),
                     ("Valleyrun Copper Ingot".to_string(), 3),
                     ("Waterskin (Filled)".to_string(), 3),
                 ]);
@@ -8435,7 +8527,7 @@ mod tests {
                 assert!(campfire.is_lit);
                 assert_eq!(inventory.items.len(), 1);
                 assert_eq!(inventory.items[0].name, "Firewood");
-                assert_eq!(inventory.items[0].quantity, 5);
+                assert_eq!(inventory.items[0].quantity, 20);
 
                 let mut structures =
                     world.query_filtered::<(&PlayerId, &Template), With<ClassStructure>>();
@@ -8473,6 +8565,145 @@ mod tests {
                 ["Burrow", "Campfire", "Crafting Tent", "Stockade"]
             );
         }
+    }
+
+    #[test]
+    fn campfire_light_is_positional_across_movement_and_reconnect() {
+        use crate::obj::Campfire;
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "CampfireLightMovementBot");
+        let (campfire_entity, campfire_pos) = {
+            let world = game.app.world_mut();
+            let mut campfires = world.query::<(Entity, &PlayerId, &Position, &Campfire)>();
+            campfires
+                .iter(world)
+                .find(|(_, owner, _, campfire)| owner.0 == player_id && campfire.is_lit)
+                .map(|(entity, _, pos, _)| (entity, *pos))
+                .expect("owned lit starting Campfire")
+        };
+
+        game.app.world_mut().resource_mut::<GameTick>().0 = crate::constants::NIGHT - 2;
+        game.tick(3);
+
+        let (hero_entity, hero_pos, night_vision, initial_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(hero_pos, campfire_pos);
+        assert_eq!(night_vision, 1);
+        assert!(initial_light.is_some());
+
+        let away_pos = passable_unoccupied_adjacent_position(&mut game, campfire_pos);
+        move_primary_hero_and_wait(&mut game, away_pos);
+        let (_, moved_pos, moved_vision, moved_light) = primary_hero_light_snapshot(&mut game);
+        assert_eq!(moved_pos, away_pos);
+        assert_eq!(moved_vision, 0);
+        assert!(moved_light.is_none());
+
+        game.disconnect_player();
+        game.tick(3);
+        game.reconnect_player_with_login();
+        game.tick(8);
+        let (_, reconnected_pos, reconnected_vision, reconnected_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(reconnected_pos, away_pos);
+        assert_eq!(reconnected_vision, 0);
+        assert!(reconnected_light.is_none());
+
+        move_primary_hero_and_wait(&mut game, campfire_pos);
+        let (_, returned_pos, returned_vision, returned_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(returned_pos, campfire_pos);
+        assert_eq!(returned_vision, 1);
+        assert!(returned_light.is_some());
+
+        game.app
+            .world_mut()
+            .get_mut::<PlayerId>(campfire_entity)
+            .expect("starting Campfire owner")
+            .0 = player_id + 1000;
+        game.app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .insert(crate::event::MoveEventCompleted);
+        game.tick(1);
+        let (_, foreign_pos, foreign_vision, foreign_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(foreign_pos, campfire_pos);
+        assert_eq!(foreign_vision, 0);
+        assert!(foreign_light.is_none());
+
+        game.app
+            .world_mut()
+            .get_mut::<PlayerId>(campfire_entity)
+            .expect("starting Campfire owner")
+            .0 = player_id;
+        game.app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .insert(crate::event::MoveEventCompleted);
+        game.tick(1);
+        let (_, restored_pos, restored_vision, restored_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(restored_pos, campfire_pos);
+        assert_eq!(restored_vision, 1);
+        let restored_light = restored_light.expect("Campfire Light after restoring ownership");
+
+        game.app
+            .world_mut()
+            .entity_mut(hero_entity)
+            .insert(crate::event::MoveEventCompleted);
+        game.tick(1);
+        let (_, duplicate_pos, duplicate_vision, duplicate_light) =
+            primary_hero_light_snapshot(&mut game);
+        assert_eq!(duplicate_pos, campfire_pos);
+        assert_eq!(duplicate_vision, 1);
+        assert_eq!(duplicate_light, Some(restored_light));
+    }
+
+    #[test]
+    fn campfire_burnout_clears_stationary_hero_light_and_night_vision() {
+        use crate::obj::Campfire;
+
+        let mut game = HeadlessGame::new(10_000);
+        let player_id = game.spawn_hero("Warrior", "CampfireLightBurnoutBot");
+        game.app.world_mut().resource_mut::<GameTick>().0 = crate::constants::NIGHT - 2;
+        game.tick(3);
+
+        let campfire_entity = {
+            let world = game.app.world_mut();
+            let mut campfires = world.query::<(Entity, &PlayerId, &Campfire)>();
+            campfires
+                .iter(world)
+                .find(|(_, owner, campfire)| owner.0 == player_id && campfire.is_lit)
+                .map(|(entity, ..)| entity)
+                .expect("owned lit starting Campfire")
+        };
+        game.app
+            .world_mut()
+            .get_mut::<Inventory>(campfire_entity)
+            .expect("starting Campfire inventory")
+            .items
+            .clear();
+
+        let fuel_cycle = crate::constants::TICKS_PER_SEC * 10;
+        let next_fuel_tick = ((game.game_tick() / fuel_cycle) + 1) * fuel_cycle;
+        game.app.world_mut().resource_mut::<GameTick>().0 = next_fuel_tick - 2;
+        for _ in 0..(fuel_cycle + 3) {
+            game.tick(1);
+            if game.world().get::<Campfire>(campfire_entity).is_none() {
+                break;
+            }
+        }
+
+        assert!(game.world().get::<Campfire>(campfire_entity).is_none());
+        let (_, _, night_vision, light) = primary_hero_light_snapshot(&mut game);
+        assert_eq!(night_vision, 0);
+        assert!(light.is_none());
+
+        game.tick(1);
+        let (_, _, repeated_vision, repeated_light) = primary_hero_light_snapshot(&mut game);
+        assert_eq!(repeated_vision, 0);
+        assert!(repeated_light.is_none());
     }
 
     #[test]
@@ -8626,15 +8857,20 @@ mod tests {
             .expect("opening encounter before search")
             .clone();
 
-        run_intro_check_at_or_after(&mut game, before_search.second_rat_spawn_tick + 100);
+        assert!((1..=3).contains(&before_search.rat_ids.len()));
         assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("opening encounter held before search")
-                .opening_enemy_spawned,
-            [false, false]
+            before_search.opening_enemy_spawned.len(),
+            before_search.rat_ids.len()
         );
+        run_intro_check_at_or_after(&mut game, before_search.opening_rat_spawn_tick + 100);
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening encounter held before search")
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| !spawned));
 
         let search_started_at = game.game_tick();
         investigate_shipwreck_for_smoke(&mut game, player_id);
@@ -8645,32 +8881,32 @@ mod tests {
             .expect("opening encounter after search")
             .clone();
         assert!(
-            after_search.first_rat_spawn_tick
+            after_search.opening_rat_spawn_tick
                 >= search_started_at + OPENING_POST_SALVAGE_GRACE_TICKS,
-            "first hostile must leave the full post-salvage grace"
+            "opening rat wave must leave the full post-salvage grace"
         );
-        assert!(after_search.second_rat_spawn_tick > after_search.first_rat_spawn_tick);
 
-        game.app.world_mut().resource_mut::<GameTick>().0 = after_search.first_rat_spawn_tick - 12;
+        game.app.world_mut().resource_mut::<GameTick>().0 =
+            after_search.opening_rat_spawn_tick - 12;
         game.tick(5);
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("opening encounter during grace")
-                .opening_enemy_spawned,
-            [false, false]
-        );
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening encounter during grace")
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| !spawned));
 
-        run_intro_check_at_or_after(&mut game, after_search.first_rat_spawn_tick);
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("opening encounter after grace")
-                .opening_enemy_spawned,
-            [true, false]
-        );
+        run_intro_check_at_or_after(&mut game, after_search.opening_rat_spawn_tick);
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening encounter after grace")
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| *spawned));
     }
 
     #[test]
@@ -8708,11 +8944,10 @@ mod tests {
     }
 
     #[test]
-    fn revised_opening_salvages_gathers_and_builds_a_normal_burrow() {
-        use crate::constants::{GATHER_TIME_SEC, LOG, TICKS_PER_SEC};
+    fn revised_opening_salvages_and_builds_a_normal_burrow_without_gathering() {
+        use crate::constants::LOG;
         use crate::game::InitialEncounterState;
         use crate::obj::Storage;
-        use crate::resource::Resource;
 
         let mut game = HeadlessGame::new(20_000);
         let player_id = game.spawn_hero("Warrior", "OpeningBurrowBot");
@@ -8725,13 +8960,12 @@ mod tests {
             let entry = encounters
                 .get_mut(&player_id)
                 .expect("opening encounter fixture");
-            entry.first_rat_spawn_tick = i32::MAX / 4;
-            entry.second_rat_spawn_tick = i32::MAX / 4;
+            entry.opening_rat_spawn_tick = i32::MAX / 4;
             entry.phase1_unlock_tick = i32::MAX / 4;
             entry.spider_unlock_tick = i32::MAX / 4;
         }
 
-        let (hero_id, hero_pos, stick_id, salvaged_logs_id) = {
+        let (hero_id, hero_pos, salvaged_logs_id) = {
             let world = game.app.world_mut();
             let hero_id = world
                 .resource::<Ids>()
@@ -8751,65 +8985,22 @@ mod tests {
             let inventory = world
                 .get::<Inventory>(shipwreck_entity)
                 .expect("opening Shipwreck inventory");
-            let stick_id = inventory
-                .items
-                .iter()
-                .find(|item| item.name == "Sharpened Stick")
-                .expect("starter logging stick")
-                .id;
             let salvaged_logs = inventory
                 .items
                 .iter()
                 .find(|item| item.name == "Springbranch Maple Log")
-                .expect("two starter Logs");
-            assert_eq!(salvaged_logs.quantity, 2);
-            (hero_id, hero_pos, stick_id, salvaged_logs.id)
+                .expect("five starter Logs");
+            assert_eq!(salvaged_logs.quantity, 5);
+            (hero_id, hero_pos, salvaged_logs.id)
         };
 
-        for item_id in [stick_id, salvaged_logs_id] {
-            game.inject(PlayerEvent::ItemTransfer {
-                player_id,
-                item_id,
-                source_id: shipwreck_id,
-                target_id: hero_id,
-            });
-            game.tick(3);
-        }
-        game.inject(PlayerEvent::Equip {
+        game.inject(PlayerEvent::ItemTransfer {
             player_id,
-            obj_id: hero_id,
-            item_id: stick_id,
-            status: true,
+            item_id: salvaged_logs_id,
+            source_id: shipwreck_id,
+            target_id: hero_id,
         });
         game.tick(3);
-        assert!(game
-            .observe()
-            .inventory
-            .iter()
-            .any(|item| item.id == stick_id && item.equipped && item.is_logging));
-
-        game.app
-            .world_mut()
-            .resource_mut::<Resources>()
-            .remove(&hero_pos);
-        Resource::create(
-            "Springbranch Maple Log".to_string(),
-            LOG.to_string(),
-            "maplelog".to_string(),
-            1,
-            1.0,
-            1,
-            100,
-            hero_pos,
-            Vec::new(),
-            None,
-            &mut game.app.world_mut().resource_mut::<Resources>(),
-        );
-        game.app.world_mut().resource_mut::<Resources>().set_reveal(
-            hero_pos,
-            LOG.to_string(),
-            true,
-        );
 
         let log_quantity = |game: &mut HeadlessGame| {
             game.observe()
@@ -8819,18 +9010,10 @@ mod tests {
                 .map(|item| item.quantity)
                 .sum::<i32>()
         };
-        assert_eq!(log_quantity(&mut game), 2);
-        for _attempt in 0..20 {
-            if log_quantity(&mut game) >= 5 {
-                break;
-            }
-            game.inject(PlayerEvent::Gather { player_id });
-            game.tick((GATHER_TIME_SEC * TICKS_PER_SEC + 4) as u32);
-        }
         assert_eq!(
             log_quantity(&mut game),
             5,
-            "the production gather path should supply the three missing Logs"
+            "the salvaged stack should supply the full Burrow requirement"
         );
 
         let burrow_pos = passable_unoccupied_adjacent_position(&mut game, hero_pos);
@@ -8877,7 +9060,7 @@ mod tests {
                 .inventory
                 .iter()
                 .find(|item| item.class == LOG)
-                .expect("unstaged gathered Log")
+                .expect("unstaged salvaged Log")
                 .id;
             game.inject(PlayerEvent::ItemTransfer {
                 player_id,
@@ -8991,7 +9174,7 @@ mod tests {
             .expect("initial encounter state after Shipwreck search")
             .clone();
 
-        run_intro_check_at_or_after(&mut game, entry.second_rat_spawn_tick);
+        run_intro_check_at_or_after(&mut game, entry.opening_rat_spawn_tick);
 
         assert!(
             game.world()
@@ -9003,7 +9186,7 @@ mod tests {
         );
         let opening_deadline = entry.phase1_unlock_tick;
         mark_obj_ids_dead(&mut game, &entry.rat_ids, opening_deadline);
-        run_intro_check_at_or_after(&mut game, opening_deadline);
+        run_intro_spawn_check_at_or_after(&mut game, opening_deadline);
 
         let phase1_id = game
             .world()
@@ -9011,6 +9194,7 @@ mod tests {
             .get(&player_id)
             .and_then(|state| state.phase1_npc_id)
             .expect("boar/crab follow-up should spawn after opening enemies die");
+        assert_intro_followup_spawn_position(&mut game, player_id, phase1_id);
         assert!(
             game.world()
                 .resource::<IntroEncounterState>()
@@ -9020,7 +9204,7 @@ mod tests {
         );
 
         mark_obj_ids_dead(&mut game, &[phase1_id], entry.spider_unlock_tick);
-        run_intro_check_at_or_after(&mut game, entry.spider_unlock_tick);
+        run_intro_spawn_check_at_or_after(&mut game, entry.spider_unlock_tick);
 
         assert!(
             game.world()
@@ -9029,17 +9213,23 @@ mod tests {
                 .expect("separate intro encounter progress")
                 .spider_encounter
         );
-        let spider_exists = {
+        let spider_id = {
             let world = game.app.world_mut();
-            let mut query = world.query::<(&Template, &Position, Option<&StateDead>)>();
-            query.iter(world).any(|(template, pos, dead)| {
-                template.0 == "Spider" && *pos == entry.spawn_pos && dead.is_none()
-            })
+            let run_object_ids = world
+                .resource::<RunSpawnedObjs>()
+                .get(&player_id)
+                .cloned()
+                .expect("run objects after Spider follow-up");
+            let mut query = world.query::<(&Id, &Template, Option<&StateDead>)>();
+            query
+                .iter(world)
+                .find(|(id, template, dead)| {
+                    run_object_ids.contains(&id.0) && template.0 == "Spider" && dead.is_none()
+                })
+                .map(|(id, ..)| id.0)
+                .expect("live Spider follow-up")
         };
-        assert!(
-            spider_exists,
-            "the Spider follow-up should be alive at the wreck"
-        );
+        assert_intro_followup_spawn_position(&mut game, player_id, spider_id);
 
         assert!(
             game.world()
@@ -9090,60 +9280,128 @@ mod tests {
             entry.spider_unlock_tick = original.spider_unlock_tick + 10_000;
         }
 
-        run_intro_check_at_or_after(&mut game, original.first_rat_spawn_tick);
-        let after_first = game
+        assert!((1..=3).contains(&original.rat_ids.len()));
+        assert_eq!(original.opening_enemy_spawned.len(), original.rat_ids.len());
+        assert_eq!(
+            original.opening_enemy_defeated.len(),
+            original.rat_ids.len()
+        );
+        assert_eq!(
+            original
+                .rat_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len(),
+            original.rat_ids.len(),
+            "the opening wave must reserve a distinct object id for every rat"
+        );
+
+        run_intro_spawn_check_at_or_after(&mut game, original.opening_rat_spawn_tick);
+        let after_wave = game
             .world()
             .resource::<InitialEncounterState>()
             .get(&player_id)
-            .expect("opening entry after first spawn");
-        assert_eq!(after_first.opening_enemy_spawned, [true, false]);
-        assert_eq!(after_first.opening_enemy_defeated, [false, false]);
+            .expect("opening entry after rat-wave spawn");
+        assert!(after_wave
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| *spawned));
+        assert!(after_wave
+            .opening_enemy_defeated
+            .iter()
+            .all(|defeated| !defeated));
+        {
+            let world = game.app.world();
+            let entity_map = world.resource::<EntityObjMap>();
+            for rat_id in &original.rat_ids {
+                let entity = entity_map.get_entity(*rat_id).expect("opening rat entity");
+                assert_eq!(
+                    world
+                        .get::<Template>(entity)
+                        .expect("opening rat template")
+                        .0,
+                    "Giant Rat"
+                );
+                assert_eq!(
+                    *world.get::<Position>(entity).expect("opening rat position"),
+                    original.spawn_pos,
+                    "every opening rat should emerge from the run-owned Shipwreck"
+                );
+            }
+        }
+
+        run_intro_check_at_or_after(&mut game, original.opening_rat_spawn_tick + 50);
         {
             let world = game.app.world_mut();
             let mut query = world.query::<&Id>();
-            assert_eq!(
-                query
-                    .iter(world)
-                    .filter(|id| id.0 == original.rat_ids[0])
-                    .count(),
-                1
-            );
+            for rat_id in &original.rat_ids {
+                assert_eq!(
+                    query.iter(world).filter(|id| id.0 == *rat_id).count(),
+                    1,
+                    "re-evaluating the wave deadline must not duplicate any opening rat"
+                );
+            }
         }
 
-        run_intro_check_at_or_after(&mut game, original.first_rat_spawn_tick + 50);
-        {
-            let world = game.app.world_mut();
-            let mut query = world.query::<&Id>();
-            assert_eq!(
-                query
-                    .iter(world)
-                    .filter(|id| id.0 == original.rat_ids[0])
-                    .count(),
-                1,
-                "re-evaluating the first deadline must not duplicate the first attacker"
+        let incomplete_count = original.rat_ids.len().saturating_sub(1);
+        let incomplete_due = game.game_tick() + 1;
+        game.app
+            .world_mut()
+            .resource_mut::<InitialEncounterState>()
+            .get_mut(&player_id)
+            .expect("opening entry before incomplete-wave check")
+            .phase1_unlock_tick = incomplete_due;
+        if incomplete_count > 0 {
+            mark_obj_ids_dead(
+                &mut game,
+                &original.rat_ids[..incomplete_count],
+                incomplete_due,
             );
         }
-
-        run_intro_check_at_or_after(&mut game, original.second_rat_spawn_tick);
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("opening entry after both spawns")
-                .opening_enemy_spawned,
-            [true, true]
+        run_intro_check_at_or_after(&mut game, incomplete_due);
+        let after_incomplete_defeats = game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening entry after incomplete rat-wave defeats");
+        assert!(
+            after_incomplete_defeats.opening_enemy_defeated[..incomplete_count]
+                .iter()
+                .all(|defeated| *defeated)
         );
+        assert!(
+            after_incomplete_defeats.opening_enemy_defeated[incomplete_count..]
+                .iter()
+                .all(|defeated| !defeated)
+        );
+        assert_eq!(
+            after_incomplete_defeats.phase1_npc_id, None,
+            "the boar/crab follow-up must wait until every opening rat is dead"
+        );
+
+        let deferred_phase1_tick = game.game_tick() + 5_000;
+        game.app
+            .world_mut()
+            .resource_mut::<InitialEncounterState>()
+            .get_mut(&player_id)
+            .expect("opening entry before remaining rat defeat")
+            .phase1_unlock_tick = deferred_phase1_tick;
         let opening_dead_at = game.game_tick();
-        mark_obj_ids_dead(&mut game, &original.rat_ids, opening_dead_at);
-        run_intro_check_at_or_after(&mut game, opening_dead_at + 1);
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("opening entry after genuine defeats")
-                .opening_enemy_defeated,
-            [true, true]
+        mark_obj_ids_dead(
+            &mut game,
+            &original.rat_ids[incomplete_count..],
+            opening_dead_at,
         );
+        run_intro_check_at_or_after(&mut game, opening_dead_at + 1);
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("opening entry after genuine defeats")
+            .opening_enemy_defeated
+            .iter()
+            .all(|defeated| *defeated));
 
         run_intro_check_at_or_after(&mut game, opening_dead_at + 510);
         {
@@ -9169,7 +9427,7 @@ mod tests {
                     .filter(|id| original.rat_ids.contains(&id.0))
                     .count(),
                 0,
-                "removed opening corpses must not make either attacker eligible again"
+                "removed opening corpses must not make any rat eligible again"
             );
         }
 
@@ -9180,13 +9438,14 @@ mod tests {
             entry.phase1_unlock_tick = phase1_due;
             entry.spider_unlock_tick = phase1_due + 5_000;
         }
-        run_intro_check_at_or_after(&mut game, phase1_due);
+        run_intro_spawn_check_at_or_after(&mut game, phase1_due);
         let phase1_id = game
             .world()
             .resource::<InitialEncounterState>()
             .get(&player_id)
             .and_then(|entry| entry.phase1_npc_id)
             .expect("the existing boar/crab follow-up should spawn");
+        assert_intro_followup_spawn_position(&mut game, player_id, phase1_id);
         assert!(
             game.world()
                 .resource::<IntroEncounterState>()
@@ -9219,19 +9478,25 @@ mod tests {
             .get_mut(&player_id)
             .expect("opening entry before Spider follow-up")
             .spider_unlock_tick = spider_due;
-        run_intro_check_at_or_after(&mut game, spider_due);
+        run_intro_spawn_check_at_or_after(&mut game, spider_due);
         let spider_ids = {
             let world = game.app.world_mut();
-            let mut query = world.query::<(&Id, &Template, &Position, Option<&StateDead>)>();
+            let run_object_ids = world
+                .resource::<RunSpawnedObjs>()
+                .get(&player_id)
+                .cloned()
+                .expect("run objects after Spider follow-up");
+            let mut query = world.query::<(&Id, &Template, Option<&StateDead>)>();
             query
                 .iter(world)
-                .filter(|(_, template, pos, dead)| {
-                    template.0 == "Spider" && *pos == &original.spawn_pos && dead.is_none()
+                .filter(|(id, template, dead)| {
+                    run_object_ids.contains(&id.0) && template.0 == "Spider" && dead.is_none()
                 })
                 .map(|(id, ..)| id.0)
                 .collect::<Vec<_>>()
         };
         assert_eq!(spider_ids.len(), 1);
+        assert_intro_followup_spawn_position(&mut game, player_id, spider_ids[0]);
         assert!(
             game.world()
                 .resource::<IntroEncounterState>()
@@ -9243,11 +9508,16 @@ mod tests {
         run_intro_check_at_or_after(&mut game, repeated_spider_check);
         let repeated_spider_count = {
             let world = game.app.world_mut();
-            let mut query = world.query::<(&Template, &Position, Option<&StateDead>)>();
+            let run_object_ids = world
+                .resource::<RunSpawnedObjs>()
+                .get(&player_id)
+                .cloned()
+                .expect("run objects after repeated Spider check");
+            let mut query = world.query::<(&Id, &Template, Option<&StateDead>)>();
             query
                 .iter(world)
-                .filter(|(template, pos, dead)| {
-                    template.0 == "Spider" && *pos == &original.spawn_pos && dead.is_none()
+                .filter(|(id, template, dead)| {
+                    run_object_ids.contains(&id.0) && template.0 == "Spider" && dead.is_none()
                 })
                 .count()
         };
@@ -9333,20 +9603,18 @@ mod tests {
             shipwreck_id
         );
         let opening_start = game.game_tick();
-        let first_opening_due = opening_start + 1;
-        let second_opening_due = opening_start + 11;
+        let opening_due = opening_start + 1;
         {
             let mut encounters = game.app.world_mut().resource_mut::<InitialEncounterState>();
             let entry = encounters
                 .get_mut(&player_id)
                 .expect("initial encounter state");
-            entry.first_rat_spawn_tick = first_opening_due;
-            entry.second_rat_spawn_tick = second_opening_due;
+            entry.opening_rat_spawn_tick = opening_due;
             entry.phase1_unlock_tick = opening_start + 10_000;
             entry.spider_unlock_tick = opening_start + 10_000;
             entry.villager_ready_tick = opening_start;
         }
-        run_intro_check_at_or_after(&mut game, second_opening_due);
+        run_intro_check_at_or_after(&mut game, opening_due);
         let opening_ids = game
             .world()
             .resource::<InitialEncounterState>()
@@ -9354,25 +9622,25 @@ mod tests {
             .expect("spawned opening encounter")
             .rat_ids
             .clone();
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("spawned opening encounter")
-                .opening_enemy_spawned,
-            [true, true]
-        );
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("spawned opening encounter")
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| *spawned));
         let opening_dead_at = game.game_tick();
         mark_obj_ids_dead(&mut game, &opening_ids, opening_dead_at);
         run_intro_check_at_or_after(&mut game, opening_dead_at + 1);
-        assert_eq!(
-            game.world()
-                .resource::<InitialEncounterState>()
-                .get(&player_id)
-                .expect("defeated opening encounter")
-                .opening_enemy_defeated,
-            [true, true]
-        );
+        assert!(game
+            .world()
+            .resource::<InitialEncounterState>()
+            .get(&player_id)
+            .expect("defeated opening encounter")
+            .opening_enemy_defeated
+            .iter()
+            .all(|defeated| *defeated));
         // Leave the short combat-action lock before starting construction.
         game.tick(crate::obj::COMBAT_LOCK_TICKS as u32 + 1);
         let villager_id = {
@@ -9533,19 +9801,19 @@ mod tests {
             .entry(player_id)
             .or_default()
             .scavenge_shipwreck = true;
-        let first_due = {
+        let opening_due = {
             let encounters = game.world().resource::<InitialEncounterState>();
             encounters
                 .get(&player_id)
                 .expect("initial encounter state")
-                .first_rat_spawn_tick
+                .opening_rat_spawn_tick
         };
-        run_intro_check_at_or_after(&mut game, first_due);
+        run_intro_check_at_or_after(&mut game, opening_due);
         let opening_ids = game
             .world()
             .resource::<InitialEncounterState>()
             .get(&player_id)
-            .expect("initial encounter after first spawn")
+            .expect("initial encounter after rat-wave spawn")
             .rat_ids
             .clone();
         let first_opening_dead_at = game.game_tick();
@@ -9554,7 +9822,12 @@ mod tests {
         run_intro_check_at_or_after(&mut game, record_first_defeat_at);
 
         let recommendation_before = capture_current_objective_id(&mut game);
-        assert_eq!(recommendation_before, "build_burrow");
+        let expected_recommendation = if opening_ids.len() == 1 {
+            "build_burrow"
+        } else {
+            "win_first_fight"
+        };
+        assert_eq!(recommendation_before, expected_recommendation);
         let encounter_before = game
             .world()
             .resource::<InitialEncounterState>()
@@ -9609,15 +9882,14 @@ mod tests {
         let other_player_id = player_id + 1_000;
         let other_rat_ids = {
             let mut ids = game.app.world_mut().resource_mut::<Ids>();
-            vec![ids.new_obj_id(), ids.new_obj_id()]
+            vec![ids.new_obj_id(), ids.new_obj_id(), ids.new_obj_id()]
         };
         let mut other_encounter = encounter_before.clone();
         other_encounter.rat_ids = other_rat_ids.clone();
-        other_encounter.opening_enemy_spawned = [true, true];
-        other_encounter.opening_enemy_defeated = [true, false];
+        other_encounter.opening_enemy_spawned = vec![true, true, true];
+        other_encounter.opening_enemy_defeated = vec![true, false, true];
         other_encounter.phase1_defeated = true;
-        other_encounter.first_rat_spawn_tick = i32::MAX / 2;
-        other_encounter.second_rat_spawn_tick = i32::MAX / 2;
+        other_encounter.opening_rat_spawn_tick = i32::MAX / 2;
         other_encounter.phase1_unlock_tick = i32::MAX / 2;
         other_encounter.spider_unlock_tick = i32::MAX / 2;
         let other_intro = PlayerIntroEntry {
@@ -9707,8 +9979,14 @@ mod tests {
             .get(&other_player_id)
             .expect("neighbor encounter survives another owner's cleanup");
         assert_eq!(other_encounter_after.rat_ids, other_rat_ids);
-        assert_eq!(other_encounter_after.opening_enemy_spawned, [true, true]);
-        assert_eq!(other_encounter_after.opening_enemy_defeated, [true, false]);
+        assert_eq!(
+            other_encounter_after.opening_enemy_spawned,
+            vec![true, true, true]
+        );
+        assert_eq!(
+            other_encounter_after.opening_enemy_defeated,
+            vec![true, false, true]
+        );
         assert!(other_encounter_after.phase1_defeated);
         let other_intro_after = game
             .world()
@@ -9749,8 +10027,19 @@ mod tests {
             .resource::<InitialEncounterState>()
             .get(&player_id)
             .expect("fresh-run initial encounter");
-        assert_eq!(fresh_encounter.opening_enemy_spawned, [false, false]);
-        assert_eq!(fresh_encounter.opening_enemy_defeated, [false, false]);
+        assert!((1..=3).contains(&fresh_encounter.rat_ids.len()));
+        assert_eq!(
+            fresh_encounter.opening_enemy_spawned.len(),
+            fresh_encounter.rat_ids.len()
+        );
+        assert!(fresh_encounter
+            .opening_enemy_spawned
+            .iter()
+            .all(|spawned| !spawned));
+        assert!(fresh_encounter
+            .opening_enemy_defeated
+            .iter()
+            .all(|defeated| !defeated));
         assert!(!fresh_encounter.phase1_defeated);
         assert_eq!(
             game.world()
@@ -9973,8 +10262,7 @@ mod tests {
             let encounter = encounters
                 .get_mut(&player_id)
                 .expect("initial encounter state");
-            encounter.first_rat_spawn_tick = current_tick;
-            encounter.second_rat_spawn_tick = current_tick;
+            encounter.opening_rat_spawn_tick = current_tick;
             encounter.phase1_unlock_tick = current_tick;
             encounter.rat_ids.clone()
         };

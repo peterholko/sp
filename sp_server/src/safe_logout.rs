@@ -1202,12 +1202,11 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
         let mut encounters = world.resource_mut::<InitialEncounterState>();
         for resume in &resumes {
             if let Some(entry) = encounters.get_mut(&resume.player_id) {
-                rebase_tick(&mut entry.first_rat_spawn_tick, resume.duration);
-                rebase_tick(&mut entry.second_rat_spawn_tick, resume.duration);
+                rebase_tick(&mut entry.opening_rat_spawn_tick, resume.duration);
                 rebase_tick(&mut entry.villager_ready_tick, resume.duration);
                 rebase_tick(&mut entry.phase1_unlock_tick, resume.duration);
                 rebase_tick(&mut entry.spider_unlock_tick, resume.duration);
-                count(resume.player_id, 5);
+                count(resume.player_id, 4);
             }
         }
     }

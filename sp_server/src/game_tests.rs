@@ -50,6 +50,59 @@ fn early_game_enemy_random_spawn_pool_excludes_bog_leech() {
 }
 
 #[test]
+fn shipwreck_opening_rat_count_is_randomized_within_one_to_three() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0x51E6_EA7);
+    let counts = (0..256)
+        .map(|_| random_opening_rat_count(&mut rng))
+        .collect::<HashSet<_>>();
+
+    assert!(counts
+        .iter()
+        .all(|count| (OPENING_RAT_MIN_COUNT..=OPENING_RAT_MAX_COUNT).contains(count)));
+    assert!(counts.contains(&OPENING_RAT_MIN_COUNT));
+    assert!(counts.contains(&OPENING_RAT_MAX_COUNT));
+}
+
+#[test]
+fn intro_followup_tiles_are_available_around_every_curated_start() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = Map::load_map();
+    let starts = [
+        Position { x: 16, y: 36 },
+        Position { x: 5, y: 21 },
+        Position { x: 14, y: 13 },
+        Position { x: 5, y: 30 },
+        Position { x: 18, y: 5 },
+    ];
+    let mut rng = StdRng::seed_from_u64(0x1A7B_0A2D);
+
+    for start in starts {
+        let candidates = intro_followup_spawn_candidates(start, &HashSet::new(), &map);
+        assert!(
+            !candidates.is_empty(),
+            "curated start {start:?} must have a valid intro follow-up tile"
+        );
+        assert!(candidates.iter().all(|candidate| {
+            let distance = Map::dist(start, *candidate) as i32;
+            (INTRO_FOLLOWUP_MIN_RADIUS..=INTRO_FOLLOWUP_MAX_RADIUS).contains(&distance)
+                && Map::is_valid_pos((candidate.x, candidate.y))
+                && Map::is_passable(candidate.x, candidate.y, &map)
+        }));
+
+        let selected = random_intro_followup_spawn_position(start, &HashSet::new(), &map, &mut rng)
+            .expect("a seeded selection from the valid candidates");
+        assert!(candidates.contains(&selected));
+        assert!(
+            !intro_followup_spawn_candidates(start, &HashSet::from([selected]), &map)
+                .contains(&selected)
+        );
+    }
+}
+
+#[test]
 fn wildlife_templates_are_loaded() {
     let obj_templates = load_obj_templates();
     let expected = [
@@ -459,6 +512,27 @@ fn combat_lock_helper_uses_three_second_window() {
     assert!(is_combat_locked(129, &last_combat_tick));
     assert!(!is_combat_locked(130, &last_combat_tick));
     assert!(!is_combat_locked(131, &last_combat_tick));
+}
+
+#[test]
+fn campfire_light_sync_is_idempotent_and_preserves_other_effects() {
+    let mut effects = Effects(HashMap::from([(Effect::WatchtowerLight, (10, 0.0, 1))]));
+
+    assert!(sync_campfire_light_effect(&mut effects, true, 20));
+    assert_eq!(effects.0.get(&Effect::CampfireLight), Some(&(21, 0.0, 1)));
+    assert!(effects.has(Effect::WatchtowerLight));
+
+    assert!(!sync_campfire_light_effect(&mut effects, true, 30));
+    assert_eq!(
+        effects.0.get(&Effect::CampfireLight),
+        Some(&(21, 0.0, 1)),
+        "duplicate reconciliation must not refresh or stack the effect"
+    );
+
+    assert!(sync_campfire_light_effect(&mut effects, false, 40));
+    assert!(!effects.has(Effect::CampfireLight));
+    assert!(effects.has(Effect::WatchtowerLight));
+    assert!(!sync_campfire_light_effect(&mut effects, false, 50));
 }
 
 fn setup_new_obj_observer_test_app() -> App {
@@ -5263,20 +5337,15 @@ fn core_gameplay_objective_facts() -> EarlyObjectiveFacts {
 
 fn core_gameplay_initial_encounter_entry() -> InitialEncounterEntry {
     InitialEncounterEntry {
-        rat_ids: vec![1, 2],
-        opening_enemy_templates: EARLY_GAME_ENEMY_TEMPLATES
-            .iter()
-            .map(|template| (*template).to_string())
-            .collect(),
-        opening_enemy_spawned: [false; 2],
-        opening_enemy_defeated: [false; 2],
+        rat_ids: vec![1, 2, 3],
+        opening_enemy_spawned: vec![false; 3],
+        opening_enemy_defeated: vec![false; 3],
         phase1_spawn: "Wild Boar".to_string(),
         phase1_npc_id: None,
         phase1_defeated: false,
         spawn_pos: Position { x: 10, y: 10 },
         villager_spawn_pos: Position { x: 11, y: 10 },
-        first_rat_spawn_tick: 900,
-        second_rat_spawn_tick: 1200,
+        opening_rat_spawn_tick: 900,
         villager_ready_tick: 1110,
         phase1_unlock_tick: 2600,
         spider_unlock_tick: 3600,
@@ -5306,49 +5375,48 @@ fn core_gameplay_objective_state(
 #[test]
 fn core_gameplay_checkpoint1_opening_history_records_spawn_and_defeat_once() {
     let mut entry = core_gameplay_initial_encounter_entry();
-    let mut spawn_counts = [0usize; 2];
+    let mut spawn_counts = vec![0usize; entry.rat_ids.len()];
 
-    for current_tick in [899, 900, 900, 1199, 1200, 1200] {
-        let due_ticks = [entry.first_rat_spawn_tick, entry.second_rat_spawn_tick];
-        for (index, due_tick) in due_ticks.into_iter().enumerate() {
-            if current_tick >= due_tick && !entry.opening_enemy_spawned[index] {
+    for current_tick in [899, 900, 900, 1200] {
+        for index in 0..entry.rat_ids.len() {
+            if current_tick >= entry.opening_rat_spawn_tick && !entry.opening_enemy_spawned[index] {
                 entry.opening_enemy_spawned[index] = true;
                 spawn_counts[index] += 1;
             }
         }
     }
 
-    assert_eq!(spawn_counts, [1, 1]);
-    assert_eq!(entry.opening_enemy_spawned, [true, true]);
+    assert_eq!(spawn_counts, vec![1, 1, 1]);
+    assert_eq!(entry.opening_enemy_spawned, vec![true, true, true]);
     assert!(entry.opening_enemy_is_active());
 
     let first_corpse = HashSet::from([entry.rat_ids[0]]);
     entry.record_opening_enemy_defeats(&first_corpse);
     entry.record_opening_enemy_defeats(&first_corpse);
-    assert_eq!(entry.opening_enemy_defeated, [true, false]);
+    assert_eq!(entry.opening_enemy_defeated, vec![true, false, false]);
 
     entry.record_opening_enemy_defeats(&HashSet::new());
     assert_eq!(
         entry.opening_enemy_defeated,
-        [true, false],
+        vec![true, false, false],
         "removing corpse evidence must not erase run history or permit a respawn"
     );
-    assert_eq!(entry.opening_enemy_spawned, [true, true]);
+    assert_eq!(entry.opening_enemy_spawned, vec![true, true, true]);
 
-    let second_corpse = HashSet::from([entry.rat_ids[1]]);
-    entry.record_opening_enemy_defeats(&second_corpse);
+    let remaining_corpses = HashSet::from([entry.rat_ids[1], entry.rat_ids[2]]);
+    entry.record_opening_enemy_defeats(&remaining_corpses);
     entry.record_opening_enemy_defeats(&HashSet::new());
-    assert_eq!(entry.opening_enemy_defeated, [true, true]);
+    assert_eq!(entry.opening_enemy_defeated, vec![true, true, true]);
     assert!(entry.all_opening_enemies_defeated());
     assert!(!entry.opening_enemy_is_active());
 }
 
 #[test]
-fn core_gameplay_checkpoint1_both_opening_defeats_gate_first_fight_progress() {
+fn core_gameplay_checkpoint1_all_opening_rat_defeats_gate_first_fight_progress() {
     let mut entry = core_gameplay_initial_encounter_entry();
-    entry.opening_enemy_spawned = [true, true];
+    entry.opening_enemy_spawned = vec![true; entry.rat_ids.len()];
     let first_enemy_id = entry.rat_ids[0];
-    let second_enemy_id = entry.rat_ids[1];
+    let remaining_enemy_ids = HashSet::from([entry.rat_ids[1], entry.rat_ids[2]]);
 
     entry.record_opening_enemy_defeats(&HashSet::from([first_enemy_id]));
     assert!(!entry.all_opening_enemies_defeated());
@@ -5360,14 +5428,14 @@ fn core_gameplay_checkpoint1_both_opening_defeats_gate_first_fight_progress() {
     let mut facts = EarlyObjectiveFacts {
         hero_idle: true,
         opening_enemy_active: entry.opening_enemy_is_active(),
-        opening_enemy_spawned: 2,
+        opening_enemy_spawned: 3,
         ..EarlyObjectiveFacts::default()
     };
     let (current_id, _) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
     assert_eq!(current_id, "win_first_fight");
 
-    entry.record_opening_enemy_defeats(&HashSet::from([second_enemy_id]));
+    entry.record_opening_enemy_defeats(&remaining_enemy_ids);
     assert!(entry.all_opening_enemies_defeated());
     objectives.win_first_fight = entry.all_opening_enemies_defeated();
     facts.opening_enemy_active = entry.opening_enemy_is_active();
@@ -5448,7 +5516,7 @@ fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritat
             .unwrap()
             .blocker
             .as_deref(),
-        Some("The next opening attacker has not appeared yet. Stay near the Shipwreck.")
+        Some("The opening fight is resolving. Stay near the Shipwreck.")
     );
 }
 

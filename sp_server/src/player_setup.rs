@@ -9,9 +9,9 @@ use crate::effect::Effect;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{
-    InitialEncounterEntry, InitialEncounterState, IntroEncounterState, Merchant, MerchantSailState,
-    Monolith, ObjQuery, PlayerIntroEncounters, PlayerIntroEntry, PlayerIntroState, SpawnPositions,
-    EARLY_GAME_ENEMY_TEMPLATES,
+    random_opening_rat_count, InitialEncounterEntry, InitialEncounterState, IntroEncounterState,
+    Merchant, MerchantSailState, Monolith, ObjQuery, PlayerIntroEncounters, PlayerIntroEntry,
+    PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
 };
 use crate::item::{Inventory, Slot};
 use crate::obj::{
@@ -325,7 +325,7 @@ pub fn new(
         campfire.inventory.new(
             ids.new_item_id(),
             "Firewood".to_string(),
-            5,
+            20,
             &templates.item_templates,
         );
 
@@ -930,9 +930,8 @@ pub fn new(
     };
 
     // General survival supplies. The starter-only Sharpened Stick keeps its
-    // normal combat/hunting values and gains Logging 1 because the prescribed
-    // manifest otherwise leaves every class unable to gather the three Logs
-    // required for its first normal Burrow.
+    // normal combat/hunting values and gains Logging 1 so every class can use
+    // the ordinary logging path after recovering the initial settlement wood.
     shipwreck_inventory.new_with_attrs(
         ids.new_item_id(),
         shipwreck_id,
@@ -1006,7 +1005,7 @@ pub fn new(
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Springbranch Maple Log".to_string(),
-        2,
+        5,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
@@ -1153,29 +1152,20 @@ pub fn new(
         y: start_location.shipwreck_pos[1],
     };
 
-    let mut rat_ids = Vec::new();
-    for i in 0..2 {
+    let opening_rat_count = random_opening_rat_count(&mut rand::thread_rng());
+    let mut rat_ids = Vec::with_capacity(opening_rat_count);
+    for _ in 0..opening_rat_count {
         let rat_npc_id = ids.new_obj_id();
         rat_ids.push(rat_npc_id);
     }
 
-    // Register the initial encounter chain: two pests, then boar/crab, then spider.
+    // Register the initial encounter chain: one rat wave, then boar/crab, then spider.
     // The villager waits for shipwreck inspection, but only after the help call has fired.
     let villager_spawn_pos = Position {
         x: start_location.villager_pos[0],
         y: start_location.villager_pos[1],
     };
     let villager_help_tick = game_tick.0 + 1100;
-    let first_enemy_index = rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len());
-    let mut second_enemy_index =
-        rand::thread_rng().gen_range(0..EARLY_GAME_ENEMY_TEMPLATES.len() - 1);
-    if second_enemy_index >= first_enemy_index {
-        second_enemy_index += 1;
-    }
-    let opening_enemy_templates = vec![
-        EARLY_GAME_ENEMY_TEMPLATES[first_enemy_index].to_string(),
-        EARLY_GAME_ENEMY_TEMPLATES[second_enemy_index].to_string(),
-    ];
     let phase1_spawn = if rand::thread_rng().gen_range(0..2) == 0 {
         "Giant Crab".to_string()
     } else {
@@ -1226,16 +1216,14 @@ pub fn new(
         player_id,
         InitialEncounterEntry {
             rat_ids,
-            opening_enemy_templates,
-            opening_enemy_spawned: [false; 2],
-            opening_enemy_defeated: [false; 2],
+            opening_enemy_spawned: vec![false; opening_rat_count],
+            opening_enemy_defeated: vec![false; opening_rat_count],
             phase1_spawn,
             phase1_npc_id: None,
             phase1_defeated: false,
             spawn_pos: shipwreck_pos,
             villager_spawn_pos,
-            first_rat_spawn_tick: game_tick.0 + 900,
-            second_rat_spawn_tick: game_tick.0 + 1200,
+            opening_rat_spawn_tick: game_tick.0 + 900,
             villager_ready_tick: villager_help_tick + TICKS_PER_SEC,
             phase1_unlock_tick: game_tick.0 + 2600,
             spider_unlock_tick: game_tick.0 + 3600,
@@ -1750,7 +1738,7 @@ mod tests {
     use crate::item::{Item, LOG, WEAPON};
 
     #[test]
-    fn starter_shipwreck_stick_can_gather_the_three_missing_logs() {
+    fn starter_shipwreck_stick_can_gather_logs_after_the_opening() {
         let stick = Item {
             id: 1,
             owner: 1,
