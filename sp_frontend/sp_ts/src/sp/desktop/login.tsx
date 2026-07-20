@@ -18,8 +18,7 @@ import ErrorPanel from "./ui/errorPanel";
 import AccountSetupPanel from "./ui/accountSetupPanel";
 import { GameEvent } from "../core/gameEvent";
 import TrueDeathPanel from "./ui/trueDeathPanel";
-import LeaderboardSidebar from "./ui/leaderboardSidebar";
-import { isDesktop, isWideScreen } from "../core/config";
+import { isDesktop } from "../core/config";
 import appStyles from "./app.module.css";
 import {
   SAFE_LOGOUT_COMPLETION_MESSAGE,
@@ -1285,7 +1284,6 @@ export default class LoginControl extends React.Component<any, any> {
               <UI />
             </div>
             <Game />
-            {isWideScreen() && <LeaderboardSidebar entries={this.state.leaderboardEntries} />}
             {isDesktop() && typeof window !== 'undefined' && window.innerHeight > 1150 && (
               <img
                 src={logo}

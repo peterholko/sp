@@ -6,12 +6,12 @@ The opening-session follow-up removes the completed starter Burrow and moves
 all survival supplies into the run's existing Shipwreck. Fresh heroes keep
 their class, statistics, abilities, recipes, and four basic plans, but their
 inventory contains only equipped Tattered Shirt and Tattered Pants. The lit
-starter Campfire remains and contains five ordinary Firewood.
+starter Campfire remains and contains 20 ordinary Firewood.
 
 The owner Shipwreck manifest is exact: Sharpened Stick x1, Crude Torch x1,
 Bedroll x1, Waterskin (Filled) x3, Salted Meat Strip x3, Honeybell Berries x3,
 Health Potion x1, Flint Shard x1, Cragroot Maple Resin x1, Cragroot Maple Stick
-x1, Springbranch Maple Log x2, Cragroot Maple Timber x1, Valleyrun Copper
+x1, Springbranch Maple Log x5, Cragroot Maple Timber x1, Valleyrun Copper
 Ingot x3, Gold Coins x10, and Fishing Rod x1. Warrior adds Copper Helm x1,
 Ranger adds Training Bow x1, and Mage adds Mana x5. The previous per-instance
 Copper Helm Defense 3, Training Bow attributes, and starter Health Potion
@@ -44,27 +44,29 @@ The existing setup architecture has four important consequences:
   so the Shipwreck-specific automatic reward is removed while other POI
   outcomes remain unchanged.
 
-The exact requested manifest exposes one repository conflict: normal hero
-logging requires an equipped main-hand item with `Logging`, but none of the
-listed salvage or current class items has that attribute. The current Warrior
-does not start with an axe, and the Copper Training Axe requires a Crafting
-Tent whose own inputs cannot be obtained from this start. The selected narrow
-correction gives only the starter Shipwreck's Sharpened Stick instance
-`Logging 1`, while retaining its existing combat and Hunting attributes. The
-global item template, resource nodes, yields, recipes, and gathering rates are
-unchanged. Timber continues to be a legal Log substitute in the existing
-construction engine; the guided path uses the two salvaged Logs plus three
-newly gathered Logs and leaves the Timber as valuable storage salvage.
+The starter Shipwreck's Sharpened Stick instance retains `Logging 1` alongside
+its existing combat and Hunting attributes, giving every class access to the
+ordinary logging path after the opening. The global item template, resource
+nodes, yields, recipes, and gathering rates are unchanged. Timber continues to
+be a legal Log substitute in the existing construction engine, but the guided
+path uses the five salvaged Logs and leaves the Timber as valuable storage
+salvage.
 
 The existing 90-second opening-hostile delay is ample only when the player
 searches immediately. The revised flow also requires owner Shipwreck
-inspection before either scheduled opening enemy can spawn. A late first
-inspection pushes the existing two spawn deadlines forward by a bounded
-post-search equip grace; early inspection keeps the current schedule. The
-existing enemy composition, at-most-once history, boar/crab and Spider
-follow-ups, danger unlock, and Offline Protection remain authoritative. The
+inspection before the opening wave can spawn. A late first inspection pushes
+the single wave deadline forward by a bounded post-search equip grace; early
+inspection keeps the current schedule. That first hostile spawn is a randomly
+sized wave of one to three Giant Rats on the Shipwreck tile. After every rat is
+defeated and the existing phase gates are reached, the Wild Boar/Giant Crab
+follow-up and then the Spider each choose a randomized valid, passable,
+reachable, unoccupied tile two to four tiles from the run's assigned hero
+start. If no safe candidate exists, spawning waits and retries instead of
+overlapping an occupied or invalid tile. The rescued villager, merchant, and
+introductory Necromancer retain their authored narrative anchors. At-most-once
+history, danger unlock, and Offline Protection remain authoritative. The
 rescued villager additionally waits for a completed normal Burrow, preserving
-the requested search, gather, build, then rescue order without a parallel
+the requested search, salvage, build, then rescue order without a parallel
 tutorial state machine.
 
 The exact implementation surface for this follow-up is:
@@ -109,7 +111,7 @@ follow-up.
   no panic, automatic dusk wave, assault duplication, or crisis/safe-logout
   invariant failure. This is a bounded smoke result, not a claimed simulation
   victory; the focused production-opening test is the deterministic proof that
-  salvage, real Log gathering, and normal Burrow construction complete.
+  salvaging the five Logs and normal Burrow construction complete.
 
 ## Scope and checkpoint plan
 
@@ -129,20 +131,22 @@ Milestone 4 Undead crisis.
 
 This section records the opening that the original Checkpoint 1 inherited and
 validated. The revised-opening follow-up above supersedes its starting Burrow,
-starter inventory, Shipwreck contents, and rescue eligibility; the encounter
-history and objective fixes remain current.
+starter inventory, Shipwreck contents, rescue eligibility, opening-enemy
+composition and schedule, and hostile spawn placement. The at-most-once
+encounter-history and objective fixes remain current.
 
 * `player_setup::new` assigns one of the existing start locations and creates
   the hero, completed Burrow, lit Campfire, salvage-filled Shipwreck, two human
   corpses, hidden introductory Necromancer and Mausoleum, offshore merchant,
-  and fresh runtime introduction state. It preallocates two opening-enemy IDs.
-  The Shipwreck includes ten existing Logs and ten Hides; the existing
-  Stockade (three Logs, 30 work) and Crafting Tent (five Logs, five Hides,
-  100 work) rules remain the early construction path.
-* `InitialEncounterState` owns the detailed per-run schedule: opening enemies
-  at 900 and 1,200 ticks (both currently Cave Bats), a survivor call at 1,100
-  ticks and rescue eligibility at 1,110 ticks, the existing Wild Boar/Giant
-  Crab follow-up gate at 2,600 ticks, and Spider gate at 3,600 ticks.
+  and fresh runtime introduction state. At that checkpoint it preallocated two
+  opening-enemy IDs. The Shipwreck includes ten existing Logs and ten Hides;
+  the existing Stockade (three Logs, 30 work) and Crafting Tent (five Logs,
+  five Hides, 100 work) rules remain the early construction path.
+* The historical `InitialEncounterState` schedule used Cave Bats at 900 and
+  1,200 ticks, a survivor call at 1,100 ticks and rescue eligibility at 1,110
+  ticks, the Wild Boar/Giant Crab follow-up gate at 2,600 ticks, and the Spider
+  gate at 3,600 ticks. The current opening instead uses one delayed one-to-three
+  Giant Rat wave and randomized follow-up positions as described above.
   `PlayerIntroState` owns broad introduction/danger facts;
   `IntroEncounterState` owns follow-up phase facts.
 * Investigating the Shipwreck records `scavenge_shipwreck` and the existing
@@ -166,12 +170,14 @@ history and objective fixes remain current.
 
 ## Repository conflicts and four selected fixes
 
-1. **Opening-enemy lifecycle history.** The first enemy has a broad
+1. **Opening-enemy lifecycle history.** The original first enemy had a broad
    `shipwreck_chain_started` guard, while the second and first-fight objective
-   infer history from current corpse/entity existence. Corpse removal can make
-   the second enemy eligible to spawn again and can erase evidence needed by
-   the next phase. `InitialEncounterEntry` will own explicit two-entry spawned
-   and defeated flags. The scheduled composition remains unchanged.
+   inferred history from current corpse/entity existence. Corpse removal could
+   make the second enemy eligible to spawn again and erase evidence needed by
+   the next phase. `InitialEncounterEntry` now owns explicit spawned and
+   defeated history for every wave member. The randomized Giant Rat revision
+   sizes those lifecycle vectors to the one-to-three-enemy wave, preserving the
+   same at-most-once guarantee.
 2. **Authoritative early recommendation.** The packet currently recommends
    Campfire before opening combat even though a fresh run already owns a lit
    Campfire, and its static copy cannot describe a waiting encounter. The
@@ -220,9 +226,9 @@ Safe Logout, map, and deployment files are unchanged.
 * Restart persistence for introduction/objective state remains absent with the
   rest of the runtime-only run graph.
 * The existing `rat_ids` name and split between three introduction resources
-  remain as legacy structure. The lifecycle fix adds only the two requested
-  opening arrays and one narrow `phase1_defeated` fact so corpse cleanup cannot
-  strand the already-existing Spider follow-up.
+  remain as legacy structure. The lifecycle history uses dynamically sized
+  spawned and defeated vectors plus one narrow `phase1_defeated` fact so corpse
+  cleanup cannot strand the already-existing Spider follow-up.
 * `choose_expansion` retains its existing foundation-based completion fact.
   Tightening that second progression fact was intentionally not folded into
   the one selected completed-structure dead-end fix.
@@ -249,9 +255,11 @@ Safe Logout, map, and deployment files are unchanged.
 * Frontend type-checking passed; the focused guidance, crisis, and Safe Logout
   scripts passed 3/3; production Webpack passed for desktop and mobile with
   their existing three performance warnings each.
-* Exactly three bounded headless smokes passed 3/3. The opening smoke used the
-  production Shipwreck investigation, recorded both at-most-once Cave Bat
-  deaths, removed corpses, and reached the boar/crab and Spider follow-ups.
+* Exactly three bounded headless smokes passed 3/3. The historical opening
+  smoke used the production Shipwreck investigation, recorded both at-most-once
+  Cave Bat deaths, removed corpses, and reached the boar/crab and Spider
+  follow-ups. This validation record predates the current Giant Rat wave and
+  randomized follow-up placement.
   The settlement smoke used the lit Campfire, rescued unarmed villager, real
   assignment, three existing Shipwreck Logs, and normal Stockade work to reach
   three completed structures. The lifecycle smoke preserved encounter and

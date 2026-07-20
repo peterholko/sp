@@ -9,8 +9,8 @@
 //   2. Retreat — when wounded and an enemy is close, fall back toward home.
 //   3. Heal up — when wounded and safe, use a healing item.
 //   4. Fight — attack adjacent enemies / close on nearby ones while healthy.
-//   5. Opening — search the run-owned Shipwreck, recover its salvage, gather
-//      three additional Logs, and build the normal Burrow foundation.
+//   5. Opening — search the run-owned Shipwreck, recover its salvage, and build
+//      the normal Burrow foundation from the five salvaged Logs.
 //   6. Build — drive later build jobs, pulling resources from the Burrow and
 //      depositing them into the foundation.
 //   7. Fortify — once the campfire stands, ring the base with palisade walls.
@@ -84,9 +84,9 @@ const HIRE_WAGE: i32 = 25; // Gold Coins charged per hire (matches the server)
 const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
 // Structure recipes the bot builds (req type -> quantity), matching the
-// obj_template.yaml `req` fields. The revised opening builds a Burrow from two
-// recovered Logs plus three gathered Logs; later emergency Campfires use the
-// recovered Stick+Resin, and Stockade walls use Logs.
+// obj_template.yaml `req` fields. The revised opening builds a Burrow from five
+// recovered Logs; later emergency Campfires use the recovered Stick+Resin, and
+// Stockade walls use Logs.
 const BURROW_REQS: &[(&str, i32)] = &[("Log", 5)];
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 3)];
@@ -850,8 +850,7 @@ impl Bot {
         }
 
         // Preserve the Warrior's recovered class protection. Ranger weapon
-        // selection remains combat-driven; the shared starter stick is equipped
-        // below because Logging is required before any class can build a Burrow.
+        // selection remains combat-driven.
         if let Some(helm_id) = view
             .inventory
             .iter()
@@ -862,6 +861,23 @@ impl Bot {
                 player_id: self.player_id,
                 obj_id: hero.id,
                 item_id: helm_id,
+                status: true,
+            });
+        }
+
+        // Recovering enough Logs removes the old mandatory gathering step, but
+        // the shared stick is still every class's starter weapon and logging
+        // fallback. Equip it through the normal player event before building.
+        if let Some(stick_id) = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Sharpened Stick" && !item.equipped)
+            .map(|item| item.id)
+        {
+            return Some(PlayerEvent::Equip {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id: stick_id,
                 status: true,
             });
         }
@@ -888,9 +904,9 @@ impl Bot {
         None
     }
 
-    // Equip the starter-only Logging stick, reveal a real Log node through the
-    // ordinary Prospect event, then gather it through the production timer and
-    // yield rules until five actual Logs are carried (two salvage + three more).
+    // Compatibility fallback for an incomplete salvage supply: equip the
+    // starter-only Logging stick, reveal a real Log node through the ordinary
+    // Prospect event, then gather until five actual Logs are carried.
     fn logging_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         if !view
             .inventory
@@ -1449,7 +1465,7 @@ impl Bot {
         //    campfire, so a hero-inventory-only check abandoned the cook the moment
         //    the meat left the pack (staged meat rotted unattended while the bot
         //    wandered off to hunt more).
-        //    COOK FIRST: the campfire carries its own five Firewood, so cooking
+        //    COOK FIRST: the campfire carries its own 20 Firewood, so cooking
         //    usually needs no hero-side fuel at all — only fall back
         //    to ensure_firewood (split a Burrow Log into 5 Firewood) when the cook
         //    can't proceed for lack of fuel anywhere.
@@ -2591,7 +2607,10 @@ mod tests {
             if view.has_built("storage") {
                 assert!(investigated_owned_wreck);
                 assert!(manual_salvage_transfers > 0);
-                assert!(production_gathers > 0);
+                assert_eq!(
+                    production_gathers, 0,
+                    "the five salvaged Logs should build the opening Burrow without gathering"
+                );
                 assert!(max_actual_logs >= BURROW_REQS[0].1);
                 assert!(normal_burrow_foundation);
                 assert!(view.inventory.iter().any(|item| item.class == "Timber"));
@@ -2600,10 +2619,11 @@ mod tests {
                     .iter()
                     .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
                     .is_some_and(|poi| poi.inventory.is_empty()));
-                assert_eq!(
-                    game.protected_intro_snapshot().opening_enemy_spawned,
-                    [false, false]
-                );
+                assert!(game
+                    .protected_intro_snapshot()
+                    .opening_enemy_spawned
+                    .iter()
+                    .all(|spawned| !spawned));
                 return;
             }
             assert!(
@@ -3422,9 +3442,11 @@ mod tests {
                         .is_some_and(|poi| poi.inventory.is_empty()),
                     "production opening must manually recover the run-owned Shipwreck before the Burrow"
                 );
-                assert_eq!(
-                    game.protected_intro_snapshot().opening_enemy_spawned,
-                    [false, false],
+                assert!(
+                    game.protected_intro_snapshot()
+                        .opening_enemy_spawned
+                        .iter()
+                        .all(|spawned| !spawned),
                     "class-combat fixture setup must finish during the production post-salvage warning grace"
                 );
                 bot.advance_phase(&view);
@@ -3496,7 +3518,7 @@ mod tests {
                 game.spawn_hero(class_name, &format!("Cp4Integrated{class_name}{attempt}"));
             // Intro combat has dedicated production coverage. Keep its random
             // attackers out of this class-assault regression while retaining
-            // the complete authoritative Shipwreck -> salvage -> logging ->
+            // the complete authoritative Shipwreck -> salvage -> equipment ->
             // Burrow path that establishes legitimate class inventory.
             game.defer_intro_encounter_deadlines_for_fixture()
                 .expect("deferred unrelated intro encounter deadlines");

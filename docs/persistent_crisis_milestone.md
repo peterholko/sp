@@ -730,10 +730,13 @@ headless crisis metrics remain deferred to later checkpoints.
   automatic systems are mode-gated. Economy plugins and their systems are
   registered independently and require no Checkpoint 1 changes.
 * New-player setup in `player_setup.rs` creates `PlayerIntroState` and
-  `InitialEncounterState`, including two delayed opening enemies, the
-  boar/crab follow-up, spider follow-up, villager timing, merchant, and later
-  necromancer data. `initial_encounter_system` still uses the two introduction
-  flags in `PlayerCrisis`; this temporary coupling is retained for Checkpoint 1.
+  `InitialEncounterState`, including one delayed wave of one to three Giant
+  Rats at the Shipwreck, the boar/crab follow-up, Spider follow-up, villager
+  timing, merchant, and later Necromancer data. The hostile follow-ups use
+  randomized valid, passable, reachable, unoccupied tiles two to four tiles
+  from the assigned hero start; narrative NPC anchors are unchanged.
+  `initial_encounter_system` still uses the two introduction flags in
+  `PlayerCrisis`; this temporary coupling is retained for Checkpoint 1.
 * Login enters through `PlayerEvent::Login` in `player.rs`, which schedules a
   `GameEventType::Login`; `game_event_system` later performs login perception
   and queues the sanctuary resend. Network disconnect paths remove the active
@@ -826,9 +829,11 @@ add Checkpoint 4 metrics.
   undead, and pillager flags. The two shipwreck follow-up flags were the only
   remaining introduction/legacy coupling.
 * `PlayerIntroState.danger_unlocked` is the existing introduction safety gate.
-  `InitialEncounterState` owns the detailed delayed-enemy, villager, merchant,
-  and necromancer data. `initial_encounter_system` owns the boar/crab and spider
-  follow-ups and remains registered in both director modes.
+  `InitialEncounterState` owns the delayed one-to-three Giant Rat wave,
+  villager, merchant, and Necromancer data. `initial_encounter_system` owns the
+  boar/crab and Spider follow-ups, selects their valid randomized positions two
+  to four tiles from the assigned hero start, and remains registered in both
+  director modes. Narrative NPCs retain their authored spawn anchors.
 * Completed structures have the canonical predicate
   `Structure::is_built(State)`. Living villagers can be identified by owner,
   live `State`, and absence of `StateDead`. Existing goblin wealth logic already
@@ -1276,7 +1281,8 @@ The existing economy is feature-frozen but remains active and testable.
 * Preserve the old systems behind a named legacy mode where practical.
 * Do not delete working content merely because it is disabled in the new prototype mode.
 * Keep the introductory shipwreck encounter chain functional.
-* Keep its initial enemy, follow-up creature, villager, spider, and related progression intact.
+* Keep its initial Giant Rat wave, follow-up creature, villager, Spider, and
+  related progression intact.
 
 ## Offline constraints
 
