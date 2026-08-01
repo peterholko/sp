@@ -8,6 +8,7 @@ import { STRUCTURE, FOUNDED, PLANNING_UPGRADE } from "../../core/config";
 import { Util } from "../../core/util";
 import MobilePanelScreen from "./mobilePanelScreen";
 import MobileInventoryGrid from "./mobileInventoryGrid";
+import { canLootAllEnemyCorpse, lootAllItemIds } from "../../core/lootAllPolicy";
 
 interface ITPProps {
   leftInventoryData,
@@ -33,6 +34,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
 
     this.handleSelect = this.handleSelect.bind(this);
     this.handleItemTransferClick = this.handleItemTransferClick.bind(this);
+    this.handleLootAllClick = this.handleLootAllClick.bind(this);
     this.handleBuildClick = this.handleBuildClick.bind(this);
     this.handleUpgradeClick = this.handleUpgradeClick.bind(this);
   }
@@ -82,6 +84,60 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
         selectedItemName: '',
       });
     }
+  }
+
+  handleLootAllClick() {
+    const sourceId = this.props.rightInventoryData.id;
+    const targetId = this.props.leftInventoryData.id;
+
+    lootAllItemIds(this.props.rightInventoryData.items).forEach(itemId => {
+      Global.network.sendItemTransfer(itemId, sourceId, targetId);
+    });
+
+    Global.selectedItemId = -1;
+    Global.selectedItemOwnerId = -1;
+    Global.selectedItemName = '';
+    this.setState({
+      leftSelectedItemId: -1,
+      rightSelectedItemId: -1,
+      selectedItemName: '',
+    });
+  }
+
+  renderLootAllButton() {
+    const corpseState = Global.objectStates[this.props.rightInventoryData.id];
+    if (!canLootAllEnemyCorpse(
+      corpseState,
+      Global.playerId,
+      this.props.rightInventoryData.items,
+    )) {
+      return null;
+    }
+
+    const wrapStyle: React.CSSProperties = {
+      display: 'flex',
+      justifyContent: 'center',
+      marginTop: '10px',
+    };
+    const buttonStyle: React.CSSProperties = {
+      minWidth: '116px',
+      minHeight: '40px',
+      padding: '7px 16px',
+      border: '1px solid rgba(201, 170, 113, 0.65)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      fontSize: '12px',
+      fontWeight: 'bold',
+    };
+
+    return (
+      <div style={wrapStyle}>
+        <button type="button" style={buttonStyle} onClick={this.handleLootAllClick}>
+          Loot All
+        </button>
+      </div>
+    );
   }
 
   handleBuildClick() {
@@ -265,7 +321,14 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     );
   }
 
-  renderColumn(label: string, inventoryData, selectedItemId, side: 'left' | 'right', special?: React.ReactNode) {
+  renderColumn(
+    label: string,
+    inventoryData,
+    selectedItemId,
+    side: 'left' | 'right',
+    special?: React.ReactNode,
+    afterGrid?: React.ReactNode,
+  ) {
     const pageSize = 12;
     const pageState = side == 'left' ? this.state.leftPage : this.state.rightPage;
     const pageData = this.pagedItems(inventoryData.items, pageState, pageSize);
@@ -344,6 +407,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
           onSelect={this.handleSelect}
           compact={true}
         />
+        {afterGrid}
         {this.renderPager(side, pageData.page, pageData.totalPages)}
       </div>
     );
@@ -410,7 +474,8 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
             this.props.rightInventoryData,
             this.state.rightSelectedItemId,
             'right',
-            (isFounded || isPlanningUpgrade) ? this.renderRequirements(Boolean(isPlanningUpgrade)) : null
+            (isFounded || isPlanningUpgrade) ? this.renderRequirements(Boolean(isPlanningUpgrade)) : null,
+            this.renderLootAllButton(),
           )}
         </div>
       </MobilePanelScreen>

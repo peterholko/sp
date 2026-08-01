@@ -12,10 +12,13 @@ import followbutton from "ui_comp/followbutton.png";
 import infobutton from "ui_comp/infobutton.png";
 import merchantbutton from "ui_comp/merchantbutton.png";
 import repairbutton from "ui_comp/repairbutton.png";
+import usebutton from "ui_comp/usebutton.png";
 
 import { Util } from "../../core/util";
 import { VILLAGER, DEAD, OBJ, TILE, FOUNDED, BUTTON_WIDTH } from "../../core/config";
 import { GameEvent } from "../../core/gameEvent";
+import { isSafeLogoutProtectedObject } from "../../core/protectedSettlements";
+import { canLightCampfireTarget } from "./campfireActionPolicy";
 import SmallButton from "./smallButton";
 
 interface TAProps {
@@ -39,6 +42,7 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     this.handleInfoTileResourceClick = this.handleInfoTileResourceClick.bind(this)
     this.handleMerchantClick = this.handleMerchantClick.bind(this)
     this.handleRepairClick = this.handleRepairClick.bind(this)
+    this.handleLightCampfireClick = this.handleLightCampfireClick.bind(this)
   }
 
   handleInventoryClick(event: React.MouseEvent) {
@@ -87,6 +91,11 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
   }
 
+  handleLightCampfireClick() {
+    Global.network.sendActivate(this.props.selectedKey.id);
+    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
+  }
+
   handleInfoClick(event: React.MouseEvent) {
     if (this.props.selectedKey.type == OBJ) {
       console.log('handleInfoClick');
@@ -114,6 +123,14 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
   }
 
   render() {
+    const selectedObjectState = this.props.selectedKey.type == OBJ
+      ? Global.objectStates[this.props.selectedKey.id]
+      : undefined;
+    const safeLogoutProtected = isSafeLogoutProtectedObject(
+      selectedObjectState,
+      Global.protectedSettlements,
+    );
+
     var hideInfoButton = true;
     var hideInfoTileResourceButton = true;
     var hideInventoryButton = true;
@@ -123,6 +140,10 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     var hideFollowButton = true;
     var hideMerchantButton = true;
     var hideRepairButton = true;
+    var hideLightCampfireButton = !canLightCampfireTarget(
+      selectedObjectState,
+      safeLogoutProtected,
+    );
     var exploreActionLabel = "Prospect";
 
     var buttonOrder = {
@@ -196,6 +217,18 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
       //numButtons = 2;
     }
 
+    if (safeLogoutProtected) {
+      // Read-only inspection remains available; every mutation is disabled at
+      // the desktop affordance as well as at the authoritative server guard.
+      hideTranferButton = true;
+      hideExploreButton = true;
+      hideGatherButton = true;
+      hideFollowButton = true;
+      hideMerchantButton = true;
+      hideRepairButton = true;
+      numButtons = Number(!hideInfoButton) + Number(!hideInventoryButton);
+    }
+
     var panelWidth = numButtons * BUTTON_WIDTH;
     var panelPos = ((this.props.selectedBoxPos + 1) * 74) + 35 - 37 + panelWidth / 2;
 
@@ -223,7 +256,7 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     } as React.CSSProperties    
 
     const inventoryStyle = {
-      transform: 'translate(100px, 0px)',
+      transform: safeLogoutProtected ? 'translate(50px, 0px)' : 'translate(100px, 0px)',
       position: 'fixed'
     } as React.CSSProperties
 
@@ -257,8 +290,38 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
       position: 'fixed'
     } as React.CSSProperties    
 
+    const lightCampfireStyle = {
+      transform: 'translate(0px, 50px)',
+      position: 'fixed'
+    } as React.CSSProperties
+
+    const protectedLabelStyle = {
+      position: 'absolute',
+      top: '50px',
+      left: '-25px',
+      padding: '5px 8px',
+      border: '1px solid #e4c66f',
+      borderRadius: '3px',
+      background: 'rgba(16, 40, 58, 0.94)',
+      color: '#e5fbff',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      lineHeight: '13px',
+      whiteSpace: 'nowrap',
+      boxShadow: '0 0 10px rgba(114, 214, 232, 0.32)',
+      pointerEvents: 'none'
+    } as React.CSSProperties
+
     return (
       <div style={targetActionPanelStyle} >
+
+        {safeLogoutProtected &&
+          <div
+            style={protectedLabelStyle}
+            title="This settlement is frozen and cannot be changed until its owner returns."
+          >
+            ◇ Safe Logout protected
+          </div>}
 
         {!hideInfoButton &&
           <SmallButton handler={this.handleInfoClick}
@@ -307,6 +370,14 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
           <SmallButton handler={this.handleRepairClick}
             imageName="repairbutton"
             style={repairStyle} />}             
+
+        {!hideLightCampfireButton &&
+          <div title="Light Campfire" aria-label="Light Campfire">
+            <img src={usebutton}
+              alt="Light Campfire"
+              onClick={this.handleLightCampfireClick}
+              style={lightCampfireStyle} />
+          </div>}
 
       </div>
     );

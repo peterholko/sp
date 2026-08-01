@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
@@ -16,6 +16,7 @@ use crate::network;
 use crate::obj::Position;
 
 use crate::skill::{self, SkillData, Skills};
+use crate::skill_defs::Skill;
 use crate::templates::{ItemTemplate, ResTemplate, ResTemplates, Templates};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -48,8 +49,38 @@ pub enum ResourceGatherError {
     NoItemGathered,
 }
 
-#[derive(Resource, Deref, DerefMut, Debug)]
+#[derive(Resource, Deref, DerefMut, Debug, Default)]
 pub struct Resources(HashMap<Position, HashMap<String, Resource>>);
+
+/// Resource deposits are part of the shared world, but ordinary prospecting
+/// knowledge belongs to the player who found the deposit. `Resource::reveal`
+/// remains the explicit world-visible escape hatch used by special systems
+/// such as emergency spring discovery.
+#[derive(Resource, Debug, Default)]
+pub struct ResourceDiscoveries(HashMap<i32, HashMap<Position, HashSet<String>>>);
+
+impl ResourceDiscoveries {
+    pub fn is_discovered(&self, player_id: i32, pos: Position, resource_name: &str) -> bool {
+        self.0
+            .get(&player_id)
+            .and_then(|tiles| tiles.get(&pos))
+            .map(|resources| resources.contains(resource_name))
+            .unwrap_or(false)
+    }
+
+    pub fn discover(&mut self, player_id: i32, pos: Position, resource_name: String) -> bool {
+        self.0
+            .entry(player_id)
+            .or_default()
+            .entry(pos)
+            .or_default()
+            .insert(resource_name)
+    }
+
+    pub fn clear_player(&mut self, player_id: i32) {
+        self.0.remove(&player_id);
+    }
+}
 
 impl Resources {
     pub fn get_by_type(&self, pos: Position, res_type: String, reveal: bool) -> Vec<Resource> {
@@ -78,6 +109,15 @@ impl Resources {
 }
 
 impl Resource {
+    pub fn is_visible_to(
+        resource: &Resource,
+        player_id: i32,
+        discoveries: &ResourceDiscoveries,
+    ) -> bool {
+        resource.reveal
+            || discoveries.is_discovered(player_id, resource.pos, resource.name.as_str())
+    }
+
     pub fn spawn_all_resources(
         resources: &mut ResMut<Resources>,
         templates: &Templates,
@@ -242,12 +282,17 @@ impl Resource {
         }
     }
 
-    pub fn get_on_tile(position: Position, resources: &Resources) -> Vec<network::TileResource> {
+    pub fn get_on_tile(
+        position: Position,
+        resources: &Resources,
+        discoveries: &ResourceDiscoveries,
+        player_id: i32,
+    ) -> Vec<network::TileResource> {
         let mut tile_resources = Vec::new();
 
         if let Some(resources_on_tile) = resources.get(&position) {
             for (resource_type, resource) in &*resources_on_tile {
-                if resource.reveal {
+                if Resource::is_visible_to(resource, player_id, discoveries) {
                     let tile_resource = network::TileResource {
                         name: resource_type.to_string(),
                         image: resource.image.clone(),
@@ -268,6 +313,8 @@ impl Resource {
     pub fn get_nearby_resources(
         center: Position,
         resources: &Resources,
+        discoveries: &ResourceDiscoveries,
+        player_id: i32,
     ) -> Vec<network::TileResourceWithPos> {
         let mut tile_resources = Vec::new();
 
@@ -278,7 +325,7 @@ impl Resource {
 
             if let Some(resources_on_tile) = resources.get(&tile) {
                 for (resource_type, resource) in &*resources_on_tile {
-                    if resource.reveal {
+                    if Resource::is_visible_to(resource, player_id, discoveries) {
                         let tile_resource = network::TileResourceWithPos {
                             name: resource_type.to_string(),
                             color: (resource.yield_level + resource.quantity_level) / 2,
@@ -339,12 +386,17 @@ impl Resource {
         }
     }
 
-    pub fn num_unrevealed_on_tile(position: Position, resources: &Resources) -> i32 {
+    pub fn num_unrevealed_on_tile(
+        position: Position,
+        resources: &Resources,
+        discoveries: &ResourceDiscoveries,
+        player_id: i32,
+    ) -> i32 {
         let mut num_unrevealed = 0;
 
         if let Some(resources_on_tile) = resources.get(&position) {
             for (_resource_type, resource) in &*resources_on_tile {
-                if resource.reveal != true {
+                if !Resource::is_visible_to(resource, player_id, discoveries) {
                     num_unrevealed += 1;
                 }
             }
@@ -374,6 +426,28 @@ impl Resource {
 
         // Return empty vector
         return Vec::new();
+    }
+
+    pub fn get_by_type_for_player(
+        position: Position,
+        res_type: String,
+        resources: &Resources,
+        discoveries: &ResourceDiscoveries,
+        player_id: i32,
+    ) -> Vec<Resource> {
+        resources
+            .get(&position)
+            .map(|resources_on_tile| {
+                resources_on_tile
+                    .values()
+                    .filter(|resource| {
+                        resource.res_type == res_type
+                            && Resource::is_visible_to(resource, player_id, discoveries)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn forage(
@@ -952,32 +1026,61 @@ impl Resource {
     }*/
 
     pub fn explore(
-        _obj_id: i32,
+        player_id: i32,
         position: Position,
-        resources: &mut Resources,
+        resources: &Resources,
+        discoveries: &mut ResourceDiscoveries,
         res_templates: &ResTemplates,
-    ) -> Vec<Resource> {
-        let explore_skill = 50; // TODO move to skills
-        let mut revealed_resources = Vec::new();
+        skills: &Skills,
+        preferred_res_type: Option<&str>,
+    ) -> Option<Resource> {
+        let Some(resources_on_tile) = resources.get(&position) else {
+            return None;
+        };
 
-        if let Some(resources_on_tile) = resources.get_mut(&position) {
-            debug!("Resources on tile: {:?}", resources_on_tile);
-            for (_resource_type, resource) in resources_on_tile {
-                if let Some(res_template) = res_templates.get(&resource.name) {
-                    let res_skill_req = res_template.skill_req;
-                    let quantity_skill_req =
-                        Resource::quantity_skill_req(resource.max, res_template.quantity.clone());
+        let mut candidates: Vec<(&Resource, i32)> = resources_on_tile
+            .values()
+            .filter(|resource| !Resource::is_visible_to(resource, player_id, discoveries))
+            .filter_map(|resource| {
+                let template = res_templates.get(&resource.name)?;
+                let skill_name = Resource::type_to_skill(resource.res_type.clone());
+                let skill_level = Skill::from_str(&skill_name)
+                    .map(|skill| skills.get_level_by_name(skill))
+                    .unwrap_or(0);
 
-                    if explore_skill >= (res_skill_req + quantity_skill_req) {
-                        resource.reveal = true;
-                        revealed_resources.push(resource.clone());
-                        debug!("Revealing resource: {:?}", resource);
-                    }
-                }
+                (skill_level >= Resource::minimum_skill_level(template.skill_req))
+                    .then_some((resource, skill_level))
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        if let Some(preferred) = preferred_res_type {
+            let preferred_candidates = candidates
+                .iter()
+                .filter(|(resource, _)| resource.res_type == preferred)
+                .copied()
+                .collect::<Vec<_>>();
+            if !preferred_candidates.is_empty() {
+                candidates = preferred_candidates;
             }
         }
 
-        return revealed_resources;
+        let index = rand::thread_rng().gen_range(0..candidates.len());
+        let (resource, skill_level) = candidates[index];
+        let template = res_templates.get(&resource.name)?;
+
+        if rand::thread_rng().gen::<f32>()
+            >= Resource::discovery_chance(skill_level, template.skill_req)
+        {
+            return None;
+        }
+
+        discoveries.discover(player_id, position, resource.name.clone());
+        debug!("Player {:?} discovered resource {:?}", player_id, resource);
+        Some(resource.clone())
     }
 
     pub fn is_valid_type(res_type: String, pos: Position, resources: &Resources) -> bool {
@@ -991,11 +1094,25 @@ impl Resource {
         }
     }
 
+    pub fn is_valid_type_for_player(
+        res_type: String,
+        pos: Position,
+        resources: &Resources,
+        discoveries: &ResourceDiscoveries,
+        player_id: i32,
+    ) -> bool {
+        !Resource::get_by_type_for_player(pos, res_type, resources, discoveries, player_id)
+            .is_empty()
+    }
+
     pub fn type_to_skill(res_type: String) -> String {
         match res_type.as_str() {
             ORE => skill::MINING.to_string(),
             LOG => skill::LOGGING.to_string(),
             STONE => skill::STONECUTTING.to_string(),
+            FISH => skill::FISHING.to_string(),
+            FOOD => skill::FARMING.to_string(),
+            GAME_ANIMAL => "Hunting".to_string(),
             _ => skill::FORAGING.to_string(),
             /*WATER => skill::FORAGING.to_string(),
             FOOD => skill::FARMING.to_string(),
@@ -1004,30 +1121,46 @@ impl Resource {
     }
 
     pub fn gather_chance(skill_value: i32, res_skill_req: i32) -> f32 {
-        match (skill_value, res_skill_req) {
-            (0, 0) => 0.7,
-            (1, 0) => 0.7,
-            (2, 0) => 0.7,
-            (3, 0) => 0.7,
-            (4, 0) => 0.7,
-            (5, 0) => 0.7,
-            (_, 0) => 1.0,
+        let minimum = Resource::minimum_skill_level(res_skill_req);
+        if skill_value < minimum {
+            return 0.0;
+        }
 
-            (0, 25) => 0.00016,
-            (1, 25) => 0.00032,
-            (2, 25) => 0.00048,
-            (3, 25) => 0.00064,
-            (4, 25) => 0.00080,
-            (5, 25) => 0.00096,
+        let base = if res_skill_req <= 0 {
+            0.85
+        } else if res_skill_req <= 25 {
+            0.60
+        } else {
+            0.35
+        };
 
-            (0, 50) => 0.00004,
-            (1, 50) => 0.00008,
-            (2, 50) => 0.00012,
-            (3, 50) => 0.00016,
-            (4, 50) => 0.00020,
-            (5, 50) => 0.00024,
+        (base + 0.02 * (skill_value - minimum) as f32).min(0.95)
+    }
 
-            (_, _) => 1.0,
+    pub fn discovery_chance(skill_value: i32, res_skill_req: i32) -> f32 {
+        let minimum = Resource::minimum_skill_level(res_skill_req);
+        if skill_value < minimum {
+            return 0.0;
+        }
+
+        let base = if res_skill_req <= 0 {
+            0.85
+        } else if res_skill_req <= 25 {
+            0.60
+        } else {
+            0.35
+        };
+
+        (base + 0.05 * (skill_value - minimum) as f32).min(0.95)
+    }
+
+    pub fn minimum_skill_level(res_skill_req: i32) -> i32 {
+        if res_skill_req <= 0 {
+            0
+        } else if res_skill_req <= 25 {
+            2
+        } else {
+            4
         }
     }
 
@@ -1053,6 +1186,58 @@ impl Plugin for ResourcePlugin {
     fn build(&self, app: &mut App) {
         let resources = Resources(HashMap::new());
 
-        app.insert_resource(resources);
+        app.insert_resource(resources)
+            .init_resource::<ResourceDiscoveries>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_resource(reveal: bool) -> Resource {
+        Resource {
+            name: "Test Maple".to_string(),
+            image: "maple".to_string(),
+            res_type: LOG.to_string(),
+            pos: Position { x: 3, y: 4 },
+            max: 10,
+            yield_level: 1,
+            yield_mod: 1.0,
+            quantity_level: 1,
+            quantity: 10,
+            properties: Vec::new(),
+            produces: None,
+            reveal,
+        }
+    }
+
+    #[test]
+    fn ordinary_resource_discovery_is_player_scoped() {
+        let resource = test_resource(false);
+        let mut discoveries = ResourceDiscoveries::default();
+
+        discoveries.discover(7, resource.pos, resource.name.clone());
+
+        assert!(Resource::is_visible_to(&resource, 7, &discoveries));
+        assert!(!Resource::is_visible_to(&resource, 8, &discoveries));
+    }
+
+    #[test]
+    fn explicit_world_reveal_is_visible_to_every_player() {
+        let resource = test_resource(true);
+        let discoveries = ResourceDiscoveries::default();
+
+        assert!(Resource::is_visible_to(&resource, 7, &discoveries));
+        assert!(Resource::is_visible_to(&resource, 8, &discoveries));
+    }
+
+    #[test]
+    fn gather_chance_has_smooth_tiers_and_caps() {
+        assert_eq!(Resource::gather_chance(0, 0), 0.85);
+        assert_eq!(Resource::gather_chance(1, 25), 0.0);
+        assert_eq!(Resource::gather_chance(2, 25), 0.60);
+        assert_eq!(Resource::gather_chance(4, 50), 0.35);
+        assert_eq!(Resource::gather_chance(99, 0), 0.95);
     }
 }

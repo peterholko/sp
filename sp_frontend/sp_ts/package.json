@@ -41,7 +41,10 @@
   },
   "scripts": {
     "dev": "webpack --mode development",
-    "build": "webpack --mode production && webpack-dev-server --mode production"
+    "check": "./check-imports.sh && tsc --noEmit --skipLibCheck",
+    "build": "webpack --mode production --stats=errors-warnings",
+    "rebuild:ux": "npm run check && npm run build && ./copy.sh",
+    "serve": "webpack serve --mode development"
   },
   "author": {
     "name": "Peter Holko",

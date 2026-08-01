@@ -184,6 +184,17 @@ assert.equal(
   'online',
   'reconnect online snapshot replaces any protected presentation',
 );
+secondSocket.message({
+  packet: 'protected_settlements',
+  version: 1,
+  settlements: [{ player_id: 44, monolith_id: 700, sanctuary_radius: 4 }],
+});
+assert.deepEqual(Global.protectedSettlements['44'], {
+  player_id: 44,
+  monolith_id: 700,
+  sanctuary_radius: 4,
+});
+assert.equal(emitter.count(NetworkEvent.PROTECTED_SETTLEMENTS) > 0, true);
 
 const completionCountBeforeStalePacket = emitter.count(NetworkEvent.SAFE_LOGOUT_COMPLETE);
 firstSocket.message({ ...protectedPacket, message: 'Delayed old-socket packet.' });
@@ -202,6 +213,11 @@ clock.runAll();
 assert.equal(emitter.count(NetworkEvent.SERVER_OFFLINE), 1, 'ordinary close reaches the health/reconnect surface');
 
 network.connect();
+assert.deepEqual(
+  Global.protectedSettlements,
+  {},
+  'a new connection lifecycle clears the prior world protection snapshot',
+);
 const thirdSocket = FakeWebSocket.instances[2];
 thirdSocket.open();
 thirdSocket.message(protectedPacket);
@@ -277,6 +293,11 @@ assert.equal(replacementNetwork.getLatestSafeLogoutStatus(), null, 'fresh hero s
 
 replacementSocket.message(status({ can_request: true, message: 'Prior account.' }));
 replacementSocket.message({
+  packet: 'protected_settlements',
+  version: 1,
+  settlements: [{ player_id: 55, monolith_id: 701, sanctuary_radius: 3 }],
+});
+replacementSocket.message({
   packet: 'init_perception',
   data: { map: [], visible_objs: [], observers: [], weather: [] },
 });
@@ -286,6 +307,7 @@ const networkErrorsBeforeAuthReset = emitter.count(NetworkEvent.NETWORK_ERROR);
 const offlineEventsBeforeAuthReset = emitter.count(NetworkEvent.SERVER_OFFLINE);
 replacementNetwork.resetForAuthentication();
 assert.equal(replacementNetwork.getLatestSafeLogoutStatus(), null, 'authentication start clears prior-account status');
+assert.deepEqual(Global.protectedSettlements, {}, 'authentication reset clears prior-account wards');
 assert.equal(clock.callbacks.size, 0, 'authentication start cancels prior-account callbacks');
 assert.equal(replacementSocket.closeCount, 1, 'authentication start closes the superseded socket once');
 replacementSocket.message(protectedPacket);

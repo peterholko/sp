@@ -24,7 +24,8 @@ interface BaseInventoryProps {
   showEquipped?: boolean
   handleSelect: Function,
   selectedItemId?: integer,
-  disabledItems?: any
+  disabledItems?: any,
+  footer?: React.ReactNode,
 }
 
 export default class BaseInventoryPanel extends React.Component<BaseInventoryProps, any> {
@@ -264,6 +265,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
         }
         {!hideLeftButton && <img src={leftbutton} style={leftStyle} onClick={this.handleLeftClick} />}
         {!hideRightButton && <img src={rightbutton} style={rightStyle} onClick={this.handleRightClick} />}
+        {this.props.footer}
       </HalfPanel>
     );
   }

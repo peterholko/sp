@@ -73,6 +73,16 @@
   position: fixed;
 }
 
+.combobuttonReady {
+  animation: combo-ready-pulse 850ms ease-in-out infinite alternate;
+  filter: drop-shadow(0 0 7px #ffd45a);
+}
+
+@keyframes combo-ready-pulse {
+  from { transform: scale(1); }
+  to { transform: scale(1.13); }
+}
+
 .quickattackbutton {
   bottom: 10px;
   left: 50%;

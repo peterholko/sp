@@ -14,9 +14,21 @@ import { NetworkEvent } from '../networkEvent';
 import { ObjectState } from '../objectState';
 import { MultiImage } from '../multiImage';
 import { Network } from '../network';
-import { HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE, VILLAGER, HARVESTING, CRAFTING, GATHERING, BUILDING, desktopCameraZoom } from '../config';
+import {
+  HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE,
+  VILLAGER, HARVESTING, CRAFTING, GATHERING, BUILDING, desktopCameraZoom,
+  isDesktop,
+} from '../config';
 import { GameImage } from '../objects/gameImage';
 import { GameContainer } from '../objects/gameContainer';
+import {
+  fireAnimationPresentation,
+  fireAnimationStartFrame,
+} from '../fireAnimationPresentation';
+import {
+  isVisibilitySource,
+  needsZeroVisionShroud,
+} from '../visibilitySourcePolicy';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -76,12 +88,13 @@ export class ObjectScene extends Phaser.Scene {
   private multiImages: Record<string, Array<MultiImage>> = {};
 
   private stateTimerList: Record<string, ReturnType<typeof setInterval>> = {};
-  private burningSprites: Record<string, Phaser.GameObjects.Sprite> = {};
+  private fireAnimationSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
   private actionProgressBars: Record<string, ActionProgressBar> = {};
   private structureWorkProgress: Record<string, StructureWorkProgress> = {};
 
   private lastVillagerActivity: Record<string, string> = {};
+  private lastFinisherShakeAt = 0;
 
   constructor() {
     super({
@@ -181,7 +194,7 @@ export class ObjectScene extends Phaser.Scene {
     this.load.on('filecomplete', this.fileLoadComplete, this);
     this.load.on('complete', this.loadComplete, this);
 
-    this.time.addEvent({ delay: 1000, callback: this.processBurningState, callbackScope: this, loop: true });
+    this.time.addEvent({ delay: 1000, callback: this.processFireAnimationState, callbackScope: this, loop: true });
 
   }
 
@@ -390,9 +403,9 @@ export class ObjectScene extends Phaser.Scene {
       delete this.stateTimerList[objectId];
     }
 
-    if (this.burningSprites[objectId]) {
-      this.burningSprites[objectId].destroy();
-      delete this.burningSprites[objectId];
+    if (this.fireAnimationSprites[objectId]) {
+      this.fireAnimationSprites[objectId].destroy();
+      delete this.fireAnimationSprites[objectId];
     }
 
     delete this.wallList[objectId];
@@ -708,13 +721,14 @@ export class ObjectScene extends Phaser.Scene {
     //Clear visibleTiles & shroud
     Global.visibleTiles = [];
     this.clearShroud();
+    const positiveVisibleTiles = new Set<string>();
 
     for (var objectId in objectStates) {
       var objectState = objectStates[objectId] as ObjectState;
       console.log(objectState);
 
       if (objectState.op != 'deleted') {
-        this.processVisibleTiles(objectState);
+        this.processVisibleTiles(objectState, positiveVisibleTiles);
       }
 
       if (objectState.op == 'added') {
@@ -744,30 +758,35 @@ export class ObjectScene extends Phaser.Scene {
 
     this.reconcileRenderedObjects();
 
+    // State/image updates should ignite or extinguish visible fire immediately;
+    // the slower timer remains as a safety reconciliation pass.
+    this.processFireAnimationState();
+
     //Call processWall here for loaded wall images
     this.processWallList();
 
     //Add Shroud tiles
-    this.addShroud();
+    this.addShroud(positiveVisibleTiles);
   }
 
-  processVisibleTiles(objectState: ObjectState) {
-    if (objectState.player == Global.playerId) {
-      if (objectState.vision > 0) {
-        var visibleTiles = Util.range(objectState.x,
-          objectState.y,
-          objectState.vision);
+  processVisibleTiles(objectState: ObjectState, positiveVisibleTiles: Set<string>) {
+    if (isVisibilitySource(objectState, Global.playerId)) {
+      var visibleTiles = Util.range(objectState.x,
+        objectState.y,
+        objectState.vision);
 
-        Global.visibleTiles = Global.visibleTiles.concat(visibleTiles);
-      } else {
+      for (const tile of visibleTiles) {
+        positiveVisibleTiles.add(`${tile.q},${tile.r}`);
+      }
+      Global.visibleTiles = Global.visibleTiles.concat(visibleTiles);
+    } else if (objectState.player == Global.playerId && (objectState.vision ?? 0) <= 0) {
 
-        if (objectState.subclass == HERO || objectState.subclass == VILLAGER) {
-          // Add current tile to visible tiles
-          Global.visibleTiles.push({
-            q: objectState.x,
-            r: objectState.y
-          });
-        }
+      if (objectState.subclass == HERO || objectState.subclass == VILLAGER) {
+        // Add current tile to visible tiles
+        Global.visibleTiles.push({
+          q: objectState.x,
+          r: objectState.y
+        });
       }
     }
   }
@@ -856,7 +875,7 @@ export class ObjectScene extends Phaser.Scene {
 
 
 
-  addShroud() {
+  addShroud(positiveVisibleTiles: ReadonlySet<string>) {
     const existingShroudTiles = new Map(); // key: "q,r", value: Set of filenames used
 
     for (var index in Global.tileStates) {
@@ -973,7 +992,11 @@ export class ObjectScene extends Phaser.Scene {
         continue;
       }
 
-      if (objectState.vision == 0) {
+      const coveredByPositiveVisibilitySource = positiveVisibleTiles.has(
+        `${objectState.x},${objectState.y}`,
+      );
+
+      if (needsZeroVisionShroud(objectState, coveredByPositiveVisibilitySource)) {
 
         var pixel = Util.hex_to_pixel(objectState.x, objectState.y);
 
@@ -1533,6 +1556,17 @@ export class ObjectScene extends Phaser.Scene {
     return UNIT_DAMAGE_TEXT_COLOR;
   }
 
+  private shakeForFinisher(): void {
+    const now = Date.now();
+    if (now - this.lastFinisherShakeAt < 250) {
+      return;
+    }
+    this.lastFinisherShakeAt = now;
+    this.cameras.main.shake(180, 0.008);
+    const mapScene = this.scene.get('MapScene') as MapScene;
+    mapScene?.cameras?.main?.shake(180, 0.008);
+  }
+
   processDmgMessage(message) {
     console.log('Dmg Message: ' + message.source_id + ' -> ' + message.target_id);
     if (message.source_id in Global.objectStates && message.target_id in Global.objectStates) {
@@ -1609,13 +1643,25 @@ export class ObjectScene extends Phaser.Scene {
         var dmgMsg = ''
         if (message.missed) {
           dmgMsg = 'Miss';
-        } else if ('combo' in message) {
-          dmgMsg = message.combo + ' ' + message.dmg + '!';
+        } else if (message.combo) {
+          dmgMsg = message.combo + '\n' + message.dmg + '!';
         } else {
           dmgMsg = message.dmg;
         }
 
-        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: this.getDamageTextColor(message.target_id), stroke: '#000000', strokeThickness: 4 });
+        const isFinisher = Boolean(message.combo);
+        if (isFinisher) {
+          this.shakeForFinisher();
+        }
+        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
+          fontFamily: 'Verdana',
+          fontSize: isFinisher ? 30 : 22,
+          fontStyle: isFinisher ? 'bold' : 'normal',
+          align: 'center',
+          color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
+          stroke: '#000000',
+          strokeThickness: isFinisher ? 6 : 4,
+        });
         dmgText.setDepth(10);
         dmgText.setOrigin(0.5, 0.5);
 
@@ -1672,13 +1718,25 @@ export class ObjectScene extends Phaser.Scene {
       tween.play();
 
       var dmgMsg = ''
-      if ('combo' in message) {
-        dmgMsg = message.combo + ' ' + message.dmg + '!';
+      if (message.combo) {
+        dmgMsg = message.combo + '\n' + message.dmg + '!';
       } else {
         dmgMsg = message.dmg;
       }
 
-      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 20, color: this.getDamageTextColor(message.target_id) });
+      const isFinisher = Boolean(message.combo);
+      if (isFinisher) {
+        this.shakeForFinisher();
+      }
+      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
+        fontFamily: 'Verdana',
+        fontSize: isFinisher ? 28 : 20,
+        fontStyle: isFinisher ? 'bold' : 'normal',
+        align: 'center',
+        color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
+        stroke: '#000000',
+        strokeThickness: isFinisher ? 6 : 3,
+      });
       dmgText.setDepth(10);
       dmgText.setOrigin(0.5, 0.5);
 
@@ -2298,35 +2356,65 @@ export class ObjectScene extends Phaser.Scene {
     this.queueImageDefTask(objectState);
   }
 
-  processBurningState() {
-    for (var burningId in this.burningSprites) {
-      var burningState = Global.objectStates[burningId];
+  processFireAnimationState() {
+    const litCampfireAnimationEnabled = isDesktop();
 
-      if (!burningState || burningState.state != 'burning' || !this.shouldRenderState(burningState)) {
-        this.burningSprites[burningId].destroy();
-        delete this.burningSprites[burningId];
+    for (var burningId in this.fireAnimationSprites) {
+      var burningState = Global.objectStates[burningId];
+      var burningPresentation = fireAnimationPresentation(
+        burningState,
+        litCampfireAnimationEnabled,
+      );
+      var baseRenderMissing = burningPresentation?.kind == 'lit-campfire'
+        && !this.getRenderedObject(burningId);
+
+      if (!burningPresentation || baseRenderMissing || !this.shouldRenderState(burningState)) {
+        this.fireAnimationSprites[burningId].destroy();
+        delete this.fireAnimationSprites[burningId];
       }
     }
 
     for (var objectId in Global.objectStates) {
       var objectState = Global.objectStates[objectId] as ObjectState;
+      var presentation = fireAnimationPresentation(
+        objectState,
+        litCampfireAnimationEnabled,
+      );
 
-      if (objectState.state != 'burning' || !this.shouldRenderState(objectState)) {
+      if (!presentation || !this.shouldRenderState(objectState)) {
+        continue;
+      }
+
+      if (presentation.kind == 'lit-campfire' && !this.getRenderedObject(objectId)) {
         continue;
       }
 
       var origin = Util.hex_to_pixel(objectState.x, objectState.y);
-      var burningSprite = this.burningSprites[objectId];
+      var burningSprite = this.fireAnimationSprites[objectId];
 
       if (!burningSprite || burningSprite.scene == null) {
-        burningSprite = this.add.sprite(origin.x + 36, origin.y + 36, 'burning');
-        burningSprite.setDepth(10);
-        burningSprite.play('burninganim');
-        this.burningSprites[objectId] = burningSprite;
-      } else {
-        burningSprite.x = origin.x + 36;
-        burningSprite.y = origin.y + 36;
+        burningSprite = this.add.sprite(
+          origin.x + presentation.offsetX,
+          origin.y + presentation.offsetY,
+          'burning',
+        );
+        burningSprite.play({
+          key: 'burninganim',
+          startFrame: fireAnimationStartFrame(objectId),
+        });
+        this.fireAnimationSprites[objectId] = burningSprite;
       }
+
+      burningSprite.setPosition(
+        origin.x + presentation.offsetX,
+        origin.y + presentation.offsetY,
+      );
+      burningSprite.setDepth(presentation.depth);
+      burningSprite.setScale(presentation.scale);
+      burningSprite.setAlpha(presentation.alpha);
+      burningSprite.setBlendMode(
+        presentation.additiveBlend ? Phaser.BlendModes.ADD : Phaser.BlendModes.NORMAL,
+      );
     }
   }
 }

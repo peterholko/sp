@@ -39,6 +39,12 @@ before reconnect resumes simulation. Checkpoint 3 exposes that authority through
 authenticated production commands, deduplicated status snapshots, a desktop
 sanctuary control, and an intentional protected-confirmation close flow.
 
+The current source also includes the desktop Sanctuary Ward follow-up described
+at the end of this document. It adds a recipient-filtered
+`protected_settlements` snapshot and desktop presentation only; it does not
+change Safe Logout eligibility, protection scope, resume ordering, or the two
+recorded Checkpoint 4 sign-off blockers.
+
 ## Checkpoint breakdown
 
 1. **Checkpoint 1 — state foundation and eligibility:** authoritative presence,
@@ -1893,3 +1899,35 @@ weakening Checkpoint 1 eligibility or Checkpoint 2 simulation gates.
 
 The current Checkpoint 4 and out-of-scope boundaries are recorded in the
 Checkpoint 3 section above.
+
+## Desktop Sanctuary Ward follow-up
+
+Safe Logged-out settlements now have a desktop-only world presentation. The
+server publishes a versioned, full `protected_settlements` snapshot containing
+the protected player ID, bound monolith ID, and live sanctuary radius. It
+intentionally omits coordinates, so a client can only anchor a ward after the
+monolith has been learned through ordinary perception. Foreign entries are
+filtered through the recipient's authoritative explored map; an owner always
+receives their own entry. Snapshots include the reconnect synchronization
+barrier, are deduplicated per authoritative connection, retry a failed enqueue,
+and send an empty list when protection clears.
+
+The desktop client traces the exact `distance < full_radius` hex perimeter
+beneath the shroud and places a shield-and-moon status marker above the visible
+monolith. Selecting an owner-attributed asset or the bound monolith keeps
+inspection available while hiding mutating controls and labels the asset as
+Safe Logout protected. This is a status presentation: Safe Logout still
+protects the owner's complete recorded run, including attributed assets outside
+the drawn sanctuary perimeter. Neutral run-associated objects such as the
+Shipwreck remain server-protected but do not receive the owner-based desktop
+label because the public snapshot intentionally omits the complete protected
+run-object list.
+
+Mobile rendering and mobile UI are unchanged. They continue to use the shared
+base object scene; only the desktop entry registers the ward-aware subclass.
+
+The snapshot is presentation data, not a permission grant. The server remains
+the mutation authority, and the desktop's hidden controls are only an early
+read-only affordance. Delivery is a full replacement per current connection,
+so an empty snapshot removes stale wards after protection ends or an account
+changes.

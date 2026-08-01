@@ -1,5 +1,13 @@
 # Milestone 5 — Core Gameplay and Settlement Lifecycle Polish
 
+## Status
+
+Checkpoint 1, the revised new-player opening, and the source follow-ups recorded
+at the top of this document are implemented in the current checkout.
+Checkpoint 2 remains reserved. The later “baseline before” and “original
+Checkpoint 1” sections are historical records; where they differ, the current
+contract in the sections above them takes precedence.
+
 ## Revised new-player opening follow-up
 
 The opening-session follow-up removes the completed starter Burrow and moves
@@ -8,11 +16,41 @@ their class, statistics, abilities, recipes, and four basic plans, but their
 inventory contains only equipped Tattered Shirt and Tattered Pants. The lit
 starter Campfire remains and contains 20 ordinary Firewood.
 
-The owner Shipwreck manifest is exact: Sharpened Stick x1, Crude Torch x1,
-Bedroll x1, Waterskin (Filled) x3, Salted Meat Strip x3, Honeybell Berries x3,
-Health Potion x1, Flint Shard x1, Cragroot Maple Resin x1, Cragroot Maple Stick
-x1, Springbranch Maple Log x5, Cragroot Maple Timber x1, Valleyrun Copper
-Ingot x3, Gold Coins x10, and Fishing Rod x1. Warrior adds Copper Helm x1,
+A lit standalone Campfire provides a one-hex visibility bubble centered on the
+Campfire only while a living player hero is standing on it or an adjacent hex.
+The nearby hero's player receives that bubble regardless of who owns the
+Campfire. Multiple bubbles are combined as a simple union and never increase
+one another's range. Any living hero may light a completed standalone Campfire
+from within that same one-hex distance by using the hero's own Ignition Tool;
+the Campfire must already contain fuel, and lighting it does not grant access
+to another player's fuel inventory or other structure controls.
+Existing fire-capable shelters retain their previous owner-only, exact-tile
+illumination and controls; they do not become public Campfires under this rule.
+
+The server represents each active viewer/Campfire pair in
+`CampfireVisibilityState` and sends the Campfire as a perception observer with
+its real owner and a one-hex range. The client accepts a foreign object as a
+vision source only when the current authoritative observer snapshot designates
+it as one. It preserves that observer range across incremental visible-object
+updates and clears old observer authority at the next initialization boundary,
+preventing remembered foreign structures from becoming permanent light
+sources.
+
+Both client shells retain the shared animated overlay for objects whose state
+is `burning`. Desktop additionally draws a smaller, translucent, additive
+flame over an object whose authoritative presentation is a lit standalone
+Campfire. Animation start frames are stable per object so nearby fires do not
+move in lockstep. The desktop target strip exposes **Light Campfire** for a
+completed unlit standalone Campfire; the server still validates living-hero
+identity, idle state, range, fuel, an Ignition Tool, duplicate activation, and
+Safe Logout protection. Mobile has the shared light/perception behavior but no
+new lighting affordance or lit-Campfire overlay in this follow-up.
+
+The owner Shipwreck manifest is exact: Sharpened Stick x1, Crude Hatchet x1,
+Crude Torch x3, Bedroll x1, Waterskin (Filled) x3, Salted Meat Strip x3,
+Honeybell Berries x3, Health Potion x1, Flint Shard x1, Cragroot Maple Resin
+x1, Cragroot Maple Stick x1, Springbranch Maple Log x5, Cragroot Maple Timber
+x1, Valleyrun Copper Ingot x3, Gold Coins x10, and Fishing Rod x1. Warrior adds Copper Helm x1,
 Ranger adds Training Bow x1, and Mage adds Mana x5. The previous per-instance
 Copper Helm Defense 3, Training Bow attributes, and starter Health Potion
 Healing 10 are preserved instead of silently replacing them with current
@@ -44,30 +82,57 @@ The existing setup architecture has four important consequences:
   so the Shipwreck-specific automatic reward is removed while other POI
   outcomes remain unchanged.
 
-The starter Shipwreck's Sharpened Stick instance retains `Logging 1` alongside
-its existing combat and Hunting attributes, giving every class access to the
-ordinary logging path after the opening. The global item template, resource
-nodes, yields, recipes, and gathering rates are unchanged. Timber continues to
-be a legal Log substitute in the existing construction engine, but the guided
-path uses the five salvaged Logs and leaves the Timber as valuable storage
-salvage.
+The starter Shipwreck's Crude Hatchet has `Damage 1` and `Speed 5`, matching
+the Sharpened Stick's combat profile, plus `Logging 1` so every class can use
+the ordinary lumberjacking path after the opening. The Sharpened Stick keeps
+its normal global template attributes. Resource nodes, yields, recipes, and
+gathering rates are unchanged. Timber continues to be a legal Log substitute
+in the existing construction engine, but the guided path uses the five
+salvaged Logs and leaves the Timber as valuable storage salvage.
 
-The existing 90-second opening-hostile delay is ample only when the player
-searches immediately. The revised flow also requires owner Shipwreck
-inspection before the opening wave can spawn. A late first inspection pushes
-the single wave deadline forward by a bounded post-search equip grace; early
-inspection keeps the current schedule. That first hostile spawn is a randomly
-sized wave of one to three Giant Rats on the Shipwreck tile. After every rat is
-defeated and the existing phase gates are reached, the Wild Boar/Giant Crab
-follow-up and then the Spider each choose a randomized valid, passable,
-reachable, unoccupied tile two to four tiles from the run's assigned hero
-start. If no safe candidate exists, spawning waits and retries instead of
-overlapping an occupied or invalid tile. The rescued villager, merchant, and
-introductory Necromancer retain their authored narrative anchors. At-most-once
-history, danger unlock, and Offline Protection remain authoritative. The
-rescued villager additionally waits for a completed normal Burrow, preserving
-the requested search, salvage, build, then rescue order without a parallel
-tutorial state machine.
+The first successful owner Shipwreck investigation is the authoritative
+survivor-discovery beat. It records the search facts, reveals that someone is
+trapped in the wreck, and arms the run's single randomized wave of one to three
+Giant Rats. Repeated investigation cannot replay the discovery, create another
+opening wave, or schedule another rescue. The investigation counts only if its
+timed action completes while the living hero is still investigating, remains
+adjacent to the Shipwreck, and is outside the combat lock. Movement, death, or
+combat contact—including damage that does not otherwise establish a combat
+lock—cancels that attempt without recording discovery or arming the wave; the
+player can investigate again once it is safe. The
+successful investigation replaces the old 90-second hostile deadline with a
+one-second post-search grace. With the encounter system's one-second polling
+cadence, the rats appear within roughly one to two seconds. They spawn on the Shipwreck tile and
+immediately fan out to distinct, spatially separated passable adjacent tiles.
+If fewer safe adjacent tiles are available, only the rats with reserved paths
+move and the blocked remainder stay on the wreck. These scripted opening rats
+use a dedicated 6 HP, 0 defense combat profile so ordinary precise Sharpened
+Stick attacks from every novice class defeat one in two to three landed hits.
+Their Giant Rat base damage is doubled from 2 to 4 to keep the shorter fight
+dangerous. Ambient Giant Rats retain their normal template statistics.
+
+The rat wave deliberately interrupts settlement work. While any opening rat
+is active, `win_first_fight` temporarily takes priority over an unfinished
+`build_burrow` recommendation. Normal server combat-lock behavior cancels a
+hero's peaceful Building action after combat contact, but the Burrow
+foundation, staged materials, and accumulated construction work remain. Once
+the threat is clear, guidance returns to the unfinished Burrow instead of
+restarting either task.
+
+The rescued villager is scheduled exactly once only after both independent
+facts are true: the entire randomized opening wave has been defeated and the
+player owns a completed normal Burrow. Either fact may be completed first. No
+elapsed-time-only path can release the villager; the former fixed 1,100-tick
+distress call and 1,110-tick rescue-eligibility gate are removed. The rescued
+villager, merchant, and introductory Necromancer retain their authored
+narrative anchors. After every rat is defeated and the existing later phase
+gates are reached, the Wild Boar/Giant Crab follow-up and then the Spider each
+choose a randomized valid, passable, reachable, unoccupied tile two to four
+tiles from the run's assigned hero start. If no safe candidate exists, spawning
+waits and retries instead of overlapping an occupied or invalid tile.
+At-most-once history, danger unlock, and Offline Protection remain
+authoritative, preserving the search, salvage, complete-the-fight-and-build,
+then rescue flow without a parallel tutorial state machine.
 
 The exact implementation surface for this follow-up is:
 
@@ -78,7 +143,11 @@ The exact implementation surface for this follow-up is:
   grace, Burrow-aware intro/objective flow, and focused regressions;
 * `sp_server/src/headless.rs`, `headless_bot.rs`, and
   `bin/headless_runner.rs` — production-path opening, reconnect, and reporting
-  fixtures that currently assume a free Burrow and hero-carried equipment.
+  fixtures updated to recover Shipwreck salvage and build the normal Burrow.
+* `sp_frontend/sp_ts/src/sp/core/` — observer-source tracking, incremental
+  visibility reconciliation, and shared fire presentation;
+* `sp_frontend/sp_ts/src/sp/desktop/` — the public Campfire action and
+  desktop-only lit-Campfire animation.
 
 No map, resource node, global item template, recipe, production, crisis,
 weather, persistence, database, or deployment redesign is part of this
@@ -113,6 +182,76 @@ follow-up.
   victory; the focused production-opening test is the deterministic proof that
   salvaging the five Logs and normal Burrow construction complete.
 
+The event-driven rescue sequencing described above supersedes the fixed
+distress/rescue timing exercised by this earlier validation record. The current
+source adds focused regressions for interrupted and retryable investigation,
+same-update combat and lethal damage, the one-second post-search grace,
+Burrow-first and rats-first rescue ordering, reconnect/idempotency, partial
+Burrow preservation, public Campfire ignition, overlapping light bubbles,
+burnout, shelter compatibility, observer-source policy, and desktop fire
+presentation.
+
+During the 2026-07-27 documentation sync, formatting and compilation passed but
+the full library test target exposed five current-worktree failures. One
+Campfire visibility test could not find its randomized second passable step;
+the production opening bot observed the rat wave earlier than its fixture
+expected; and the three class-combat fixtures did not finish setup within the
+post-search grace. These failures are not rewritten as passing
+by the older validation record above, and this documentation-only change does
+not alter their source fixtures. A focused Campfire test rerun passed, showing
+that failure is sensitive to randomized start geometry; a focused opening-bot
+rerun reproduced the unexpected spawn-state assertion.
+
+## Desktop Tutorial and Help follow-up
+
+The desktop Survival Thread now serves as the Tutorial and Help surface without
+introducing a second objective model. The existing server-authoritative
+`objective_state` packet remains the source for the current task, lesson,
+action hint, blocker, and progress. Crisis and Safe Logout continue to use the
+same outer panel but remain independent of whether tutorial guidance is
+enabled.
+
+Tutorial guidance is enabled by default. A keyboard-accessible desktop toggle
+stores an explicit, versioned preference per player in browser `localStorage`.
+Disabling it hides objective guidance and cancels tutorial reminders without
+hiding Crisis or Safe Logout controls. Objective snapshots continue updating
+while disabled so re-enabling immediately shows the authoritative current
+step. The preference survives reconnect, True Death, and a new run; it is a
+desktop-browser preference rather than a new database field.
+
+When an enabled tutorial objective remains unchanged for 60 seconds of
+eligible foreground play, the desktop panel displays a dedicated hint using
+the objective's existing action hint and optional blocker. An unchanged task
+can repeat at most once every 120 seconds. Progress, objective changes,
+reconnect, run reset, or re-enabling restart the grace period. Hidden tabs,
+stale objective delivery, hero death, active combat, urgent personal crisis,
+and pending or protected Safe Logout defer reminders. Hints render inside the
+Tutorial and Help presentation rather than entering the normal notification
+stack.
+
+The protocol's generic `Notice` packet has no presentation category, and its
+scheduled opening notices are shared by desktop and mobile. To keep this
+checkpoint desktop-only, the desktop shell narrowly consumes the two exact
+opening instructional notices and removes its own duplicate Shipwreck nudge.
+Other alerts and completion feedback remain transient notices. Server
+scheduling and all mobile source and behavior are unchanged; a typed tutorial
+notice category remains a possible later protocol cleanup when the mobile
+design is revisited.
+
+The implementation surface is limited to the desktop UI shell, desktop
+Survival Thread panel, desktop-only preference/hint/routing helpers and their
+focused tests, plus this record. It adds no server system, network packet,
+database write, gameplay rule, or mobile UI change.
+
+The required validation for this follow-up is the supported
+`npx tsc --noEmit --skipLibCheck` check, the cross-fork import guard, focused
+tutorial policy/preference/routing and ObjectivesPanel component checks, and a
+finite production Webpack build. Browser QA at 1440×900 and the compact
+1024×900 desktop breakpoint should cover the On/Off control, expanded and
+collapsed hint layouts, Open guide and Dismiss actions, and a clean console.
+That browser check is a manual acceptance item, not implied by source-level
+tests.
+
 ## Scope and checkpoint plan
 
 Milestone 5 has two checkpoints:
@@ -140,18 +279,21 @@ encounter-history and objective fixes remain current.
   corpses, hidden introductory Necromancer and Mausoleum, offshore merchant,
   and fresh runtime introduction state. At that checkpoint it preallocated two
   opening-enemy IDs. The Shipwreck includes ten existing Logs and ten Hides;
-  the existing Stockade (three Logs, 30 work) and Crafting Tent (five Logs,
+  the existing Stockade (ten Logs, 30 work) and Crafting Tent (five Logs,
   five Hides, 100 work) rules remain the early construction path.
 * The historical `InitialEncounterState` schedule used Cave Bats at 900 and
   1,200 ticks, a survivor call at 1,100 ticks and rescue eligibility at 1,110
   ticks, the Wild Boar/Giant Crab follow-up gate at 2,600 ticks, and the Spider
-  gate at 3,600 ticks. The current opening instead uses one delayed one-to-three
-  Giant Rat wave and randomized follow-up positions as described above.
-  `PlayerIntroState` owns broad introduction/danger facts;
+  gate at 3,600 ticks. The current opening removes the fixed survivor call and
+  rescue deadline. It uses the first successful Shipwreck investigation for
+  discovery, one delayed one-to-three Giant Rat wave, the completed-Burrow plus
+  all-rats-defeated rescue gate, and randomized follow-up positions described
+  above. `PlayerIntroState` owns broad introduction/danger facts;
   `IntroEncounterState` owns follow-up phase facts.
-* Investigating the Shipwreck records `scavenge_shipwreck` and the existing
-  `explore_poi` fact. Once the survivor readiness time is reached, the
-  inspection schedules the rescued villager. That villager is created already
+* The first successful Shipwreck investigation records `scavenge_shipwreck`
+  and the existing `explore_poi` fact, reveals the survivor, and arms the one
+  opening wave. The rescued villager is queued only after the entire wave is
+  defeated and a normal Burrow is complete. That villager is created already
   owned by the player with zero base damage and a Crude Torch, shares the
   existing Watchtower plan, and schedules the merchant after 1,800 ticks and
   introductory Necromancer after 3,000 ticks.
@@ -159,8 +301,8 @@ encounter-history and objective fixes remain current.
   emits the existing `objectives` and `objective_state` packets. The desktop
   Survival Thread selects the one `active` row while continuing to display the
   remaining rows.
-* True Death removes only that player's three introduction resources,
-  objectives, run objects, and start assignment. A successful fresh run
+* True Death removes only that player's introduction resources, objectives,
+  run objects, and start assignment. A successful fresh run
   initializes new state. Ordinary reconnect retains state; Offline Protection
   freezes the existing introduction deadlines and systems.
 * `PlayerIntroState.danger_unlocked` remains the personal-crisis gate at 4,800
@@ -181,10 +323,13 @@ encounter-history and objective fixes remain current.
 2. **Authoritative early recommendation.** The packet currently recommends
    Campfire before opening combat even though a fresh run already owns a lit
    Campfire, and its static copy cannot describe a waiting encounter. The
-   existing objective facts will drive one ordered recommendation: inspect the
-   Shipwreck, defeat the opening threat, establish/use the existing Campfire,
-   meet the survivor, put the settler to work, complete a basic settlement, and
-   choose an expansion. No action is made mandatory by this ordering.
+   existing objective facts drive the opening recommendation: inspect the
+   Shipwreck, recover supplies and build the Burrow, temporarily prioritize the
+   opening fight whenever its rats are active, then return to unfinished
+   construction. Only after both the completed Burrow and defeated wave does
+   guidance advance to meeting the survivor, putting the settler to work,
+   completing a basic settlement, and choosing an expansion. Guidance does not
+   automate combat, construction, rescue, or assignment.
 3. **First-villager purpose.** The rescued villager is already player-owned, so
    `recruit_villager` completes as soon as the entity appears and gives no
    actionable work step. The existing objective resource will record a
@@ -261,7 +406,7 @@ Safe Logout, map, and deployment files are unchanged.
   follow-ups. This validation record predates the current Giant Rat wave and
   randomized follow-up placement.
   The settlement smoke used the lit Campfire, rescued unarmed villager, real
-  assignment, three existing Shipwreck Logs, and normal Stockade work to reach
+  assignment, ten fixture Shipwreck Logs, and normal Stockade work to reach
   three completed structures. The lifecycle smoke preserved encounter and
   recommendation state across ordinary reconnect, then verified True Death
   cleanup and fresh-run reset.

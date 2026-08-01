@@ -89,9 +89,6 @@ export interface SafeLogoutStatusView {
   reasonMessage: string | null;
 }
 
-export const SAFE_LOGOUT_CONDITIONS =
-  'Safe Logout takes 10 seconds. Remain inside your sanctuary, stay still, and avoid combat. Closing the game before it completes will not protect you.';
-
 export const SAFE_LOGOUT_ACTIVE_ASSAULT_WARNING =
   'Safe Logout is unavailable during an active assault. Disconnecting will not stop the assault.';
 
@@ -134,6 +131,10 @@ const REASON_MESSAGES: Record<KnownSafeLogoutReason, string> = {
   run_ended: 'Safe Logout ended with the previous settlement run.',
   unknown: 'Safe Logout is unavailable right now.',
 };
+
+// The player pressed Cancel themselves, so echoing the cancellation back is
+// noise; the card falls through to its normal guidance instead.
+const SILENT_REASONS = new Set<string>(['manually_cancelled']);
 
 const INTERACTION_FEEDBACK_REASONS = new Set<string>([
   'assault_active',
@@ -208,9 +209,10 @@ export function safeLogoutStatusView(
   const protectedStatus = packet.state === 'protected' && packet.protected === true;
   const activeAssault = packet.active_assault === true;
   const reason = nonEmptyString(packet.reason);
+  const silentReason = reason !== null && SILENT_REASONS.has(reason);
   const reasonMessage = activeAssault
     ? SAFE_LOGOUT_ACTIVE_ASSAULT_WARNING
-    : safeLogoutReasonMessage(reason);
+    : silentReason ? null : safeLogoutReasonMessage(reason);
   const countdownSeconds = pending
     ? safeLogoutCountdownSeconds(packet.countdown_remaining_seconds)
     : null;
@@ -237,7 +239,9 @@ export function safeLogoutStatusView(
     countdownLabel: countdownSeconds === null
       ? null
       : `Safe in ${countdownSeconds} ${countdownSeconds === 1 ? 'second' : 'seconds'}`,
-    message: nonEmptyString(packet.message) || reasonMessage || fallbackMessage,
+    message: silentReason
+      ? fallbackMessage
+      : nonEmptyString(packet.message) || reasonMessage || fallbackMessage,
     reason,
     reasonMessage,
   };

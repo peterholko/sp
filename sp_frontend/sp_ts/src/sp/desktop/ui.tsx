@@ -82,6 +82,7 @@ import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
 import ZoomButton from './ui/zoomButton';
 import ObjectivesPanel from './ui/objectivesPanel';
+import { isDesktopTutorialNotice } from './ui/tutorialNoticeRouting';
 
 interface NoticeNotification {
   id: number,
@@ -197,13 +198,13 @@ interface UIState {
   combatState: any,
   combatTelegraphs: any,
   inCombatZoom: boolean,
+  protectionRevision: number,
 }
 
 export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
   private heroDeathOverlayTimer: any = null;
   private nextNotificationId: number = 1;
-  private firstActionNudgeShown: boolean = false;
   // BB-A: per-attacker expiry timers, keyed by attacker_id. An entry is dropped
   // only when its attacker stops telegraphing (died/fled/disengaged).
   private telegraphTimers: { [id: number]: any } = {};
@@ -318,6 +319,7 @@ export default class UI extends React.Component<any, UIState> {
       combatState: null,
       combatTelegraphs: {},
       inCombatZoom: false,
+      protectionRevision: 0,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -441,6 +443,17 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.NEW_ITEMS, this.handleNewItems, this);
     Global.gameEmitter.on(NetworkEvent.DMG, this.handleDamage, this);
     Global.gameEmitter.on(NetworkEvent.STATS, this.handleStats, this);
+    Global.gameEmitter.on(
+      NetworkEvent.PROTECTED_SETTLEMENTS,
+      this.handleProtectedSettlements,
+      this,
+    );
+  }
+
+  handleProtectedSettlements() {
+    this.setState((state) => ({
+      protectionRevision: state.protectionRevision + 1,
+    }));
   }
 
   handleMoveClick(event: React.MouseEvent) {
@@ -838,7 +851,8 @@ export default class UI extends React.Component<any, UIState> {
   handleCombatState(message) {
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
-    const inCombat = attackHistory.length > 0 || hasComboHint;
+    const hasTargetEffects = message && Array.isArray(message.target_effects) && message.target_effects.length > 0;
+    const inCombat = attackHistory.length > 0 || hasComboHint || hasTargetEffects;
 
     if (inCombat && !this.state.inCombatZoom) {
       Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
@@ -850,7 +864,7 @@ export default class UI extends React.Component<any, UIState> {
 
     this.setState({
       combatState: message,
-      hideAttacksPanel: attackHistory.length == 0 && !hasComboHint,
+      hideAttacksPanel: attackHistory.length == 0 && !hasComboHint && !hasTargetEffects,
     });
   }
 
@@ -1063,6 +1077,10 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleNotice(message) {
+    if (isDesktopTutorialNotice(message.noticemsg)) {
+      return;
+    }
+
     this.enqueueNotice(message.noticemsg, message.expiry || Global.noticeExpiry);
   }
 
@@ -1829,18 +1847,6 @@ export default class UI extends React.Component<any, UIState> {
 
   handleWorld(message) {
     this.setState({ worldData: message });
-
-    // QW3: on first entry into the world, give the player an immediate,
-    // unmistakable first action so they aren't dropped on the map unsure what
-    // to do. Shown once per session; the Survival Thread panel carries the
-    // ongoing step-by-step guidance from here.
-    if (!this.firstActionNudgeShown) {
-      this.firstActionNudgeShown = true;
-      this.enqueueNotice(
-        "Inspect the Shipwreck first. Your Campfire is already lit; stay near it when threats approach.",
-        15000
-      );
-    }
   }
 
   getAbilityHints() {
@@ -1925,7 +1931,7 @@ export default class UI extends React.Component<any, UIState> {
 
         <SmallButtonClassName handler={this.handleComboClick}
           imageName="combobutton"
-          className={styles.combobutton}
+          className={`${styles.combobutton} ${this.state.combatState?.available_finisher ? styles.combobuttonReady : ''}`}
           title="Combo Finisher — unleash a combo when one is available" />
 
         <ActionButton type={QUICK}

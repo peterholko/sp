@@ -1,15 +1,17 @@
 # Known Issues
 
 Findings from the 2026-06-10 instrumented-play analysis (5 headless bot runs +
-105 recorded runs in `scores`, cross-checked against code). Everything below
-is still open, ordered by priority.
+105 recorded runs in `scores`, cross-checked against the source at that time).
+This is a dated issue ledger, not the current design source of truth. The
+applicability notes below were refreshed against the 2026-07-27 checkout;
+individual defects remain open unless explicitly marked fixed.
 
 Already fixed from that analysis:
 
 - Hero needs warnings, death economy (flat first-death cost + needs reset on
   resurrect), nightly-wave pursuit, and needs/crisis pacing — commit
   `Survival fixes: needs warnings, death economy, wave pursuit, pacing`.
-- The three run-poisoning bugs: stale-session login dead-end (sp_axum now
+- The three run-poisoning bugs: stale-session login dead-end (`sp_axum` now
   rotates sessions older than 20h in `/auth` and `/fingerprint-auth`), dirty
   start-location recycling (True Death now removes the player's objects, the
   run's spawns tracked in `RunSpawnedObjs` — setup POIs, nightly waves,
@@ -17,8 +19,12 @@ Already fixed from that analysis:
   `RUN_CLEANUP_RADIUS` of camp; clears the per-run intro/encounter/objectives
   state that kept spawning enemies after death; purges pending map events for
   removed objects, which otherwise panicked the server; and refills the bound
-  monolith's Soulshards to the starting 10), and the Burrow's 50 starting gold
-  instantly triggering the tier-3 raid (now 20, under the 30-gold threshold).
+  monolith's Soulshards to the starting 10), and starter wealth immediately
+  triggering legacy crisis pressure.
+
+  The later opening redesign superseded the old Burrow inventory fix. Fresh
+  runs now start without a completed Burrow; the run-owned Shipwreck contains
+  10 Gold Coins and the five Logs used to build the normal Burrow.
 
   Minor residual: the POI-guard `SpawnNPC` game events scheduled at setup
   (+6000 ticks) are not player-attributed; if a run ends before they fire,
@@ -27,7 +33,13 @@ Already fixed from that analysis:
 
 ---
 
-## Open balance / scoring items
+## Open legacy-director / scoring items
+
+The production and headless default is now
+`SurvivalDirectorMode::PersonalCrisis`. The automatic nightly and legendary
+systems discussed in issues 4–6 remain compiled only in
+`SurvivalDirectorMode::Legacy`. The score fields they feed still exist, but
+these issues do not describe the default personal-crisis attack scheduler.
 
 ### 4. Score barely discriminates play quality (S/M)
 
@@ -55,7 +67,7 @@ prepare-and-survive design. Batch followers into the nightly dusk pulse
 (bigger nights, calm days) instead. Unverified in play: no run has yet
 survived to day 7.
 
-### 6. Day-8+ content has never been play-tested (verification task)
+### 6. Legacy day-8+ content has never been play-tested (verification task)
 
 The survival director (day ≥ 8), the day-8/10/12/14/16/18 horde composition
 tables, the legendary arc combat, hideout clearing, and Monolith sealing have
@@ -67,13 +79,14 @@ run to day 8–10; tune whatever breaks first.
 
 ## Open feedback / legibility items
 
-### 7. Threat panel UI is built, fed, and switched off (S)
+### 7. Generic threat/discovery detail UI is fed and intentionally hidden (S)
 
 The server sends `threat_state` (pressure level, known risks with thresholds,
-next-night warning) every 5 seconds, and the client has handlers — but the
-panel render is commented out in `ObjectivesPanel`
-(`sp_frontend/sp_ts/.../objectivesPanel.tsx`). `discovery_event` UI likewise.
-Re-enable once pressure (issue 4) is meaningful.
+next-night warning) every 5 seconds, and the client retains handlers/state. The
+current desktop Tutorial & Help surface intentionally omits the verbose Threat
+Pressure and Discovery sections while rendering objective, personal-crisis,
+and Safe Logout cards. Re-enable only if the generic data earns a clear
+player-facing role; do not confuse it with the structured personal-crisis card.
 
 ### 8. Hero HP is never pushed by the server (S)
 
@@ -111,6 +124,6 @@ the warning until the spawn succeeds.
   packet's `time_of_day` in the summary.
 - The system-prompt structure names ("Shelter", "Storage Box") are not valid
   templates — server returns `Invalid structure name`. Use real names
-  (Small Tent, Cache/Warehouse, Crafting Tent, ...).
+  (Shelter Tent, Cache/Warehouse, Crafting Tent, ...).
 - Hero HP in the agent summary is stale for the same reason as issue 8 —
   poll `get_stats` after combat events, or fix issue 8.

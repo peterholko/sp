@@ -8,6 +8,7 @@ pub const ATTACK_COOLDOWN_TICKS: i32 = 50; // 5 seconds at 10 ticks/sec
 pub const NPC_ATTACK_JITTER_TICKS: i32 = 5; // up to 0.5s at 10 ticks/sec
 pub const BASE_MOVE_TICKS: f32 = 100.0;
 pub const BASE_SPEED: f32 = 1.0;
+pub const INVESTIGATE_TICKS: i32 = 20;
 
 pub const MERCHANT_PLAYER_ID: i32 = 2000;
 pub const MONOLITH_PLAYER_ID: i32 = 2000;

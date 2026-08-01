@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::combat::CombatQuery;
 use crate::constants::*;
-use crate::effect::{Effect, Effects};
+use crate::effect::{ControlEffectDiminishingReturns, Effect, Effects};
 use crate::event::{MapEvents, VisibleEvent};
 use crate::game::{GameTick, ObjQueryMut};
 use crate::ids::{EntityObjMap, Ids};
@@ -436,6 +436,7 @@ pub fn is_peaceful_interruptible_state(state: &State) -> bool {
         state,
         State::Building
             | State::Gathering
+            | State::Investigating
             | State::Refining
             | State::Operating
             | State::Mining
@@ -789,6 +790,9 @@ pub struct WorkQueue(pub Vec<WorkEntry>);
 #[derive(Debug, Clone)]
 
 pub struct WorkEntry {
+    /// Stable server-side identity used to tie this queue job to its timed
+    /// event. The network continues to expose list indexes for compatibility.
+    pub entry_id: i32,
     pub worker_id: i32,
     pub work_type: WorkType,
     pub work_status: WorkStatus,
@@ -990,6 +994,7 @@ pub struct Obj {
     pub misc: Misc,
     pub stats: Stats,
     pub effects: Effects,
+    pub control_effect_dr: ControlEffectDiminishingReturns,
     pub inventory: Inventory,
     pub last_combat_tick: LastCombatTick,
 }
@@ -1038,6 +1043,7 @@ impl Obj {
                 base_vision: template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: obj_id,
                 items: Vec::new(),
@@ -1109,6 +1115,7 @@ impl Obj {
                 base_vision: template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: inventory,
             last_combat_tick: LastCombatTick::default(),
         };

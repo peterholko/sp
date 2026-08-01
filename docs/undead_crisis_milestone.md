@@ -2,13 +2,18 @@
 
 ## Status and checkpoint boundary
 
-Checkpoint 1, **Multi-Crisis Foundation and Undead Pre-Assault Progression**, is
-complete on the latest `main`. Checkpoint 2, **Undead Assault Lifecycle and
-Feature Validation**, is implemented and validated on
-`undead_crisis_milestone`. It completes the second personal crisis by extending
-the existing personal-assault lifecycle by `CrisisKind`; it does not introduce
-another scheduler, balance candidates, a new runner, broad telemetry, or a
-third crisis.
+Checkpoint 1, **Multi-Crisis Foundation and Undead Pre-Assault Progression**,
+and Checkpoint 2, **Undead Assault Lifecycle and Feature Validation**, are
+implemented and validated in the current source. The milestone completes the
+second personal crisis by extending the existing personal-assault lifecycle by
+`CrisisKind`; it does not introduce another scheduler, balance candidates, a
+new runner, broad telemetry, or a third crisis.
+
+The architecture findings below intentionally preserve the pre-implementation
+state each checkpoint audited. They are not claims that the current source
+still hardcodes a Goblin-only `CrisisKind` or stops Undead at
+`AssaultReady`. The selected runtime design and Checkpoint 2 implementation
+sections describe the resulting code.
 
 The milestone has two checkpoints:
 

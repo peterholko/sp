@@ -1,193 +1,169 @@
-# In-Process Headless Test Harness — Implementation Plan
+# In-Process Headless Harness — Current Architecture
 
-> Status: **implemented.** This document is the build brief for the in-process Rust test harness
-> that drives the Bevy game `App` directly so we can run many full games quickly for
-> balance/metrics testing.
->
-> Implementation lives in `src/headless.rs` (`HeadlessGame` + `RunMetrics` + smoke test),
-> `src/headless_bot.rs` (deterministic `Bot`), and `src/bin/headless_runner.rs` (multi-game
-> runner → `headless_runs.{csv,json}` + summary). The setup split is in `src/game.rs`
-> (`world_init`/`network_init`/`new_game_setup_headless`, `GamePlugin.headless`) and the headless
-> app builder + shared `register_all_types` are in `src/lib.rs` (`build_headless_app`).
->
-> Run with: `cargo run --bin headless_runner [N] [MAX_TICKS]` and
-> `cargo test --lib headless::tests::smoke`. Must run via cargo (the map loads relative to
-> `CARGO_MANIFEST_DIR`).
->
-> Notes from the build:
-> - The hero's `player_id` is **1** (`< MAX_PLAYER_ID` so it counts as human); 1000 is the NPC id.
-> - Movement is single-hex-step: the server's `MoveEvent` only accepts a destination adjacent to
->   the mover, so the bot greedily steps toward targets and only acts while the hero is idle.
-> - Runs are **not** bit-identical across the same bot because the game uses `rand::thread_rng()`
->   in ~50 places (world gen, enemy choice, loot, combat rolls). Isolation is instead guaranteed
->   structurally (a fresh `App` per run; no shared mutable statics) and observed empirically:
->   back-to-back runs match on every metric except RNG-driven combat hp.
-> - The runner found and the build fixed a latent crash: `Map::is_passable` indexed out of bounds
->   when `goblin_raid_system` placed a spawn off-map; both passability helpers now bounds-check.
->   The runner also wraps each game in `catch_unwind` so any future game panic is recorded as a
->   `Panic` outcome instead of aborting the batch.
+## Status
 
-## Context
+Implemented. The current harness drives the production gameplay plugin graph
+and server-authoritative systems while replacing the TLS WebSocket,
+PostgreSQL, filesystem snapshot, and real-time schedule runner with in-process
+channels and explicit `App::update()` calls.
 
-`sp_server` (Siege Perilous) can today only be played over the real client path:
-WebSocket-over-TLS → session cookie validated against PostgreSQL `sessions` → class selection →
-real-time play at 10 ticks/sec. An existing Python LLM agent (`sp_agent/`) automates a single
-session but inherits all that friction (needs `sp_axum` + Postgres + TLS + a registered account,
-runs in wall-clock real time, one game at a time, costs LLM tokens).
+Implementation lives in:
 
-To **run many full games quickly for balance/metrics testing**, we remove the
-network/auth/real-time barriers and drive the game directly. The chosen approach is an
-**in-process Rust harness**: build the Bevy `App` directly (no TLS / no WebSocket / no Postgres /
-no real-time scheduler), drive it with a **deterministic scripted bot**, fast-forward ticks by
-pumping `app.update()`, run N games back-to-back, and emit per-run + aggregate **metrics**.
+- `src/lib.rs` — shared type registration plus
+  `build_headless_app[_with_director]`;
+- `src/game.rs` — shared world initialization and the production/headless
+  `GamePlugin` split;
+- `src/headless.rs` — `HeadlessGame`, world snapshots, fixtures, packet capture,
+  telemetry, and regression scenarios;
+- `src/headless_bot.rs` — the deterministic scripted action policy; and
+- `src/bin/headless_runner.rs` — repeated-run execution, CSV/JSON output, and
+  aggregate reporting.
 
-### Why this is feasible (verified in code)
+Run Cargo commands from `sp_server/`. Template paths and several data paths are
+relative to that working directory.
 
-- **Fast-forward is free**: there are **zero** `Res<Time>` / `Instant::now` / `tokio::time` /
-  `thread::sleep` usages in `sp_server/src`. The game is 100% `GameTick`-driven (incremented once
-  per `Update` in `update_game_tick`, game.rs ~14880). Looping `app.update()` advances game time
-  deterministically with no wall-clock waiting.
-- **Output capture is trivial**: `send_to_client` (network.rs:1406) just does
-  `client.sender.try_send(json)` over a `tokio::sync::mpsc::Sender<String>`. `try_send`/`try_recv`
-  need no running runtime — the harness inserts a `Client` and drains the receiver.
-- **Input injection is trivial**: actions are `PlayerEvent`s (player.rs:99-493) pushed into the
-  `NetworkReceiver` crossbeam channel (game.rs:93) and drained by `message_broker_system`
-  (player.rs ~755, one event per `update()`). Hero creation = inject
-  `PlayerEvent::NewPlayer { player_id, hero_name, class_name }` (exactly what
-  `handle_selected_class` sends, network.rs:2726).
-- **DB never touched**: all env/TLS/Postgres reads live inside `tokio_setup`; by not spawning it,
-  the headless path never touches them. One guard needed: `send_to_database` (network.rs:1421)
-  does `.get(&DATABASE_MANAGER_ID).unwrap()` → harness must register a **dummy** `DatabaseClient`.
-- **Multi-game isolation is clean**: the only global statics are `LOG_RELOAD_HANDLE` (logging) and
-  `TILESET` (cosmetic image cache) — neither holds per-game mutable state. All game state lives in
-  the App's `World`/resources, so dropping & recreating a `HeadlessGame` between runs fully isolates.
+## Runtime shape
 
-## Approach
+Production calls `setup()` with:
 
-Additive only — the existing `setup()` and `tokio_setup` networked path stays byte-for-byte
-identical. New headless code compiles into the lib as extra functions + modules (no cargo feature
-needed).
+- Bevy state, asset, scene, task-pool, frame-count, logging, and
+  `ScheduleRunnerPlugin` plugins;
+- `GamePlugin { headless: false }`; and
+- the Tokio TLS WebSocket/PostgreSQL initialization path.
 
-### 1. Server-side decoupling — `src/lib.rs`, `src/game.rs`
+The harness calls `build_headless_app_with_director()` with the same gameplay
+plugins and reflect registration, but without `ScheduleRunnerPlugin`,
+`LogPlugin`, or the production filesystem snapshot system. `HeadlessGame`
+supplies:
 
-**a) Split `Game::new_game_setup` (game.rs:1545-~1674)** into:
-   - `Game::world_init(...)` — world build only (spawn resources, terrain, recipes, prices, and
-     insert `GameTick`/`MapEvents`/`Objectives`/`RunScoreState`/`VictoryState`/`CrisisState`/etc).
-     **Excludes** the three network resources and the `tokio_setup` spawn (game.rs ~1582-1597,
-     ~1646-1648).
-   - `Game::network_init(...)` — the extracted network portion (crossbeam channel, `tokio_setup`
-     spawn, insert `NetworkReceiver`/`Clients`/`DatabaseManagers`).
-   - Keep `new_game_setup` as a thin wrapper calling both + `next_state.set(Running)` — **behavior
-     preserving** for the production path.
+- a real `NetworkReceiver` channel for normal `PlayerEvent` ingress;
+- an authoritative `Clients` entry with bounded packet capture;
+- a dummy database channel so production database-send seams remain present
+  without contacting PostgreSQL; and
+- a fresh Bevy `App` for each run.
 
-**b) Add `headless: bool` to `GamePlugin`** (struct at game.rs:1205, `impl Default` at 1209). In
-   `GamePlugin::build` (game.rs:1216), when `headless`, register `Game::new_game_setup_headless` on
-   `PreStartup` instead of `new_game_setup`. The headless variant calls `world_init` +
-   `next_state.set(Running)` only. **All other GamePlugin sub-plugins and ~50 Update systems are
-   kept identical** — they are pure game logic and must run.
+`HEADLESS_PLAYER_ID` is `1`, which is inside the server's human-player range.
+Additional helpers can create connected players for multiplayer, authority,
+disconnect, reconnect, and Safe Logout scenarios.
 
-**c) Refactor the ~70 `register_type` calls** (lib.rs:134-200) into a shared
-   `register_all_types(app: &mut App)` used by both `setup()` and the new headless builder, to
-   guarantee identical reflect registry.
+The game is tick-driven. Pumping `app.update()` advances `GameTick` without a
+wall-clock sleep. World generation, combat, loot, and other production systems
+still call runtime RNG, so the scripted bot is deterministic but repeated
+whole-game results are not bit-identical.
 
-**d) Add `build_headless_app() -> App`** in lib.rs:
-   - Include: `StatesPlugin`, `AssetPlugin`, `ScenePlugin`, `TaskPoolPlugin` (provides the IoTaskPool
-     AssetPlugin needs), `FrameCountPlugin`, `GamePlugin { new_game: true, headless: true }`,
-     `init_state::<AppState>()`, `register_all_types`, `init_asset::<DynamicScene>()`.
-   - **Exclude**: `ScheduleRunnerPlugin::run_loop` (no real-time loop — harness pumps manually) and
-     `LogPlugin` (omit for quiet/speed; `LOG_RELOAD_HANDLE` simply stays `None`).
-   - Add `pub mod headless;` / `pub mod headless_bot;` and re-export `ResponsePacket` for the harness.
+## Input, observation, and packet behavior
 
-### 2. Harness — `src/headless.rs` (new)
+The harness creates heroes with the production `PlayerEvent::NewPlayer` path.
+Actions are also normal `PlayerEvent` values. The player message broker
+consumes one queued event per update, so callers inject at most one decision
+and then advance the game before making another.
 
-`HeadlessGame` owning: `app: App`, `player_id`, `event_tx: crossbeam Sender<PlayerEvent>`,
-`packet_rx: tokio mpsc Receiver<String>`, `_db_rx` (kept alive to satisfy the dummy manager),
-`tick_count`, `max_ticks`.
+The bot reads an owned `WorldView` snapshot rather than reimplementing
+perception JSON. The view currently exposes:
 
-- `new(max_ticks)` — `build_headless_app()`, create the crossbeam event channel + tokio packet/db
-  channels, insert `NetworkReceiver(event_rx)`, an empty `Clients`, and a `DatabaseManagers` holding
-  a dummy `DatabaseClient { sender: db_tx }` under `DATABASE_MANAGER_ID`. Pump 2 `update()`s to run
-  `PreStartup` world-init → transition to `Running` → `OnEnter(Running)` init.
-- `spawn_hero(class, name) -> i32` — pick a deterministic `player_id` (e.g. 1000), insert a
-  matching `Client { player_id, sender: packet_tx.clone() }` into `Clients` so `send_to_client`
-  reaches us, inject `PlayerEvent::NewPlayer{..}`, then `tick(8)` to let the hero spawn.
-- `inject(PlayerEvent)`, `tick(n)` (loop `app.update()`), `drain_packets() -> Vec<ResponsePacket>`,
-  `world()` / `app_mut()` accessors, `game_tick()`, `is_over()` (max_ticks OR `VictoryState`
-  win OR hero `TrueDeath`/missing), `metrics() -> RunMetrics`.
-- **Bot reads `World` directly** via queries (`Position`, `Stats`, `Skills`, `Inventory`, `State`,
-  nearby entities) rather than parsing perception JSON — simpler and deterministic. `drain_packets`
-  is mainly for assertions/debug.
-- **Pacing constraint**: `message_broker_system` drains **one** event per `update()` (player.rs
-  `if let Ok`). So inject one action per decision step, then `tick(N)` — the runner loop does this
-  naturally. (Do **not** change the broker to a `while let` loop — that would alter production
-  behavior.)
+- hero state, class, needs, resources, position, and death state;
+- carried item facts needed by the survival policy;
+- enemies and personal-assault attribution;
+- villagers, POIs, the run-owned Shipwreck, merchant, monolith, corpses, and
+  structures;
+- discovered resource tiles and map occupancy; and
+- game tick, day, and current personal-crisis phase.
 
-### 3. Scripted bot — `src/headless_bot.rs` (new)
+Outgoing production packets are drained every update. Sparse packet types can
+be retained for assertions and telemetry without allowing a bounded channel to
+fill during long simulations.
 
-Deterministic, phase-based `Bot` (no RNG, or per-run seeded). `step(&HeadlessGame) -> Option<PlayerEvent>`
-reads World, decides one action. Phases: `Bootstrap → Survive → Gather → Build → Fight → Explore →
-Done`, transitioning on `Objectives`/`RunScoreState`/day count. Action emitters map to `PlayerEvent`
-variants (`Move`, `Gather`, `Craft`, `StructureCraft`, `Attack`, `Harvest`, …). Helpers
-`nearest_resource_node`, `nearest_enemy`, `path_step_toward` use the `Map` resource + `Position`
-queries. `DECISION_TICKS` ≈ 4-10 per step (server actions resolve over several ticks).
+## Current scripted bot
 
-### 4. Multi-game runner — `src/bin/headless_runner.rs` (new) + `[[bin]]` in `Cargo.toml`
+The current phase enum is:
 
 ```text
-for i in 0..N {
-    let mut g = HeadlessGame::new(MAX_TICKS);     // fresh App = isolation
-    let pid = g.spawn_hero("Warrior", &format!("Bot{i}"));
-    let mut bot = Bot::new(pid);
-    while !g.is_over() {
-        if let Some(ev) = bot.step(&g) { g.inject(ev); }
-        g.tick(DECISION_TICKS);
-        bot.advance_phase(&g);
-    }
-    results.push(g.metrics());                    // g dropped -> full cleanup
-}
-write_csv + write_json + print_summary(results);  // win rate, mean days survived, p50/p90 ticks
+Bootstrap -> Build -> Fortify -> Survive -> Done
 ```
 
-**`RunMetrics`** (derive `Serialize`), read from `RunScoreState` (waves/enemies/elites/captains/
-legendary kills, hideouts cleared, repairs, highest_pressure_level), `PlayerStats` (deaths),
-`Objectives` (all 10 bools), `VictoryState` (rescue_progress/prosperity/conquest), plus hero
-end-state (`final_hp`, skill total, inventory count, structures_built) and
-`outcome`/`ticks`/`days_survived`. **Read the actual struct field names in game.rs before wiring.**
+The bot prioritizes survival and immediate threats, then:
 
-## Critical files
+1. investigates the run-owned Shipwreck;
+2. manually transfers its salvage through the production item-transfer path;
+3. equips recovered class gear and the Sharpened Stick, with the Crude Hatchet
+   available for lumberjacking;
+4. builds a normal Burrow from the five recovered Logs;
+5. uses or replaces a Campfire when the selected policy requires one;
+6. cooks and stockpiles food, gathers, hires or assigns villagers, upgrades the
+   sanctuary, and builds Stockades according to the scenario policy; and
+7. explores deterministic waypoints when no higher-priority work exists.
 
-- `src/lib.rs` — `register_all_types`, `build_headless_app`, `pub mod headless;` /
-  `pub mod headless_bot;`, re-export `ResponsePacket`.
-- `src/game.rs` — split `new_game_setup` → `world_init`/`network_init`; add `headless` flag +
-  `new_game_setup_headless` in `GamePlugin::build` (~1216).
-- `src/headless.rs` *(new)* — `HeadlessGame`, `RunMetrics`, smoke test.
-- `src/headless_bot.rs` *(new)* — deterministic `Bot`.
-- `src/bin/headless_runner.rs` *(new)* — multi-game loop + CSV/JSON.
-- `Cargo.toml` — add `[[bin]] headless_runner`.
-- Read-only refs: `network.rs` (`send_to_client`/`send_to_database`/`tokio_setup`), `player.rs`
-  (`PlayerEvent`, `message_broker_system`, `new_player_system`). Existing protocol/state mapping in
-  `sp_agent/{tools.py,game_state.py}` is a useful reference for action/field names.
+The bot has class-valid combat policies for Warrior, Ranger, and Mage and
+scenario policies for passive, basic, prepared, fortified, villager-supported,
+helper-supported, disconnect, and Safe Logout runs.
 
-## Risks & mitigations
+The bot does not implement the parked Crafting Tent/Blacksmith gear ladder.
+See `docs/gear_progression_plan.md`.
 
-1. **Working-dir dependence (confirmed)** — `templates/*.yaml`, `map/*`, `tileset/*` load relative
-   to CWD. Harness, runner, and tests **must run with CWD = `sp_server/`** (existing tests already do).
-2. **`send_to_database` panic** — register a dummy `DatabaseClient` under `DATABASE_MANAGER_ID`.
-3. **`register_type` parity** — shared `register_all_types` keeps reflect registry identical.
-4. **Broker single-drain-per-tick** — pace one action per decision step (handled by the loop shape).
-5. **App drop isolation** — verify two back-to-back runs with the same deterministic bot produce
-   identical metrics (regression guard against hidden static state).
-
-## Verification
+## Runner command
 
 ```bash
-cd sp_server
-cargo build --bin headless_runner
-cargo run --bin headless_runner 100         # -> headless_runs.{csv,json} + summary stats
-cargo test --lib headless::tests::smoke -- --nocapture   # 1 short game, asserts world built + ticks>0
-cargo test                                  # ensure existing tests still pass (additive change)
+cargo run --bin headless_runner -- [N] [MAX_TICKS] [MODE] [SIDE]
 ```
 
-Expected: per-run lines then an aggregate summary (win rate, mean days survived, mean enemies
-killed, p50/p90 ticks), produced in seconds for many games (no sleeps, no I/O). The smoke `#[test]`
-lives in `headless.rs` and runs one capped game end-to-end.
+Defaults are 20 games, 120,000 ticks, and `standard`.
+
+| Mode | Purpose |
+| --- | --- |
+| `standard` | Normal scripted survival runs |
+| `safe-logout` | Bounded Safe Logout exercise |
+| `safe-logout-matrix` | Rotates through eight lifecycle, reconnect, disconnect, and multiplayer scenarios |
+| `goblin-balance` | Runs the class/scenario balance matrix and writes the Checkpoint 2-style report |
+
+`SIDE` applies only to `goblin-balance` and accepts `control` or `candidate`.
+The runner validates the selected label against the compiled
+Preparing/AssaultReady thresholds before writing a comparison report.
+
+Every run is wrapped in `catch_unwind`; a panic becomes a retained `Panic`
+result instead of aborting the batch. The normal artifacts are:
+
+- `headless_runs.csv`
+- `headless_runs.json`
+
+Both are ignored/generated evidence, not gameplay input.
+
+## Validation
+
+Focused smoke:
+
+```bash
+cargo test --lib headless::tests::smoke
+```
+
+Broader server validation:
+
+```bash
+cargo fmt --all -- --check
+cargo check
+cargo test --no-fail-fast
+```
+
+Bounded runner example:
+
+```bash
+cargo run --bin headless_runner -- 1 6000 standard
+```
+
+Gameplay milestones add focused tests to `src/headless.rs` instead of creating
+parallel simulation frameworks. Current coverage includes the revised opening,
+Campfire visibility and public ignition, personal Goblin and Undead lifecycles,
+Safe Logout freezing/resume, reconnect and True Death cleanup, multiplayer
+ownership, and balance telemetry.
+
+## Known limitations
+
+- A fresh `App` isolates runs, but production RNG prevents exact replay.
+- Several metrics and scenario fixtures remain Goblin-balance-specific; Undead
+  functional validation is primarily in focused headless tests.
+- The harness bypasses TLS, HTTP authentication, PostgreSQL, browser rendering,
+  and wall-clock scheduling. Separate protocol/client checks cover those
+  boundaries.
+- Runtime game data still needs the `sp_server/` working directory.
+- Standard runs can legitimately end in True Death or hit the tick cap; a
+  successful process exit is not evidence of a gameplay victory or final
+  balance.

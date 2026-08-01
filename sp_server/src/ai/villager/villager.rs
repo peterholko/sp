@@ -4,6 +4,7 @@ use bevy::{
     prelude::*,
 };
 use big_brain::prelude::*;
+use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
@@ -27,7 +28,7 @@ use crate::{
     map::{Map, MapPos, TileType},
     network::{send_to_client, ResponsePacket},
     obj::{Name, StartBuild, State, *},
-    player::{ActiveInfoType, ActiveInfos},
+    player::{ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents},
     recipe::Recipes,
     resource::{Resource, Resources},
     safe_logout::{
@@ -170,38 +171,33 @@ pub struct NoDrinks {
     pub at_tick: i32,
 }
 
-// A villager with no drink item of its own is heading to / drinking at a natural
-// water source (a revealed spring near base). Set by find_drink_system's fallback,
-// consumed by drink_action_system. Lets settlement villagers stay hydrated without
-// being handed waterskins.
+// A desperately thirsty villager is inspecting one adjacent tile for a spring.
+// The destination is chosen without reading hidden resources. TransferDrink
+// reveals and validates a spring only after arrival; Drink validates it again
+// before quenching thirst.
 #[derive(Debug, Clone, Component)]
-pub struct DrinkingFromWater;
+pub struct DrinkingFromWater {
+    pub pos: Position,
+}
 
-// How far a thirsty villager will look for a revealed spring to drink at.
-const VILLAGER_WATER_RANGE: i32 = 15;
-
-// Nearest natural water the villager can drink at, within `range`: a passable tile
-// that either holds a revealed spring (stand on it, like the hero) or sits beside a
-// river (drink from the bank). Rivers are always visible, so this gives villagers a
-// reliable water source even before the hero has prospected a spring nearby.
-fn nearest_water(pos: &Position, resources: &Resources, map: &Map, range: i32) -> Option<Position> {
-    for r in 0..=range {
-        for (x, y) in Map::ring((pos.x, pos.y), r) {
-            if !Map::is_valid_pos((x, y)) {
-                continue;
-            }
-            let tile = Position { x, y };
-            if !Resource::get_by_type(tile, SPRING_WATER.to_string(), resources, true).is_empty() {
-                return Some(tile);
-            }
-            if Map::is_passable(x, y, map)
-                && Map::are_tile_types_nearby(tile, vec![TileType::River], map)
-            {
-                return Some(tile);
-            }
-        }
-    }
-    None
+fn object_is_water_search_danger(
+    actor: Entity,
+    owner_player_id: i32,
+    pos: Position,
+    entity: Entity,
+    player_id: &PlayerId,
+    object_pos: &Position,
+    class: &Class,
+    state: &State,
+    state_dead: Option<&StateDead>,
+) -> bool {
+    entity != actor
+        && player_id.0 != owner_player_id
+        && player_id.0 != MERCHANT_PLAYER_ID
+        && class.0 == CLASS_UNIT
+        && state_dead.is_none()
+        && state.is_alive()
+        && Map::dist(pos, *object_pos) <= 2
 }
 
 #[derive(Debug, Clone, Component)]
@@ -2075,11 +2071,21 @@ pub fn process_order_system(
                         commands.entity(*actor).remove::<BlockedWork>();
                         *villager_state = State::Gathering;
 
+                        let base_seconds = if res_type == LOG { 30 } else { GATHER_TIME_SEC };
+                        let work_duration = villager_inventory
+                            .get_equipped_tool_for_res_type(res_type)
+                            .and_then(|tool| {
+                                item::required_tool_attr_for_res_type(res_type)
+                                    .map(|attr| tool.attr_num(&attr))
+                            })
+                            .map(|rating| item::gather_duration_ticks(base_seconds, rating))
+                            .unwrap_or(base_seconds * TICKS_PER_SEC);
+
                         // Add Game Event to start work
                         let event = GameEvent {
                             event_id: ids.new_map_event_id(),
                             start_tick: game_tick.0,
-                            run_tick: game_tick.0 + 1,
+                            run_tick: game_tick.0 + work_duration,
                             event_type: GameEventType::GatherEvent {
                                 gatherer_id: villager_id.0,
                                 res_type: res_type.clone(),
@@ -3338,14 +3344,21 @@ pub fn find_drink_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     map: Res<Map>,
-    resources: Res<Resources>,
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
-    mut villager_query: Query<VillagerQuery, With<SubclassVillager>>,
+    villager_query: Query<(&Id, &PlayerId, &Position, &Inventory, &Thirst), With<SubclassVillager>>,
     structure_query: Query<
         (&Id, &PlayerId, &Position, &Inventory),
         (With<ClassStructure>, Without<SubclassVillager>),
     >,
+    object_query: Query<(
+        Entity,
+        &PlayerId,
+        &Position,
+        &Class,
+        &State,
+        Option<&StateDead>,
+    )>,
     find_event_completed: Query<&FindEventCompleted>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut action_query: Query<(&Actor, &mut ActionState, &FindDrink, &ActionSpan)>,
@@ -3358,7 +3371,7 @@ pub fn find_drink_system(
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
-                let Ok(villager) = villager_query.get(*actor) else {
+                let Ok((villager_id, _, _, _, _)) = villager_query.get(*actor) else {
                     span.span().in_scope(|| {
                         villager_error!(*actor, obj_id, None, "Cannot get villager query");
                     });
@@ -3380,10 +3393,10 @@ pub fn find_drink_system(
 
                 // Create find event
                 map_events.new(
-                    villager.id.0,
+                    villager_id.0,
                     game_tick.0 + FIND_DRINK_TICKS,
                     VisibleEvent::FindDrinkEvent {
-                        obj_id: villager.id.0,
+                        obj_id: villager_id.0,
                     },
                 );
 
@@ -3419,7 +3432,9 @@ pub fn find_drink_system(
                 });
                 event_executing.state = EventExecutingState::None;
 
-                let Ok(villager) = villager_query.get_mut(*actor) else {
+                let Ok((villager_id, villager_player_id, villager_pos, villager_inventory, thirst)) =
+                    villager_query.get(*actor)
+                else {
                     span.span().in_scope(|| {
                         villager_error!(*actor, obj_id, None, "Cannot get villager query");
                     });
@@ -3427,33 +3442,101 @@ pub fn find_drink_system(
                 };
 
                 let Some((item_location, item, item_pos)) = find_item_location_by_class(
-                    villager.player_id.0,
-                    &villager.pos,
-                    &villager.inventory,
+                    villager_player_id.0,
+                    villager_pos,
+                    villager_inventory,
                     &structure_query,
                     DRINK.to_string(),
                     &map,
                 ) else {
-                    // No drink item on hand or in storage: fall back to a natural
-                    // water source (a revealed spring, or a river bank). The villager
-                    // walks there and drinks directly.
-                    if let Some(water) =
-                        nearest_water(&villager.pos, &resources, &map, VILLAGER_WATER_RANGE)
+                    commands.entity(*actor).remove::<TargetItem>();
+                    commands.entity(*actor).remove::<Destination>();
+                    commands.entity(*actor).remove::<DrinkingFromWater>();
+
+                    // Ordinary thirst can use only carried or player-stocked
+                    // water. At emergency thirst, search one safe adjacent tile
+                    // without consulting hidden resources or globally known rivers.
+                    if thirst.thirst >= DEHYDRATED_SCORE
+                        && !object_query.iter().any(
+                            |(entity, player_id, object_pos, class, state, state_dead)| {
+                                object_is_water_search_danger(
+                                    *actor,
+                                    villager_player_id.0,
+                                    *villager_pos,
+                                    entity,
+                                    player_id,
+                                    object_pos,
+                                    class,
+                                    state,
+                                    state_dead,
+                                )
+                            },
+                        )
                     {
-                        span.span().in_scope(|| {
-                            villager_debug!(*actor, obj_id, None, "Heading to water to drink");
-                        });
-                        commands.entity(*actor).remove::<NoDrinks>();
-                        commands.entity(*actor).insert(DrinkingFromWater);
-                        commands.entity(*actor).insert(Destination { pos: water });
-                        *state = ActionState::Success;
-                        continue;
+                        let mut candidates = Map::ring((villager_pos.x, villager_pos.y), 1)
+                            .into_iter()
+                            .map(|(x, y)| Position { x, y })
+                            .filter(|candidate| {
+                                Map::is_valid_pos((candidate.x, candidate.y))
+                                    && Map::is_passable(candidate.x, candidate.y, &map)
+                                    && !object_query.iter().any(
+                                        |(entity, _, pos, class, object_state, state_dead)| {
+                                            entity != *actor
+                                                && *pos == *candidate
+                                                && class.is_blocking()
+                                                && object_state.is_blocking()
+                                                && state_dead.is_none()
+                                        },
+                                    )
+                                    && !object_query.iter().any(
+                                        |(
+                                            entity,
+                                            player_id,
+                                            object_pos,
+                                            class,
+                                            state,
+                                            state_dead,
+                                        )| {
+                                            object_is_water_search_danger(
+                                                *actor,
+                                                villager_player_id.0,
+                                                *candidate,
+                                                entity,
+                                                player_id,
+                                                object_pos,
+                                                class,
+                                                state,
+                                                state_dead,
+                                            )
+                                        },
+                                    )
+                            })
+                            .collect::<Vec<_>>();
+                        candidates.shuffle(&mut rand::thread_rng());
+
+                        if let Some(search_pos) = candidates.first().copied() {
+                            span.span().in_scope(|| {
+                                villager_debug!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "Searching adjacent tile for a spring"
+                                );
+                            });
+                            commands.entity(*actor).remove::<NoDrinks>();
+                            commands.entity(*actor).try_insert((
+                                DrinkingFromWater { pos: search_pos },
+                                Destination { pos: search_pos },
+                            ));
+                            *state = ActionState::Success;
+                            continue;
+                        }
                     }
 
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot find any drinks");
                     });
-                    commands.entity(*actor).insert(NoDrinks {
+                    commands.entity(*actor).try_insert(NoDrinks {
                         at_tick: game_tick.0,
                     });
 
@@ -3473,7 +3556,7 @@ pub fn find_drink_system(
                 if item_location == ItemLocation::Own {
                     commands
                         .entity(*actor)
-                        .insert(Destination { pos: *villager.pos });
+                        .insert(Destination { pos: *villager_pos });
                 } else if item_location == ItemLocation::OwnStructure {
                     commands
                         .entity(*actor)
@@ -3491,6 +3574,8 @@ pub fn find_drink_system(
                 }
 
                 commands.trigger(CancelEvents { entity: *actor });
+                commands.entity(*actor).remove::<DrinkingFromWater>();
+                commands.entity(*actor).remove::<Destination>();
 
                 *state = ActionState::Failure
             }
@@ -3834,12 +3919,25 @@ pub fn move_to_system(
 }
 
 pub fn transfer_drink_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut ids: ResMut<Ids>,
     templates: Res<Templates>,
     protection: VillagerProtection,
-    villager_query: Query<(&PlayerId, &Id, &TargetItem), With<SubclassVillager>>,
+    mut resources: ResMut<Resources>,
+    mut player_events: ResMut<PlayerEvents>,
+    villager_query: Query<(&PlayerId, &Id), With<SubclassVillager>>,
+    target_item_query: Query<&TargetItem, With<SubclassVillager>>,
     water_query: Query<&DrinkingFromWater>,
+    object_query: Query<(
+        Entity,
+        &PlayerId,
+        &Position,
+        &Class,
+        &State,
+        Option<&StateDead>,
+    )>,
     mut inventory_query: Query<(&Id, &Position, &mut Inventory)>,
     mut action_query: Query<(&Actor, &mut ActionState, &TransferDrink, &ActionSpan)>,
 ) {
@@ -3858,16 +3956,99 @@ pub fn transfer_drink_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                // Drinking straight from a spring — nothing to transfer.
-                if water_query.get(*actor).is_ok() {
+                // Inspect the selected tile only after arriving. This keeps
+                // hidden springs hidden from AI path selection.
+                if let Ok(water_search) = water_query.get(*actor) {
+                    let Ok((villager_player_id, _villager_id)) = villager_query.get(*actor) else {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, None, "Cannot get villager query");
+                        });
+                        commands.entity(*actor).remove::<DrinkingFromWater>();
+                        commands.entity(*actor).remove::<Destination>();
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+                    let Ok((_id, villager_pos, _inventory)) = inventory_query.get_mut(*actor)
+                    else {
+                        span.span().in_scope(|| {
+                            villager_debug!(*actor, obj_id, None, "Cannot get villager position");
+                        });
+                        commands.entity(*actor).remove::<DrinkingFromWater>();
+                        commands.entity(*actor).remove::<Destination>();
+                        *state = ActionState::Failure;
+                        continue;
+                    };
+
+                    let danger_nearby = object_query.iter().any(
+                        |(entity, player_id, object_pos, class, object_state, state_dead)| {
+                            object_is_water_search_danger(
+                                *actor,
+                                villager_player_id.0,
+                                *villager_pos,
+                                entity,
+                                player_id,
+                                object_pos,
+                                class,
+                                object_state,
+                                state_dead,
+                            )
+                        },
+                    );
+                    let hidden_spring = !resources
+                        .get_by_type(water_search.pos, SPRING_WATER.to_string(), false)
+                        .is_empty();
+                    let revealed_spring = !resources
+                        .get_by_type(water_search.pos, SPRING_WATER.to_string(), true)
+                        .is_empty();
+
+                    if *villager_pos != water_search.pos
+                        || danger_nearby
+                        || (!hidden_spring && !revealed_spring)
+                    {
+                        span.span().in_scope(|| {
+                            villager_debug!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Adjacent tile search found no safe spring"
+                            );
+                        });
+                        commands.entity(*actor).remove::<DrinkingFromWater>();
+                        commands.entity(*actor).remove::<Destination>();
+                        commands.entity(*actor).try_insert(NoDrinks {
+                            at_tick: game_tick.0,
+                        });
+                        *state = ActionState::Failure;
+                        continue;
+                    }
+
+                    if hidden_spring {
+                        resources.set_reveal(water_search.pos, SPRING_WATER.to_string(), true);
+                        player_events.insert(
+                            ids.player_event,
+                            PlayerEvent::InfoTile {
+                                player_id: villager_player_id.0,
+                                x: water_search.pos.x,
+                                y: water_search.pos.y,
+                            },
+                        );
+                        ids.player_event += 1;
+                    }
+
+                    commands.entity(*actor).remove::<NoDrinks>();
                     *state = ActionState::Success;
                     continue;
                 }
-                let Ok((_villager_player_id, villager_id, target_item)) =
-                    villager_query.get(*actor)
-                else {
+                let Ok((_villager_player_id, villager_id)) = villager_query.get(*actor) else {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot get villager query");
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                };
+                let Ok(target_item) = target_item_query.get(*actor) else {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "Cannot get target drink item");
                     });
                     *state = ActionState::Failure;
                     continue;
@@ -3960,6 +4141,8 @@ pub fn transfer_drink_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "Cancelling transfer drink");
                 });
+                commands.entity(*actor).remove::<DrinkingFromWater>();
+                commands.entity(*actor).remove::<Destination>();
                 *state = ActionState::Failure
             }
             _ => {}
@@ -3971,6 +4154,7 @@ pub fn drink_action_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
     protection: VillagerProtection,
+    resources: Res<Resources>,
     mut ids: ResMut<Ids>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
@@ -3980,6 +4164,17 @@ pub fn drink_action_system(
     mut event_executing_query: Query<&mut EventExecuting>,
     last_combat_tick_query: Query<&LastCombatTick>,
     water_query: Query<&DrinkingFromWater>,
+    object_query: Query<
+        (
+            Entity,
+            &PlayerId,
+            &Position,
+            &Class,
+            &State,
+            Option<&StateDead>,
+        ),
+        Without<SubclassVillager>,
+    >,
     mut thirst_query: Query<&mut Thirst>,
     mut query: Query<(&Actor, &mut ActionState, &Drink, &ActionSpan)>,
 ) {
@@ -4001,21 +4196,9 @@ pub fn drink_action_system(
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot drink while in combat");
                     });
-                    *state = ActionState::Failure;
-                    continue;
-                }
-
-                // Drinking straight from the spring we walked to — quench directly,
-                // no waterskin/drink item involved.
-                if water_query.get(*actor).is_ok() {
-                    if let Ok(mut thirst) = thirst_query.get_mut(*actor) {
-                        thirst.thirst = 0.0;
-                    }
                     commands.entity(*actor).remove::<DrinkingFromWater>();
-                    span.span().in_scope(|| {
-                        villager_debug!(*actor, obj_id, None, "Drank from water");
-                    });
-                    *state = ActionState::Success;
+                    commands.entity(*actor).remove::<Destination>();
+                    *state = ActionState::Failure;
                     continue;
                 }
 
@@ -4023,9 +4206,64 @@ pub fn drink_action_system(
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot get villager query");
                     });
+                    commands.entity(*actor).remove::<DrinkingFromWater>();
+                    commands.entity(*actor).remove::<Destination>();
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                // Revalidate the discovered spring and nearby safety at the
+                // moment of drinking, since either can change after arrival.
+                if let Ok(water_search) = water_query.get(*actor) {
+                    let spring_is_revealed = !resources
+                        .get_by_type(water_search.pos, SPRING_WATER.to_string(), true)
+                        .is_empty();
+                    let danger_nearby = object_query.iter().any(
+                        |(entity, player_id, object_pos, class, object_state, state_dead)| {
+                            object_is_water_search_danger(
+                                *actor,
+                                villager.player_id.0,
+                                *villager.pos,
+                                entity,
+                                player_id,
+                                object_pos,
+                                class,
+                                object_state,
+                                state_dead,
+                            )
+                        },
+                    );
+
+                    if *villager.pos != water_search.pos || !spring_is_revealed || danger_nearby {
+                        commands.entity(*actor).remove::<DrinkingFromWater>();
+                        commands.entity(*actor).remove::<Destination>();
+                        commands.entity(*actor).try_insert(NoDrinks {
+                            at_tick: game_tick.0,
+                        });
+                        span.span().in_scope(|| {
+                            villager_debug!(
+                                *actor,
+                                obj_id,
+                                None,
+                                "Cannot safely drink from searched spring"
+                            );
+                        });
+                        *state = ActionState::Failure;
+                        continue;
+                    }
+
+                    if let Ok(mut thirst) = thirst_query.get_mut(*actor) {
+                        thirst.thirst = 0.0;
+                    }
+                    commands.entity(*actor).remove::<DrinkingFromWater>();
+                    commands.entity(*actor).remove::<Destination>();
+                    commands.entity(*actor).remove::<NoDrinks>();
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "Drank from discovered spring");
+                    });
+                    *state = ActionState::Success;
+                    continue;
+                }
 
                 let Some(drink_item) = villager.inventory.get_by_class(DRINK.to_owned()) else {
                     span.span().in_scope(|| {
@@ -4114,6 +4352,9 @@ pub fn drink_action_system(
                 span.span().in_scope(|| {
                     villager_debug!(*actor, obj_id, None, "Cancelling Drink action");
                 });
+
+                commands.entity(*actor).remove::<DrinkingFromWater>();
+                commands.entity(*actor).remove::<Destination>();
 
                 let Ok(mut villager) = villager_query.get_mut(*actor) else {
                     span.span().in_scope(|| {

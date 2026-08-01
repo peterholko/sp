@@ -9,7 +9,7 @@ use crate::crisis_balance::{
     is_live_built_human_core_structure, CrisisAttackTelemetryEvent, CrisisAttackTelemetryStage,
     CrisisCombatTelemetryEvent,
 };
-use crate::effect::{Effect, Effects};
+use crate::effect::{ControlEffectDiminishingReturns, ControlEffectDrEntry, Effect, Effects};
 use crate::event::{MapEvents, Spell, VisibleEvent};
 use crate::game::{CrisisAssaultUnit, Fortified, GameTick};
 use crate::ids::Ids;
@@ -30,6 +30,21 @@ pub const FIERCE: &str = "fierce";
 
 pub const HAMSTRING: &str = "Hamstring";
 pub const GOUGE: &str = "Gouge";
+pub const COMBO_CHAIN_TIMEOUT_TICKS: i32 = 150;
+pub const CONTROL_EFFECT_DR_RESET_TICKS: i32 = 150;
+pub const MAX_EFFECT_STACKS: i32 = 5;
+
+#[derive(Event, Debug, Clone, Copy)]
+pub struct CombatEffectsChanged {
+    pub target_id: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComboAreaProfile {
+    pub damage_scale: Option<f32>,
+    pub effect: Effect,
+    pub effect_duration_scale: f32,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttackType {
@@ -89,6 +104,7 @@ impl Combo {
 pub struct ComboTracker {
     pub target_id: i32,
     pub attacks: Vec<AttackType>,
+    pub last_attack_tick: i32,
 }
 
 #[derive(QueryData)]
@@ -106,6 +122,7 @@ pub struct CombatQuery {
     pub misc: &'static mut Misc,
     pub stats: &'static mut Stats,
     pub effects: &'static mut Effects,
+    pub control_effect_dr: Option<&'static mut ControlEffectDiminishingReturns>,
     pub fortified: Option<&'static Fortified>,
     pub inventory: &'static mut Inventory,
     pub skills: Option<&'static mut Skills>,
@@ -405,50 +422,27 @@ impl Combat {
         _map_events: &mut ResMut<MapEvents>,
         options: AttackOptions,
     ) -> (i32, Option<String>, Option<SkillUpdated>, Option<String>) {
-        let mut rng = rand::thread_rng();
-
-        // 1 Get Base Damage, DamageRange, BaseDef and DefHp
         let target_template = templates.obj_templates.get(target.template.0.clone());
-        let damage_range = attacker.stats.damage_range.unwrap() as f32;
-        let base_damage = attacker.stats.base_damage.unwrap() as f32;
-        let base_defense = target.stats.base_def as f32;
 
-        // #3 Get attacker weapons
+        // Keep the equipped weapons for proc rolls and kill XP attribution.
         let attacker_weapons = attacker.inventory.get_equipped_weapons();
         debug!("Attacker_weapons: {:?}", attacker_weapons);
 
-        // 4 Get damage effects on attacker
-        let damage_effects_mod = Self::get_damage_effects(attacker, templates);
-
-        // 5 Get defense effects on defender
-        let defense_effects_mod = Self::get_defense_effects(target, templates);
-
-        // 6 Get damage mod from items
-        let damage_from_items = attacker
-            .inventory
-            .get_items_value_by_attr(&item::AttrKey::Damage, true);
-
-        // 6b Get weapon skill damage bonus (+5% per skill level)
-        let skill_damage_mod = Self::get_skill_damage_mod(attacker, &attacker_weapons);
-
-        // 7 Get attack type damage from
+        // Basic attacks and finishers share the same damage pipeline below.
         let attack_type_damage_mod = Self::attack_type_damage_mod(attack_type.clone());
-
-        // TODO 8 Get damage reduction from Defensive action
-
-        // 8a Get Sanctuary damage reduction
-        let sanctuary_defense = Self::get_sanctuary_defense(target, templates);
-
-        // 9 Get armor from defender items
-        let defense_from_items = target
-            .inventory
-            .get_items_value_by_attr(&item::AttrKey::Defense, true);
 
         // 10 Check if defender has a matched defensive stance (BB-A).
         let (defend_stance_mod, countered) = Self::get_defend_stance_mod(&attack_type, target);
 
         // 11 & 12 Add attack type to attack list
-        Self::add_attack_to_combo_tracker(commands, templates, attack_type, attacker, target);
+        Self::add_attack_to_combo_tracker(
+            commands,
+            templates,
+            attack_type,
+            attacker,
+            target,
+            game_tick.0,
+        );
 
         // 13 & 14 A successful counter interrupts the attacker's combo sequence.
         if countered.is_some() {
@@ -468,50 +462,17 @@ impl Combat {
 
         // TODO 16 Check if target is fortified
 
-        // 17 Roll from base damage. damage_range can be 0 (e.g. villagers, whose
-        // damage comes entirely from their equipped weapon via damage_from_items),
-        // and gen_range panics on an empty range, so only roll when there's a span.
-        let damage_roll = if damage_range > 0.0 {
-            rng.gen_range(0.0..damage_range)
-        } else {
-            0.0
-        };
-        let roll_damage = damage_roll + base_damage;
-
-        // 18 Calculate total damage
-        let total_damage = (roll_damage + damage_from_items + options.damage_bonus as f32)
-            * damage_effects_mod
-            * attack_type_damage_mod
-            * skill_damage_mod;
-
-        // 19 Calculate total defense
-        let total_defense = Self::total_defense(
-            base_defense,
-            defense_from_items,
-            defense_effects_mod,
-            sanctuary_defense,
+        let (total_damage, dealt_damage) = Self::resolve_damage(
+            attacker,
+            target,
+            templates,
+            map,
+            attack_type_damage_mod,
+            options.damage_bonus,
+            defend_stance_mod,
         );
 
-        // 20 & 21 Calculate damage defense reduction
-        let defense_reduction = total_defense / (total_defense + 50.0);
-        let damage_reduction = total_damage * (1.0 - defense_reduction);
-
-        // 22 Defense stance mod computed above (matched-counter reduction).
-
-        // 23 Get terrain defense mod
-        let terrain_defense_mod = Self::get_terrain_defense(*target.pos, map);
-
-        // TODO 24 Get monolith distance defense mod
-        let monolith_distance_defense_mod = 1.0;
-
-        // 25 Calculate final damage
-        let final_damage = damage_reduction
-            * defend_stance_mod
-            * terrain_defense_mod
-            * monolith_distance_defense_mod;
-
         // 26 Update Hp and check if target is dead
-        let dealt_damage = final_damage as i32;
         let target_hp_before = target.stats.hp;
         let target_was_core_structure = is_live_built_human_core_structure(
             target.class_structure,
@@ -567,7 +528,14 @@ impl Combat {
         );*/
 
         // 29 Check if any weapons procced
-        Self::process_weapon_procs(templates, &attacker_weapons, target);
+        Self::process_weapon_procs(
+            commands,
+            templates,
+            &attacker_weapons,
+            target,
+            game_tick.0,
+            _map_events,
+        );
 
         // 30 & 31 Check if target is dead and update skills
         let mut skill_updated = None;
@@ -636,7 +604,7 @@ impl Combat {
 
         // Report the damage actually dealt (post armor + matched stance) so the
         // client shows the real number and a successful counter reads as 0/low.
-        return (final_damage as i32, None, skill_updated, countered);
+        return (dealt_damage, None, skill_updated, countered);
     }
 
     pub fn process_combo(
@@ -649,44 +617,11 @@ impl Combat {
         game_tick: &Res<GameTick>,
         map_events: &mut ResMut<MapEvents>,
     ) -> (i32, Option<String>, Option<SkillUpdated>) {
-        let mut rng = rand::thread_rng();
-
-        // 1 Get Base Damage, DamageRange, BaseDef and DefHp
         let target_template = templates.obj_templates.get(target.template.0.clone());
-        let damage_range = attacker.stats.damage_range.unwrap() as f32;
-        let base_damage = attacker.stats.base_damage.unwrap() as f32;
-        let base_defense = target.stats.base_def as f32;
 
-        // 2 Get attacker & defender items
-        let attacker_items = attacker.inventory.get_equipped();
-        let defender_items = target.inventory.get_equipped();
-
-        // #3 Get attacker weapons
+        // Keep the equipped weapons for proc rolls and kill XP attribution.
         let attacker_weapons = attacker.inventory.get_equipped_weapons();
         debug!("Attacker_weapons: {:?}", attacker_weapons);
-
-        // 4 Get damage effects on attacker
-        let damage_effects_mod = Self::get_damage_effects(attacker, templates);
-
-        // 5 Get defense effects on defender
-        let defense_effects_mod = Self::get_defense_effects(target, templates);
-
-        // 5b Get Sanctuary damage reduction
-        let sanctuary_defense = Self::get_sanctuary_defense(target, templates);
-
-        // 6 Get damage mod from items
-        let damage_from_items = attacker
-            .inventory
-            .get_items_value_by_attr(&item::AttrKey::Damage, true);
-
-        // TODO 8 Get damage reduction from Defensive action
-
-        // 9 Get armor from defender items
-        let defense_from_items = target
-            .inventory
-            .get_items_value_by_attr(&item::AttrKey::Defense, true);
-
-        // TODO 10 Check if Defender has Defensive Stance
 
         // 11 & 12 Add attack type to attack list and check if combo is completed
         let combo_template = Self::find_combo(commands, templates, attacker, target);
@@ -706,49 +641,10 @@ impl Combat {
 
         // TODO 16 Check if target is fortified
 
-        // 17 Roll from base damage. damage_range can be 0 (e.g. villagers, whose
-        // damage comes entirely from their equipped weapon via damage_from_items),
-        // and gen_range panics on an empty range, so only roll when there's a span.
-        let damage_roll = if damage_range > 0.0 {
-            rng.gen_range(0.0..damage_range)
-        } else {
-            0.0
-        };
-        let roll_damage = damage_roll + base_damage;
-
-        // 18 Calculate total damage
-        let total_damage =
-            (roll_damage + damage_from_items) * damage_effects_mod * combo_damage_mod;
-
-        // 19 Calculate total defense
-        let total_defense = Self::total_defense(
-            base_defense,
-            defense_from_items,
-            defense_effects_mod,
-            sanctuary_defense,
-        );
-
-        // 20 & 21 Calculate damage defense reduction
-        let defense_reduction = total_defense / (total_defense + 50.0);
-        let damage_reduction = total_damage * (1.0 - defense_reduction);
-
-        // TODO 22 Get defense stance mod
-        let defend_stance_mod = 1.0;
-
-        // 23 Get terrain defense mod
-        let terrain_defense_mod = Self::get_terrain_defense(*target.pos, map);
-
-        // TODO 24 Get monolith distance defense mod
-        let monolith_distance_defense_mod = 1.0;
-
-        // 25 Calculate final damage
-        let final_damage = damage_reduction
-            * defend_stance_mod
-            * terrain_defense_mod
-            * monolith_distance_defense_mod;
+        let (total_damage, dealt_damage) =
+            Self::resolve_damage(attacker, target, templates, map, combo_damage_mod, 0, 1.0);
 
         // 26 Update Hp and check if target is dead
-        let dealt_damage = final_damage as i32;
         let target_hp_before = target.stats.hp;
         let target_was_core_structure = is_live_built_human_core_structure(
             target.class_structure,
@@ -795,16 +691,25 @@ impl Combat {
         // 28 Apply new effects from this attack
         Self::apply_combo_effects(
             combo_template.clone(),
+            commands,
             templates,
             attacker,
             target,
             ids,
             game_tick,
             map_events,
+            1.0,
         );
 
         // 29 Check if any weapons procced
-        Self::process_weapon_procs(templates, &attacker_weapons, target);
+        Self::process_weapon_procs(
+            commands,
+            templates,
+            &attacker_weapons,
+            target,
+            game_tick.0,
+            map_events,
+        );
 
         // 30 & 31 Check if target is dead and update skills
         let mut skill_updated = None;
@@ -854,7 +759,182 @@ impl Combat {
             combo_name = Some(combo.name);
         }
 
-        return (total_damage as i32, combo_name, skill_updated);
+        return (dealt_damage, combo_name, skill_updated);
+    }
+
+    pub fn combo_area_profile(combo_name: &str) -> Option<ComboAreaProfile> {
+        match combo_name {
+            "Intimidating Shout" => Some(ComboAreaProfile {
+                damage_scale: None,
+                effect: Effect::Fear,
+                effect_duration_scale: 1.0,
+            }),
+            "Shatter Cleave" => Some(ComboAreaProfile {
+                damage_scale: Some(0.5),
+                effect: Effect::Bleed,
+                effect_duration_scale: 1.0,
+            }),
+            "Massive Pummel" => Some(ComboAreaProfile {
+                damage_scale: None,
+                effect: Effect::Concussed,
+                effect_duration_scale: 0.5,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn valid_combo_secondary(
+        attacker_pos: Position,
+        primary_target_id: i32,
+        target: &CombatQueryItem,
+    ) -> bool {
+        Self::valid_combo_secondary_fields(
+            attacker_pos,
+            primary_target_id,
+            target.id.0,
+            target.player_id.0,
+            target.class,
+            *target.state,
+            target.stats.hp,
+            *target.pos,
+            Self::target_is_fortified(target),
+        ) && Self::target_is_attackable(target)
+    }
+
+    fn valid_combo_secondary_fields(
+        attacker_pos: Position,
+        primary_target_id: i32,
+        target_id: i32,
+        target_player_id: i32,
+        target_class: &Class,
+        target_state: State,
+        target_hp: i32,
+        target_pos: Position,
+        fortified: bool,
+    ) -> bool {
+        target_id != primary_target_id
+            && target_player_id >= 1000
+            && target_class.0 == crate::constants::CLASS_UNIT
+            && target_state != State::Dead
+            && target_hp > 0
+            && Map::dist(attacker_pos, target_pos) <= 1
+            && !fortified
+    }
+
+    pub fn process_combo_secondary(
+        attacker: &mut CombatQueryItem,
+        target: &mut CombatQueryItem,
+        combo_template: &ComboTemplate,
+        profile: &ComboAreaProfile,
+        commands: &mut Commands,
+        templates: &Res<Templates>,
+        map: &Res<Map>,
+        game_tick: &Res<GameTick>,
+        map_events: &mut ResMut<MapEvents>,
+    ) -> (i32, Option<SkillUpdated>) {
+        let attacker_weapons = attacker.inventory.get_equipped_weapons();
+        let target_template = templates.obj_templates.get(target.template.0.clone());
+        let dealt_damage = profile.damage_scale.map_or(0, |damage_scale| {
+            let (quick, precise, fierce) = Self::get_combo_damage(Some(combo_template.clone()));
+            Self::resolve_damage(
+                attacker,
+                target,
+                templates,
+                map,
+                quick * precise * fierce * damage_scale,
+                0,
+                1.0,
+            )
+            .1
+        });
+
+        let target_hp_before = target.stats.hp;
+        let target_was_core_structure = is_live_built_human_core_structure(
+            target.class_structure,
+            target.class,
+            target.player_id,
+            *target.subclass,
+            *target.state,
+            false,
+        );
+        target.stats.hp = target.stats.hp.saturating_sub(dealt_damage);
+        if dealt_damage > 0 {
+            commands
+                .entity(target.entity)
+                .try_insert(LastDamageTick(game_tick.0));
+        }
+
+        attacker.last_combat_tick.0 = game_tick.0;
+        target.last_combat_tick.0 = game_tick.0;
+        Self::interrupt_peaceful_work(commands, target.entity, &target.state);
+        if attacker.player_id.0 != target.player_id.0 {
+            commands.entity(target.entity).try_insert(LastAttacker {
+                id: attacker.id.0,
+                tick: game_tick.0,
+            });
+        }
+
+        let effect_template = templates
+            .effect_templates
+            .get(&profile.effect.clone().to_str())
+            .expect("AoE combo effect missing from templates");
+        Self::apply_timed_combat_effect(
+            commands,
+            target,
+            profile.effect.clone(),
+            effect_template,
+            game_tick.0,
+            map_events,
+            profile.effect_duration_scale,
+        );
+
+        let mut skill_updated = None;
+        if target.stats.hp <= 0 {
+            *target.state = State::Dead;
+            commands
+                .entity(target.entity)
+                .try_insert(StateDead {
+                    dead_at: game_tick.0,
+                    killer: attacker.template.0.clone(),
+                })
+                .try_remove::<ThinkerBuilder>();
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::Dead,
+            });
+            for item in &attacker_weapons {
+                skill_updated = Some(SkillUpdated {
+                    id: attacker.id.0,
+                    xp_type: item.subclass.to_string(),
+                    xp: target_template.kill_xp.unwrap_or(0),
+                });
+            }
+        }
+
+        Self::emit_crisis_combat_telemetry(
+            commands,
+            game_tick.0,
+            attacker,
+            target,
+            target_hp_before,
+            target_was_core_structure,
+        );
+        let (reveal_attacker, reveal_target) =
+            Self::combat_reveals(*attacker.state, *target.state, target.stats.hp);
+        if reveal_attacker {
+            commands.trigger(StateChange {
+                entity: attacker.entity,
+                new_state: State::None,
+            });
+        }
+        if reveal_target {
+            commands.trigger(StateChange {
+                entity: target.entity,
+                new_state: State::None,
+            });
+        }
+
+        (dealt_damage, skill_updated)
     }
 
     pub fn process_spell_damage(
@@ -911,9 +991,12 @@ impl Combat {
     }
 
     fn process_weapon_procs(
+        commands: &mut Commands,
         templates: &Res<Templates>,
         attacker_weapons: &Vec<Item>,
         target: &mut CombatQueryItem,
+        game_tick: i32,
+        map_events: &mut ResMut<MapEvents>,
     ) {
         let mut rng = rand::thread_rng();
 
@@ -943,10 +1026,17 @@ impl Combat {
                             .get(&effect_string)
                             .expect("Cannot find template for effect");
 
-                        let effects = &mut target.effects.0;
-                        effects.insert(effect, (effect_template.duration, 1.0, 1));
+                        Self::apply_timed_combat_effect(
+                            commands,
+                            target,
+                            effect,
+                            effect_template,
+                            game_tick,
+                            map_events,
+                            1.0,
+                        );
 
-                        debug!("effects: {:?}", effects);
+                        debug!("effects: {:?}", target.effects.0);
                     }
                 }
             }
@@ -955,28 +1045,33 @@ impl Combat {
 
     fn add_attack_to_combo_tracker(
         commands: &mut Commands,
-        _templates: &Res<Templates>,
+        templates: &Res<Templates>,
         attack_type: AttackType,
         attacker: &mut CombatQueryItem,
         target: &mut CombatQueryItem,
+        game_tick: i32,
     ) {
         // Only allow combos for players
         if attacker.player_id.0 < 1000 {
             debug!("check combo_tracker: {:?}", attacker.combo_tracker);
 
             if let Some(combo_tracker) = &mut attacker.combo_tracker {
-                // Add to existing combo tracker only if same target id
-                // TODO reconsider if this is a good idea
-                if combo_tracker.target_id == target.id.0 {
-                    combo_tracker.attacks.push(attack_type);
+                let previous = if combo_tracker.target_id == target.id.0
+                    && game_tick.saturating_sub(combo_tracker.last_attack_tick)
+                        <= COMBO_CHAIN_TIMEOUT_TICKS
+                {
+                    combo_tracker.attacks.clone()
                 } else {
-                    combo_tracker.target_id = target.id.0;
-                    combo_tracker.attacks = vec![attack_type];
-                }
+                    Vec::new()
+                };
+                combo_tracker.target_id = target.id.0;
+                combo_tracker.attacks = Self::next_combo_attacks(&previous, attack_type, templates);
+                combo_tracker.last_attack_tick = game_tick;
             } else {
                 let combo_tracker = ComboTracker {
                     target_id: target.id.0,
-                    attacks: vec![attack_type],
+                    attacks: Self::next_combo_attacks(&[], attack_type, templates),
+                    last_attack_tick: game_tick,
                 };
 
                 commands.entity(attacker.entity).insert(combo_tracker);
@@ -984,6 +1079,46 @@ impl Combat {
 
             debug!("post check combo_tracker {:?}", attacker.combo_tracker);
         }
+    }
+
+    pub(crate) fn next_combo_attacks(
+        previous: &[AttackType],
+        attack_type: AttackType,
+        templates: &Templates,
+    ) -> Vec<AttackType> {
+        let mut candidate = previous.to_vec();
+        candidate.push(attack_type);
+
+        for suffix_start in 0..candidate.len() {
+            let suffix = &candidate[suffix_start..];
+            let suffix_is_live = templates.combo_templates.iter().any(|(_, combo)| {
+                suffix.len() <= combo.attacks.len()
+                    && suffix
+                        .iter()
+                        .zip(combo.attacks.iter())
+                        .all(|(attack, expected)| attack.clone().to_str() == *expected)
+            });
+            if suffix_is_live {
+                return suffix.to_vec();
+            }
+        }
+
+        Vec::new()
+    }
+
+    pub(crate) fn live_combo_attacks_before_append(
+        tracker: Option<&ComboTracker>,
+        target_id: i32,
+        game_tick: i32,
+    ) -> Vec<AttackType> {
+        tracker
+            .filter(|tracker| {
+                tracker.target_id == target_id
+                    && game_tick.saturating_sub(tracker.last_attack_tick)
+                        <= COMBO_CHAIN_TIMEOUT_TICKS
+            })
+            .map(|tracker| tracker.attacks.clone())
+            .unwrap_or_default()
     }
 
     fn find_combo(
@@ -1023,12 +1158,14 @@ impl Combat {
 
     fn apply_combo_effects(
         combo: Option<ComboTemplate>,
+        commands: &mut Commands,
         templates: &Res<Templates>,
         _attacker: &mut CombatQueryItem,
         target: &mut CombatQueryItem,
         _ids: &mut ResMut<Ids>,
         game_tick: &Res<GameTick>,
         map_events: &mut ResMut<MapEvents>,
+        duration_scale: f32,
     ) {
         if let Some(combo_template) = combo {
             for effect_name in combo_template.effects.iter() {
@@ -1042,38 +1179,126 @@ impl Combat {
                 let effect = Effect::from_string(&effect_template.name);
 
                 debug!("Effect applied: {:?}", effect);
-                //
-                match effect {
-                    Effect::Hamstrung => {
-                        let hamstrung_event = VisibleEvent::EffectExpiredEvent {
-                            effect: effect.clone(),
-                        };
-
-                        map_events.new(
-                            target.id.0,
-                            game_tick.0 + effect_template.duration * TICKS_PER_SEC,
-                            hamstrung_event,
-                        );
-                    }
-                    Effect::Stunned => {
-                        let stun_event = VisibleEvent::EffectExpiredEvent {
-                            effect: effect.clone(),
-                        };
-
-                        map_events.new(
-                            target.id.0,
-                            game_tick.0 + effect_template.duration * TICKS_PER_SEC,
-                            stun_event,
-                        );
-                    }
-                    _ => {}
-                }
-
-                target
-                    .effects
-                    .0
-                    .insert(effect, (effect_template.duration, 1.0, 1));
+                Self::apply_timed_combat_effect(
+                    commands,
+                    target,
+                    effect,
+                    effect_template,
+                    game_tick.0,
+                    map_events,
+                    duration_scale,
+                );
             }
+        }
+    }
+
+    fn is_control_effect(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::Stunned | Effect::Fear | Effect::Concussed | Effect::Hamstrung
+        )
+    }
+
+    fn control_effect_duration_multiplier(
+        dr: &mut ControlEffectDiminishingReturns,
+        effect: &Effect,
+        game_tick: i32,
+    ) -> Option<f32> {
+        let entry = dr.0.entry(effect.clone()).or_insert(ControlEffectDrEntry {
+            stage: 0,
+            last_applied_tick: game_tick,
+        });
+        if game_tick.saturating_sub(entry.last_applied_tick) >= CONTROL_EFFECT_DR_RESET_TICKS {
+            entry.stage = 0;
+        }
+
+        let multiplier = match entry.stage {
+            0 => Some(1.0),
+            1 => Some(0.5),
+            2 => Some(0.25),
+            _ => None,
+        };
+        entry.stage = entry.stage.saturating_add(1).min(3);
+        entry.last_applied_tick = game_tick;
+        multiplier
+    }
+
+    fn apply_timed_combat_effect(
+        commands: &mut Commands,
+        target: &mut CombatQueryItem,
+        effect: Effect,
+        effect_template: &crate::templates::EffectTemplate,
+        game_tick: i32,
+        map_events: &mut ResMut<MapEvents>,
+        duration_scale: f32,
+    ) -> bool {
+        let dr_multiplier = if Self::is_control_effect(&effect) {
+            if let Some(dr) = target.control_effect_dr.as_deref_mut() {
+                let Some(multiplier) =
+                    Self::control_effect_duration_multiplier(dr, &effect, game_tick)
+                else {
+                    return false;
+                };
+                multiplier
+            } else {
+                let mut dr = ControlEffectDiminishingReturns::default();
+                let multiplier =
+                    Self::control_effect_duration_multiplier(&mut dr, &effect, game_tick)
+                        .expect("first control application is never immune");
+                commands.entity(target.entity).try_insert(dr);
+                multiplier
+            }
+        } else {
+            1.0
+        };
+
+        let duration_ticks =
+            ((effect_template.duration * TICKS_PER_SEC) as f32 * duration_scale * dr_multiplier)
+                .round() as i32;
+        if duration_ticks <= 0 {
+            return false;
+        }
+
+        let expires_at = game_tick.saturating_add(duration_ticks);
+        Self::record_timed_effect(
+            target.id.0,
+            &mut target.effects,
+            effect,
+            effect_template.stackable.unwrap_or(false),
+            expires_at,
+            map_events,
+        );
+        true
+    }
+
+    fn record_timed_effect(
+        target_id: i32,
+        effects: &mut Effects,
+        effect: Effect,
+        stackable: bool,
+        expires_at: i32,
+        map_events: &mut MapEvents,
+    ) {
+        let stacks = Self::next_effect_stack_count(
+            effects.0.get(&effect).map(|(_, _, stacks)| *stacks),
+            stackable,
+        );
+        effects.0.insert(effect.clone(), (expires_at, 1.0, stacks));
+        map_events.new(
+            target_id,
+            expires_at,
+            VisibleEvent::EffectExpiredEvent { effect },
+        );
+    }
+
+    fn next_effect_stack_count(current: Option<i32>, stackable: bool) -> i32 {
+        if stackable {
+            current
+                .unwrap_or(0)
+                .saturating_add(1)
+                .min(MAX_EFFECT_STACKS)
+        } else {
+            1
         }
     }
 
@@ -1150,13 +1375,115 @@ impl Combat {
         1.0
     }
 
+    fn get_armor_effects_mod(target: &CombatQueryItem, templates: &Templates) -> f32 {
+        Self::get_armor_effects_mod_from_effects(&target.effects, templates)
+    }
+
+    fn get_armor_effects_mod_from_effects(effects: &Effects, templates: &Templates) -> f32 {
+        let armor_adjustment = effects
+            .0
+            .iter()
+            .filter_map(|(effect, (_expiry_tick, _amplifier, stacks))| {
+                templates
+                    .effect_templates
+                    .get(&effect.clone().to_str())
+                    .and_then(|template| template.armor)
+                    .map(|armor| armor * *stacks as f32)
+            })
+            .sum::<f32>();
+
+        (1.0 + armor_adjustment).max(0.0)
+    }
+
+    /// The one authoritative physical-damage calculation shared by basic
+    /// attacks, primary finishers, and finisher secondary hits.
+    fn resolve_damage(
+        attacker: &mut CombatQueryItem,
+        target: &mut CombatQueryItem,
+        templates: &Res<Templates>,
+        map: &Res<Map>,
+        damage_multiplier: f32,
+        flat_damage_bonus: i32,
+        defend_stance_mod: f32,
+    ) -> (f32, i32) {
+        let damage_range = attacker.stats.damage_range.unwrap_or(0).max(0) as f32;
+        let damage_roll = if damage_range > 0.0 {
+            rand::thread_rng().gen_range(0.0..damage_range)
+        } else {
+            0.0
+        };
+        let attacker_weapons = attacker.inventory.get_equipped_weapons();
+        let damage_from_items = attacker
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Damage, true);
+        let damage_effects_mod = Self::get_damage_effects(attacker, templates);
+        let skill_damage_mod = Self::get_skill_damage_mod(attacker, &attacker_weapons);
+        let total_damage = Self::outgoing_damage(
+            attacker.stats.base_damage.unwrap_or(0) as f32 + damage_roll,
+            damage_from_items,
+            flat_damage_bonus,
+            damage_effects_mod,
+            damage_multiplier,
+            skill_damage_mod,
+        );
+
+        let defense_from_items = target
+            .inventory
+            .get_items_value_by_attr(&item::AttrKey::Defense, true);
+        let total_defense = Self::total_defense(
+            target.stats.base_def as f32,
+            defense_from_items,
+            Self::get_defense_effects(target, templates),
+            Self::get_sanctuary_defense(target, templates),
+            Self::get_armor_effects_mod(target, templates),
+        );
+        (
+            total_damage,
+            Self::post_defense_damage(
+                total_damage,
+                total_defense,
+                defend_stance_mod,
+                Self::get_terrain_defense(*target.pos, map),
+            ),
+        )
+    }
+
+    fn outgoing_damage(
+        roll_damage: f32,
+        damage_from_items: f32,
+        flat_damage_bonus: i32,
+        damage_effects_mod: f32,
+        damage_multiplier: f32,
+        skill_damage_mod: f32,
+    ) -> f32 {
+        (roll_damage + damage_from_items + flat_damage_bonus as f32)
+            * damage_effects_mod
+            * damage_multiplier
+            * skill_damage_mod
+    }
+
+    fn post_defense_damage(
+        total_damage: f32,
+        total_defense: f32,
+        defend_stance_mod: f32,
+        terrain_defense_mod: f32,
+    ) -> i32 {
+        let defense_reduction = total_defense / (total_defense + 50.0);
+        (total_damage * (1.0 - defense_reduction) * defend_stance_mod * terrain_defense_mod)
+            .max(0.0) as i32
+    }
+
     fn total_defense(
         base_defense: f32,
         defense_from_items: f32,
         defense_effects_mod: f32,
         sanctuary_defense: f32,
+        armor_effects_mod: f32,
     ) -> f32 {
-        (base_defense + defense_from_items) * defense_effects_mod * sanctuary_defense
+        (base_defense + defense_from_items)
+            * defense_effects_mod
+            * sanctuary_defense
+            * armor_effects_mod
     }
 
     fn get_terrain_defense(position: Position, map: &Res<Map>) -> f32 {
@@ -1350,6 +1677,50 @@ mod tests {
         templates
     }
 
+    fn combo_templates() -> Templates {
+        let mut templates = Templates::from_obj_templates(Vec::new());
+        templates.combo_templates.load(vec![
+            ComboTemplate {
+                name: "Hamstring".to_string(),
+                attacks: vec![QUICK.to_string(), QUICK.to_string()],
+                effects: vec!["Hamstrung".to_string()],
+                quick_damage: 1.0,
+                precise_damage: 1.0,
+                fierce_damage: 1.0,
+            },
+            ComboTemplate {
+                name: "Shrouded Slash".to_string(),
+                attacks: vec![PRECISE.to_string(), FIERCE.to_string(), QUICK.to_string()],
+                effects: vec!["Expose Armor".to_string()],
+                quick_damage: 3.0,
+                precise_damage: 1.0,
+                fierce_damage: 1.0,
+            },
+            ComboTemplate {
+                name: "Shatter Cleave".to_string(),
+                attacks: vec![QUICK.to_string(), FIERCE.to_string(), FIERCE.to_string()],
+                effects: vec!["Bleed".to_string()],
+                quick_damage: 1.0,
+                precise_damage: 1.0,
+                fierce_damage: 3.5,
+            },
+            ComboTemplate {
+                name: "Nightmare Strike".to_string(),
+                attacks: vec![
+                    FIERCE.to_string(),
+                    PRECISE.to_string(),
+                    QUICK.to_string(),
+                    FIERCE.to_string(),
+                ],
+                effects: Vec::new(),
+                quick_damage: 1.0,
+                precise_damage: 1.0,
+                fierce_damage: 8.0,
+            },
+        ]);
+        templates
+    }
+
     #[test]
     fn sanctuary_defense_uses_full_and_weak_templates() {
         let templates = combat_templates();
@@ -1404,8 +1775,243 @@ mod tests {
 
     #[test]
     fn total_defense_adds_base_and_items_before_sanctuary() {
-        assert_eq!(Combat::total_defense(4.0, 0.0, 1.0, 5.0), 20.0);
-        assert_eq!(Combat::total_defense(4.0, 2.0, 3.0, 2.0), 36.0);
+        assert_eq!(Combat::total_defense(4.0, 0.0, 1.0, 5.0, 1.0), 20.0);
+        assert_eq!(Combat::total_defense(4.0, 2.0, 3.0, 2.0, 1.0), 36.0);
+        assert_eq!(Combat::total_defense(20.0, 0.0, 1.0, 1.0, 0.75), 15.0);
+    }
+
+    #[test]
+    fn expose_armor_reduces_total_defense_by_five_percent_per_stack() {
+        let mut templates = combat_templates();
+        templates
+            .effect_templates
+            .load(vec![crate::templates::EffectTemplate {
+                name: crate::effect::EXPOSEDARMOR.to_string(),
+                duration: 20,
+                max_hp: None,
+                healing: None,
+                damage: None,
+                damage_over_time: None,
+                speed: None,
+                attack_speed: None,
+                defense: None,
+                stackable: Some(true),
+                armor: Some(-0.05),
+                lifeleech: None,
+                viewshed: None,
+                ignore_all_armor: None,
+                instant_kill_chance: None,
+                next_attack: None,
+                vision: None,
+                health: None,
+                stamina: None,
+            }]);
+        let effects = Effects(HashMap::from([(Effect::ExposedArmor, (200, 1.0, 5))]));
+
+        assert_eq!(
+            Combat::get_armor_effects_mod_from_effects(&effects, &templates),
+            0.75
+        );
+        assert_eq!(
+            Combat::total_defense(
+                20.0,
+                0.0,
+                1.0,
+                1.0,
+                Combat::get_armor_effects_mod_from_effects(&effects, &templates),
+            ),
+            15.0
+        );
+    }
+
+    #[test]
+    fn combo_history_keeps_exact_matches_and_longest_live_suffix() {
+        let templates = combo_templates();
+        assert_eq!(
+            Combat::next_combo_attacks(&[AttackType::Quick], AttackType::Quick, &templates),
+            vec![AttackType::Quick, AttackType::Quick]
+        );
+        assert_eq!(
+            Combat::next_combo_attacks(
+                &[AttackType::Precise, AttackType::Fierce, AttackType::Quick],
+                AttackType::Fierce,
+                &templates,
+            ),
+            vec![AttackType::Quick, AttackType::Fierce]
+        );
+        assert_eq!(
+            Combat::next_combo_attacks(&[], AttackType::Precise, &templates),
+            vec![AttackType::Precise]
+        );
+    }
+
+    #[test]
+    fn combo_history_times_out_after_fifteen_seconds() {
+        let tracker = ComboTracker {
+            target_id: 9,
+            attacks: vec![AttackType::Quick],
+            last_attack_tick: 100,
+        };
+        assert_eq!(
+            Combat::live_combo_attacks_before_append(Some(&tracker), 9, 250),
+            vec![AttackType::Quick]
+        );
+        assert!(Combat::live_combo_attacks_before_append(Some(&tracker), 9, 251).is_empty());
+    }
+
+    #[test]
+    fn all_combo_effects_schedule_expiry_and_stackable_effects_cap_at_five() {
+        let mut effects = Effects(HashMap::new());
+        let mut events = MapEvents::default();
+        let combo_effects = [
+            Effect::Hamstrung,
+            Effect::Stunned,
+            Effect::Fear,
+            Effect::ExposedArmor,
+            Effect::Bleed,
+            Effect::Concussed,
+        ];
+        for (index, effect) in combo_effects.iter().cloned().enumerate() {
+            Combat::record_timed_effect(
+                index as i32 + 1,
+                &mut effects,
+                effect.clone(),
+                false,
+                200 + index as i32,
+                &mut events,
+            );
+            assert!(events.values().any(|event| {
+                event.run_tick == 200 + index as i32
+                    && matches!(
+                        &event.event_type,
+                        VisibleEvent::EffectExpiredEvent { effect: scheduled }
+                            if *scheduled == effect
+                    )
+            }));
+        }
+
+        for expires_at in 300..308 {
+            Combat::record_timed_effect(
+                7,
+                &mut effects,
+                Effect::ExposedArmor,
+                true,
+                expires_at,
+                &mut events,
+            );
+        }
+        assert_eq!(effects.0[&Effect::ExposedArmor], (307, 1.0, 5));
+    }
+
+    #[test]
+    fn control_effect_dr_uses_full_half_quarter_immune_then_resets() {
+        let mut dr = ControlEffectDiminishingReturns::default();
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 10),
+            Some(1.0)
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 20),
+            Some(0.5)
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 30),
+            Some(0.25)
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 40),
+            None
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 190),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn finisher_damage_uses_skill_scaling_and_reports_post_defense() {
+        let pre_defense = Combat::outgoing_damage(10.0, 0.0, 0, 1.0, 2.0, 1.5);
+        assert_eq!(pre_defense, 30.0);
+        assert_eq!(Combat::post_defense_damage(pre_defense, 50.0, 1.0, 1.0), 15);
+    }
+
+    #[test]
+    fn aoe_profiles_and_secondary_filters_match_the_milestone() {
+        assert_eq!(
+            Combat::combo_area_profile("Shatter Cleave")
+                .unwrap()
+                .damage_scale,
+            Some(0.5)
+        );
+        assert_eq!(
+            Combat::combo_area_profile("Massive Pummel")
+                .unwrap()
+                .effect_duration_scale,
+            0.5
+        );
+        assert!(Combat::combo_area_profile("Hamstring").is_none());
+
+        let attacker = Position { x: 5, y: 5 };
+        let unit = Class(crate::constants::CLASS_UNIT.to_string());
+        assert!(Combat::valid_combo_secondary_fields(
+            attacker,
+            10,
+            11,
+            1000,
+            &unit,
+            State::None,
+            10,
+            Position { x: 6, y: 5 },
+            false,
+        ));
+        for invalid in [
+            Combat::valid_combo_secondary_fields(
+                attacker,
+                10,
+                11,
+                2,
+                &unit,
+                State::None,
+                10,
+                Position { x: 6, y: 5 },
+                false,
+            ),
+            Combat::valid_combo_secondary_fields(
+                attacker,
+                10,
+                11,
+                1000,
+                &unit,
+                State::Dead,
+                10,
+                Position { x: 6, y: 5 },
+                false,
+            ),
+            Combat::valid_combo_secondary_fields(
+                attacker,
+                10,
+                11,
+                1000,
+                &unit,
+                State::None,
+                10,
+                Position { x: 7, y: 5 },
+                false,
+            ),
+            Combat::valid_combo_secondary_fields(
+                attacker,
+                10,
+                11,
+                1000,
+                &unit,
+                State::None,
+                10,
+                Position { x: 6, y: 5 },
+                true,
+            ),
+        ] {
+            assert!(!invalid);
+        }
     }
 
     #[test]

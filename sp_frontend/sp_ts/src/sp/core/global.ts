@@ -3,6 +3,7 @@ import { TileState } from './tileState';
 import { MultiImage } from './multiImage';
 import { WeatherState } from './weatherState';
 import { ZIndexManager } from './zIndexManager';
+import { ProtectedSettlementLookup } from './protectedSettlements';
 
 
 
@@ -40,6 +41,7 @@ export class Global {
     public static effectTextOffsetY = 0;
 
     public static objectStates : Record<string, ObjectState> = {};
+    public static protectedSettlements: ProtectedSettlementLookup = {};
     public static tileStates : Record<string, TileState> = {};
     public static weatherStates : Record<string, WeatherState> = {};
 

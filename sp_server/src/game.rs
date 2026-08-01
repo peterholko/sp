@@ -36,7 +36,7 @@ use tokio::sync::mpsc::Sender;
 use async_compat::Compat;
 use std::env;
 
-use crate::combat::{Combat, CombatSpellQuery};
+use crate::combat::{Combat, CombatEffectsChanged, CombatSpellQuery};
 use crate::common::{
     Dehydrated, Exhausted, Heat, Hunger, Starving, Target, TaskTarget, Thirst, Tired, Transport,
 };
@@ -83,12 +83,14 @@ use crate::obj::{
 use crate::player::{self, ActiveInfoType, ActiveInfos, PlayerEvent, PlayerEvents, PlayerPlugin};
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::{RecipePlugin, Recipes};
-use crate::resource::{Resource, ResourceGatherError, ResourcePlugin, Resources};
+use crate::resource::{
+    Resource, ResourceDiscoveries, ResourceGatherError, ResourcePlugin, Resources,
+};
 use crate::safe_logout::{
     entity_belongs_to_protected_run, is_owner_offline_protected, is_player_offline_protected,
     mark_player_login_sync_complete, object_belongs_to_protected_run, protected_player_for_object,
     remove_player_presence_for_run_cleanup, PlayerWorldPresenceState, SafeLogoutPlugin,
-    SafeLogoutTelemetryState,
+    SafeLogoutPostUpdateSet, SafeLogoutTelemetryState,
 };
 use crate::skill::{SkillData, SkillPlugin, Skills, CARPENTRY, CONSTRUCTION, MASONRY};
 use crate::skill_defs::Skill;
@@ -1069,7 +1071,7 @@ impl CrisisPreparationCollector<'_, '_> {
             && facts.hero_idle
             && !facts.current_tile_wall_present
             && facts.stockade_plan_available
-            && facts.stockade_log_units_carried >= 3;
+            && facts.stockade_log_units_carried >= 10;
 
         // A hero without an equipped weapon should retain the first carried
         // weapon as an equipment option. Hero/storage weapons are observed,
@@ -1170,17 +1172,46 @@ pub const EARLY_GAME_ENEMY_TEMPLATES: [&str; 2] = [
                //"Reef Skitter",
 ];
 
-/// A late Shipwreck search receives enough time to transfer and equip salvage
-/// before the first scheduled opening attacker can appear.
-pub const OPENING_POST_SALVAGE_GRACE_TICKS: i32 = 30 * TICKS_PER_SEC;
+/// A successful Shipwreck search starts a one-second grace before the opening
+/// attackers emerge. The encounter system's one-second polling cadence means
+/// they appear roughly one to two seconds after the investigation completes.
+pub const OPENING_POST_SALVAGE_GRACE_TICKS: i32 = TICKS_PER_SEC;
 pub const OPENING_RAT_TEMPLATE: &str = "Giant Rat";
 pub const OPENING_RAT_MIN_COUNT: usize = 1;
 pub const OPENING_RAT_MAX_COUNT: usize = 3;
+pub const OPENING_RAT_HP: i32 = 6;
+pub const OPENING_RAT_DEFENSE: i32 = 0;
+pub const OPENING_RAT_DAMAGE_MULTIPLIER: i32 = 2;
 pub const INTRO_FOLLOWUP_MIN_RADIUS: i32 = 2;
 pub const INTRO_FOLLOWUP_MAX_RADIUS: i32 = 4;
+pub const CAMPFIRE_VISIBILITY_RANGE: u32 = 1;
+
+/// Per-player Campfire light sources currently activated by that player's
+/// living hero. A pair is `(viewer_player_id, campfire_obj_id)`; storing pairs
+/// in a set makes overlapping light bubbles a union rather than a stack.
+#[derive(Resource, Deref, DerefMut, Debug, Default, Clone, PartialEq, Eq)]
+pub struct CampfireVisibilityState(pub HashSet<(i32, i32)>);
 
 pub(crate) fn random_opening_rat_count<R: Rng + ?Sized>(rng: &mut R) -> usize {
     rng.gen_range(OPENING_RAT_MIN_COUNT..=OPENING_RAT_MAX_COUNT)
+}
+
+fn opening_rat_combat_stats(template: &ObjTemplate) -> Stats {
+    Stats {
+        hp: OPENING_RAT_HP,
+        base_hp: OPENING_RAT_HP,
+        stamina: template.base_stamina,
+        mana: None,
+        base_stamina: template.base_stamina,
+        base_mana: None,
+        base_def: OPENING_RAT_DEFENSE,
+        damage_range: template.dmg_range,
+        base_damage: template
+            .base_dmg
+            .map(|damage| damage.saturating_mul(OPENING_RAT_DAMAGE_MULTIPLIER)),
+        base_speed: template.base_speed,
+        base_vision: template.base_vision,
+    }
 }
 
 fn random_early_game_enemy_template() -> &'static str {
@@ -1343,7 +1374,6 @@ pub struct InitialEncounterEntry {
     pub spawn_pos: Position,
     pub villager_spawn_pos: Position,
     pub opening_rat_spawn_tick: i32,
-    pub villager_ready_tick: i32,
     pub phase1_unlock_tick: i32,
     pub spider_unlock_tick: i32,
     pub villager_event_scheduled: bool,
@@ -2096,7 +2126,7 @@ fn derive_crisis_preparation_options(
             "defences",
             "Defences",
             "needs_attention",
-            "No completed wall is present; a Stockade plan and 3 carried Log-compatible units are ready."
+            "No completed wall is present; a Stockade plan and 10 carried Log-compatible units are ready."
                 .to_string(),
             "Place a Stockade foundation using the existing plan and carried materials.",
         )
@@ -2109,8 +2139,8 @@ fn derive_crisis_preparation_options(
             "Move to a tile without an existing wall before placing a Stockade foundation."
         } else if !facts.stockade_plan_available {
             "The Stockade plan is not available to this player."
-        } else if facts.stockade_log_units_carried < 3 {
-            "A Stockade requires 3 carried Log-compatible units."
+        } else if facts.stockade_log_units_carried < 10 {
+            "A Stockade requires 10 carried Log-compatible units."
         } else {
             "A completed wall is required before wall repairs are available."
         };
@@ -3015,13 +3045,12 @@ fn survival_horde_composition(size: usize, day: i32) -> Vec<&'static str> {
 }
 
 fn shipwreck_inspection_can_spawn_villager(
-    game_tick: i32,
     entry: &InitialEncounterEntry,
     objectives: Option<&PlayerObjectives>,
     has_burrow: bool,
 ) -> bool {
-    game_tick >= entry.villager_ready_tick
-        && has_burrow
+    has_burrow
+        && entry.all_opening_enemies_defeated()
         && objectives
             .map(|obj| obj.scavenge_shipwreck)
             .unwrap_or(false)
@@ -3106,7 +3135,7 @@ pub const MERCHANT_INVENTORY: &[(&str, i32)] = &[
     ("Trapper Deed", 1),
     ("Mine Deed", 1),
     ("Farm Deed", 1),
-    ("Small Tent Deed", 1),
+    ("Shelter Tent Deed", 1),
     ("Training Pick Axe", 1),
     ("Sickle", 1),
     ("Bucket", 2),
@@ -3559,6 +3588,12 @@ impl Plugin for GamePlugin {
             .add_plugins(VillagerPlugin)
             .add_plugins(TaxCollectorPlugin)
             .add_plugins(SafeLogoutPlugin);
+        app.add_systems(
+            PostUpdate,
+            investigate_event_system
+                .before(SafeLogoutPostUpdateSet::Lifecycle)
+                .run_if(in_state(AppState::Running)),
+        );
         app.add_systems(OnEnter(AppState::Running), init_objs);
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
         app.init_resource::<SanctuaryExcursions>();
@@ -3576,6 +3611,7 @@ impl Plugin for GamePlugin {
         app.init_resource::<CrisisStatusLoginSync>();
         app.init_resource::<CrisisStatusDeliveryState>();
         app.init_resource::<ResumeLoginSyncState>();
+        app.init_resource::<CampfireVisibilityState>();
 
         if !self.headless {
             // The simulation harness must not exercise the live server's
@@ -3588,6 +3624,12 @@ impl Plugin for GamePlugin {
             .add_systems(
                 Update,
                 stamina_recovery_system.run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                damage_over_time_system
+                    .after(stamina_recovery_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -3653,10 +3695,6 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                investigate_event_system.run_if(in_state(AppState::Running)),
-            )
-            .add_systems(
-                Update,
                 farm_event_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
@@ -3706,7 +3744,9 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                initial_encounter_system.run_if(in_state(AppState::Running)),
+                initial_encounter_system
+                    .after(update_game_tick)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -3831,7 +3871,25 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                visible_event_system.run_if(in_state(AppState::Running)),
+                campfire_visibility_system
+                    .after(update_game_tick)
+                    .after(move_event_completed_system)
+                    .after(activate_event_system)
+                    .after(fuel_system)
+                    .after(state_dead_system)
+                    .after(hero_dead_system)
+                    .after(resurrect_system)
+                    .before(true_death_system)
+                    .before(visible_event_system)
+                    .before(perception_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
+                visible_event_system
+                    .before(true_death_system)
+                    .before(perception_system)
+                    .run_if(in_state(AppState::Running)),
             )
             .add_systems(
                 Update,
@@ -4849,6 +4907,10 @@ fn sanctuary_exploration_unlocked(power_score: i32) -> bool {
     power_score >= SANCTUARY_POWER_UNLOCK_SCORE
 }
 
+fn sanctuary_excursion_actor_is_eligible(player_id: i32, subclass: &Subclass) -> bool {
+    player::is_player(player_id) && (subclass.is_hero() || subclass.is_villager())
+}
+
 fn record_sanctuary_exposure(
     sanctuary_excursions: &mut SanctuaryExcursions,
     player_id: i32,
@@ -5021,7 +5083,6 @@ fn move_event_completed_system(
     (
         mover_query,
         map_obj_query,
-        campfire_query,
         mut effect_query,
         sanctuary_query,
         weak_sanctuary_query,
@@ -5048,7 +5109,6 @@ fn move_event_completed_system(
             With<MoveEventCompleted>,
         >,
         Query<MapObjQuery>,
-        Query<(&PlayerId, &Position, &State, &Campfire, Option<&StateDead>)>,
         Query<&mut Effects>,
         Query<&Sanctuary>,
         Query<&WeakSanctuary>,
@@ -5130,24 +5190,6 @@ fn move_event_completed_system(
                 if Map::dist(*mover_pos, *obj.pos) < 1 {
                     is_dst_shelter = Some(obj.id.0);
                 }
-            }
-        }
-
-        let is_on_owned_lit_campfire = campfire_query.iter().any(
-            |(campfire_player_id, campfire_pos, campfire_state, campfire, state_dead)| {
-                campfire_player_id.0 == mover_player_id.0
-                    && *campfire_pos == *mover_pos
-                    && campfire.is_lit
-                    && campfire_state.is_alive()
-                    && state_dead.is_none()
-            },
-        );
-        if let Ok(mut effects) = effect_query.get_mut(mover_entity) {
-            if sync_campfire_light_effect(&mut effects, is_on_owned_lit_campfire, game_tick.0) {
-                commands.trigger(UpdateObj {
-                    entity: mover_entity,
-                    attrs: vec![(VISION.to_string(), "Pending".to_string())],
-                });
             }
         }
 
@@ -5454,9 +5496,20 @@ fn move_event_completed_system(
                 effects.has(Effect::Sanctuary) || effects.has(Effect::WeakSanctuary);
             drop(effects);
 
-            if mover_subclass.is_hero() {
-                if let Ok((hero_template, hero_skills, hero_inventory)) =
-                    hero_power_query.get(mover_entity)
+            if sanctuary_excursion_actor_is_eligible(mover_player_id.0, mover_subclass) {
+                // Villagers share their owner's excursion pressure and use the
+                // owner's hero progression for scaling. This lets a rescued
+                // villager trigger the same sanctuary-exit response without
+                // treating villager stats as hero power.
+                let owner_hero_entity = if mover_subclass.is_hero() {
+                    Some(mover_entity)
+                } else {
+                    ids.get_hero(mover_player_id.0)
+                        .and_then(|hero_id| entity_map.get_entity(hero_id))
+                };
+
+                if let Some((hero_template, hero_skills, hero_inventory)) =
+                    owner_hero_entity.and_then(|hero_entity| hero_power_query.get(hero_entity).ok())
                 {
                     let player_gold = total_player_gold(mover_player_id.0, &inventory_query);
                     let power_score = sanctuary_power_score(
@@ -5510,8 +5563,8 @@ fn move_event_completed_system(
                     }
                 } else {
                     error!(
-                        "Hero {:?} missing progression data for sanctuary excursion",
-                        mover_entity
+                        "Player {} mover {:?} missing owner hero progression data for sanctuary excursion",
+                        mover_player_id.0, mover_entity
                     );
                 }
             }
@@ -5621,12 +5674,31 @@ fn move_event_completed_system(
     }
 }
 
-fn sync_campfire_light_effect(
+fn hero_activates_campfire_light(
+    hero_pos: Position,
+    hero_state: State,
+    hero_hp: i32,
+    hero_dead: bool,
+    campfire_pos: Position,
+    campfire_state: State,
+    campfire_is_lit: bool,
+    campfire_dead: bool,
+) -> bool {
+    hero_hp > 0
+        && !hero_dead
+        && hero_state.is_alive()
+        && campfire_is_lit
+        && !campfire_dead
+        && campfire_state.is_alive()
+        && Map::dist(hero_pos, campfire_pos) <= 1
+}
+
+fn sync_legacy_shelter_light_effect(
     effects: &mut Effects,
-    is_on_owned_lit_campfire: bool,
+    receives_light: bool,
     game_tick: i32,
 ) -> bool {
-    if is_on_owned_lit_campfire {
+    if receives_light {
         if effects.has(Effect::CampfireLight) {
             false
         } else {
@@ -5637,6 +5709,157 @@ fn sync_campfire_light_effect(
         }
     } else {
         effects.0.remove(&Effect::CampfireLight).is_some()
+    }
+}
+
+fn campfire_visibility_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    presence: Res<PlayerWorldPresenceState>,
+    mut visibility_state: ResMut<CampfireVisibilityState>,
+    mut perception_updates: ResMut<PerceptionUpdates>,
+    mut legacy_light_query: Query<
+        (
+            Entity,
+            &PlayerId,
+            &Position,
+            &State,
+            &mut Effects,
+            Option<&StateDead>,
+        ),
+        (With<Viewshed>, Without<SubclassHero>),
+    >,
+    mut hero_query: Query<
+        (
+            Entity,
+            &PlayerId,
+            &Position,
+            &State,
+            &Stats,
+            &mut Effects,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    campfire_query: Query<(
+        &Id,
+        &PlayerId,
+        &Position,
+        &State,
+        &Subclass,
+        &Campfire,
+        Option<&StateDead>,
+    )>,
+) {
+    let mut next = HashSet::new();
+
+    // Standalone Campfire illumination is now a hero-activated, fire-centered
+    // bubble. Preserve the previous private, exact-tile +1 vision behavior for
+    // other fire-capable structures without making them public bubbles.
+    for (entity, owner, pos, state, mut effects, state_dead) in legacy_light_query.iter_mut() {
+        let receives_legacy_shelter_light = state.is_active()
+            && state_dead.is_none()
+            && !is_player_offline_protected(owner.0, &presence)
+            && campfire_query.iter().any(
+                |(_, fire_owner, fire_pos, fire_state, fire_subclass, fire, fire_dead)| {
+                    *fire_subclass != Subclass::Campfire
+                        && fire_owner.0 == owner.0
+                        && *fire_pos == *pos
+                        && fire.is_lit
+                        && fire_state.is_alive()
+                        && fire_dead.is_none()
+                },
+            );
+        if sync_legacy_shelter_light_effect(
+            &mut effects,
+            receives_legacy_shelter_light,
+            game_tick.0,
+        ) {
+            commands.trigger(UpdateObj {
+                entity,
+                attrs: vec![(VISION.to_string(), "Pending".to_string())],
+            });
+        }
+    }
+
+    for (
+        hero_entity,
+        player_id,
+        hero_pos,
+        hero_state,
+        hero_stats,
+        mut hero_effects,
+        hero_dead,
+        true_death,
+    ) in hero_query.iter_mut()
+    {
+        let hero_can_activate_light = player_id.is_human()
+            && !is_player_offline_protected(player_id.0, &presence)
+            && true_death.is_none()
+            && hero_dead.is_none()
+            && hero_stats.hp > 0
+            && hero_state.is_alive();
+        let mut receives_legacy_shelter_light = false;
+
+        if hero_can_activate_light {
+            for (
+                campfire_id,
+                campfire_player_id,
+                campfire_pos,
+                campfire_state,
+                campfire_subclass,
+                campfire,
+                campfire_dead,
+            ) in campfire_query.iter()
+            {
+                let light_is_active = hero_activates_campfire_light(
+                    *hero_pos,
+                    *hero_state,
+                    hero_stats.hp,
+                    hero_dead.is_some(),
+                    *campfire_pos,
+                    *campfire_state,
+                    campfire.is_lit,
+                    campfire_dead.is_some(),
+                );
+                if !light_is_active {
+                    continue;
+                }
+
+                if *campfire_subclass == Subclass::Campfire {
+                    next.insert((player_id.0, campfire_id.0));
+                } else if campfire_player_id.0 == player_id.0 && *campfire_pos == *hero_pos {
+                    // Preserve the previous private, exact-tile +1 vision for
+                    // fire-capable shelters. They do not become public light
+                    // bubbles under the standalone Campfire rule.
+                    receives_legacy_shelter_light = true;
+                }
+            }
+        }
+
+        let legacy_shelter_light_changed = sync_legacy_shelter_light_effect(
+            &mut hero_effects,
+            receives_legacy_shelter_light,
+            game_tick.0,
+        );
+        if legacy_shelter_light_changed {
+            commands.trigger(UpdateObj {
+                entity: hero_entity,
+                attrs: vec![(VISION.to_string(), "Pending".to_string())],
+            });
+        }
+    }
+
+    let changed_players: HashSet<i32> = visibility_state
+        .0
+        .symmetric_difference(&next)
+        .map(|(player_id, _)| *player_id)
+        .collect();
+    visibility_state.0 = next;
+
+    for player_id in changed_players {
+        perception_updates.insert((player_id, PerceptionUpdateType::UpdatePerception));
     }
 }
 
@@ -5811,6 +6034,7 @@ fn activate_event_system(
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     mut query: Query<ObjWithStatsQuery>,
+    campfire_query: Query<&Campfire>,
 ) {
     let mut events_to_add: Vec<MapEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -5855,6 +6079,13 @@ fn activate_event_system(
                         continue;
                     };
 
+                    if campfire_query
+                        .get(structure_entity)
+                        .is_ok_and(|campfire| campfire.is_lit)
+                    {
+                        continue;
+                    }
+
                     let Ok(structure) = query.get_mut(structure_entity) else {
                         error!("Query failed to find entity {:?}", structure_entity);
                         continue;
@@ -5877,12 +6108,6 @@ fn activate_event_system(
                         commands.trigger(UpdateObj {
                             entity: structure_entity,
                             attrs: vec![(IMAGE.to_string(), structure_campfire_image)],
-                        });
-
-                        // Add campfire light effect
-                        commands.trigger(AddLightEffect {
-                            entity: structure_entity,
-                            effect: Effect::CampfireLight.clone(),
                         });
                     }
                 }
@@ -6121,8 +6346,9 @@ pub fn build_system(
                     // Get workspaces from structure template
                     let workspaces = structure_template.workspaces.unwrap_or(0);
 
-                    for _workspace in 0..workspaces {
+                    for workspace in 0..workspaces {
                         let work_entry = WorkEntry {
+                            entry_id: -(workspace + 1),
                             worker_id: -1,
                             work_type: WorkType::Operate,
                             work_status: WorkStatus::Idle,
@@ -6954,6 +7180,40 @@ fn forage_event_system(
     }
 }
 
+enum HarvestToolWear {
+    Worn(Item),
+    Broken { id: i32, name: String },
+}
+
+fn wear_harvesting_tool(
+    inventory: &mut Inventory,
+    res_type: &str,
+    templates: &Templates,
+) -> Option<HarvestToolWear> {
+    let tool = inventory.get_equipped_tool_for_res_type(res_type)?;
+    let maximum = templates
+        .item_templates
+        .iter()
+        .find(|template| template.name == tool.name)
+        .and_then(|template| template.durability)?;
+    // Existing persistent items predate tool durability. The first harvesting
+    // use lazily adopts the template maximum so old inventories migrate safely.
+    let current = tool.durability.unwrap_or(maximum);
+    let remaining = current.saturating_sub(1);
+    let break_chance = item::harvest_tool_break_chance(remaining, maximum);
+
+    if rand::thread_rng().gen::<f32>() < break_chance {
+        inventory.remove_item(tool.id);
+        Some(HarvestToolWear::Broken {
+            id: tool.id,
+            name: tool.name,
+        })
+    } else {
+        inventory.update_durability(tool.id, remaining);
+        inventory.get_by_id(tool.id).map(HarvestToolWear::Worn)
+    }
+}
+
 fn gather_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
@@ -6965,6 +7225,7 @@ fn gather_event_system(
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
@@ -7016,11 +7277,12 @@ fn gather_event_system(
 
                     let mut rng = rand::thread_rng();
 
-                    let resources_on_tile = Resource::get_by_type(
+                    let resources_on_tile = Resource::get_by_type_for_player(
                         gatherer.pos.clone(),
                         res_type.clone(),
                         &resources,
-                        true,
+                        &discoveries,
+                        gatherer.player_id.0,
                     );
                     let res_templates = &templates.res_templates;
                     let item_templates = &templates.item_templates;
@@ -7033,139 +7295,104 @@ fn gather_event_system(
                     let mut gathered_levelup: Option<i32> = None;
 
                     info!("Resources on tile: {:?}", resources_on_tile);
-                    for resource in resources_on_tile.iter() {
+                    let skill_name = Resource::type_to_skill(res_type.clone());
+                    let skill_name_enum = Skill::from_str(&skill_name)
+                        .unwrap_or_else(|| panic!("Invalid skill name: {}", skill_name));
+                    let skill_value = gatherer
+                        .skills
+                        .get_by_name(skill_name_enum.clone())
+                        .map(|skill| skill.level)
+                        .unwrap_or(0);
+                    let eligible_resources = resources_on_tile
+                        .iter()
+                        .filter(|resource| {
+                            res_templates
+                                .get(&resource.name)
+                                .map(|template| {
+                                    skill_value >= Resource::minimum_skill_level(template.skill_req)
+                                })
+                                .unwrap_or(false)
+                        })
+                        .collect::<Vec<_>>();
+
+                    if let Some(resource) = eligible_resources.choose(&mut rng).copied() {
                         if let Some(res_template) = res_templates.get(&resource.name) {
-                            let skill_name = Resource::type_to_skill(res_type.clone());
-                            let skill_name_enum = Skill::from_str(&skill_name)
-                                .expect(&format!("Invalid skill name: {}", skill_name));
-
-                            let mut skill_value = 0;
-
-                            if let Some(gatherer_skill) =
-                                gatherer.skills.get_by_name(skill_name_enum.clone())
-                            {
-                                skill_value = gatherer_skill.level;
-                            }
-
-                            info!("Res template: {:?}", res_template);
-                            info!("Skill value: {:?}", skill_value);
-                            info!("Skill name: {:?}", skill_name);
                             let gather_chance =
                                 Resource::gather_chance(skill_value, res_template.skill_req);
 
-                            let random_num = rng.gen::<f32>();
+                            if rng.gen::<f32>() < gather_chance {
+                                let item_name = resource
+                                    .produces
+                                    .as_ref()
+                                    .and_then(|produces| produces.first())
+                                    .cloned()
+                                    .unwrap_or_else(|| resource.name.clone());
+                                let item_weight = Item::get_weight_from_template(
+                                    item_name.clone(),
+                                    1,
+                                    item_templates,
+                                );
 
-                            info!("Gather chance: {:?}", gather_chance);
-                            info!("Random number: {:?}", random_num);
-
-                            if random_num < gather_chance {
-                                info!("Gathering resource: {:?}", resource.name);
-                                let resource_quantity = 1;
-
-                                let current_total_weight = gatherer.inventory.get_total_weight();
-                                let mut total_needed_weight = 0;
-
-                                if let Some(produces) = &resource.produces {
-                                    for produce in produces.iter() {
-                                        total_needed_weight += Item::get_weight_from_template(
-                                            produce.clone(),
-                                            resource_quantity,
-                                            &item_templates,
-                                        );
-                                    }
-                                } else {
-                                    total_needed_weight = Item::get_weight_from_template(
-                                        resource.name.clone(),
-                                        resource_quantity,
-                                        &item_templates,
-                                    );
-                                }
-
-                                if (current_total_weight + total_needed_weight) < capacity {
-                                    // Update skill
+                                if gatherer.inventory.get_total_weight() + item_weight <= capacity {
                                     let levelup = gatherer.skills.update(
-                                        skill_name_enum.clone(),
-                                        100,
+                                        skill_name_enum,
+                                        25,
                                         &templates.skill_templates,
                                     );
-                                    gathered_xp += 100;
-                                    gathered_skill = Some(skill_name.clone());
-                                    if levelup.is_some() {
-                                        gathered_levelup = levelup;
-                                    }
+                                    gathered_xp = 25;
+                                    gathered_skill = Some(skill_name);
+                                    gathered_levelup = levelup;
 
-                                    let mut item_attrs = HashMap::new();
-
-                                    let quality_rate = res_template
-                                        .quality_rate
-                                        .clone()
-                                        .unwrap_or(vec![60, 30, 10]);
-
-                                    // Determine quality
-                                    let dist = WeightedIndex::new(quality_rate).unwrap();
-                                    let sample = dist.sample(&mut rng);
-                                    let quality_level = sample as i32;
-
-                                    debug!("Quality Level: {:?}", quality_level);
-
-                                    for property in resource.properties.iter() {
-                                        debug!("{:?} {:?}", property.name, property.value);
-                                        //let characteristic_value = rng.gen_range(characteristic.min..characteristic.max);
-
-                                        let attr_key = AttrKey::str_to_key(property.name.clone());
-
-                                        item_attrs.insert(
-                                            attr_key,
-                                            item::AttrVal::Num(property.value as f32),
-                                        );
-                                    }
-
-                                    debug!("item_attrs: {:?}", item_attrs);
-                                    debug!("Produces: {:?}", resource.produces);
-
-                                    if let Some(produces) = &resource.produces {
-                                        for produce in produces.iter() {
-                                            let item_name = produce.clone();
-
-                                            let (new_item, _merged) =
-                                                gatherer.inventory.new_with_attrs(
-                                                    ids.new_item_id(),
-                                                    *gatherer_id,
-                                                    item_name,
-                                                    1, //TODO should this be only 1
-                                                    item_attrs.clone(),
-                                                    &templates.item_templates,
-                                                );
-
-                                            items_to_update.push(Item::to_packet(new_item));
-                                        }
-                                    } else {
-                                        let (new_item, _merged) =
-                                            gatherer.inventory.new_with_attrs(
-                                                ids.new_item_id(),
-                                                *gatherer_id,
-                                                resource.name.clone(),
-                                                1, //TODO should this be only 1
-                                                item_attrs.clone(),
-                                                &templates.item_templates,
-                                            );
-
-                                        items_to_update.push(Item::to_packet(new_item));
-                                    }
-                                } else {
-                                    info!(
-                                        "Not enough inventory capacity to gather resource: {:?}",
-                                        resource.name
+                                    let item_attrs = resource
+                                        .properties
+                                        .iter()
+                                        .map(|property| {
+                                            (
+                                                AttrKey::str_to_key(property.name.clone()),
+                                                item::AttrVal::Num(property.value as f32),
+                                            )
+                                        })
+                                        .collect::<HashMap<_, _>>();
+                                    let (new_item, _merged) = gatherer.inventory.new_with_attrs(
+                                        ids.new_item_id(),
+                                        *gatherer_id,
+                                        item_name,
+                                        1,
+                                        item_attrs,
+                                        item_templates,
                                     );
+                                    items_to_update.push(Item::to_packet(new_item));
                                 }
-                            } else {
-                                info!("Failed to gather resource: {:?}", resource.name);
                             }
-                        } else {
-                            info!(
-                                "No resource template found for resource: {:?}",
-                                resource.name
+                        }
+
+                        if let Some(wear) =
+                            wear_harvesting_tool(&mut gatherer.inventory, res_type, &templates)
+                        {
+                            let (items_updated, items_removed, broken_name) = match wear {
+                                HarvestToolWear::Worn(item) => {
+                                    (vec![item.packet()], Vec::new(), None)
+                                }
+                                HarvestToolWear::Broken { id, name } => {
+                                    (Vec::new(), vec![id], Some(name))
+                                }
+                            };
+                            send_to_client(
+                                gatherer.player_id.0,
+                                ResponsePacket::InfoItemsUpdate {
+                                    id: *gatherer_id,
+                                    items_updated,
+                                    items_removed,
+                                },
+                                &clients,
                             );
+                            if let Some(name) = broken_name {
+                                send_notice(
+                                    gatherer.player_id.0,
+                                    &format!("Your {} broke while harvesting.", name),
+                                    &clients,
+                                );
+                            }
                         }
                     }
 
@@ -7236,10 +7463,11 @@ fn structure_gather_event_system(
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut operator_query: Query<(&Template, &mut Skills)>,
+    mut operator_query: Query<(&PlayerId, &Template, &mut Skills)>,
     mut structure_query: Query<(&Position, &Template, &mut Inventory)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
@@ -7264,7 +7492,7 @@ fn structure_gather_event_system(
                         continue;
                     };
 
-                    let Ok((operator_template, mut operator_skills)) =
+                    let Ok((operator_player_id, operator_template, mut operator_skills)) =
                         operator_query.get_mut(operator_entity)
                     else {
                         error!("Query failed to find entity {:?}", operator_entity);
@@ -7306,11 +7534,12 @@ fn structure_gather_event_system(
 
                     let mut rng = rand::thread_rng();
 
-                    let resources_on_tile = Resource::get_by_type(
+                    let resources_on_tile = Resource::get_by_type_for_player(
                         structure_pos.clone(),
                         res_type.clone(),
                         &resources,
-                        true,
+                        &discoveries,
+                        operator_player_id.0,
                     );
                     let res_templates = &templates.res_templates;
                     let item_templates = &templates.item_templates;
@@ -7366,7 +7595,7 @@ fn structure_gather_event_system(
                                     );
                                 }
 
-                                if (current_total_weight + total_needed_weight) < capacity {
+                                if current_total_weight + total_needed_weight <= capacity {
                                     // Update skill
                                     operator_skills.update(
                                         skill_name_enum.clone(),
@@ -7539,90 +7768,53 @@ fn refine_event_system(
 
                     let refiner_capacity =
                         Obj::get_capacity(&refiner_template.0, &templates.obj_templates);
-
-                    let mut items_to_update = Vec::new();
-
                     let item_template =
-                        Item::get_template(item_to_refine.name, &templates.item_templates);
-
-                    let Some(produces_list) = item_template.produces.clone() else {
-                        error!(
-                            "Missing item produces attribute for item template {:?}",
-                            item_template
-                        );
-                        continue 'event_loop;
-                    };
-
-                    let item_to_refine_weight = item_to_refine.weight as i32;
-                    let mut produced_items = Vec::new();
-
-                    // Butchery doubles yield per produces-entry (better cuts than improvised tools)
+                        Item::get_template(item_to_refine.name, &templates.item_templates).clone();
                     let yield_multiplier = if refiner_template.0 == "Butchery" {
                         2
                     } else {
                         1
                     };
-
-                    // Create new items
-                    for produce_item_name in produces_list.iter() {
-                        let produce_item_template = Item::get_template(
-                            produce_item_name.to_string(),
-                            &templates.item_templates,
-                        );
-                        let produce_quantity = yield_multiplier;
-
-                        let current_total_weight = refiner_inventory.get_total_weight();
-                        let item_weight = produce_item_template.weight as i32 * produce_quantity;
-
-                        info!("Current total weight: {:?}", current_total_weight);
-                        info!("Item to refine weight: {:?}", item_to_refine_weight);
-                        info!("Item weight: {:?}", item_weight);
-                        info!("Source capacity: {:?}", refiner_capacity);
-                        if current_total_weight - item_to_refine_weight + item_weight
-                            > refiner_capacity
-                        {
-                            info!("Refining refiner is full {:?}", refiner_id);
-                            // Send error packet to refiner
-                            let error_packet: ResponsePacket = ResponsePacket::Error {
-                                errmsg: "Inventory is full, cannot refine".to_string(),
+                    let outcome = match refiner_inventory.try_refine(
+                        item_to_refine.id,
+                        yield_multiplier,
+                        refiner_capacity,
+                        &templates.item_templates,
+                        &mut ids,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            error!("Refine failed for {:?}: {:?}", refiner_id, error);
+                            let message = match error {
+                                item::RefineError::InventoryFull => {
+                                    "Inventory is full, cannot refine"
+                                }
+                                item::RefineError::ItemNotFound => {
+                                    "The item to refine is no longer available"
+                                }
+                                item::RefineError::ItemNotRefineable => {
+                                    "That item cannot be refined"
+                                }
+                                item::RefineError::MissingItemTemplate(_) => {
+                                    "Refining output is invalid"
+                                }
                             };
-                            send_to_client(refiner_player_id, error_packet, &clients);
-
-                            // Add State Change Event to None
-                            commands.trigger(StateChange {
-                                entity: refiner_entity,
-                                new_state: State::None,
-                            });
-
+                            send_to_client(
+                                refiner_player_id,
+                                ResponsePacket::Error {
+                                    errmsg: message.to_string(),
+                                },
+                                &clients,
+                            );
                             continue 'event_loop;
                         }
-
-                        if let Some(merged_item) = refiner_inventory
-                            .update_quantity(produce_item_template.name.clone(), produce_quantity)
-                        {
-                            items_to_update.push(Item::to_packet(merged_item.clone()));
-                            produced_items.push((merged_item.id, produce_quantity));
-                        } else {
-                            let new_item = refiner_inventory.new(
-                                ids.new_item_id(),
-                                produce_item_template.name.clone(),
-                                produce_quantity,
-                                &templates.item_templates,
-                            );
-
-                            items_to_update.push(Item::to_packet(new_item.clone()));
-                            produced_items.push((new_item.id, produce_quantity));
-                        }
-                    }
-
-                    // Consume item to refine
-                    let refined_item = refiner_inventory.remove_quantity(item_to_refine.id, 1);
-                    let refined_item_packet;
-
-                    info!("Refined item: {:?}", refined_item);
-
-                    // No refined item, set packet to none
-                    refined_item_packet = None;
+                    };
+                    let produced_items = outcome
+                        .produced
+                        .iter()
+                        .map(|(item, quantity)| (item.id, *quantity))
+                        .collect();
+                    let refined_item_packet = None;
 
                     let refine_skill = item_template
                         .refine_skill
@@ -7684,6 +7876,37 @@ fn refine_event_system(
     }
 }
 
+fn remove_work_queue_job(work_queue: &mut WorkQueue, entry_id: Option<i32>) {
+    if let Some(entry_id) = entry_id {
+        work_queue.0.retain(|entry| entry.entry_id != entry_id);
+    }
+}
+
+fn reset_work_queue_job(work_queue: &mut WorkQueue, entry_id: Option<i32>) {
+    if let Some(entry_id) = entry_id {
+        if let Some(entry) = work_queue
+            .0
+            .iter_mut()
+            .find(|entry| entry.entry_id == entry_id)
+        {
+            entry.worker_id = -1;
+            entry.work_status = WorkStatus::Idle;
+        }
+    }
+}
+
+fn reset_operate_job(work_queue: &mut WorkQueue, worker_id: i32) -> bool {
+    if let Some(entry) = work_queue
+        .0
+        .iter_mut()
+        .find(|entry| entry.work_type == WorkType::Operate && entry.worker_id == worker_id)
+    {
+        entry.work_status = WorkStatus::Idle;
+        return true;
+    }
+    false
+}
+
 fn structure_refine_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
@@ -7695,8 +7918,8 @@ fn structure_refine_event_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut refiner_query: Query<(&Subclass, &State, &mut Skills)>,
-    mut structure_query: Query<(&Template, &mut Inventory, &mut WorkQueue)>,
+    mut refiner_query: Query<(&Position, &Subclass, &State, &mut Skills)>,
+    mut structure_query: Query<(&Position, &Template, &State, &mut Inventory, &mut WorkQueue)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -7712,6 +7935,7 @@ fn structure_refine_event_system(
                     refiner_id,
                     structure_id,
                     item_id,
+                    work_entry_id,
                 } => {
                     info!("Processing RefineEvent");
                     events_to_remove.push(*event_id);
@@ -7726,7 +7950,7 @@ fn structure_refine_event_system(
                         continue;
                     };
 
-                    let Ok((refiner_subclass, refiner_state, mut refiner_skills)) =
+                    let Ok((refiner_pos, refiner_subclass, refiner_state, mut refiner_skills)) =
                         refiner_query.get_mut(refiner_entity)
                     else {
                         error!("Cannot find refiner from entity {:?}", refiner_entity);
@@ -7746,8 +7970,13 @@ fn structure_refine_event_system(
                         continue;
                     };
 
-                    let Ok((structure_template, mut structure_inventory, mut work_queue_entries)) =
-                        structure_query.get_mut(structure_entity)
+                    let Ok((
+                        structure_pos,
+                        structure_template,
+                        structure_state,
+                        mut structure_inventory,
+                        mut work_queue_entries,
+                    )) = structure_query.get_mut(structure_entity)
                     else {
                         error!("Cannot find structure from entity {:?}", structure_entity);
                         continue;
@@ -7762,96 +7991,115 @@ fn structure_refine_event_system(
                         new_state: State::None,
                     });
 
+                    if ids.get_player(*structure_id) != Some(player_id)
+                        || *refiner_pos != *structure_pos
+                        || !Structure::is_built(*structure_state)
+                    {
+                        error!(
+                            "Rejected structure refine completion for worker {:?} and structure {:?}",
+                            refiner_id, structure_id
+                        );
+                        remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                        continue;
+                    }
+
                     let Some(item_to_refine) = structure_inventory.get_by_id(*item_id) else {
                         // No items to refine, skip event
                         debug!(
                             "No items to refine for structure {:?} with item id {:?}",
                             structure_id, item_id
                         );
+                        remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
                         continue;
                     };
 
                     let structure_capacity =
                         Obj::get_capacity(&structure_template.0, &templates.obj_templates);
-
-                    let mut items_to_update = Vec::new();
-                    let mut items_to_remove = Vec::new();
-
                     let item_template =
-                        Item::get_template(item_to_refine.name.clone(), &templates.item_templates);
-
-                    let Some(produces_list) = item_template.produces.clone() else {
+                        Item::get_template(item_to_refine.name.clone(), &templates.item_templates)
+                            .clone();
+                    let station_template =
+                        templates.obj_templates.get(structure_template.0.clone());
+                    let supports_item = station_template.refine.as_ref().is_some_and(|types| {
+                        types.iter().any(|item_type| {
+                            item_type == &item_to_refine.name
+                                || item_type == &item_to_refine.class
+                                || item_type == &item_to_refine.subclass
+                        })
+                    });
+                    let refine_skill_allowed = item_template
+                        .refine_skill
+                        .as_ref()
+                        .and_then(|skill| Skill::from_str(skill))
+                        .is_some_and(|skill| {
+                            refiner_skills.has_proficiency_requirement(
+                                skill,
+                                item_template.refine_skill_req.unwrap_or(0),
+                                &templates.skill_templates,
+                            )
+                        });
+                    if !supports_item || !refine_skill_allowed {
                         error!(
-                            "Missing item produces attribute for item template {:?}",
-                            item_template
+                            "Structure {:?} or refiner {:?} cannot refine {:?}",
+                            structure_template.0, refiner_id, item_to_refine.name
                         );
+                        remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
                         continue;
-                    };
+                    }
 
-                    let item_to_refine_weight = item_to_refine.weight as i32;
-                    let mut produced_items = Vec::new();
-
-                    // Butchery doubles yield per produces-entry (better cuts than improvised tools)
                     let yield_multiplier = if structure_template.0 == "Butchery" {
                         2
                     } else {
                         1
                     };
-
-                    // Create new items
-                    for produce_item_name in produces_list.iter() {
-                        let produce_item_template = Item::get_template(
-                            produce_item_name.to_string(),
-                            &templates.item_templates,
-                        );
-                        let produce_quantity = yield_multiplier;
-
-                        let current_total_weight = structure_inventory.get_total_weight();
-                        let item_weight = produce_item_template.weight as i32 * produce_quantity;
-
-                        info!("Current total weight: {:?}", current_total_weight);
-                        info!("Item to refine weight: {:?}", item_to_refine_weight);
-                        info!("Item weight: {:?}", item_weight);
-                        info!("Structure capacity: {:?}", structure_capacity);
-                        if current_total_weight - item_to_refine_weight + item_weight
-                            > structure_capacity
-                        {
-                            info!("Refining structure is full {:?}", structure_id);
-                            // Send error packet to refiner
-                            let error_packet: ResponsePacket = ResponsePacket::Error {
-                                errmsg: "Inventory is full, cannot refine".to_string(),
+                    let outcome = match structure_inventory.try_refine(
+                        item_to_refine.id,
+                        yield_multiplier,
+                        structure_capacity,
+                        &templates.item_templates,
+                        &mut ids,
+                    ) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            error!(
+                                "Structure refine failed for {:?}: {:?}",
+                                structure_id, error
+                            );
+                            let message = match error {
+                                item::RefineError::InventoryFull => {
+                                    "Inventory is full, cannot refine"
+                                }
+                                item::RefineError::ItemNotFound => {
+                                    "The item to refine is no longer available"
+                                }
+                                item::RefineError::ItemNotRefineable => {
+                                    "That item cannot be refined"
+                                }
+                                item::RefineError::MissingItemTemplate(_) => {
+                                    "Refining output is invalid"
+                                }
                             };
-                            send_to_client(player_id, error_packet, &clients);
+                            send_to_client(
+                                player_id,
+                                ResponsePacket::Error {
+                                    errmsg: message.to_string(),
+                                },
+                                &clients,
+                            );
+                            remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
                             continue 'event_loop;
                         }
+                    };
+                    let produced_items = outcome
+                        .produced
+                        .iter()
+                        .map(|(item, quantity)| (item.id, *quantity))
+                        .collect();
 
-                        if let Some(merged_item) = structure_inventory
-                            .update_quantity(produce_item_template.name.clone(), produce_quantity)
-                        {
-                            items_to_update.push(Item::to_packet(merged_item.clone()));
-                            produced_items.push((merged_item.id, produce_quantity));
-                        } else {
-                            let new_item = structure_inventory.new(
-                                ids.new_item_id(),
-                                produce_item_template.name.clone(),
-                                produce_quantity,
-                                &templates.item_templates,
-                            );
-
-                            items_to_update.push(Item::to_packet(new_item.clone()));
-                            produced_items.push((new_item.id, produce_quantity));
-                        }
-                    }
-
-                    // Consume item to refine
-                    let refined_item = structure_inventory.remove_quantity(item_to_refine.id, 1);
-                    let refined_item_packet;
-
-                    info!("Refined item: {:?}", refined_item);
-                    if let Some(refined_item) = refined_item {
+                    let refined_item_packet = if let Some(refined_item) = outcome.remaining_source {
                         let mut produces_list_packet: Vec<network::ProducedItem> = Vec::new();
 
-                        for produce in produces_list.iter() {
+                        for produce in item_template.produces.iter().flatten() {
                             let produce_template =
                                 Item::get_template(produce.to_string(), &templates.item_templates);
 
@@ -7864,13 +8112,9 @@ fn structure_refine_event_system(
                         }
 
                         // Get refine time
-                        let item_template = Item::get_template(
-                            refined_item.name.clone(),
-                            &templates.item_templates,
-                        );
                         let refine_time = item_template.get_refine_time();
 
-                        refined_item_packet = Some(RefiningItem {
+                        Some(RefiningItem {
                             id: refined_item.id,
                             name: refined_item.name,
                             image: refined_item.image,
@@ -7884,34 +8128,10 @@ fn structure_refine_event_system(
                                 .expect("Missing refine skill"),
                             refine_time: refine_time / TICKS_PER_SEC,
                             progress: 0,
-                        });
-
-                        // Add another refine event
-                        /*let game_event = GameEvent {
-                            event_id: ids.new_map_event_id(),
-                            start_tick: game_tick.0,
-                            run_tick: game_tick.0 + refine_time,
-                            event_type: GameEventType::RefineEvent {
-                                refiner_id: *refiner_id,
-                                structure_id: *structure_id,
-                                item_id: item_to_refine.id,
-                            },
-                        };
-
-                        events_to_add.push(game_event);*/
+                        })
                     } else {
-                        // No refined item, set packet to none
-                        refined_item_packet = None;
-
-                        // Item was removed, add to remove list
-                        items_to_remove.push(item_to_refine.id);
-
-                        // Add State Change Event to None
-                        commands.trigger(StateChange {
-                            entity: refiner_entity,
-                            new_state: State::None,
-                        });
-                    }
+                        None
+                    };
 
                     let refine_skill = item_template
                         .refine_skill
@@ -7927,9 +8147,7 @@ fn structure_refine_event_system(
                     );
 
                     // Remove completed work queue entry
-                    work_queue_entries
-                        .0
-                        .retain(|entry| entry.worker_id != *refiner_id);
+                    remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
 
                     if let Some(_active_info_players) =
                         active_infos.get(&(*structure_id, ActiveInfoType::StructureRefine))
@@ -7981,7 +8199,14 @@ fn craft_event_system(
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
-    mut query: Query<(&PlayerId, &Subclass, &State, &mut Inventory, &mut Skills)>,
+    mut query: Query<(
+        &PlayerId,
+        &Subclass,
+        &State,
+        &mut Inventory,
+        &mut Skills,
+        Option<&Template>,
+    )>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -8011,6 +8236,7 @@ fn craft_event_system(
                         crafter_state,
                         mut crafter_inventory,
                         mut crafter_skills,
+                        crafter_template,
                     )) = query.get_mut(crafter_entity)
                     else {
                         error!("Cannot find crafter from entity {:?}", crafter_entity);
@@ -8031,7 +8257,9 @@ fn craft_event_system(
                         new_state: State::None,
                     });
 
-                    let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                    let Some(recipe) =
+                        recipes.get_for_owner_by_name(crafter_player_id.0, recipe_name)
+                    else {
                         error!("Recipe not found {:?}", recipe_name);
                         continue;
                     };
@@ -8053,14 +8281,39 @@ fn craft_event_system(
                         info!("Item name: {:?}", item_name);
 
                         // Create new item
-                        let new_item_id = crafter_inventory.craft(
+                        let capacity = crafter_template
+                            .map(|template| {
+                                Obj::get_capacity(&template.0, &templates.obj_templates)
+                            })
+                            .unwrap_or(i32::MAX);
+                        let craft_result = crafter_inventory.try_craft(
                             ids.new_item_id(),
                             *crafter_id,
                             item_name,
                             &recipe,
                             None,
                             None,
+                            capacity,
                         );
+                        if let Err(error) = craft_result {
+                            error!("Craft failed for {:?}: {:?}", crafter_id, error);
+                            let message = match error {
+                                item::CraftError::InsufficientResources => {
+                                    "Required crafting materials are no longer available"
+                                }
+                                item::CraftError::InventoryFull => {
+                                    "Inventory is full, cannot craft"
+                                }
+                            };
+                            send_to_client(
+                                crafter_player_id.0,
+                                ResponsePacket::Error {
+                                    errmsg: message.to_string(),
+                                },
+                                &clients,
+                            );
+                            continue;
+                        }
 
                         // Get skill from recipe class first if not found get from subclass
                         let skill_name_enum = match SkillData::item_class_to_skill(&recipe.class) {
@@ -8085,7 +8338,8 @@ fn craft_event_system(
                             active_infos.get(&(*crafter_id, ActiveInfoType::Craft))
                         {
                             let crafter_items = crafter_inventory.get_packet();
-                            let crafter_recipes = recipes.get_basic_recipes_packet();
+                            let crafter_recipes =
+                                recipes.get_basic_recipes_packet(crafter_player_id.0);
 
                             let info_craft_packet: ResponsePacket = ResponsePacket::InfoCraft {
                                 crafter_id: *crafter_id,
@@ -8130,7 +8384,7 @@ fn structure_craft_event_system(
     templates: Res<Templates>,
     active_infos: Res<ActiveInfos>,
     mut crafter_query: Query<(&Position, &State, &mut Skills, Has<SubclassVillager>)>,
-    mut query: Query<(&Position, &Template, &mut Inventory, &mut WorkQueue)>,
+    mut query: Query<(&Position, &Template, &State, &mut Inventory, &mut WorkQueue)>,
 ) {
     let events_to_add: Vec<GameEvent> = Vec::new();
     let mut events_to_remove = Vec::new();
@@ -8146,6 +8400,7 @@ fn structure_craft_event_system(
                     crafter_id,
                     structure_id,
                     recipe_name,
+                    work_entry_id,
                 } => {
                     info!("Processing CraftEvent");
                     events_to_remove.push(*event_id);
@@ -8200,6 +8455,7 @@ fn structure_craft_event_system(
                     let Ok((
                         structure_pos,
                         structure_template,
+                        structure_state,
                         mut structure_inventory,
                         mut work_queue_entries,
                     )) = query.get_mut(structure_entity)
@@ -8213,15 +8469,16 @@ fn structure_craft_event_system(
                     // authoritative and must reject a worker that was displaced in
                     // the meantime. Leave the ingredients untouched and make the
                     // queue entry available so the villager can walk back and retry.
-                    if is_villager && *crafter_pos != *structure_pos {
+                    if *crafter_pos != *structure_pos {
                         debug!(
                             "Cancelling StructureCraftEvent for crafter {:?}: worker at {:?}, structure at {:?}",
                             crafter_id, crafter_pos, structure_pos
                         );
-                        for work_entry in work_queue_entries.0.iter_mut() {
-                            if work_entry.worker_id == *crafter_id {
-                                work_entry.worker_id = -1;
-                                work_entry.work_status = WorkStatus::Idle;
+                        if is_villager {
+                            if work_entry_id.is_some() {
+                                reset_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                            } else {
+                                reset_operate_job(&mut work_queue_entries, *crafter_id);
                             }
                         }
                         commands.entity(crafter_entity).insert(EventCompleted {
@@ -8233,13 +8490,40 @@ fn structure_craft_event_system(
                         continue;
                     }
 
-                    let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                    let Some(recipe) =
+                        recipes.get_for_owner_by_name(structure_player_id, recipe_name)
+                    else {
                         error!(
                             "Recipe not found {:?} for structure {:?}",
                             recipe_name, structure_id
                         );
+                        if is_villager {
+                            if work_entry_id.is_some() {
+                                remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                            } else {
+                                reset_operate_job(&mut work_queue_entries, *crafter_id);
+                            }
+                        }
                         continue;
                     };
+
+                    if !Structure::is_built(*structure_state)
+                        || !recipe.supports_structure(&structure_template.0)
+                        || !recipe.skill_requirement_met(&crafter_skills, &templates)
+                    {
+                        error!(
+                            "Rejected structure craft completion for {:?} at {:?}",
+                            recipe_name, structure_template.0
+                        );
+                        if is_villager {
+                            if work_entry_id.is_some() {
+                                remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                            } else {
+                                reset_operate_job(&mut work_queue_entries, *crafter_id);
+                            }
+                        }
+                        continue;
+                    }
 
                     if let Some(item_reqs) = structure_inventory.find_by_reqs(recipe.req.clone()) {
                         let item_name = if let Some(_item_name_from_req) = recipe.item_name_from_req
@@ -8258,14 +8542,43 @@ fn structure_craft_event_system(
                         info!("Item name: {:?}", item_name);
 
                         // Create new item
-                        let new_item = structure_inventory.craft(
+                        let structure_capacity =
+                            Obj::get_capacity(&structure_template.0, &templates.obj_templates);
+                        let craft_result = structure_inventory.try_craft(
                             ids.new_item_id(),
                             *structure_id,
                             item_name,
                             &recipe,
                             None,
                             None,
+                            structure_capacity,
                         );
+                        if let Err(error) = craft_result {
+                            error!("Structure craft failed for {:?}: {:?}", structure_id, error);
+                            let message = match error {
+                                item::CraftError::InsufficientResources => {
+                                    "Required crafting materials are no longer available"
+                                }
+                                item::CraftError::InventoryFull => {
+                                    "Structure inventory is full, cannot craft"
+                                }
+                            };
+                            send_to_client(
+                                structure_player_id,
+                                ResponsePacket::Error {
+                                    errmsg: message.to_string(),
+                                },
+                                &clients,
+                            );
+                            if is_villager {
+                                if work_entry_id.is_some() {
+                                    remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                                } else {
+                                    reset_operate_job(&mut work_queue_entries, *crafter_id);
+                                }
+                            }
+                            continue;
+                        }
 
                         // Get skill from recipe class first if not found get from subclass
                         let skill_name_enum = match SkillData::item_class_to_skill(&recipe.class) {
@@ -8287,9 +8600,17 @@ fn structure_craft_event_system(
                         );
 
                         // Remove crafter from work queue
-                        work_queue_entries
-                            .0
-                            .retain(|entry| entry.worker_id != *crafter_id);
+                        remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                        if is_villager
+                            && work_entry_id.is_none()
+                            && reset_operate_job(&mut work_queue_entries, *crafter_id)
+                        {
+                            commands.trigger(StartWork {
+                                entity: crafter_entity,
+                                worker_id: *crafter_id,
+                                structure_id: *structure_id,
+                            });
+                        }
 
                         if let Some(_active_info_players) =
                             active_infos.get(&(*structure_id, ActiveInfoType::StructureCraft))
@@ -8328,6 +8649,13 @@ fn structure_craft_event_system(
                             errmsg: "Structure does not have required items".to_string(),
                         };
                         send_to_client(crafter_player_id, error_packet, &clients);
+                        if is_villager {
+                            if work_entry_id.is_some() {
+                                remove_work_queue_job(&mut work_queue_entries, *work_entry_id);
+                            } else {
+                                reset_operate_job(&mut work_queue_entries, *crafter_id);
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -8353,7 +8681,9 @@ fn structure_operate_event_system(
     mut map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
+    recipes: Res<Recipes>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     mut operator_query: Query<(&PlayerId, &Position, &mut Skills)>,
     mut query: Query<(
         &PlayerId,
@@ -8438,14 +8768,37 @@ fn structure_operate_event_system(
                     // Remove Event In Progress
                     commands.entity(operator_entity).remove::<EventInProgress>();
 
-                    // T2.7 integration point: for food-production structures (Bakery,
-                    // Smoker, Millhouse, Butchery) we want villagers assigned via
-                    // Order::Operate to auto-craft from inventory rather than gather
-                    // from the tile. The recipe picker is `recipe::pick_available_recipe_at`.
-                    // Triggering a StructureCraftEvent here requires (a) adding the
-                    // `recipes: Res<Recipes>` param to this system and (b) transitioning
-                    // the villager to State::Crafting, both of which need their own
-                    // tests — leaving the wiring as a follow-up.
+                    if let Some(recipe) = crate::recipe::pick_available_recipe_at(
+                        structure_player_id.0,
+                        &structure_template.0,
+                        &structure_inventory,
+                        &recipes,
+                        &operator_skills,
+                        &templates,
+                    ) {
+                        commands.trigger(StateChange {
+                            entity: operator_entity,
+                            new_state: State::Crafting,
+                        });
+
+                        let crafting_time = recipe.crafting_time.unwrap_or(100);
+                        let event_id = ids.new_map_event_id();
+                        events_to_add.push(GameEvent {
+                            event_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + crafting_time,
+                            event_type: GameEventType::StructureCraftEvent {
+                                crafter_id: *operator_id,
+                                structure_id: *structure_id,
+                                recipe_name: recipe.name,
+                                // Operate slots are persistent; the craft
+                                // completion resets the slot instead of
+                                // deleting it.
+                                work_entry_id: None,
+                            },
+                        });
+                        continue;
+                    }
 
                     // Get gatherer capacity
                     let capacity =
@@ -8455,11 +8808,12 @@ fn structure_operate_event_system(
                     let res_type = Structure::resource_type(structure_template.0.clone());
 
                     // Get resources on tile by type
-                    let resources_on_tile = Resource::get_by_type(
+                    let resources_on_tile = Resource::get_by_type_for_player(
                         structure_pos.clone(),
                         res_type.clone(),
                         &resources,
-                        true,
+                        &discoveries,
+                        operator_player_id.0,
                     );
 
                     let res_templates = &templates.res_templates;
@@ -8516,7 +8870,7 @@ fn structure_operate_event_system(
                                     );
                                 }
 
-                                if (current_total_weight + total_needed_weight) < capacity {
+                                if current_total_weight + total_needed_weight <= capacity {
                                     // Update skill
                                     operator_skills.update(
                                         skill_name_enum.clone(),
@@ -8694,6 +9048,7 @@ fn experiment_event_system(
                         // If recipe is none, find a valid recipe for experimentation
                         if experiment.recipe == None {
                             let recipe = Experiment::find_recipe(
+                                structure_player_id.0,
                                 *structure_id,
                                 structure_name.0.clone(),
                                 &structure_inventory,
@@ -8920,14 +9275,23 @@ fn loot_poi_spawn_pos(template_name: &str, center: Position, map: &Map) -> Optio
 }
 
 fn reveal_nearby_resource(
+    player_id: i32,
     center: Position,
-    resources: &mut Resources,
-    res_templates: &ResTemplates,
+    resources: &Resources,
+    discoveries: &mut ResourceDiscoveries,
 ) -> Option<Resource> {
     for (x, y) in Map::range((center.x, center.y), 3) {
-        let revealed = Resource::explore(0, Position { x, y }, resources, res_templates);
-        if let Some(resource) = revealed.first() {
-            return Some(resource.clone());
+        let pos = Position { x, y };
+        let Some(resources_on_tile) = resources.get(&pos) else {
+            continue;
+        };
+        let hidden = resources_on_tile
+            .values()
+            .filter(|resource| !Resource::is_visible_to(resource, player_id, discoveries))
+            .collect::<Vec<_>>();
+        if let Some(resource) = hidden.choose(&mut rand::thread_rng()) {
+            discoveries.discover(player_id, pos, resource.name.clone());
+            return Some((*resource).clone());
         }
     }
 
@@ -9035,11 +9399,12 @@ fn add_timed_explore_effect(
         .get(&effect.clone().to_str())
         .expect("Effect missing from templates");
     let duration_ticks = effect_template.duration * TICKS_PER_SEC;
+    let expires_at = game_tick.saturating_add(duration_ticks);
 
-    effects.0.insert(effect.clone(), (duration_ticks, 1.0, 1));
+    effects.0.insert(effect.clone(), (expires_at, 1.0, 1));
     map_events.new(
         obj_id,
-        game_tick + duration_ticks,
+        expires_at,
         VisibleEvent::EffectExpiredEvent {
             effect: effect.clone(),
         },
@@ -9235,6 +9600,7 @@ fn apply_explore_outcome(
     entity_map: &mut ResMut<EntityObjMap>,
     map: &Res<Map>,
     resources: &mut ResMut<Resources>,
+    discoveries: &mut ResMut<ResourceDiscoveries>,
     inventory: &mut Inventory,
     effects: &mut Effects,
     templates: &Res<Templates>,
@@ -9246,8 +9612,7 @@ fn apply_explore_outcome(
 ) {
     match outcome {
         ExploreOutcomeKind::ResourceGlimpse => {
-            if let Some(resource) = reveal_nearby_resource(pos, resources, &templates.res_templates)
-            {
+            if let Some(resource) = reveal_nearby_resource(player_id, pos, resources, discoveries) {
                 send_notice(
                     player_id,
                     &format!(
@@ -9458,7 +9823,7 @@ fn explore_event_system(
     presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
-    mut resources: ResMut<Resources>,
+    mut resource_state: (ResMut<Resources>, ResMut<ResourceDiscoveries>),
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     initial_encounter_state: Res<InitialEncounterState>,
@@ -9472,6 +9837,7 @@ fn explore_event_system(
         &mut State,
         &mut Inventory,
         &mut Effects,
+        &Skills,
     )>,
     mut map_events: ResMut<MapEvents>,
 ) {
@@ -9511,6 +9877,7 @@ fn explore_event_system(
                     mut explorer_state,
                     mut inventory,
                     mut effects,
+                    skills,
                 )) = query.get_mut(entity)
                 else {
                     error!("Query failed to find entity {:?}", entity);
@@ -9531,19 +9898,25 @@ fn explore_event_system(
                 });
 
                 if is_prospect {
-                    let revealed_resources = Resource::explore(
-                        map_event.obj_id,
+                    let preferred_res_type = inventory.get_equipped_main_hand().and_then(|item| {
+                        item::gather_resource_type_for_tool(&item).map(str::to_string)
+                    });
+                    let revealed_resource = Resource::explore(
+                        player_id_value,
                         pos,
-                        &mut resources,
+                        &resource_state.0,
+                        &mut resource_state.1,
                         &templates.res_templates,
+                        skills,
+                        preferred_res_type.as_deref(),
                     );
 
-                    if let Some(resource) = revealed_resources.first() {
+                    if let Some(resource) = revealed_resource {
                         let notification_packet: ResponsePacket = ResponsePacket::NewItems {
                             action: STATE_PROSPECTING.to_string(),
                             source_id: map_event.obj_id,
                             item_name: resource.name.clone(),
-                            amount: revealed_resources.len() as i32,
+                            amount: 1,
                         };
 
                         send_to_client(player_id_value, notification_packet, &clients);
@@ -9575,7 +9948,8 @@ fn explore_event_system(
                         &mut ids,
                         &mut entity_map,
                         &map,
-                        &mut resources,
+                        &mut resource_state.0,
+                        &mut resource_state.1,
                         &mut inventory,
                         &mut effects,
                         &templates,
@@ -9607,6 +9981,28 @@ fn send_objectives_packet(player_id: i32, obj: &PlayerObjectives, clients: &Res<
     send_to_client(player_id, objectives_packet, clients);
 }
 
+fn investigation_can_complete(
+    state: &State,
+    state_dead: bool,
+    last_combat_tick: Option<&LastCombatTick>,
+    last_damage_tick: Option<&LastDamageTick>,
+    game_tick: i32,
+    investigation_started_tick: i32,
+    investigator_pos: Position,
+    target_pos: Position,
+) -> bool {
+    *state == State::Investigating
+        && !state_dead
+        && state.is_alive()
+        && !last_combat_tick
+            .map(|last_combat_tick| is_combat_locked(game_tick, last_combat_tick))
+            .unwrap_or(false)
+        && !last_damage_tick
+            .map(|last_damage_tick| last_damage_tick.0 >= investigation_started_tick)
+            .unwrap_or(false)
+        && Map::dist(investigator_pos, target_pos) <= 1
+}
+
 fn investigate_event_system(
     mut commands: Commands,
     clients: Res<Clients>,
@@ -9615,7 +10011,7 @@ fn investigate_event_system(
     presence: Res<PlayerWorldPresenceState>,
     mut entity_map: ResMut<EntityObjMap>,
     map: Res<Map>,
-    mut resources: ResMut<Resources>,
+    mut resource_state: (ResMut<Resources>, ResMut<ResourceDiscoveries>),
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
@@ -9631,6 +10027,9 @@ fn investigate_event_system(
         &mut State,
         &mut Inventory,
         &mut Effects,
+        Option<&LastCombatTick>,
+        Option<&LastDamageTick>,
+        Option<&StateDead>,
     )>,
     mut map_events: ResMut<MapEvents>,
 ) {
@@ -9658,6 +10057,17 @@ fn investigate_event_system(
         };
         let Some(target_entity) = entity_map.get_entity(target_id) else {
             error!("Cannot find investigate target from id: {:?}", target_id);
+            if let Ok((_, _, _, _, _, mut state, _, _, _, _, state_dead)) =
+                query.get_mut(explorer_entity)
+            {
+                if state_dead.is_none() && *state == State::Investigating && state.is_alive() {
+                    *state = State::None;
+                    commands.trigger(StateChange {
+                        entity: explorer_entity,
+                        new_state: State::None,
+                    });
+                }
+            }
             continue;
         };
 
@@ -9679,6 +10089,9 @@ fn investigate_event_system(
             mut explorer_state,
             mut explorer_inventory,
             mut explorer_effects,
+            explorer_last_combat_tick,
+            explorer_last_damage_tick,
+            explorer_state_dead,
         ) = explorer;
         let (
             _target_player_id,
@@ -9689,6 +10102,9 @@ fn investigate_event_system(
             _target_state,
             _target_inventory,
             _target_effects,
+            _target_last_combat_tick,
+            _target_last_damage_tick,
+            _target_state_dead,
         ) = target;
 
         let player_id = explorer_player_id.0;
@@ -9698,6 +10114,33 @@ fn investigate_event_system(
         let target_template_name = target_template.0.clone();
         let target_is_poi = *target_subclass == Subclass::Poi;
         let target_is_monolith = target_subclass.is_monolith();
+        let investigation_started_tick = map_event.run_tick.saturating_sub(INVESTIGATE_TICKS);
+
+        if !investigation_can_complete(
+            &explorer_state,
+            explorer_state_dead.is_some(),
+            explorer_last_combat_tick,
+            explorer_last_damage_tick,
+            game_tick.0,
+            investigation_started_tick,
+            investigator_pos,
+            *target_pos,
+        ) {
+            // Moving and combat both cancel the pending map event. Revalidate
+            // here as well so a same-tick combat/death transition cannot race
+            // the due investigation and record a discovery anyway.
+            if explorer_state.is_alive()
+                && explorer_state_dead.is_none()
+                && *explorer_state == State::Investigating
+            {
+                *explorer_state = State::None;
+                commands.trigger(StateChange {
+                    entity: explorer_entity,
+                    new_state: State::None,
+                });
+            }
+            continue;
+        }
 
         if target_template_name == "Shipwreck"
             && !run_spawned_objs.contains_for_player(player_id, target_id_value)
@@ -9755,10 +10198,22 @@ fn investigate_event_system(
                 player_obj.scavenge_shipwreck = true;
 
                 if let Some(entry) = initial_encounter_state.get_mut(&player_id) {
-                    let delayed_opening = game_tick.0 + OPENING_POST_SALVAGE_GRACE_TICKS;
-                    entry.opening_rat_spawn_tick =
-                        entry.opening_rat_spawn_tick.max(delayed_opening);
+                    entry.opening_rat_spawn_tick = game_tick.0 + OPENING_POST_SALVAGE_GRACE_TICKS;
                 }
+
+                // The investigation discovers the survivor; it does not spawn
+                // them. Keep the clue anchored to the Shipwreck while the
+                // Burrow and complete opening-rat-wave gates remain pending.
+                map_events.new(
+                    target_id_value,
+                    game_tick.0 + 1,
+                    VisibleEvent::SpeechEvent {
+                        speech:
+                            "A desperate voice calls from below deck: \"Is anyone out there?!\""
+                                .to_string(),
+                        intensity: 5,
+                    },
+                );
 
                 // BB-A/BB-B: action-driven nudge toward the next objective.
                 send_to_client(
@@ -9791,7 +10246,8 @@ fn investigate_event_system(
                     &mut ids,
                     &mut entity_map,
                     &map,
-                    &mut resources,
+                    &mut resource_state.0,
+                    &mut resource_state.1,
                     &mut explorer_inventory,
                     &mut explorer_effects,
                     &templates,
@@ -9965,26 +10421,28 @@ fn farm_event_system(
                     // Reset villager state to None
                     *villager.state = State::None;
 
+                    let Some(ready_crop) = crops
+                        .get(structure_id)
+                        .filter(|crop| crop.stage == CropStages::Mature)
+                    else {
+                        info!("No crops to harvest");
+                        continue;
+                    };
+                    let capacity =
+                        Obj::get_capacity(&structure.template.0, &templates.obj_templates);
+                    let current_total_weight = structure.inventory.get_total_weight();
+                    let item_weight = Item::get_weight_from_template(
+                        ready_crop.crop_type.clone(),
+                        1,
+                        &templates.item_templates,
+                    );
+                    if current_total_weight + item_weight > capacity {
+                        info!("Harvest structure is full {:?}", structure);
+                        continue;
+                    }
+
                     if let Some(crop) = crops.harvest(*structure_id, 1) {
                         info!("Harvesting crop: {:?}", crop);
-                        let item_template =
-                            Item::get_template(crop.crop_type.clone(), &templates.item_templates);
-
-                        let capacity =
-                            Obj::get_capacity(&structure.template.0, &templates.obj_templates);
-
-                        let current_total_weight = structure.inventory.get_total_weight();
-                        let item_weight = Item::get_weight_from_template(
-                            crop.crop_type.clone(),
-                            1,
-                            &templates.item_templates,
-                        );
-
-                        if current_total_weight + item_weight > capacity {
-                            info!("Harvest structure is full {:?}", structure);
-                            continue;
-                        }
-
                         let (new_item, _merged) = structure.inventory.new_with_attrs(
                             ids.new_item_id(),
                             structure.id.0,
@@ -10709,6 +11167,7 @@ fn broadcast_event_system(
 }
 
 fn effect_expired_event_system(
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     ids: Res<Ids>,
     presence: Res<PlayerWorldPresenceState>,
@@ -10736,7 +11195,13 @@ fn effect_expired_event_system(
 
                     if let Ok(mut effects) = effect_query.get_mut(entity) {
                         debug!("Effects on {:?}", map_event.obj_id);
-                        effects.0.remove(effect);
+                        let is_current_expiry =
+                            effect_expiry_is_current(&effects, effect, map_event.run_tick);
+                        if is_current_expiry && effects.0.remove(effect).is_some() {
+                            commands.trigger(CombatEffectsChanged {
+                                target_id: map_event.obj_id,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -10747,6 +11212,14 @@ fn effect_expired_event_system(
     for event_id in events_to_remove.iter() {
         map_events.remove(event_id);
     }
+}
+
+fn effect_expiry_is_current(effects: &Effects, effect: &Effect, event_tick: i32) -> bool {
+    effects
+        .0
+        .get(effect)
+        .map(|(expires_at, _, _)| *expires_at == event_tick)
+        .unwrap_or(false)
 }
 
 fn cooldown_event_system(
@@ -12463,15 +12936,58 @@ fn fishing_event_system(
     }
 }
 
+#[derive(Debug, Clone)]
+struct EventVisibilityObserver {
+    player_id: PlayerId,
+    pos: Position,
+    class: Class,
+    state: State,
+    viewshed: Viewshed,
+    can_hear: bool,
+}
+
 fn visible_event_system(
     clients: Res<Clients>,
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
+    campfire_visibility: Res<CampfireVisibilityState>,
     obj_query: Query<ObjQuery>,
     observer_query: Query<ObjQueryVision>,
+    campfire_query: Query<(&Id, &Position), With<Campfire>>,
 ) {
     let mut all_change_events: HashMap<i32, HashSet<network::ChangeEvents>> = HashMap::new();
     let mut all_broadcast_events: HashMap<i32, HashSet<BroadcastEvents>> = HashMap::new();
+    let campfire_positions: HashMap<i32, Position> = campfire_query
+        .iter()
+        .map(|(id, pos)| (id.0, *pos))
+        .collect();
+    let mut event_observers: Vec<EventVisibilityObserver> = observer_query
+        .iter()
+        .map(|observer| EventVisibilityObserver {
+            player_id: observer.player_id.clone(),
+            pos: *observer.pos,
+            class: observer.class.clone(),
+            state: *observer.state,
+            viewshed: observer.viewshed.clone(),
+            can_hear: true,
+        })
+        .collect();
+
+    for (player_id, campfire_id) in campfire_visibility.iter() {
+        let Some(pos) = campfire_positions.get(campfire_id).copied() else {
+            continue;
+        };
+        event_observers.push(EventVisibilityObserver {
+            player_id: PlayerId(*player_id),
+            pos,
+            class: Class(CLASS_STRUCTURE.to_string()),
+            state: State::None,
+            viewshed: Viewshed {
+                range: CAMPFIRE_VISIBILITY_RANGE,
+            },
+            can_hear: false,
+        });
+    }
 
     for map_event in visible_events.iter() {
         debug!("Checking if map_event is visible: {:?}", map_event);
@@ -12482,7 +12998,7 @@ fn visible_event_system(
                 debug!("Event obj: {:?}", event_obj);
                 let network_obj = network::create_network_obj(&event_obj);
 
-                for observer in observer_query.iter() {
+                for observer in event_observers.iter() {
                     // Skip corpse observers
                     if observer.class.is_corpse() {
                         continue;
@@ -12514,7 +13030,7 @@ fn visible_event_system(
                             }
                         }
                         VisibleEvent::MoveEvent { src, dst } => {
-                            let src_distance = Map::dist(*observer.pos, *src);
+                            let src_distance = Map::dist(observer.pos, *src);
 
                             if observer.viewshed.range >= src_distance {
                                 let change_event = network::ChangeEvents::ObjMove {
@@ -12531,7 +13047,7 @@ fn visible_event_system(
                                     .insert(change_event);
                             }
 
-                            let dst_distance = Map::dist(*observer.pos, *dst);
+                            let dst_distance = Map::dist(observer.pos, *dst);
 
                             if observer.viewshed.range >= dst_distance {
                                 let change_event = network::ChangeEvents::ObjMove {
@@ -12548,7 +13064,7 @@ fn visible_event_system(
                             }
                         }
                         VisibleEvent::HideEvent => {
-                            let distance = Map::dist(*event_obj.pos, *observer.pos);
+                            let distance = Map::dist(*event_obj.pos, observer.pos);
 
                             if observer.viewshed.range >= distance {
                                 let change_event = network::ChangeEvents::ObjDelete {
@@ -12738,6 +13254,9 @@ fn visible_event_system(
                             }
                         }
                         VisibleEvent::SpeechEvent { speech, intensity } => {
+                            if !observer.can_hear {
+                                continue;
+                            }
                             let distance = Map::distance(
                                 (event_obj.pos.x, event_obj.pos.y),
                                 (observer.pos.x, observer.pos.y),
@@ -12764,6 +13283,9 @@ fn visible_event_system(
                             sound,
                             intensity,
                         } => {
+                            if !observer.can_hear {
+                                continue;
+                            }
                             let distance = Map::distance(
                                 (event_obj.pos.x, event_obj.pos.y),
                                 (observer.pos.x, observer.pos.y),
@@ -12835,7 +13357,7 @@ fn visible_event_system(
                             }
                         }
                         VisibleEvent::UpdateObjPosEvent { src, dst } => {
-                            let src_distance = Map::dist(*observer.pos, *src);
+                            let src_distance = Map::dist(observer.pos, *src);
 
                             if observer.viewshed.range >= src_distance {
                                 let change_event = network::ChangeEvents::ObjMove {
@@ -12852,7 +13374,7 @@ fn visible_event_system(
                                     .insert(change_event);
                             }
 
-                            let dst_distance = Map::dist(*observer.pos, *dst);
+                            let dst_distance = Map::dist(observer.pos, *dst);
 
                             if observer.viewshed.range >= dst_distance {
                                 let change_event = network::ChangeEvents::ObjMove {
@@ -12877,7 +13399,7 @@ fn visible_event_system(
                 "No entity found for map_event, must be RemoveObjEvent: {:?}",
                 map_event.event_type
             );
-            for observer in observer_query.iter() {
+            for observer in event_observers.iter() {
                 match &map_event.event_type {
                     VisibleEvent::RemoveObjEvent { pos } => {
                         let distance =
@@ -13038,21 +13560,27 @@ fn perception_system(
     clients: Res<Clients>,
     mut perception_updates: ResMut<PerceptionUpdates>,
     presence: Res<PlayerWorldPresenceState>,
+    campfire_visibility: Res<CampfireVisibilityState>,
     mut resume_login_sync: ResMut<ResumeLoginSyncState>,
     mut safe_logout_telemetry: ResMut<SafeLogoutTelemetryState>,
     observer_query: Query<ObjQueryVision>,
     obj_query: Query<ObjQuery>,
+    campfire_query: Query<ObjQuery, With<Campfire>>,
 ) {
     //let mut perceptions_to_send: HashMap<i32, HashSet<network::MapObj>> = HashMap::new();
 
-    let mut observer_objs_map: HashMap<i32, HashSet<network::MapObj>> = HashMap::new();
-    let mut visible_objs_map: HashMap<i32, HashSet<network::MapObj>> = HashMap::new();
-
-    // Could not use HashSet here due to the trait `FromIterator<&std::collections::HashSet<(i32, i32)>>` is not implemented for `Vec<(i32, i32)>`
-    let mut tiles_to_send: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
     let mut retry_updates = Vec::new();
 
     for (perception_player, perception_update_type) in perception_updates.iter() {
+        // Keep packet aggregation scoped to this request. A single update can
+        // contain one player's login snapshot and another player's Campfire
+        // refresh; sharing these maps would let the current request's packet
+        // type leak onto an earlier player's accumulated data.
+        let mut observer_objs_map: HashMap<i32, HashSet<network::MapObj>> = HashMap::new();
+        let mut visible_objs_map: HashMap<i32, HashSet<network::MapObj>> = HashMap::new();
+
+        // Could not use HashSet here due to the trait `FromIterator<&std::collections::HashSet<(i32, i32)>>` is not implemented for `Vec<(i32, i32)>`
+        let mut tiles_to_send: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
         let is_init_perception = matches!(
             perception_update_type,
             PerceptionUpdateType::InitPerception | PerceptionUpdateType::ResumeInitPerception(_)
@@ -13156,6 +13684,55 @@ fn perception_system(
                     .or_default()
                     .extend(visible_tiles_pos);
             }
+        }
+
+        // A nearby living hero activates a fire-centered observer for their
+        // own player, regardless of who owns the Campfire. The Campfire keeps
+        // its real owner in the packet; `vision: 1` designates this recipient's
+        // transient light bubble. Hash sets and tile de-duplication make
+        // overlapping bubbles a union rather than an additive bonus.
+        for campfire_obj in campfire_query.iter() {
+            if !campfire_visibility.contains(&(*perception_player, campfire_obj.id.0)) {
+                continue;
+            }
+
+            let mut light_source = network::create_network_obj(&campfire_obj);
+            light_source.vision = Some(CAMPFIRE_VISIBILITY_RANGE);
+            observer_objs_map
+                .entry(*perception_player)
+                .or_default()
+                .insert(light_source);
+
+            for obj in obj_query.iter() {
+                if obj.id == campfire_obj.id || !obj.state.is_visible() {
+                    continue;
+                }
+                if Map::dist(*campfire_obj.pos, *obj.pos) <= CAMPFIRE_VISIBILITY_RANGE {
+                    visible_objs_map
+                        .entry(*perception_player)
+                        .or_default()
+                        .insert(network::create_network_obj(&obj));
+                }
+            }
+
+            let visible_tiles_pos = Map::range(
+                (campfire_obj.pos.x, campfire_obj.pos.y),
+                CAMPFIRE_VISIBILITY_RANGE,
+            );
+            match explored_map.entry(*perception_player) {
+                Entry::Occupied(mut occupied) => {
+                    occupied.get_mut().extend(visible_tiles_pos.clone());
+                    occupied.get_mut().sort_unstable();
+                    occupied.get_mut().dedup();
+                }
+                Entry::Vacant(vacant) => {
+                    vacant.insert(visible_tiles_pos.clone());
+                }
+            }
+            tiles_to_send
+                .entry(*perception_player)
+                .or_default()
+                .extend(visible_tiles_pos);
         }
 
         info!("Observer objs: {:?}", observer_objs_map);
@@ -16401,6 +16978,71 @@ fn random_intro_followup_spawn_position<R: Rng + ?Sized>(
         .copied()
 }
 
+fn opening_rat_disperse_positions<R: Rng + ?Sized>(
+    spawn_pos: Position,
+    rat_count: usize,
+    occupied: &HashSet<Position>,
+    map: &Map,
+    rng: &mut R,
+) -> Vec<Position> {
+    let mut candidates = Map::ring((spawn_pos.x, spawn_pos.y), 1)
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .filter(|pos| {
+            Map::is_valid_pos((pos.x, pos.y))
+                && Map::is_passable(pos.x, pos.y, map)
+                && !occupied.contains(pos)
+        })
+        .collect::<Vec<_>>();
+
+    // Randomize equivalent choices, then choose the pair/trio with the greatest
+    // minimum separation. On a clear six-hex ring this places two rats opposite
+    // one another or three rats on alternating hexes instead of clustering.
+    candidates.shuffle(rng);
+    match rat_count.min(candidates.len()) {
+        0 => Vec::new(),
+        1 => vec![candidates[0]],
+        2 => {
+            let mut best = (0, 1);
+            let mut best_distance = 0;
+            for first in 0..candidates.len() - 1 {
+                for second in first + 1..candidates.len() {
+                    let distance = Map::dist(candidates[first], candidates[second]);
+                    if distance > best_distance {
+                        best = (first, second);
+                        best_distance = distance;
+                    }
+                }
+            }
+            vec![candidates[best.0], candidates[best.1]]
+        }
+        _ => {
+            let mut best = (0, 1, 2);
+            let mut best_score = (0, 0);
+            for first in 0..candidates.len() - 2 {
+                for second in first + 1..candidates.len() - 1 {
+                    for third in second + 1..candidates.len() {
+                        let distances = [
+                            Map::dist(candidates[first], candidates[second]),
+                            Map::dist(candidates[first], candidates[third]),
+                            Map::dist(candidates[second], candidates[third]),
+                        ];
+                        let score = (
+                            *distances.iter().min().expect("three pair distances"),
+                            distances.iter().sum(),
+                        );
+                        if score > best_score {
+                            best = (first, second, third);
+                            best_score = score;
+                        }
+                    }
+                }
+            }
+            vec![candidates[best.0], candidates[best.1], candidates[best.2]]
+        }
+    }
+}
+
 // Watches for the opening rat kills and chains boar/crab into spider spawns.
 fn initial_encounter_system(
     mut commands: Commands,
@@ -16409,6 +17051,7 @@ fn initial_encounter_system(
     mut entity_map: ResMut<EntityObjMap>,
     templates: Res<Templates>,
     mut game_events: ResMut<GameEvents>,
+    mut map_events: ResMut<MapEvents>,
     mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut player_intro_state: ResMut<PlayerIntroState>,
     mut intro_encounter_state: ResMut<IntroEncounterState>,
@@ -16489,6 +17132,27 @@ fn initial_encounter_system(
             .map(|objectives| objectives.scavenge_shipwreck)
             .unwrap_or(false);
         if shipwreck_searched && game_tick.0 >= entry.opening_rat_spawn_tick {
+            let unspawned_rat_count = entry
+                .opening_enemy_spawned
+                .iter()
+                .filter(|spawned| !**spawned)
+                .count();
+            let disperse_positions = opening_rat_disperse_positions(
+                entry.spawn_pos,
+                unspawned_rat_count,
+                &occupied_positions,
+                &map,
+                &mut rand::thread_rng(),
+            );
+            let rat_template = templates
+                .obj_templates
+                .get(OPENING_RAT_TEMPLATE.to_string());
+            let opening_rat_stats = opening_rat_combat_stats(&rat_template);
+            let rat_speed = rat_template.base_speed.unwrap_or(1).max(1);
+            let disperse_duration =
+                (BASE_MOVE_TICKS * (BASE_SPEED / rat_speed as f32)).ceil() as i32;
+            let mut disperse_positions = disperse_positions.into_iter();
+
             for (index, enemy_id) in entry.rat_ids.iter().copied().enumerate() {
                 let Some(spawned) = entry.opening_enemy_spawned.get_mut(index) else {
                     warn!(
@@ -16510,7 +17174,32 @@ fn initial_encounter_system(
                     &mut entity_map,
                     &templates,
                 );
+                commands
+                    .entity(entity)
+                    .try_insert(opening_rat_stats.clone());
                 commands.trigger(NewObj { entity });
+                if let Some(dst) = disperse_positions.next() {
+                    commands.entity(entity).try_insert((
+                        State::Moving,
+                        EventExecuting {
+                            event_type: "opening_rat_dispersal".to_string(),
+                            state: EventExecutingState::Executing,
+                        },
+                    ));
+                    commands.trigger(StateChange {
+                        entity,
+                        new_state: State::Moving,
+                    });
+                    map_events.new(
+                        enemy_id,
+                        game_tick.0 + disperse_duration,
+                        VisibleEvent::MoveEvent {
+                            src: entry.spawn_pos,
+                            dst,
+                        },
+                    );
+                    occupied_positions.insert(dst);
+                }
                 *spawned = true;
                 intro_entry.shipwreck_chain_started = true;
                 info!(
@@ -16524,7 +17213,6 @@ fn initial_encounter_system(
 
         if !entry.villager_event_scheduled
             && shipwreck_inspection_can_spawn_villager(
-                game_tick.0,
                 entry,
                 objectives.get(player_id),
                 players_with_burrows.contains(player_id),
@@ -18244,10 +18932,15 @@ fn objectives_system(
 
         if !obj.win_first_fight && starting_enemies_defeated {
             obj.win_first_fight = true;
+            let noticemsg = if has_burrow {
+                "You held your ground. With the Burrow ready and the wreck clear, the survivor can emerge."
+            } else {
+                "You held your ground. Complete the Burrow so the survivor has somewhere safe to emerge."
+            };
             send_to_client(
                 player_id.0,
                 ResponsePacket::Notice {
-                    noticemsg: "You held your ground. Use the lit Campfire, then return to the Shipwreck when the survivor calls.".to_string(),
+                    noticemsg: noticemsg.to_string(),
                     expiry: Some(10000),
                 },
                 &clients,
@@ -18504,11 +19197,22 @@ fn build_objective_state_packet(
         None
     } else if facts.villager_spawned {
         Some("The shipwreck survivor is no longer available.".to_string())
-    } else {
+    } else if !facts.has_burrow && !obj.win_first_fight {
         Some(
-            "The survivor has not emerged yet. Inspect the Shipwreck and wait for the call."
+            "The survivor is still trapped. Complete your Burrow and defeat the entire opening rat wave."
                 .to_string(),
         )
+    } else if !facts.has_burrow {
+        Some(
+            "The rats are gone. Complete your Burrow so the survivor has a safe place.".to_string(),
+        )
+    } else if !obj.win_first_fight {
+        Some(
+            "Your Burrow is ready. Defeat the entire opening rat wave to free the survivor."
+                .to_string(),
+        )
+    } else {
+        Some("The survivor has been found and will emerge shortly.".to_string())
     };
     let assignment_blocker = if facts.living_villagers == 0 {
         Some("A living owned settler is required before work can be assigned.".to_string())
@@ -18565,7 +19269,7 @@ fn build_objective_state_packet(
             "Combat",
             Some("Opening attackers"),
             "Stay near the Shipwreck and defeat each opening attacker when it appears.",
-            "Clearing the attackers makes the wreck and its survivor safe to approach.",
+            "Clearing the attackers makes it safe for the survivor to emerge from the wreck.",
             fight_blocker,
             "XP, loot, and a safe opening camp.",
             None,
@@ -18592,8 +19296,8 @@ fn build_objective_state_packet(
             &current_id,
             "Villager",
             Some("Shipwreck survivor"),
-            "Return to the Shipwreck when the survivor calls out.",
-            "The survivor brings the existing Watchtower plan and another pair of hands.",
+            "Complete your Burrow and defeat the entire opening rat wave; the survivor will then emerge from the Shipwreck.",
+            "Investigating discovers the survivor; shelter and a cleared wreck make the rescue possible.",
             survivor_blocker,
             "Watchtower plan and another pair of hands.",
             None,
@@ -20533,9 +21237,10 @@ fn start_work_observer(
     mut game_events: ResMut<GameEvents>,
     recipes: Res<Recipes>,
     templates: Res<Templates>,
-    mut query: Query<(&PlayerId, &Id, &mut WorkQueue)>,
+    mut query: Query<(&PlayerId, &Id, &Template, &State, &mut WorkQueue)>,
     position_query: Query<(&Id, &Position)>,
     inventory_query: Query<&Inventory>,
+    skills_query: Query<&Skills>,
     mut active_task_query: Query<&mut ActiveTask>,
 ) {
     info!("Processing StartWork");
@@ -20596,7 +21301,7 @@ fn start_work_observer(
     };
 
     // Get assigned work entry from work queue that matches worker_id
-    for (player_id, id, mut work_queue) in query.iter_mut() {
+    for (player_id, id, structure_template, structure_state, mut work_queue) in query.iter_mut() {
         // Skip if player id does not match worker id
         if player_id.0 != player_worker_id || id.0 != start_work.structure_id {
             continue;
@@ -20606,6 +21311,12 @@ fn start_work_observer(
             // Skip if worker id does not match work queue entry worker id
             if start_work.worker_id != work_queue_entry.worker_id {
                 continue;
+            }
+
+            if !Structure::is_built(*structure_state) {
+                work_queue_entry.worker_id = -1;
+                work_queue_entry.work_status = WorkStatus::Idle;
+                return;
             }
 
             // Process the work entry here where the reference is valid
@@ -20642,10 +21353,32 @@ fn start_work_observer(
                         .clone()
                         .unwrap_or("".to_string());
 
-                    let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                    let Some(recipe) =
+                        recipes.get_for_owner_by_name(player_worker_id, &recipe_name)
+                    else {
                         error!("Cannot find recipe for {:?}", recipe_name);
-                        continue;
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        return;
                     };
+
+                    let Ok(worker_skills) = skills_query.get(worker_entity) else {
+                        error!("Cannot find worker skills for {:?}", worker_entity);
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        return;
+                    };
+                    if !recipe.supports_structure(&structure_template.0)
+                        || !recipe.skill_requirement_met(worker_skills, &templates)
+                    {
+                        error!(
+                            "Worker {:?} or structure {:?} cannot execute recipe {:?}",
+                            start_work.worker_id, structure_template.0, recipe_name
+                        );
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        return;
+                    }
 
                     let work_time = recipe.crafting_time.unwrap_or(200);
 
@@ -20657,6 +21390,7 @@ fn start_work_observer(
                             crafter_id: start_work.worker_id,
                             structure_id: start_work.structure_id,
                             recipe_name: recipe_name.clone(),
+                            work_entry_id: Some(work_queue_entry.entry_id),
                         },
                     };
 
@@ -20666,6 +21400,18 @@ fn start_work_observer(
                     ActiveTask::set_if_changed(&mut active_task, ActiveTask::Crafting);
                 }
                 WorkType::Refine => {
+                    if !worker_is_on_structure {
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        commands.entity(worker_entity).insert(EventCompleted {
+                            event_id: Uuid::new_v4(),
+                            event_type: "structure_work_position".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                        return;
+                    }
+
                     commands.trigger(StateChange {
                         entity: start_work.entity,
                         new_state: State::Refining,
@@ -20685,6 +21431,41 @@ fn start_work_observer(
 
                     let item_template =
                         Item::get_template(item.name.clone(), &templates.item_templates);
+                    let station_template =
+                        templates.obj_templates.get(structure_template.0.clone());
+                    let supports_item = station_template.refine.as_ref().is_some_and(|types| {
+                        types.iter().any(|item_type| {
+                            item_type == &item.name
+                                || item_type == &item.class
+                                || item_type == &item.subclass
+                        })
+                    });
+                    let Ok(worker_skills) = skills_query.get(worker_entity) else {
+                        error!("Cannot find worker skills for {:?}", worker_entity);
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        return;
+                    };
+                    let skill_allowed = item_template
+                        .refine_skill
+                        .as_ref()
+                        .and_then(|skill| Skill::from_str(skill))
+                        .is_some_and(|skill| {
+                            worker_skills.has_proficiency_requirement(
+                                skill,
+                                item_template.refine_skill_req.unwrap_or(0),
+                                &templates.skill_templates,
+                            )
+                        });
+                    if !supports_item || !skill_allowed || item_template.produces.is_none() {
+                        error!(
+                            "Worker {:?} or structure {:?} cannot refine {:?}",
+                            start_work.worker_id, structure_template.0, item.name
+                        );
+                        work_queue_entry.worker_id = -1;
+                        work_queue_entry.work_status = WorkStatus::Idle;
+                        return;
+                    }
                     let work_time = item_template.get_refine_time();
 
                     let event = GameEvent {
@@ -20695,6 +21476,7 @@ fn start_work_observer(
                             refiner_id: start_work.worker_id,
                             structure_id: start_work.structure_id,
                             item_id: work_queue_entry.refine_item_id.clone().unwrap_or(-1),
+                            work_entry_id: Some(work_queue_entry.entry_id),
                         },
                     };
 
@@ -20814,6 +21596,7 @@ fn cancel_events_observer(
                 refiner_id,
                 structure_id,
                 item_id: _,
+                ..
             } => {
                 if refiner_id == obj_id.0 {
                     game_events_to_cancel.push(game_event.clone());
@@ -20829,6 +21612,7 @@ fn cancel_events_observer(
                 crafter_id,
                 structure_id,
                 recipe_name: _,
+                ..
             } => {
                 if crafter_id == obj_id.0 {
                     game_events_to_cancel.push(game_event.clone());
@@ -21775,6 +22559,61 @@ fn stamina_recovery_system(
     }
 }
 
+fn damage_over_time_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    presence: OptionalPlayerWorldPresence,
+    templates: Res<Templates>,
+    mut query: Query<
+        (Entity, &Id, &PlayerId, &Effects, &mut Stats, &mut State),
+        Without<StateDead>,
+    >,
+) {
+    if game_tick.0 % TICKS_PER_SEC != 0 {
+        return;
+    }
+
+    for (entity, id, player_id, effects, mut stats, mut state) in query.iter_mut() {
+        if entity_belongs_to_protected_run(id, player_id, &presence) || *state == State::Dead {
+            continue;
+        }
+
+        let ticks = effects
+            .0
+            .iter()
+            .filter_map(|(effect, (_expires_at, amplifier, stacks))| {
+                let template = templates.effect_templates.get(&effect.clone().to_str())?;
+                let damage = template.damage_over_time? * *amplifier * *stacks as f32;
+                let damage = damage.round() as i32;
+                (damage > 0).then_some((effect.clone(), damage))
+            })
+            .collect::<Vec<_>>();
+
+        for (effect, damage) in ticks {
+            stats.hp = stats.hp.saturating_sub(damage);
+            commands
+                .entity(entity)
+                .try_insert(LastDamageTick(game_tick.0));
+
+            if stats.hp <= 0 {
+                *state = State::Dead;
+                commands
+                    .entity(entity)
+                    .try_insert(StateDead {
+                        dead_at: game_tick.0,
+                        killer: effect.to_str(),
+                    })
+                    .try_remove::<ThinkerBuilder>();
+                commands.trigger(StateChange {
+                    entity,
+                    new_state: State::Dead,
+                });
+                break;
+            }
+        }
+    }
+}
+
 fn combat_lock_interrupt_system(
     mut commands: Commands,
     game_tick: Res<GameTick>,
@@ -22586,12 +23425,6 @@ pub fn fuel_system(
             let Some(fuel_item) = inventory.get_by_class(item::FUEL.to_string()) else {
                 info!("No fuel found in tent, unlit campfire");
 
-                // Remove campfire light effect
-                commands.trigger(RemoveLightEffect {
-                    entity: entity,
-                    effect: Effect::CampfireLight,
-                });
-
                 // Swap image back to non-lit tent
                 let structure_image = Obj::template_to_image(&template.0.clone());
 
@@ -22670,7 +23503,7 @@ pub fn work_queue_update_system(
                     if let Some(crafting_event) = game_events.get_craft_event(work_entry.worker_id)
                     {
                         let recipe = recipes
-                            .get_by_name(crafting_event.recipe_name.clone())
+                            .get_for_owner_by_name(player_id.0, &crafting_event.recipe_name)
                             .expect(&format!(
                                 "Cannot find recipe for {:?}",
                                 crafting_event.recipe_name
@@ -22682,7 +23515,7 @@ pub fn work_queue_update_system(
                         game_events.get_structure_craft_event(work_entry.worker_id)
                     {
                         let recipe = recipes
-                            .get_by_name(structure_craft_event.recipe_name.clone())
+                            .get_for_owner_by_name(player_id.0, &structure_craft_event.recipe_name)
                             .expect(&format!(
                                 "Cannot find recipe for {:?}",
                                 structure_craft_event.recipe_name

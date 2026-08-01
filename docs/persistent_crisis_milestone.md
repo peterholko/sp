@@ -3,15 +3,21 @@
 ## Status
 
 All four checkpoints are implemented and validated. The persistent personal-
-crisis foundation is complete in the current runtime architecture. This does
-not complete safe logout, offline protection, regional crises, larger worlds,
-or the broader persistent-world redesign.
+crisis foundation is complete in the current runtime architecture. Milestone 4
+subsequently extended the same authority to the ordered Undead crisis. Safe
+Logout and Offline Protection are implemented under their separate milestone,
+with the remaining validation qualifications recorded there. Regional crises,
+larger worlds, durable restart persistence, and the broader persistent-world
+redesign remain outside this foundation.
 
 ## Current gameplay contract
 
 Global day/night controls environmental conditions.
 
-Personal settlement danger is controlled by the player's goblin crisis.
+Personal settlement danger is controlled by at most one current
+`SettlementCrisis`. The default ordered sequence is Goblin followed by Undead;
+the completed Undead state is terminal for the currently configured two-crisis
+sequence.
 
 Before the assault launches, crisis timing advances only while the player is
 online.
@@ -19,10 +25,15 @@ online.
 Once the assault launches, it remains active in the persistent world and
 continues if the player disconnects.
 
-Personal-crisis attackers may affect only the owning player's settlement and
-associated units.
+Personal-crisis attackers and spells may affect only the owning player's
+settlement, associated units, and exact attributed assault targets.
 
 Defeating all attributed attackers resolves the crisis exactly once.
+
+The default runtime uses `SurvivalDirectorMode::PersonalCrisis`. The legacy
+automatic rat, wolf, Goblin, Undead, Pillager, nightly, and legendary systems
+remain compiled behind `SurvivalDirectorMode::Legacy`; they are not a second
+authority in the default mode.
 
 ## Checkpoint 4 implementation record
 
@@ -1215,7 +1226,9 @@ The implementation must follow these constraints.
 
 ## World constraints
 
-* Keep the current 50×50 map.
+* Keep the current 60×50 map (`map::WIDTH = 60`, `map::HEIGHT = 50`, matching
+  the active `map/test3.tmx`). The earlier 50×50 statement was stale relative
+  to the checked-in runtime.
 * Keep the current start-location model.
 * Do not implement the future 20–25-player world yet.
 * Do not implement map resizing.

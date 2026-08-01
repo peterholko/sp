@@ -252,7 +252,7 @@ before scenario execution is:
 | Existing action | Intrinsic server time | Required existing prerequisites | Travel / feasibility assessment |
 |---|---:|---|---|
 | Repair one damaged defence | 50 ticks (5 s) after arrival | Living owned villager and damaged owned structure; the current implementation has no material charge and restores full HP | Villager movement schedules 48 ticks/tile: about 9.8 s at one tile, 29 s at five, or 53 s at ten including repair. Fits unless the villager is remote; no further cost/rate relaxation is justified. |
-| Build one Stockade | 30 work; hero fallback work 5 gives about 60 ticks (6 s) active build | Existing Stockade plan and 3 Log-compatible units deposited into the foundation | Hero movement is about 12 ticks/tile. Placement, deposit, and a local build fit; gathering missing Logs is not assumed to fit. The shipwreck originally contains 10 Logs, but guidance checks current carried facts rather than assuming they remain. |
+| Build one Stockade | 30 work; hero fallback work 5 gives about 60 ticks (6 s) active build | Existing Stockade plan and 10 Log-compatible units deposited into the foundation | Hero movement is about 12 ticks/tile. Placement and a local build fit when the lumber has already been gathered; gathering missing Logs is not assumed to fit. Guidance checks current carried facts rather than assuming materials remain. |
 | Equip carried weapon | Immediate event processing | Live idle owner and unequipped carried equippable weapon | Fits without travel. A storage item requires normal adjacent transfer first. |
 | Equip carried armor | Immediate event processing | Live idle owner and unequipped carried armor | Fits without travel. Crafting Hide Wraps takes 75 ticks (7.5 s) but also needs a Crafting Tent, 2 Hide, and 1 Twine, so guidance does not promise the full chain. |
 | Prepare one existing healing option | Crude Bandage craft 25 ticks (2.5 s); Herbal Poultice craft 50 ticks (5 s); use follows the normal queued item event | Bandage: 1 Cloth. Poultice: Crafting Tent, 1 Berries, 1 Cloth. A carried item needs no acquisition travel. | A carried Bandage or positive-healing Health potion fits. A stored item is actionable only when normal transfer is currently available. Missing station/resources are not assumed obtainable in time. |
@@ -281,7 +281,7 @@ state. The four rows are fixed-order `defences`, `defenders`, `equipment`, and
 
 - Defences is ready for complete healthy walls, needs attention for a damaged
   wall with a living repair villager, or for an idle live hero with the actual
-  Stockade plan and three carried Log-compatible units. Other cases name the
+  Stockade plan and ten carried Log-compatible units. Other cases name the
   precise blocker.
 - Defenders is ready only for a combat-capable villager. It recommends equipping
   only when an idle unarmed villager already holds an unequipped weapon; a

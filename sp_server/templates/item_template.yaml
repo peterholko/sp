@@ -324,6 +324,17 @@
     - Redvale Maple Timber
     - Redvale Maple Resin
 
+- name: Wrapwood Birch
+  class: Log
+  subclass: Birch Log
+  image: maplelog
+  weight: 10
+  refine_skill: Woodcutting
+  refine_skill_req: 25
+  refine_time: 30
+  produces:
+    - Wrapwood Birch Timber
+
 ##################
 ##### TIMBER #####
 ##################
@@ -450,6 +461,12 @@
   subclass: Pebble
   image: pebble
   weight: 1
+
+- name: Stone
+  class: Stone
+  subclass: Stone
+  image: stone
+  weight: 2
 
 ##################
 ##### CLOTH #####
@@ -888,6 +905,7 @@
   slot: Main Hand
   image: sharpenedstick
   weight: 10
+  durability: 25
   attrs:
     - name: Damage
       value: 1
@@ -896,12 +914,28 @@
     - name: Hunting  
       value: 1
 
+- name: Crude Hatchet
+  class: Weapon
+  subclass: Axe
+  slot: Main Hand
+  image: flinthatchet
+  weight: 5
+  durability: 30
+  attrs:
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 5
+    - name: Logging
+      value: 1
+
 - name: Improvised Sling
   class: Weapon
   subclass: Ranged
   slot: Main Hand
   image: sling
   weight: 1
+  durability: 30
   attrs:
     - name: Damage
       value: 1
@@ -920,6 +954,7 @@
   slot: Main Hand
   image: stoneknife
   weight: 2
+  durability: 35
   attrs:
     - name: Damage
       value: 1
@@ -934,6 +969,7 @@
   slot: Main Hand
   image: trainingaxe
   weight: 10
+  durability: 60
   attrs:
     - name: Logging
       value: 2
@@ -942,12 +978,52 @@
     - name: Speed
       value: 10
 
+- name: Copper Heavy Axe
+  class: Weapon
+  subclass: Axe
+  slot: Main Hand
+  image: heavyaxe
+  weight: 10
+  durability: 60
+  attrs:
+    - name: Logging
+      value: 2
+    - name: Damage
+      value: 35
+    - name: Speed
+      value: 4.5
+
+- name: Copper Training Sword
+  class: Weapon
+  subclass: Sword
+  slot: Main Hand
+  image: sword
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 4.5
+
+- name: Copper Training Club
+  class: Weapon
+  subclass: Hammer
+  slot: Main Hand
+  image: club
+  weight: 10
+  attrs:
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 4.5
+
 - name: Training Bow
   class: Weapon
   subclass: Bow
   slot: Main Hand
   image: bow
   weight: 10
+  durability: 60
   attrs:
     - name: Damage
       value: 8
@@ -964,6 +1040,7 @@
   slot: Main Hand
   image: heavyaxe
   weight: 10 
+  durability: 60
   attrs:
     - name: Logging
       value: 2
@@ -1116,6 +1193,16 @@
       value: 150
 
 ##################
+## STRUCTURE KITS
+##################
+
+- name: Hand Campfire
+  class: Structure Kit
+  subclass: Campfire
+  image: campfirekit
+  weight: 3
+
+##################
 ##### DEEDS #####
 ##################
 
@@ -1131,6 +1218,13 @@
   image: deed
   weight: 1
 
+- name: Shelter Tent Deed
+  class: Deed
+  subclass: Shelter Tent
+  image: deed
+  weight: 1
+
+# Legacy compatibility for deeds already present in persistent inventories.
 - name: Small Tent Deed
   class: Deed
   subclass: Small Tent
@@ -1315,6 +1409,7 @@
   slot: Main Hand
   image: sickle
   weight: 5
+  durability: 60
   attrs:
     - name: Farming
       value: 2
@@ -1329,6 +1424,7 @@
   slot: Main Hand
   image: pickaxe
   weight: 5
+  durability: 60
   attrs:
     - name: Mining
       value: 2
@@ -1349,6 +1445,7 @@
   slot: Main Hand
   image: fishingrod
   weight: 1
+  durability: 40
   attrs:
     - name: Fishing
       value: 1
@@ -1525,6 +1622,7 @@
   slot: Main Hand
   image: bonedagger
   weight: 2
+  durability: 40
   attrs:
     - name: Damage
       value: 6
@@ -1541,6 +1639,7 @@
   slot: Main Hand
   image: flinthatchet
   weight: 5
+  durability: 45
   attrs:
     - name: Damage
       value: 8
@@ -1555,6 +1654,7 @@
   slot: Main Hand
   image: sharpenedstick
   weight: 5
+  durability: 45
   attrs:
     - name: Damage
       value: 9
@@ -1583,6 +1683,7 @@
   slot: Main Hand
   image: throwingspear
   weight: 3
+  durability: 40
   attrs:
     - name: Damage
       value: 7
@@ -1767,6 +1868,7 @@
   slot: Main Hand
   image: gothicaxe
   weight: 11
+  durability: 90
   attrs:
     - name: Damage
       value: 38
@@ -2063,6 +2165,7 @@
   slot: Main Hand
   image: bow
   weight: 8
+  durability: 70
   attrs:
     - name: Damage
       value: 14
@@ -2079,6 +2182,7 @@
   slot: Main Hand
   image: longbow
   weight: 9
+  durability: 90
   attrs:
     - name: Damage
       value: 26
@@ -2122,6 +2226,7 @@
   slot: Main Hand
   image: warbow
   weight: 9
+  durability: 120
   attrs:
     - name: Damage
       value: 40

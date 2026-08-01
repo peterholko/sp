@@ -12,7 +12,7 @@ use crate::common::{
     Sleep, TaskTarget, Thirst, Tired, Transport,
 };
 use crate::constants::*;
-use crate::effect::Effects;
+use crate::effect::{ControlEffectDiminishingReturns, Effects};
 use crate::event::{EventExecuting, EventExecutingState, MapEvents, VisibleEvent};
 use crate::game::{
     EncounterMoves, GameTick, Home, HunterBehavior, Minions, SpoilTargetBehavior, WanderingBehavior,
@@ -43,9 +43,9 @@ use crate::tax_collector::{
 use crate::villager::{
     ArmedRetaliationScorer, CapacityScorer, DrowsyScorer, EnemyDistanceScorer, ExhaustedScorer,
     FightBack, FindDrink, FindFood, FindShelter, GoodMorale, HeatScorer, HungryScorer, IdleScorer,
-    LoadItems, Morale, ProcessOrder, SetFleeDestination, SetOrderDestination,
-    SetStorageDestination, StructureCapacityScorer, ThirstyScorer, TransferDrink, TransferFood,
-    UnloadItems,
+    LoadItems, MaybeTransferGatherTool, Morale, ProcessOrder, SetFleeDestination,
+    SetOrderDestination, SetStorageDestination, StructureCapacityScorer, ThirstyScorer,
+    TransferDrink, TransferFood, UnloadItems,
 };
 use crate::villager_util::VillagerUtil;
 
@@ -54,6 +54,19 @@ use crate::templates::{ObjTemplate, Templates};
 const RESCUED_VILLAGER_NEED_PER_TICK: f32 = 0.02;
 const RESCUED_VILLAGER_STARTING_THIRST: f32 = 62.0;
 const RESCUED_VILLAGER_STARTING_HUNGER: f32 = 18.0;
+
+fn villager_process_order_behavior() -> big_brain::actions::StepsBuilder {
+    Steps::build()
+        .label("ProcessOrder")
+        .step(SetOrderDestination)
+        .step(MoveTo)
+        // Gather orders can temporarily point at owned storage when the
+        // villager lacks a matching tool. Withdraw and equip it before the
+        // second movement leg returns to the assigned resource tile.
+        .step(MaybeTransferGatherTool)
+        .step(MoveTo)
+        .step(ProcessOrder)
+}
 
 #[derive(Resource, Deref, DerefMut, Reflect, Debug, Default)]
 #[reflect(Resource)]
@@ -191,6 +204,7 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: npc_id,
                 items: Vec::new(),
@@ -540,6 +554,7 @@ impl Encounter {
                 base_vision: villager_template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: villager_id,
                 items: Vec::new(),
@@ -596,11 +611,7 @@ impl Encounter {
                 duration: 100,
             });
 
-        let process_order = Steps::build()
-            .label("ProcessOrder")
-            .step(SetOrderDestination)
-            .step(MoveTo)
-            .step(ProcessOrder);
+        let process_order = villager_process_order_behavior();
 
         let unload_items = Steps::build()
             .label("UnloadItems")
@@ -737,11 +748,7 @@ impl Encounter {
                 duration: 100,
             });
 
-        let process_order = Steps::build()
-            .label("ProcessOrder")
-            .step(SetOrderDestination)
-            .step(MoveTo)
-            .step(ProcessOrder);
+        let process_order = villager_process_order_behavior();
 
         let unload_items = Steps::build()
             .label("UnloadItems")
@@ -1030,6 +1037,7 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: npc_id,
                 items: Vec::new(),
@@ -1126,6 +1134,7 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: npc_id,
                 items: Vec::new(),
@@ -1216,6 +1225,7 @@ impl Encounter {
                 base_vision: npc_template.base_vision,
             },
             effects: Effects(HashMap::new()),
+            control_effect_dr: ControlEffectDiminishingReturns::default(),
             inventory: Inventory {
                 owner: npc_id,
                 items: Vec::new(),
@@ -1484,6 +1494,35 @@ impl Encounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn villager_work_behavior_fetches_a_tool_before_returning_to_the_job_site() {
+        let behavior = format!("{:?}", villager_process_order_behavior());
+        let destination = behavior
+            .find("SetOrderDestination")
+            .expect("work behavior should choose a destination");
+        let first_move = behavior[destination..]
+            .find("MoveTo")
+            .map(|offset| destination + offset)
+            .expect("work behavior should move to its first destination");
+        let transfer = behavior[first_move..]
+            .find("MaybeTransferGatherTool")
+            .map(|offset| first_move + offset)
+            .expect("work behavior should withdraw a required gathering tool");
+        let second_move = behavior[transfer..]
+            .find("MoveTo")
+            .map(|offset| transfer + offset)
+            .expect("work behavior should return to the job site after fetching a tool");
+        let process = behavior[second_move..]
+            .find("ProcessOrder")
+            .map(|offset| second_move + offset)
+            .expect("work behavior should process the assigned order");
+
+        assert!(destination < first_move);
+        assert!(first_move < transfer);
+        assert!(transfer < second_move);
+        assert!(second_move < process);
+    }
 
     #[test]
     fn rescued_villager_needs_reach_hungry_and_thirsty_after_one_minute() {

@@ -2,41 +2,55 @@
 
 ## Project Overview
 
-Siege Perilous is a single-player-per-world **survival** game server written in Rust. It uses the **Bevy ECS** engine for game logic, **WebSocket over TLS** for networking, and **PostgreSQL** for persistence. Each player controls a hero (plus villagers and structures) in a procedurally generated world with resource gathering, crafting, combat, and NPC AI on top of an escalating survival loop.
+Siege Perilous is a persistent shared-world settlement-survival game server
+written in Rust. It uses Bevy ECS for authoritative game logic, WebSocket over
+TLS for the live protocol, and PostgreSQL for account, session, and score
+records. Multiple players can coexist in the same continuously advancing world;
+each owns a hero, villagers, settlement, introduction state, and ordered
+personal-crisis progression.
 
 - **Package:** `siege_perilous` v0.5.0
 - **Rust Edition:** 2021
-- **Binary:** `siege_perilous`
+- **Binaries:** `siege_perilous`, `headless_runner`
 - **Entry point:** `src/main.rs` → `src/lib.rs::setup()`
+- **Simulation rate:** 10 game ticks per second
+- **Active map:** 60×50, loaded from `map/test3.tmx`
+- **Start locations:** five reusable entries in `templates/player_start.yaml`
 
 ### Game Direction (the north star)
 
-The game is a **prepare-and-survive** experience: the world periodically floods the player
-with escalating waves of enemies, and the goal is to **survive as long as possible** while
-preparing (gathering, building, fortifying, recruiting). The final score rewards how long and
-how well you survived, not conquest. Most of this logic lives in `game.rs`. Key systems:
+The current game is a prepare-and-survive experience inside a shared
+environment:
 
-- **Per-player survival timing** — each player's clock starts when their intro chain begins
-  (`PlayerIntroState`), so survival day/time is measured per player, not off the global tick.
-- **Crisis tiers (1–5)** — `PlayerCrisis` / `crisis_tier()` escalate threats: rat spoilage →
-  wolf pack → goblin raid → undead incursion → goblin pillager. Each tier fires on an organic
-  condition with a time-based **fallback deadline** so passive players still face escalation.
-- **Survival director & hordes** — from ~day 6 (`survival_director_active`), `survival_horde_size`
-  / `survival_horde_composition` send periodic night hordes that scale with day, crisis tier, and
-  active legendary threats.
-- **Legendary threat** — a day-6 rumor / day-7 activation arc (`LegendaryThreat`) culminating in
-  the **Ashen Warlord** and the **Warlord Hideout**, with follower/captain waves and a reveal.
-- **Monolith / Sanctuary** — `Monolith` (collects soulshards), `BoundMonolith`, `Sanctuary` /
-  `WeakSanctuary` provide protected zones; sealing the Monolith is the major end-game legacy goal.
-- **Scoring** — `calculate_run_score_breakdown` produces a 6-component `ScoreBreakdown`
-  (survival, progression, wealth, defense, valor, legacy); `score_total_from_breakdown` applies a
-  highest-pressure-level multiplier. Persisted to the `scores` table on death.
-- **True Death & start-location recycling** — `true_death_system` ends a run; the hero's start
-  location is recycled back into the in-memory pool (`StartLocations`) for reuse. There are 5
-  start locations.
-- **Objectives** — `PlayerObjectives` tracks an onboarding/goal checklist (scavenge shipwreck,
-  build campfire, win first fight, recruit villager, survive 5 nights, find the legendary hideout,
-  defeat the Ashen Warlord, …) that feeds the legacy score component.
+- **Global environment:** day/night, weather, lighting, visibility, needs, and
+  night-travel consequences advance for the whole world.
+- **Revised opening:** a fresh hero investigates the run-owned Shipwreck,
+  recovers the exact starter salvage, builds a normal Burrow, defeats the
+  one-to-three Giant Rat wave, and then receives the rescued first villager.
+- **Personal crises:** `SettlementCrisisState` allows at most one current crisis
+  per player. `PERSONAL_CRISIS_SEQUENCE` is Goblin then Undead. Pre-assault
+  progression is owner-online-only; once launched, an assault remains committed
+  through an ordinary disconnect.
+- **Authority:** personal attackers and spells carry player/assault
+  attribution, and resolution is idempotent. Solo completion remains possible;
+  helpers may assist but are not required.
+- **Safe Logout:** explicit server-accepted protection freezes the owning run
+  after its countdown. Reconnect removes protection before that run resumes.
+- **Monolith, sanctuary, scoring, and True Death:** the run retains its bound
+  sanctuary, resurrection and permanent-death path, score breakdown, start
+  recycling, and replay lifecycle.
+- **Established economy:** gathering, farming, fishing, hunting, refining,
+  smelting, tanning, cooking, recipes, work queues, villagers, crafting, and
+  trade remain active systems.
+
+`SurvivalDirectorMode::PersonalCrisis` is the production and headless default.
+The earlier rat/wolf/tiered wave, nightly horde, Goblin Pillager, and legendary
+director remains available only through `SurvivalDirectorMode::Legacy`; do not
+describe that legacy schedule as a second active danger authority.
+
+The current design contracts are indexed in `../docs/README.md`. Historical
+balance reports describe the revision that generated them rather than the
+current checkout.
 
 ## Build & Run Commands
 
@@ -50,15 +64,20 @@ cargo run
 cargo run -- reload    # Reload existing game state from saved scene
 
 # Tests
-cargo test                              # All tests
+cargo fmt --all -- --check
+cargo check
+cargo test --no-fail-fast               # All test targets; keep all failures visible
 cargo test --lib game_tests             # Game unit tests
 cargo test --lib villager_tests         # Villager AI tests
 cargo test --test day_system_test       # Day/night integration tests
+cargo test --lib headless::tests::smoke # In-process production-schedule smoke
 cargo test -- --nocapture               # Show println/log output
 
 # Lint & format
-cargo fmt
-cargo clippy
+cargo clippy --all-targets --all-features
+
+# Bounded headless run
+cargo run --bin headless_runner -- 1 6000 standard
 ```
 
 ## Architecture
@@ -74,9 +93,13 @@ src/
 ├── main.rs              # CLI entry point, parses "reload" arg
 ├── lib.rs               # Bevy App setup, plugin registration, clippy config
 ├── game.rs              # Core game loop, event processing, tick systems AND the
-│                        #   survival loop: crisis tiers, hordes, legendary threat,
-│                        #   monolith/sanctuary, scoring, true death (~16K lines)
+│                        #   introductions, personal + legacy danger directors,
+│                        #   monolith/sanctuary, scoring, true death (~23K lines)
 ├── game_tests.rs        # Unit tests for game systems
+├── safe_logout.rs       # Safe Logout authority, freezing, delivery snapshots
+├── headless.rs          # In-process harness, fixtures, telemetry, regressions
+├── headless_bot.rs      # Scripted production-path bot
+├── bin/headless_runner.rs # Repeated-run CLI and CSV/JSON reporting
 │
 ├── Network & Persistence
 │   ├── network.rs       # WebSocket/TLS server, packet handling
@@ -234,28 +257,42 @@ Uses a custom `setup_test_app!` macro and `TestVillagerBuilder` for flexible tes
 ### Integration Tests (`tests/day_system_test.rs`)
 Tests day/night cycle effects on viewshed ranges.
 
-## Database
+## Persistence boundary
 
-**PostgreSQL** with tables: `accounts`, `sessions`, `scores`. Passwords hashed with Argon2. Session-based authentication.
+PostgreSQL stores accounts, sessions, and scores; passwords use Argon2 and
+login uses session authentication. The production server also has Bevy dynamic
+scene snapshot/reload support. Personal introduction, crisis, start-assignment,
+and Safe Logout coordination include runtime-only state, so the current design
+does not claim complete process-restart restoration for every per-run graph.
 
 The `scores` table (`scores_schema.sql`) is the run-history / leaderboard sink, written on True
 Death. Beyond `hero_name` / `hero_rank` / `total_xp` / `fate`, it stores the full score breakdown
 (`score_survival`, `score_progression`, `score_wealth`, `score_defense`, `score_valor`,
 `score_legacy`, `total_score`) plus survival telemetry: `days_survived`, `waves_survived`,
-`highest_pressure_level`, `crisis_tier`, `legendary_kills`, `hideouts_cleared`.
+`highest_pressure_level`, `crisis_tier`, `legendary_kills`, `hideouts_cleared`. Some field names
+remain legacy-compatible even though Personal Crisis is now the default director.
 
 ## Network Protocol
 
-WebSocket over TLS. Packets serialized as JSON `ResponsePacket` enums. Key packet types: `Login`, `Register`, `Move`, `Attack`, plus various state update responses. Survival-loop packets carry the
-score/run state — e.g. `ScoreBreakdown` (the 6 score components) and the objectives, sanctuary,
-and true-death updates the client uses to drive its survival UI.
+WebSocket traffic runs over TLS and server responses serialize through
+`ResponsePacket`. Player commands become `PlayerEvent` values and remain
+server-validated. The client receives full or incremental terrain/object
+perception plus focused state snapshots for weather, objectives, personal
+crisis, Safe Logout, protected settlements, scoring, resurrection, and True
+Death. Treat those packets as presentation state, not client authority.
 
 ## Important Notes
 
-- `game.rs` is the largest file (~16K lines): the core game loop, most system logic, **and** the
-  survival loop (crisis tiers, hordes, legendary threat, monolith/sanctuary, scoring, true death)
-- `player.rs` (~11K lines) handles all player-facing event processing
-- The `big-brain` dependency uses a pinned commit from a Codeberg fork, not crates.io
-- AI debug logs rotate daily to `logs/ai_debug.log`
-- The app requires a `.env` file for database and TLS configuration (not checked in)
-- Running `cargo run` starts a new game; `cargo run -- reload` loads from saved state
+- `game.rs` remains the largest module at roughly 23,000 lines. Inspect its
+  actual schedules and resources before assuming the higher-level ownership
+  list in this guide is exhaustive.
+- Bevy deferred commands can race despawns. Use safe/idempotent command patterns
+  such as `try_insert` whenever an entity may disappear before commands apply.
+- Avoid spawning from read-only reporting systems, per-tick database writes,
+  and per-tick log spam.
+- The `big-brain` dependency uses a pinned commit from a Codeberg fork rather
+  than crates.io.
+- AI debug logs rotate daily to `logs/ai_debug.log`.
+- Production startup requires database and TLS environment configuration.
+- `cargo run` starts a new game; `cargo run -- reload` loads the supported
+  dynamic-scene state.

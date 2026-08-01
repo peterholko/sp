@@ -13,7 +13,6 @@ import {
   shouldRenderSurvivalThread,
 } from "../../core/crisisStatus";
 import {
-  SAFE_LOGOUT_CONDITIONS,
   SAFE_LOGOUT_ARIA_LIVE,
   SafeLogoutStatusPacket,
   SafeLogoutStatusView,
@@ -26,6 +25,17 @@ import {
   safeLogoutLayoutMode,
   shouldRenderSafeLogout,
 } from "../../core/safeLogoutStatus";
+import {
+  TutorialHintPolicyState,
+  advanceTutorialHintPolicy,
+  createTutorialHintPolicy,
+  dismissTutorialHint,
+  receiveTutorialObjective,
+  resetTutorialHintPolicy,
+  setTutorialHintEnabled,
+  tutorialHintVisible,
+} from "./tutorialHintPolicy";
+import { loadTutorialEnabled, saveTutorialEnabled } from "./tutorialPreference";
 
 const COMPACT_DESKTOP_MAX_WIDTH = 1280;
 const DESKTOP_THREAD_BOTTOM = '145px';
@@ -75,6 +85,8 @@ interface ObjectivesState extends CrisisUiState, SafeLogoutUiState {
   threatState: any;
   discoveryEvent: any;
   viewportWidth: number;
+  tutorialEnabled: boolean;
+  tutorialHintVisible: boolean;
 }
 
 const severityRank = {
@@ -84,6 +96,10 @@ const severityRank = {
   low: 2,
   quiet: 1,
 };
+
+// Cards inside the Tutorial & Help panel share the panel's own border so the
+// chrome reads as one surface; tone/accent colors stay on text and buttons.
+const PANEL_BORDER = '1px solid rgba(201, 170, 113, 0.38)';
 
 const crisisToneColor: Record<CrisisTone, string> = {
   neutral: '#9aa0a6',
@@ -99,9 +115,20 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   private observedHeroId: string | null = null;
   private safeLogoutRequestLocked = false;
   private safeLogoutCancelLocked = false;
+  private tutorialHintPolicy: TutorialHintPolicyState;
+  private tutorialHintTimer: ReturnType<typeof setInterval> | null = null;
+  private tutorialPreferencePlayerId: string;
+  private tutorialCombatActive = false;
+  private tutorialHeroUnavailable = Boolean(Global.heroDead);
+  private tutorialDisconnected = false;
+  private tutorialDocumentHidden = typeof document !== 'undefined' && document.hidden;
 
   constructor(props) {
     super(props);
+    const now = Date.now();
+    this.tutorialPreferencePlayerId = String(Global.playerId);
+    const tutorialEnabled = loadTutorialEnabled(this.tutorialPreferencePlayerId);
+    this.tutorialHintPolicy = createTutorialHintPolicy(tutorialEnabled, now);
     this.state = {
       build_campfire: false,
       build_3_structures: false,
@@ -117,6 +144,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       safeLogoutRequestInFlight: false,
       safeLogoutCancelInFlight: false,
       viewportWidth: typeof window === 'undefined' ? 0 : window.innerWidth,
+      tutorialEnabled,
+      tutorialHintVisible: false,
       // QW1: start the Survival Thread expanded so the tutorial guidance is
       // visible by default on compact desktops; the player can still collapse it.
       compactExpanded: true,
@@ -126,6 +155,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.toggleCompactExpanded = this.toggleCompactExpanded.bind(this);
     this.handleBeginSafeLogout = this.handleBeginSafeLogout.bind(this);
     this.handleCancelSafeLogout = this.handleCancelSafeLogout.bind(this);
+    this.handleTutorialToggle = this.handleTutorialToggle.bind(this);
+    this.handleDismissTutorialHint = this.handleDismissTutorialHint.bind(this);
+    this.handleOpenTutorialHint = this.handleOpenTutorialHint.bind(this);
+    this.handleTutorialTimer = this.handleTutorialTimer.bind(this);
+    this.handleVisibilityChange = this.handleVisibilityChange.bind(this);
   }
 
   componentDidMount() {
@@ -140,10 +174,18 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_DEATH_STATE, this.handleHeroDeathState, this);
+    Global.gameEmitter.on(NetworkEvent.COMBAT_STATE, this.handleCombatState, this);
+    Global.gameEmitter.on(NetworkEvent.SERVER_OFFLINE, this.handleDisconnected, this);
+    Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleDisconnected, this);
 
     if (typeof window !== 'undefined') {
       window.addEventListener('resize', this.handleResize);
     }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    this.tutorialHintTimer = setInterval(this.handleTutorialTimer, 1000);
 
     const latestSafeLogoutStatus = Global.network
       && typeof Global.network.getLatestSafeLogoutStatus === 'function'
@@ -166,9 +208,20 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
+    Global.gameEmitter.off(NetworkEvent.HERO_DEATH_STATE, this.handleHeroDeathState, this);
+    Global.gameEmitter.off(NetworkEvent.COMBAT_STATE, this.handleCombatState, this);
+    Global.gameEmitter.off(NetworkEvent.SERVER_OFFLINE, this.handleDisconnected, this);
+    Global.gameEmitter.off(NetworkEvent.NETWORK_ERROR, this.handleDisconnected, this);
 
     if (typeof window !== 'undefined') {
       window.removeEventListener('resize', this.handleResize);
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    }
+    if (this.tutorialHintTimer !== null) {
+      clearInterval(this.tutorialHintTimer);
+      this.tutorialHintTimer = null;
     }
   }
 
@@ -184,6 +237,88 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.setState((state) => ({ compactExpanded: !state.compactExpanded }));
   }
 
+  tutorialHintsPaused(): boolean {
+    const crisis = crisisStatusView(this.state.crisisStatus);
+    const safeLogout = safeLogoutStatusView(this.state.safeLogoutStatus);
+    return this.tutorialDocumentHidden
+      || this.tutorialDisconnected
+      || this.tutorialHeroUnavailable
+      || this.tutorialCombatActive
+      || Boolean(crisis && (crisis.urgent || crisis.assaultActive))
+      || Boolean(safeLogout && (safeLogout.pending || safeLogout.protected));
+  }
+
+  syncTutorialHint(now = Date.now()) {
+    this.tutorialHintPolicy = advanceTutorialHintPolicy(
+      this.tutorialHintPolicy,
+      now,
+      this.tutorialHintsPaused(),
+    );
+    const visible = tutorialHintVisible(this.tutorialHintPolicy, now);
+    if (visible !== this.state.tutorialHintVisible) {
+      this.setState({ tutorialHintVisible: visible });
+    }
+  }
+
+  handleTutorialTimer() {
+    this.syncTutorialHint(Date.now());
+  }
+
+  handleVisibilityChange() {
+    this.tutorialDocumentHidden = typeof document !== 'undefined' && document.hidden;
+    this.syncTutorialHint(Date.now());
+  }
+
+  handleDisconnected() {
+    this.tutorialDisconnected = true;
+    this.syncTutorialHint(Date.now());
+  }
+
+  handleHeroDeathState(message) {
+    this.tutorialHeroUnavailable = !message || message.phase !== 'resurrected';
+    this.syncTutorialHint(Date.now());
+  }
+
+  handleCombatState(message) {
+    const attackHistory = message && Array.isArray(message.attack_history)
+      ? message.attack_history
+      : [];
+    const hasCombatPrompt = Boolean(
+      message
+      && ((Array.isArray(message.matching_combos) && message.matching_combos.length > 0)
+        || message.available_finisher),
+    );
+    this.tutorialCombatActive = attackHistory.length > 0 || hasCombatPrompt;
+    this.syncTutorialHint(Date.now());
+  }
+
+  handleTutorialToggle() {
+    const now = Date.now();
+    const enabled = !this.state.tutorialEnabled;
+    saveTutorialEnabled(this.tutorialPreferencePlayerId, enabled);
+    this.tutorialHintPolicy = setTutorialHintEnabled(this.tutorialHintPolicy, enabled, now);
+    this.tutorialHintPolicy = advanceTutorialHintPolicy(
+      this.tutorialHintPolicy,
+      now,
+      this.tutorialHintsPaused(),
+    );
+    this.setState({
+      tutorialEnabled: enabled,
+      tutorialHintVisible: tutorialHintVisible(this.tutorialHintPolicy, now),
+    });
+  }
+
+  handleDismissTutorialHint() {
+    const now = Date.now();
+    this.tutorialHintPolicy = dismissTutorialHint(this.tutorialHintPolicy, now);
+    this.setState({ tutorialHintVisible: false });
+  }
+
+  handleOpenTutorialHint() {
+    this.handleDismissTutorialHint();
+    this.setState({ compactExpanded: true });
+  }
+
   handleObjectives(message) {
     this.setState({
       build_campfire: message.build_campfire,
@@ -195,7 +330,22 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   }
 
   handleObjectiveState(message) {
-    this.setState({ objectiveState: message });
+    const now = Date.now();
+    this.tutorialDisconnected = false;
+    this.tutorialHintPolicy = receiveTutorialObjective(
+      this.tutorialHintPolicy,
+      message,
+      now,
+    );
+    this.tutorialHintPolicy = advanceTutorialHintPolicy(
+      this.tutorialHintPolicy,
+      now,
+      this.tutorialHintsPaused(),
+    );
+    this.setState({
+      objectiveState: message,
+      tutorialHintVisible: tutorialHintVisible(this.tutorialHintPolicy, now),
+    });
   }
 
   handleThreatState(message) {
@@ -207,7 +357,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   }
 
   handleCrisisStatus(message: CrisisStatusPacket) {
-    this.setState((state) => receiveCrisisStatus(state, message));
+    this.setState(
+      (state) => receiveCrisisStatus(state, message),
+      () => this.syncTutorialHint(Date.now()),
+    );
   }
 
   handleSafeLogoutStatus(message: SafeLogoutStatusPacket) {
@@ -231,19 +384,22 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       safeLogoutRequestInFlight: keepRequestLocked,
       safeLogoutCancelInFlight: keepCancelLocked,
     };
-    this.setState((state) => ({
-      ...next,
-      compactExpanded: Boolean(
-        view
-        && (view.pending || view.protected || view.reason)
-      ) ? true : state.compactExpanded,
-    }));
+    this.setState(
+      (state) => ({
+        ...next,
+        compactExpanded: Boolean(
+          view
+          && (view.pending || view.protected || view.reason)
+        ) ? true : state.compactExpanded,
+      }),
+      () => this.syncTutorialHint(Date.now()),
+    );
   }
 
   handleSafeLogoutReset() {
     this.safeLogoutRequestLocked = false;
     this.safeLogoutCancelLocked = false;
-    this.setState(clearSafeLogoutStatus());
+    this.setState(clearSafeLogoutStatus(), () => this.syncTutorialHint(Date.now()));
   }
 
   handleBeginSafeLogout() {
@@ -291,6 +447,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.observedHeroId = null;
     this.safeLogoutRequestLocked = false;
     this.safeLogoutCancelLocked = false;
+    this.tutorialHeroUnavailable = false;
+    this.tutorialCombatActive = false;
+    this.tutorialDisconnected = false;
+    this.tutorialHintPolicy = resetTutorialHintPolicy(this.tutorialHintPolicy, Date.now());
     this.setState((state) => ({
       build_campfire: false,
       build_3_structures: false,
@@ -300,13 +460,34 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       objectiveState: null,
       threatState: null,
       discoveryEvent: null,
+      tutorialHintVisible: false,
       ...clearCrisisStatus(state),
       ...clearSafeLogoutStatus(),
     }));
   }
 
   handleHeroInit(heroId) {
+    const now = Date.now();
     const nextHeroId = String(heroId);
+    const nextPlayerId = String(Global.playerId);
+    if (nextPlayerId !== this.tutorialPreferencePlayerId) {
+      this.tutorialPreferencePlayerId = nextPlayerId;
+      const enabled = loadTutorialEnabled(nextPlayerId);
+      this.tutorialHintPolicy = setTutorialHintEnabled(
+        this.tutorialHintPolicy,
+        enabled,
+        now,
+      );
+      this.setState({ tutorialEnabled: enabled, tutorialHintVisible: false });
+    }
+
+    // HERO_INIT is also the reconnect boundary for an existing hero. Always
+    // discard wall-clock hint history here so reconnecting can never produce a
+    // catch-up reminder before a fresh authoritative objective snapshot.
+    this.tutorialHeroUnavailable = false;
+    this.tutorialCombatActive = false;
+    this.tutorialDisconnected = false;
+    this.tutorialHintPolicy = resetTutorialHintPolicy(this.tutorialHintPolicy, now);
 
     // A reconnect reuses the same hero id and should not replay urgent
     // auto-expansion. A recreated run receives a different hero id and clears
@@ -326,9 +507,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         objectiveState: null,
         threatState: null,
         discoveryEvent: null,
+        tutorialHintVisible: false,
         ...clearCrisisStatus(state),
         ...clearSafeLogoutStatus(),
       }));
+    } else {
+      this.setState({ tutorialHintVisible: false });
     }
 
     this.observedHeroId = nextHeroId;
@@ -436,8 +620,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   ) {
     const accent = crisisToneColor[crisis.tone];
     const cardStyle: React.CSSProperties = {
-      border: `1px solid ${accent}`,
-      borderLeft: `3px solid ${accent}`,
+      border: PANEL_BORDER,
       borderRadius: '3px',
       background: 'rgba(255,255,255,0.035)',
       padding: '7px 8px',
@@ -642,8 +825,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     const protectedStatus = safeLogout.protected;
     const accent = protectedStatus ? '#78b978' : pending ? '#e2bd67' : '#8fb7d9';
     const cardStyle: React.CSSProperties = {
-      border: `1px solid ${accent}`,
-      borderLeft: `3px solid ${accent}`,
+      border: PANEL_BORDER,
       borderRadius: '3px',
       background: 'rgba(255,255,255,0.035)',
       padding: '8px',
@@ -666,11 +848,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       lineHeight: 1.25,
       margin: '6px 0',
       textAlign: 'center',
-    };
-    const contractStyle: React.CSSProperties = {
-      ...labelStyle,
-      color: '#c9aa71',
-      marginTop: '6px',
     };
     const buttonStyle: React.CSSProperties = {
       width: '100%',
@@ -728,17 +905,13 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         )}
 
         {safeLogout.state === 'online' && !safeLogout.activeAssault && (
-          <div id="safe-logout-conditions" style={contractStyle}>{SAFE_LOGOUT_CONDITIONS}</div>
-        )}
-
-        {safeLogout.state === 'online' && !safeLogout.activeAssault && (
           <button
             type="button"
             style={requestDisabled ? disabledButtonStyle : buttonStyle}
             onClick={this.handleBeginSafeLogout}
             disabled={requestDisabled}
             aria-label="Begin Safe Logout countdown"
-            aria-describedby="safe-logout-message safe-logout-conditions"
+            aria-describedby="safe-logout-message"
             title={requestDisabled ? safeLogout.message : 'Begin the server-authoritative Safe Logout countdown'}
           >
             {this.state.safeLogoutRequestInFlight ? 'Requesting…' : 'Begin Safe Logout'}
@@ -769,12 +942,15 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     const activeObjective = this.activeObjective(objectives);
     const crisis = crisisStatusView(this.state.crisisStatus);
     const safeLogout = safeLogoutStatusView(this.state.safeLogoutStatus);
+    const tutorialHint = this.state.tutorialEnabled && this.state.tutorialHintVisible
+      ? this.tutorialHintPolicy.objective
+      : null;
 
     // Threat Pressure and Discovery sections were intentionally removed from the
     // Survival Thread (too wordy for players). The data still arrives over the
     // wire and the handlers/state remain, so they can be re-added later.
     if (
-      !shouldRenderSurvivalThread(Boolean(activeObjective), this.state.crisisStatus)
+      !shouldRenderSurvivalThread(objectives.length > 0, this.state.crisisStatus)
       && !shouldRenderSafeLogout(this.state.safeLogoutStatus)
     ) {
       return null;
@@ -789,9 +965,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     );
     const compactDesktop = layoutMode === 'compact';
     const compactExpanded = compactDesktop && this.state.compactExpanded;
+    const compactHintVisible = Boolean(compactDesktop && !compactExpanded && tutorialHint);
     const panelChrome: React.CSSProperties = {
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
-      border: '1px solid rgba(201, 170, 113, 0.38)',
+      border: PANEL_BORDER,
       borderRadius: '4px',
       zIndex: 50,
       boxSizing: 'border-box',
@@ -811,10 +988,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       position: 'fixed',
       bottom: DESKTOP_THREAD_BOTTOM,
       right: '12px',
-      width: compactExpanded ? '280px' : '260px',
+      width: compactExpanded || compactHintVisible ? '280px' : '260px',
       maxWidth: 'calc(100vw - 24px)',
-      maxHeight: compactExpanded ? 'calc(100vh - 169px)' : '42px',
-      overflowY: compactExpanded ? 'auto' : 'hidden',
+      maxHeight: compactExpanded
+        ? 'calc(100vh - 169px)'
+        : compactHintVisible ? '190px' : '42px',
+      overflowY: compactExpanded || compactHintVisible ? 'auto' : 'hidden',
       padding: compactExpanded ? '8px 10px' : '7px 9px',
       pointerEvents: 'auto',
     } : {
@@ -880,6 +1059,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       paddingTop: '7px',
     };
 
+    const headerRowStyle: React.CSSProperties = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '7px',
+      width: '100%',
+      marginBottom: compactDesktop && !compactExpanded && !compactHintVisible ? 0 : '7px',
+    };
+
     const compactHeaderStyle: React.CSSProperties = {
       display: 'flex',
       alignItems: 'center',
@@ -890,11 +1077,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       color: 'inherit',
       padding: 0,
       margin: 0,
-      marginBottom: compactExpanded ? '7px' : 0,
       textAlign: 'left',
       cursor: 'pointer',
       fontFamily: 'Verdana',
       boxSizing: 'border-box',
+      minWidth: 0,
+      flex: '1 1 auto',
     };
 
     const compactTitleStyle: React.CSSProperties = {
@@ -924,6 +1112,51 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       flex: '0 0 auto',
     };
 
+    const tutorialToggleStyle: React.CSSProperties = {
+      minHeight: '25px',
+      padding: '3px 6px',
+      border: `1px solid ${this.state.tutorialEnabled ? '#8fbf88' : '#777d82'}`,
+      borderRadius: '3px',
+      background: 'rgba(20, 24, 28, 0.92)',
+      color: this.state.tutorialEnabled ? '#b8d8b1' : '#a9adb1',
+      cursor: 'pointer',
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      fontWeight: 'bold',
+      lineHeight: 1,
+      whiteSpace: 'nowrap',
+      flex: '0 0 auto',
+    };
+
+    const hintStyle: React.CSSProperties = {
+      border: '1px solid rgba(143, 183, 217, 0.75)',
+      borderLeft: '3px solid #8fb7d9',
+      borderRadius: '3px',
+      background: 'rgba(44, 65, 82, 0.42)',
+      padding: '7px 8px',
+      marginBottom: '8px',
+    };
+
+    const hintActionsStyle: React.CSSProperties = {
+      display: 'flex',
+      justifyContent: 'flex-end',
+      gap: '6px',
+      marginTop: '6px',
+    };
+
+    const hintButtonStyle: React.CSSProperties = {
+      minHeight: '25px',
+      border: '1px solid rgba(143, 183, 217, 0.75)',
+      borderRadius: '3px',
+      background: 'rgba(20, 24, 28, 0.92)',
+      color: '#dbe8f2',
+      cursor: 'pointer',
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      fontWeight: 'bold',
+      padding: '4px 7px',
+    };
+
     const safeLogoutCompactSummary = safeLogout
       ? safeLogout.pending
         ? safeLogout.countdownLabel || 'Safe Logout pending'
@@ -935,9 +1168,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       ? crisis.compactLabel || crisis.phaseLabel
       : safeLogout && safeLogout.pending
         ? safeLogoutCompactSummary
-        : activeObjective
+        : this.state.tutorialEnabled && activeObjective
           ? activeObjective.title
-          : safeLogoutCompactSummary || (crisis ? crisis.title : '');
+          : safeLogoutCompactSummary || (crisis ? crisis.title : 'Tutorial off');
 
     const objectiveRowStyle = (state: string): React.CSSProperties => ({
       display: 'flex',
@@ -959,24 +1192,74 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     return (
       <div style={containerStyle}>
-        {compactDesktop ?
+        <div style={headerRowStyle}>
+          {compactDesktop ?
+            <button
+              type="button"
+              style={compactHeaderStyle}
+              onClick={this.toggleCompactExpanded}
+              aria-expanded={compactExpanded}
+              aria-label={compactExpanded
+                ? 'Collapse Tutorial and Help'
+                : `Expand Tutorial and Help${compactSummary ? `: ${compactSummary}` : ''}`}
+              title={compactExpanded ? 'Collapse Tutorial & Help' : 'Expand Tutorial & Help'}
+            >
+              <span style={compactTitleStyle}>Tutorial &amp; Help</span>
+              {!compactExpanded && compactSummary &&
+                <span style={compactObjectiveStyle}>{compactSummary}</span>}
+              <span style={compactToggleStyle}>{compactExpanded ? '-' : '+'}</span>
+            </button>
+            :
+            <div style={{ ...titleStyle, marginBottom: 0, flex: '1 1 auto' }}>
+              Tutorial &amp; Help
+            </div>}
           <button
             type="button"
-            style={compactHeaderStyle}
-            onClick={this.toggleCompactExpanded}
-            aria-expanded={compactExpanded}
-            aria-label={compactExpanded
-              ? 'Collapse survival thread'
-              : `Expand survival thread${compactSummary ? `: ${compactSummary}` : ''}`}
-            title={compactExpanded ? 'Collapse survival thread' : 'Expand survival thread'}
+            style={tutorialToggleStyle}
+            onClick={this.handleTutorialToggle}
+            aria-pressed={this.state.tutorialEnabled}
+            aria-label={this.state.tutorialEnabled ? 'Turn tutorial off' : 'Turn tutorial on'}
+            title={this.state.tutorialEnabled
+              ? 'Hide tutorial guidance and periodic hints'
+              : 'Show tutorial guidance and periodic hints'}
           >
-            <span style={compactTitleStyle}>Survival Thread</span>
-            {!compactExpanded && compactSummary &&
-              <span style={compactObjectiveStyle}>{compactSummary}</span>}
-            <span style={compactToggleStyle}>{compactExpanded ? '-' : '+'}</span>
+            Tutorial {this.state.tutorialEnabled ? 'On' : 'Off'}
           </button>
-          :
-          <div style={titleStyle}>Survival Thread</div>}
+        </div>
+
+        {tutorialHint &&
+          <aside
+            style={hintStyle}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-label={`Tutorial hint for ${tutorialHint.title}`}
+          >
+            <div style={categoryStyle}>Tutorial hint</div>
+            <div style={activeTitleStyle}>{tutorialHint.title}</div>
+            {tutorialHint.actionHint && <div style={bodyStyle}>{tutorialHint.actionHint}</div>}
+            {tutorialHint.blocker &&
+              <div style={bodyStyle}><strong>Before that:</strong> {tutorialHint.blocker}</div>}
+            <div style={hintActionsStyle}>
+              {compactDesktop && !compactExpanded &&
+                <button
+                  type="button"
+                  style={hintButtonStyle}
+                  onClick={this.handleOpenTutorialHint}
+                  aria-label="Open Tutorial and Help for this hint"
+                >
+                  Open guide
+                </button>}
+              <button
+                type="button"
+                style={hintButtonStyle}
+                onClick={this.handleDismissTutorialHint}
+                aria-label="Dismiss tutorial hint"
+              >
+                Dismiss
+              </button>
+            </div>
+          </aside>}
 
         {(!compactDesktop || compactExpanded) && crisis &&
           this.renderCrisisCard(crisis, bodyStyle, labelStyle)}
@@ -985,17 +1268,21 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           && shouldRenderSafeLogout(this.state.safeLogoutStatus)
           && this.renderSafeLogoutCard(safeLogout, bodyStyle, labelStyle)}
 
-        {(!compactDesktop || compactExpanded) && activeObjective &&
-          <div>
+        {(!compactDesktop || compactExpanded) && this.state.tutorialEnabled && activeObjective &&
+          <section aria-labelledby="getting-started-title">
+            <div id="getting-started-title" style={categoryStyle}>
+              Getting Started · Survival Thread
+            </div>
             <div style={activeTitleStyle}>{activeObjective.title}</div>
             <div style={bodyStyle}><strong>Why:</strong> {activeObjective.lesson}</div>
             <div style={bodyStyle}><strong>Next:</strong> {activeObjective.action_hint}</div>
             {activeObjective.blocker &&
               <div style={bodyStyle}><strong>Blocked:</strong> {activeObjective.blocker}</div>}
             {this.renderProgress(activeObjective, labelStyle)}
-          </div>}
+          </section>}
 
-        {(!compactDesktop || compactExpanded) && <div style={sectionStyle}>
+        {(!compactDesktop || compactExpanded) && this.state.tutorialEnabled &&
+          <div style={sectionStyle} aria-label="Survival Thread lessons">
           {objectives.map(obj => {
             const rowTooltip = [
               obj.action_hint,

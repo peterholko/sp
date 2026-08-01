@@ -196,6 +196,10 @@ pub const INGOT: &str = "Ingot";
 pub const DUST: &str = "Dust";
 pub const TIMBER: &str = "Timber";
 
+pub fn req_matches(req_type: &str, item_name: &str, item_class: &str, item_subclass: &str) -> bool {
+    req_type == item_name || req_type == item_class || req_type == item_subclass
+}
+
 /// Returns true if an item (described by name/class/subclass) satisfies a
 /// structure requirement of the given type. Matches by name, class, or
 /// subclass, and additionally allows substitution of refined materials for
@@ -209,7 +213,7 @@ pub fn req_matches_build(
     item_class: &str,
     item_subclass: &str,
 ) -> bool {
-    if req_type == item_name || req_type == item_class || req_type == item_subclass {
+    if req_matches(req_type, item_name, item_class, item_subclass) {
         return true;
     }
     if req_type == LOG && item_class == TIMBER {
@@ -227,6 +231,44 @@ pub fn required_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
         constants::FOOD => Some(AttrKey::Farming),
         constants::GAME_ANIMAL => Some(AttrKey::Hunting),
         _ => None,
+    }
+}
+
+pub fn gather_resource_type_for_tool(item: &Item) -> Option<&'static str> {
+    if item.is_gather_tool_for_attr(&AttrKey::Mining) {
+        Some(ORE)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Logging) {
+        Some(LOG)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Stonecutting) {
+        Some(STONE)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Fishing) {
+        Some(constants::FISH)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Farming) {
+        Some(constants::FOOD)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Foraging) {
+        Some(constants::PLANT)
+    } else if item.is_gather_tool_for_attr(&AttrKey::Hunting) {
+        Some(constants::GAME_ANIMAL)
+    } else {
+        None
+    }
+}
+
+pub fn gather_duration_ticks(base_seconds: i32, tool_rating: f32) -> i32 {
+    let rating = tool_rating.max(1.0);
+    let speed_multiplier = (1.0 - 0.20 * (rating - 1.0)).max(0.40);
+    ((base_seconds * TICKS_PER_SEC) as f32 * speed_multiplier).round() as i32
+}
+
+pub fn harvest_tool_break_chance(current_durability: i32, max_durability: i32) -> f32 {
+    if current_durability <= 0 {
+        1.0
+    } else if max_durability <= 0 || current_durability * 5 > max_durability {
+        0.0
+    } else if current_durability * 10 <= max_durability {
+        0.25
+    } else {
+        0.10
     }
 }
 
@@ -367,6 +409,26 @@ impl Slot {
 pub struct Inventory {
     pub owner: i32,
     pub items: Vec<Item>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CraftError {
+    InsufficientResources,
+    InventoryFull,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefineOutcome {
+    pub remaining_source: Option<Item>,
+    pub produced: Vec<(Item, i32)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineError {
+    ItemNotFound,
+    ItemNotRefineable,
+    MissingItemTemplate(String),
+    InventoryFull,
 }
 
 impl Inventory {
@@ -735,7 +797,7 @@ impl Inventory {
         owner: i32,
         name: String,
         quantity: i32,
-        attrs: HashMap<AttrKey, AttrVal>,
+        mut attrs: HashMap<AttrKey, AttrVal>,
         item_templates: &Vec<ItemTemplate>,
     ) -> (Item, bool) {
         let mut class = "Invalid".to_string();
@@ -764,6 +826,13 @@ impl Inventory {
                 if let Some(item_template_produces) = &item_template.produces {
                     produces = item_template_produces.clone();
                 }
+
+                // Resource and refinement attributes augment the output
+                // template. Keep intrinsic attributes such as Feed or Food
+                // Poisoning unless the source explicitly overrides them.
+                let mut combined_attrs = item_template.convert_attrs();
+                combined_attrs.extend(attrs.clone());
+                attrs = combined_attrs;
             }
         }
 
@@ -778,11 +847,7 @@ impl Inventory {
 
         // Can new item be merged into existing
         if Item::can_merge_by_class(class.clone()) {
-            if let Some(merged_index) = self
-                .items
-                .iter()
-                .position(|item| item.owner == owner && item.name == name)
-            {
+            if let Some(merged_index) = self.mergeable(name.clone(), attrs.clone()) {
                 info!("Merged index: {:?}", merged_index);
                 let merged_item = &mut self.items[merged_index];
                 info!("Merged item: {:?}", merged_item);
@@ -898,17 +963,14 @@ impl Inventory {
         // By default the recipe name is the item name
         let mut name: String = recipe_name.clone();
 
-        let mut quantity = recipe.amount.unwrap_or(1);
-
-        if quantity > 1 {
-            // randomly select amount between 1 and amount
-            quantity = rand::thread_rng().gen_range(1..=quantity);
-        }
+        let quantity = recipe.amount.unwrap_or(1).max(1);
 
         let class = recipe.class.clone();
         let subclass = recipe.subclass.clone();
         let mut image = recipe.image.clone();
-        let weight = recipe.weight as f32 * (quantity as f32);
+        // Item::weight is per unit; Inventory::get_total_weight applies the
+        // stack quantity.
+        let weight = recipe.weight;
         let durability = recipe.durability.clone();
         let slot = recipe.slot.clone();
 
@@ -921,7 +983,9 @@ impl Inventory {
         }
 
         // Get consumed items and their attrs
-        let consumed_items = self.consume_reqs(recipe.req.clone());
+        let consumed_items = self
+            .try_consume_reqs(&recipe.req)
+            .expect("craft called without sufficient recipe inputs");
         let mut item_attrs = HashMap::new();
 
         for consumed_item in consumed_items.iter() {
@@ -975,6 +1039,93 @@ impl Inventory {
             self.items.push(new_item.clone());
             return new_item;
         }
+    }
+
+    /// Execute a craft as one inventory transaction. Inputs and outputs are
+    /// staged on a clone so a failed capacity check cannot consume materials.
+    pub fn try_craft(
+        &mut self,
+        item_id: i32,
+        owner: i32,
+        recipe_name: String,
+        recipe: &Recipe,
+        custom_name: Option<String>,
+        custom_image: Option<String>,
+        capacity: i32,
+    ) -> Result<Item, CraftError> {
+        if !self.has_reqs(recipe.req.clone()) {
+            return Err(CraftError::InsufficientResources);
+        }
+
+        let mut candidate = self.clone();
+        let new_item = candidate.craft(
+            item_id,
+            owner,
+            recipe_name,
+            recipe,
+            custom_name,
+            custom_image,
+        );
+
+        if candidate.get_total_weight() > capacity {
+            return Err(CraftError::InventoryFull);
+        }
+
+        *self = candidate;
+        Ok(new_item)
+    }
+
+    /// Refine one source unit and create all outputs atomically.
+    pub fn try_refine(
+        &mut self,
+        item_id: i32,
+        yield_multiplier: i32,
+        capacity: i32,
+        item_templates: &Vec<ItemTemplate>,
+        ids: &mut Ids,
+    ) -> Result<RefineOutcome, RefineError> {
+        let source = self.get_by_id(item_id).ok_or(RefineError::ItemNotFound)?;
+        let source_template = Item::find_template(source.name.clone(), item_templates)
+            .ok_or_else(|| RefineError::MissingItemTemplate(source.name.clone()))?;
+        let outputs = source_template
+            .produces
+            .clone()
+            .ok_or(RefineError::ItemNotRefineable)?;
+        let yield_multiplier = yield_multiplier.max(1);
+
+        let mut output_templates = Vec::new();
+        let mut output_weight = 0.0;
+        for output in outputs.iter() {
+            let template = Item::find_template(output.clone(), item_templates)
+                .ok_or_else(|| RefineError::MissingItemTemplate(output.clone()))?
+                .clone();
+            output_weight += template.weight * yield_multiplier as f32;
+            output_templates.push(template);
+        }
+
+        let final_weight = self.get_total_weight() as f32 - source.weight + output_weight;
+        if final_weight > capacity as f32 {
+            return Err(RefineError::InventoryFull);
+        }
+
+        let mut produced = Vec::new();
+        for template in output_templates {
+            let (item, _) = self.new_with_attrs(
+                ids.new_item_id(),
+                self.owner,
+                template.name,
+                yield_multiplier,
+                source.attrs.clone(),
+                item_templates,
+            );
+            produced.push((item, yield_multiplier));
+        }
+
+        let remaining_source = self.remove_quantity(source.id, 1);
+        Ok(RefineOutcome {
+            remaining_source,
+            produced,
+        })
     }
 
     pub fn split(
@@ -1430,27 +1581,69 @@ impl Inventory {
         return expired_items;
     }
 
-    pub fn consume_reqs(&mut self, req_items: Vec<ResReq>) -> Vec<Item> {
-        let mut consumed_items = Vec::new();
-        let mut items_to_remove = Vec::new();
+    fn requirement_consumption_plan(&self, req_items: &[ResReq]) -> Option<Vec<(usize, i32)>> {
+        let mut available = self
+            .items
+            .iter()
+            .map(|item| item.quantity)
+            .collect::<Vec<_>>();
+        let mut plan = Vec::new();
 
-        for req_item in req_items.iter() {
-            for structure_item in self.items.iter() {
-                if req_item.req_type == structure_item.name
-                    || req_item.req_type == structure_item.class
-                    || req_item.req_type == structure_item.subclass
-                {
-                    consumed_items.push(structure_item.clone());
-                    items_to_remove.push((structure_item.id, req_item.quantity));
+        for requirement in req_items {
+            if requirement.quantity < 0 {
+                return None;
+            }
+
+            let mut remaining = requirement.quantity;
+            for (index, item) in self.items.iter().enumerate() {
+                if remaining == 0 {
+                    break;
                 }
+                if req_matches(
+                    &requirement.req_type,
+                    &item.name,
+                    &item.class,
+                    &item.subclass,
+                ) {
+                    let take = remaining.min(available[index]);
+                    if take > 0 {
+                        available[index] -= take;
+                        remaining -= take;
+                        plan.push((index, take));
+                    }
+                }
+            }
+
+            if remaining != 0 {
+                return None;
             }
         }
 
-        for (item_id, quantity) in items_to_remove {
+        Some(plan)
+    }
+
+    pub fn try_consume_reqs(&mut self, req_items: &[ResReq]) -> Option<Vec<Item>> {
+        let plan = self.requirement_consumption_plan(req_items)?;
+        let mut consumed_items = Vec::new();
+        let removals = plan
+            .iter()
+            .map(|(index, quantity)| {
+                let mut consumed = self.items[*index].clone();
+                consumed.quantity = *quantity;
+                consumed_items.push(consumed);
+                (self.items[*index].id, *quantity)
+            })
+            .collect::<Vec<_>>();
+
+        for (item_id, quantity) in removals {
             self.remove_quantity(item_id, quantity);
         }
 
-        return consumed_items;
+        Some(consumed_items)
+    }
+
+    pub fn consume_reqs(&mut self, req_items: Vec<ResReq>) -> Vec<Item> {
+        self.try_consume_reqs(&req_items).unwrap_or_default()
     }
 
     /// Like `consume_reqs`, but accepts refined materials as substitutes for raw
@@ -1681,6 +1874,23 @@ impl Inventory {
             .any(|item| item.equipped && item.is_gather_tool_for_attr(attr))
     }
 
+    pub fn get_equipped_tool_for_attr(&self, attr: &AttrKey) -> Option<Item> {
+        self.items
+            .iter()
+            .filter(|item| item.equipped && item.is_gather_tool_for_attr(attr))
+            .max_by(|a, b| {
+                a.attr_num(attr)
+                    .partial_cmp(&b.attr_num(attr))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .cloned()
+    }
+
+    pub fn get_equipped_tool_for_res_type(&self, res_type: &str) -> Option<Item> {
+        required_tool_attr_for_res_type(res_type)
+            .and_then(|attr| self.get_equipped_tool_for_attr(&attr))
+    }
+
     pub fn best_tool_for_attr(&self, attr: &AttrKey) -> Option<Item> {
         self.items
             .iter()
@@ -1773,78 +1983,21 @@ impl Inventory {
     }
 
     pub fn find_by_reqs(&self, source_req_items: Vec<ResReq>) -> Option<Vec<Item>> {
-        let mut found_items = Vec::new();
-
-        let mut req_items = source_req_items.clone();
-
-        for req_item in req_items.iter_mut() {
-            let mut req_quantity = req_item.quantity;
-
-            for item in self.items.iter() {
-                if req_item.req_type == item.name
-                    || req_item.req_type == item.class
-                    || req_item.req_type == item.subclass
-                {
-                    if req_quantity - item.quantity > 0 {
-                        req_quantity -= item.quantity;
-                    } else {
-                        req_quantity = 0;
-                    }
-
-                    found_items.push(item.clone());
-                }
-            }
-            req_item.cquantity = Some(req_quantity);
-        }
-
-        for req_item in req_items.iter() {
-            if let Some(current_req_quantity) = req_item.cquantity {
-                if current_req_quantity != 0 {
-                    return None;
-                }
-            } else {
-                // If cquantity is None
-                return None;
-            }
-        }
-
-        return Some(found_items);
+        self.requirement_consumption_plan(&source_req_items)
+            .map(|plan| {
+                plan.into_iter()
+                    .map(|(index, quantity)| {
+                        let mut item = self.items[index].clone();
+                        item.quantity = quantity;
+                        item
+                    })
+                    .collect()
+            })
     }
 
     pub fn has_reqs(&self, source_req_items: Vec<ResReq>) -> bool {
-        let mut req_items = source_req_items.clone();
-
-        for req_item in req_items.iter_mut() {
-            let mut req_quantity = req_item.quantity;
-
-            for item in self.items.iter() {
-                if req_item.req_type == item.name
-                    || req_item.req_type == item.class
-                    || req_item.req_type == item.subclass
-                {
-                    if req_quantity - item.quantity > 0 {
-                        req_quantity -= item.quantity;
-                    } else {
-                        req_quantity = 0;
-                    }
-                }
-            }
-            req_item.cquantity = Some(req_quantity);
-        }
-
-        for req_item in req_items.iter() {
-            if let Some(current_req_quantity) = req_item.cquantity {
-                info!("Current req quantity: {:?}", current_req_quantity);
-                if current_req_quantity != 0 {
-                    return false;
-                }
-            } else {
-                // If cquantity is None
-                return false;
-            }
-        }
-
-        return true;
+        self.requirement_consumption_plan(&source_req_items)
+            .is_some()
     }
 
     /// Like `has_reqs`, but accepts refined materials as substitutes for raw
@@ -2753,10 +2906,7 @@ impl Item {
 
     pub fn is_req(item: Item, reqs: Vec<ResReq>) -> bool {
         for req in reqs.iter() {
-            if req.req_type == item.name
-                || req.req_type == item.class
-                || req.req_type == item.subclass
-            {
+            if req_matches(&req.req_type, &item.name, &item.class, &item.subclass) {
                 return true;
             }
         }
@@ -2848,6 +2998,21 @@ impl Plugin for ItemPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gathering_tool_rating_reduces_work_time_without_instant_actions() {
+        assert_eq!(gather_duration_ticks(30, 1.0), 300);
+        assert_eq!(gather_duration_ticks(30, 2.0), 240);
+        assert_eq!(gather_duration_ticks(30, 9.0), 120);
+    }
+
+    #[test]
+    fn harvesting_tools_only_risk_breaking_in_low_durability_band() {
+        assert_eq!(harvest_tool_break_chance(7, 30), 0.0);
+        assert_eq!(harvest_tool_break_chance(6, 30), 0.10);
+        assert_eq!(harvest_tool_break_chance(3, 30), 0.25);
+        assert_eq!(harvest_tool_break_chance(0, 30), 1.0);
+    }
 
     fn test_item(
         id: i32,
@@ -4201,6 +4366,201 @@ mod tests {
         // Target should have all gold
         assert_eq!(target_inventory.items.len(), 1);
         assert_eq!(target_inventory.items[0].quantity, 50);
+    }
+
+    fn production_test_item(
+        id: i32,
+        name: &str,
+        class: &str,
+        subclass: &str,
+        quantity: i32,
+        weight: f32,
+    ) -> Item {
+        Item {
+            id,
+            owner: 1,
+            name: name.to_string(),
+            quantity,
+            durability: None,
+            class: class.to_string(),
+            subclass: subclass.to_string(),
+            slot: None,
+            image: name.to_lowercase(),
+            weight,
+            equipped: false,
+            experiment: None,
+            start_time: 0,
+            attrs: HashMap::new(),
+            produces: Vec::new(),
+        }
+    }
+
+    fn production_test_recipe(amount: i32, weight: f32, req: Vec<ResReq>) -> Recipe {
+        Recipe {
+            name: "Output".to_string(),
+            class: "Material".to_string(),
+            subclass: "Output".to_string(),
+            image: "output".to_string(),
+            weight,
+            durability: None,
+            attrs: None,
+            owner: 1,
+            tier: None,
+            slot: None,
+            damage: None,
+            speed: None,
+            armor: None,
+            crafting_time: Some(1),
+            structure_req: None,
+            stamina_req: None,
+            skill_req: None,
+            amount: Some(amount),
+            req,
+            item_name_from_req: None,
+        }
+    }
+
+    fn production_test_template(
+        name: &str,
+        class: &str,
+        weight: f32,
+        produces: Option<Vec<String>>,
+        attrs: Option<Vec<crate::templates::ItemAttr>>,
+    ) -> ItemTemplate {
+        ItemTemplate {
+            name: name.to_string(),
+            class: class.to_string(),
+            subclass: class.to_string(),
+            image: name.to_lowercase(),
+            weight,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces,
+            slot: None,
+            duration: None,
+            attrs,
+        }
+    }
+
+    #[test]
+    fn consume_reqs_uses_exact_quantities_across_split_stacks() {
+        let mut first = production_test_item(1, "Wood", "Material", "Wood", 1, 1.0);
+        first.attrs.insert(AttrKey::Damage, AttrVal::Num(1.0));
+        let mut second = production_test_item(2, "Wood", "Material", "Wood", 1, 1.0);
+        second.attrs.insert(AttrKey::Damage, AttrVal::Num(2.0));
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![first, second],
+        };
+        let req = vec![ResReq {
+            req_type: "Wood".to_string(),
+            quantity: 2,
+            cquantity: None,
+        }];
+
+        let consumed = inventory
+            .try_consume_reqs(&req)
+            .expect("two split stacks satisfy the requirement");
+
+        assert_eq!(consumed.iter().map(|item| item.quantity).sum::<i32>(), 2);
+        assert!(inventory.items.is_empty());
+    }
+
+    #[test]
+    fn overlapping_requirements_cannot_reuse_the_same_unit() {
+        let inventory = Inventory {
+            owner: 1,
+            items: vec![production_test_item(
+                1, "Stick", "Material", "Stick", 1, 1.0,
+            )],
+        };
+        let req = vec![
+            ResReq {
+                req_type: "Material".to_string(),
+                quantity: 1,
+                cquantity: None,
+            },
+            ResReq {
+                req_type: "Stick".to_string(),
+                quantity: 1,
+                cquantity: None,
+            },
+        ];
+
+        assert!(!inventory.has_reqs(req));
+        assert_eq!(inventory.items[0].quantity, 1);
+    }
+
+    #[test]
+    fn craft_amount_is_deterministic_and_weight_is_per_unit() {
+        let mut inventory = Inventory {
+            owner: 1,
+            items: Vec::new(),
+        };
+        let recipe = production_test_recipe(5, 2.0, Vec::new());
+
+        let crafted = inventory
+            .try_craft(10, 1, "Output".to_string(), &recipe, None, None, 10)
+            .expect("five two-weight outputs exactly fit");
+
+        assert_eq!(crafted.quantity, 5);
+        assert_eq!(crafted.weight, 2.0);
+        assert_eq!(inventory.get_total_weight(), 10);
+    }
+
+    #[test]
+    fn failed_craft_capacity_check_leaves_inputs_untouched() {
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![production_test_item(1, "Wood", "Material", "Wood", 1, 1.0)],
+        };
+        let recipe = production_test_recipe(
+            1,
+            10.0,
+            vec![ResReq {
+                req_type: "Wood".to_string(),
+                quantity: 1,
+                cquantity: None,
+            }],
+        );
+
+        assert!(matches!(
+            inventory.try_craft(10, 1, "Output".to_string(), &recipe, None, None, 5),
+            Err(CraftError::InventoryFull)
+        ));
+        assert_eq!(inventory.items.len(), 1);
+        assert_eq!(inventory.items[0].name, "Wood");
+        assert_eq!(inventory.items[0].quantity, 1);
+    }
+
+    #[test]
+    fn failed_multi_output_refine_is_atomic() {
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![production_test_item(1, "Ore", "Ore", "Ore", 1, 1.0)],
+        };
+        let templates = vec![
+            production_test_template(
+                "Ore",
+                "Ore",
+                1.0,
+                Some(vec!["Ingot".to_string(), "Dust".to_string()]),
+                None,
+            ),
+            production_test_template("Ingot", "Ingot", 5.0, None, None),
+            production_test_template("Dust", "Dust", 5.0, None, None),
+        ];
+        let mut ids = Ids::default();
+
+        assert!(matches!(
+            inventory.try_refine(1, 1, 6, &templates, &mut ids),
+            Err(RefineError::InventoryFull)
+        ));
+        assert_eq!(inventory.items.len(), 1);
+        assert_eq!(inventory.items[0].name, "Ore");
+        assert_eq!(inventory.items[0].quantity, 1);
     }
 
     /*#[test]

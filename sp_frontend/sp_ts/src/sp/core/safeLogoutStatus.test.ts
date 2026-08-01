@@ -4,7 +4,6 @@ import {
   SAFE_LOGOUT_ACTIVE_ASSAULT_WARNING,
   SAFE_LOGOUT_ARIA_LIVE,
   SAFE_LOGOUT_COMPLETION_MESSAGE,
-  SAFE_LOGOUT_CONDITIONS,
   SAFE_LOGOUT_RESUME_MESSAGE,
   SafeLogoutCloseGuard,
   SafeLogoutResumeNoticeGuard,
@@ -58,7 +57,6 @@ const eligible = status({
 const eligibleView = safeLogoutStatusView(eligible);
 assert.equal(eligibleView?.canRequest, true, 'eligible server state enables Begin');
 assert.equal(eligibleView?.inOwnSanctuary, true);
-assert.match(SAFE_LOGOUT_CONDITIONS, /Closing the game before it completes will not protect you/);
 
 const outside = safeLogoutStatusView(status({ reason: 'outside_sanctuary' }));
 assert.equal(outside?.canRequest, false, 'ineligible state cannot request');
@@ -317,6 +315,25 @@ assert.equal(
   safeLogoutStatusView(cancelledWithoutTimer.safeLogoutStatus)?.countdownSeconds,
   null,
   'cancellation has no client interpolation timer to retain',
+);
+
+const manuallyCancelled = safeLogoutStatusView(status({
+  state: 'online',
+  can_request: true,
+  in_own_sanctuary: true,
+  reason: 'manually_cancelled',
+  message: 'Safe Logout was cancelled.',
+}));
+assert.equal(
+  manuallyCancelled?.message,
+  'You can safely end your session from this sanctuary.',
+  'manual cancellation is not echoed back to the player',
+);
+assert.equal(manuallyCancelled?.reasonMessage, null, 'manual cancellation has no compact summary copy');
+assert.equal(
+  safeLogoutStatusView(status({ reason: 'moved', message: 'Safe Logout was cancelled because you moved.' }))?.message,
+  'Safe Logout was cancelled because you moved.',
+  'involuntary cancellations still explain themselves',
 );
 
 console.log('safeLogoutStatus helper checks passed');

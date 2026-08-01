@@ -4,7 +4,7 @@
  */
 
 import Phaser from "phaser";
-import { ObjectScene } from '../core/scenes/objectScene';
+import { DesktopObjectScene } from './scenes/desktopObjectScene';
 import { MapScene } from '../core/scenes/mapScene';
 import { WeatherScene } from "../core/scenes/weatherScene";
 import { Global } from '../core/global';
@@ -26,6 +26,8 @@ document.addEventListener("visibilitychange", function () {
 });
 
 export default class Game extends React.Component {
+  private phaserGame: Phaser.Game | null = null;
+
   componentDidMount() {
     const desktop = isDesktop();
     const { width: dw, height: dh } = getDesktopCanvasSize();
@@ -40,7 +42,7 @@ export default class Game extends React.Component {
       height: desktop ? dh : window.innerHeight,
       type: Phaser.AUTO,
       parent: "game",
-      scene: [MapScene, ObjectScene, WeatherScene],
+      scene: [MapScene, DesktopObjectScene, WeatherScene],
       input: {
         mouse: true
       },
@@ -53,7 +55,20 @@ export default class Game extends React.Component {
       }
     };
 
-    Global.game = new Phaser.Game(config);
+    this.phaserGame = new Phaser.Game(config);
+    Global.game = this.phaserGame;
+  }
+
+  componentWillUnmount() {
+    const game = this.phaserGame;
+    this.phaserGame = null;
+
+    if (game) {
+      game.destroy(true);
+    }
+    if (Global.game === game) {
+      Global.game = null;
+    }
   }
 
   shouldComponentUpdate() {

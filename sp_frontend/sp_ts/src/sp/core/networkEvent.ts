@@ -93,6 +93,7 @@ export namespace NetworkEvent {
     export const SAFE_LOGOUT_RESET: string = 'SAFE_LOGOUT_RESET';
     export const SAFE_LOGOUT_COMPLETE: string = 'SAFE_LOGOUT_COMPLETE';
     export const SAFE_LOGOUT_RESUMED: string = 'SAFE_LOGOUT_RESUMED';
+    export const PROTECTED_SETTLEMENTS: string = 'PROTECTED_SETTLEMENTS';
     export const COMBAT_STATE: string = 'COMBAT_STATE';
     export const COMBAT_TELEGRAPH: string = 'COMBAT_TELEGRAPH';
     export const DISCOVERY_EVENT: string = 'DISCOVERY_EVENT';

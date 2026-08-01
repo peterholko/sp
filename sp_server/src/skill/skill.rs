@@ -114,6 +114,28 @@ impl Skills {
         return false;
     }
 
+    /// Template requirements use a 0-100 proficiency scale, while runtime
+    /// skills use the XP bands declared for that skill. Convert between the
+    /// two scales before enforcing a production requirement.
+    pub fn has_proficiency_requirement(
+        &self,
+        skill_name: Skill,
+        proficiency: i32,
+        skill_templates: &SkillTemplates,
+    ) -> bool {
+        if proficiency <= 0 {
+            return true;
+        }
+
+        let Some(template) = skill_templates.get(skill_name.to_str()) else {
+            return false;
+        };
+        let max_level = template.xp.len() as i32;
+        let required_level = (proficiency.clamp(0, 100) * max_level + 99) / 100;
+
+        self.get_level_by_name(skill_name) >= required_level
+    }
+
     pub fn get_all(&self) -> HashMap<String, &SkillData> {
         let mut skills_map = HashMap::new();
 
@@ -277,4 +299,33 @@ pub struct SkillPlugin;
 
 impl Plugin for SkillPlugin {
     fn build(&self, app: &mut App) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proficiency_requirements_map_to_runtime_skill_bands() {
+        let mut templates = HashMap::new();
+        templates.insert(
+            WEAPONSMITHING.to_string(),
+            SkillTemplate {
+                name: WEAPONSMITHING.to_string(),
+                class: CLASS_CRAFTING.to_string(),
+                xp: vec![100, 200, 400, 600, 1000, 1600, 2600],
+            },
+        );
+        let templates = SkillTemplates::from_map(templates);
+        let mut skills = Skills::new();
+
+        assert!(skills.has_proficiency_requirement(Skill::Weaponsmithing, 0, &templates,));
+        assert!(!skills.has_proficiency_requirement(Skill::Weaponsmithing, 25, &templates,));
+
+        skills.update(Skill::Weaponsmithing, 100, &templates);
+        assert!(!skills.has_proficiency_requirement(Skill::Weaponsmithing, 25, &templates,));
+
+        skills.update(Skill::Weaponsmithing, 200, &templates);
+        assert!(skills.has_proficiency_requirement(Skill::Weaponsmithing, 25, &templates,));
+    }
 }

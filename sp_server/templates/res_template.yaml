@@ -119,6 +119,25 @@
   properties: [Sword Damage, Spear Damage, Heavy Armor Defense, Attributes]
   num_properties: 3
 
+##################
+##### STONE ######
+##################
+
+- name: Stone
+  type: Stone
+  image: stone
+  terrain:
+    - Plains Hills
+    - Grassland Hills
+    - Desert Hills
+    - Snow Hills
+  yield_rate: [50, 25, 15, 8, 2]
+  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
+  quantity_rate: [0, 50, 20, 15, 8, 5, 2]
+  quantity: [0, 10, 25, 100, 200, 500, 1000]
+  skill_req: 0
+  level: 1
+
 - name: Cragroot Maple Log
   type: Log
   image: maplelog
@@ -187,6 +206,7 @@
   skill_req: 0
   level: 1 
   properties: [Medium Armor]
+  produces: [Windstride Deer Carcass]
 
 - name: Amitanian Grape
   type: Plant

@@ -129,6 +129,22 @@ assert.deepEqual(
   'crisis option updates do not mutate Safe Logout state',
 );
 
+panel.handleTutorialToggle();
+const tutorialOffNodes = descendants(panel.render());
+assert.ok(
+  tutorialOffNodes.some((node) => node.props?.['aria-label'] === 'Personal goblin crisis status'),
+  'turning the tutorial off preserves the crisis card',
+);
+assert.ok(
+  tutorialOffNodes.some((node) => node.props?.['aria-label'] === 'Safe Logout status'),
+  'turning the tutorial off preserves Safe Logout status and actions',
+);
+assert.ok(
+  tutorialOffNodes.some((node) => node.props?.['aria-label'] === 'Turn tutorial on'),
+  'the tutorial can be re-enabled while safety cards remain visible',
+);
+panel.handleTutorialToggle();
+
 beginButton.props.onClick();
 beginButton.props.onClick();
 assert.equal(beginRequests, 1, 'component action lock suppresses duplicate keyboard/click activation');

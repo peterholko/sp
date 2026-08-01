@@ -10,6 +10,7 @@ import FoundedInventoryPanel from "./foundedInventoryPanel";
 import SmallButton from "./smallButton";
 import UpgradeInventoryPanel from "./upgradeInventoryPanel";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
+import { canLootAllEnemyCorpse, lootAllItemIds } from "../../core/lootAllPolicy";
 
 interface ITPProps {
   leftInventoryData,
@@ -33,6 +34,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
 
     this.handleSelect = this.handleSelect.bind(this);
     this.handleItemTransferClick = this.handleItemTransferClick.bind(this);
+    this.handleLootAllClick = this.handleLootAllClick.bind(this);
   }
 
   handleSelect(eventData) {
@@ -78,6 +80,68 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       Global.selectedItemOwnerId = -1;
       Global.selectedItemName = '';
     }
+  }
+
+  handleLootAllClick(event: React.MouseEvent) {
+    event.stopPropagation();
+    const sourceId = this.props.rightInventoryData.id;
+    const targetId = this.props.leftInventoryData.id;
+
+    lootAllItemIds(this.props.rightInventoryData.items).forEach(itemId => {
+      Global.network.sendItemTransfer(itemId, sourceId, targetId);
+    });
+
+    Global.selectedItemId = -1;
+    Global.selectedItemOwnerId = -1;
+    Global.selectedItemName = '';
+    this.setState({
+      hideLeftSelect: true,
+      hideRightSelect: true,
+      leftSelectedItemId: -1,
+      rightSelectedItemId: -1,
+    });
+  }
+
+  renderLootAllButton() {
+    const corpseState = Global.objectStates[this.props.rightInventoryData.id];
+    if (!canLootAllEnemyCorpse(
+      corpseState,
+      Global.playerId,
+      this.props.rightInventoryData.items,
+    )) {
+      return null;
+    }
+
+    const wrapStyle: React.CSSProperties = {
+      position: 'absolute',
+      left: 0,
+      top: '286px',
+      width: '323px',
+      display: 'flex',
+      justifyContent: 'center',
+      zIndex: Global.zIndexManager.getTop() + 2,
+    };
+    const buttonStyle: React.CSSProperties = {
+      minWidth: '116px',
+      minHeight: '34px',
+      padding: '6px 16px',
+      border: '1px solid rgba(201, 170, 113, 0.65)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '12px',
+      fontWeight: 'bold',
+      cursor: 'pointer',
+    };
+
+    return (
+      <div style={wrapStyle}>
+        <button type="button" style={buttonStyle} onClick={this.handleLootAllClick}>
+          Loot All
+        </button>
+      </div>
+    );
   }
 
   render() {
@@ -157,7 +221,8 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
             hideSelect={this.state.hideRightSelect}
             showEquipped={true}
             handleSelect={this.handleSelect}
-            selectedItemId={this.state.rightSelectedItemId} />}
+            selectedItemId={this.state.rightSelectedItemId}
+            footer={this.renderLootAllButton()} />}
 
         {isFounded &&
           <FoundedInventoryPanel id={this.props.rightInventoryData.id}

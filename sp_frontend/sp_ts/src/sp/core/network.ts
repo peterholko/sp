@@ -20,6 +20,14 @@ import {
   rememberSafeLogoutCompletion,
   requestSafeLogoutPacket,
 } from './safeLogoutStatus';
+import {
+  ProtectedSettlementsPacket,
+  protectedSettlementLookup,
+} from './protectedSettlements';
+import {
+  mergedIncrementalVision,
+  resetVisibilitySourceForInit,
+} from './visibilitySourcePolicy';
 
 export type { CrisisStatusPacket } from './crisisStatus';
 export type { SafeLogoutStatusPacket } from './safeLogoutStatus';
@@ -212,7 +220,8 @@ export type ResponsePacket =
   | { packet: 'threat_state'; version: number; day: number; phase: string; pressure_level: string; next_night_warning: string; known_risks: ThreatRisk[]; legendary_threats: LegendaryThreat[] }
   | CrisisStatusPacket
   | SafeLogoutStatusPacket
-  | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
+  | ProtectedSettlementsPacket
+  | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; target_effects?: string[]; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
   | { packet: 'discovery_event'; version: number; discovery_type: string; title: string; unlock_source: string; location?: string; result: string };
 
 export interface PerceptionData {
@@ -679,6 +688,11 @@ export class Network {
     this.safeLogoutSnapshotGuard.clearSnapshot();
   }
 
+  private clearProtectedSettlements(): void {
+    Global.protectedSettlements = {};
+    Global.gameEmitter.emit(NetworkEvent.PROTECTED_SETTLEMENTS, Global.protectedSettlements);
+  }
+
   /**
    * End the current connection lifecycle before deliberate authentication or
    * an account switch. Invalidating `this.websocket` first makes every pending
@@ -695,6 +709,7 @@ export class Network {
     this.reloadAfterSafeLogoutClose = false;
     this.websocket = null;
     Global.connected = false;
+    this.clearProtectedSettlements();
 
     try {
       clearSafeLogoutReconnectSuppression(window.sessionStorage);
@@ -1756,6 +1771,7 @@ export class Network {
     this.safeLogoutSnapshotGuard.resetForLogin();
     this.latestSafeLogoutStatus = null;
     this.reloadAfterSafeLogoutClose = false;
+    this.clearProtectedSettlements();
     try {
       clearSafeLogoutReconnectSuppression(window.sessionStorage);
     } catch (error) {
@@ -1856,9 +1872,12 @@ export class Network {
       } else if (jsonData.packet == 'init_perception') {
         console.log('Received Perception');
 
+        for (const objectState of Object.values(Global.objectStates)) {
+          resetVisibilitySourceForInit(objectState);
+        }
         this.processTileStates(jsonData.data.map);
-        this.processInitObjStates(jsonData.data.visible_objs);
-        this.processInitObjStates(jsonData.data.observers); // Add observers after to overwrite if observers end up being visible objects
+        this.processInitObjStates(jsonData.data.visible_objs, false);
+        this.processInitObjStates(jsonData.data.observers, true); // Add observers after to overwrite if observers end up being visible objects
         this.processInitWeather(jsonData.data.weather);
 
         // Add a tracked delay to prevent perception delivery before Scenes are
@@ -2096,6 +2115,14 @@ export class Network {
             message: SAFE_LOGOUT_RESUME_MESSAGE,
           });
         }
+      } else if (jsonData.packet == 'protected_settlements') {
+        Global.protectedSettlements = protectedSettlementLookup(
+          jsonData as ProtectedSettlementsPacket,
+        );
+        Global.gameEmitter.emit(
+          NetworkEvent.PROTECTED_SETTLEMENTS,
+          Global.protectedSettlements,
+        );
       } else if (jsonData.packet == 'combat_state') {
         Global.combatState = jsonData;
         Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);
@@ -2105,7 +2132,7 @@ export class Network {
     }
   }
 
-  processInitObjStates(objs) {
+  processInitObjStates(objs, perceptionObserver = false) {
     for (var index in objs) {
       var obj = objs[index];
       var objectState: ObjectState = {
@@ -2126,6 +2153,7 @@ export class Network {
         work_done: obj.work_done,
         total_work: obj.total_work,
         work_per_sec: obj.work_per_sec,
+        perceptionObserver,
         op: 'added'
       };
 
@@ -2183,6 +2211,7 @@ export class Network {
         Global.objectStates[observer.id].work_done = observer.work_done;
         Global.objectStates[observer.id].total_work = observer.total_work;
         Global.objectStates[observer.id].work_per_sec = observer.work_per_sec;
+        Global.objectStates[observer.id].perceptionObserver = true;
         Global.objectStates[observer.id].op = 'updated';
         Global.objectStates[observer.id].updateAttr = undefined;
         Global.objectStates[observer.id].eventType = undefined;
@@ -2206,6 +2235,7 @@ export class Network {
           work_done: observer.work_done,
           total_work: observer.total_work,
           work_per_sec: observer.work_per_sec,
+          perceptionObserver: true,
           op: 'added',
           eventType: undefined
         };
@@ -2243,6 +2273,7 @@ export class Network {
         Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
         Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
         Global.objectStates[visibleObj.id].work_per_sec = visibleObj.work_per_sec;
+        Global.objectStates[visibleObj.id].perceptionObserver = false;
         Global.objectStates[visibleObj.id].op = 'updated';
         Global.objectStates[visibleObj.id].updateAttr = undefined;
         Global.objectStates[visibleObj.id].eventType = undefined;
@@ -2266,6 +2297,7 @@ export class Network {
           work_done: visibleObj.work_done,
           total_work: visibleObj.total_work,
           work_per_sec: visibleObj.work_per_sec,
+          perceptionObserver: false,
           op: 'added',
           eventType: undefined
         };
@@ -2286,7 +2318,10 @@ export class Network {
 
         Global.gameEmitter.emit(GameEvent.OBJ_CREATED, obj.id);
       } else {
-        Global.objectStates[obj.id].vision = obj.vision;
+        Global.objectStates[obj.id].vision = mergedIncrementalVision(
+          Global.objectStates[obj.id],
+          obj.vision,
+        );
         Global.objectStates[obj.id].player = obj.player;
         Global.objectStates[obj.id].name = obj.name;
         Global.objectStates[obj.id].class = obj.class;

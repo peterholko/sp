@@ -89,7 +89,7 @@ const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 // Stockade walls use Logs.
 const BURROW_REQS: &[(&str, i32)] = &[("Log", 5)];
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
-const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 3)];
+const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 10)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
 const PLANT_RES: &str = "Plant";
 
@@ -865,9 +865,9 @@ impl Bot {
             });
         }
 
-        // Recovering enough Logs removes the old mandatory gathering step, but
-        // the shared stick is still every class's starter weapon and logging
-        // fallback. Equip it through the normal player event before building.
+        // Recovering enough Logs removes the old mandatory gathering step. The
+        // shared stick remains every class's starter weapon; the Crude Hatchet
+        // is available as the dedicated logging fallback if salvage runs short.
         if let Some(stick_id) = view
             .inventory
             .iter()
@@ -905,7 +905,7 @@ impl Bot {
     }
 
     // Compatibility fallback for an incomplete salvage supply: equip the
-    // starter-only Logging stick, reveal a real Log node through the ordinary
+    // starter Crude Hatchet, reveal a real Log node through the ordinary
     // Prospect event, then gather until five actual Logs are carried.
     fn logging_action(&self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         if !view
@@ -1997,8 +1997,11 @@ impl Bot {
         })
     }
 
-    // Equip the strongest non-hunting weapon (the axe) if it isn't already — used
-    // before combat, since hunting swaps in the weak Hunting spear.
+    // Equip a dedicated non-hunting combat weapon if one is available. The
+    // starter Crude Hatchet deliberately matches the Sharpened Stick's combat
+    // profile, so it must not consume an emergency combat decision merely to
+    // swap between equivalent starter weapons. It remains valid when it is
+    // already equipped, or as the only weapon available.
     fn equip_combat_weapon(&self, view: &WorldView) -> Option<PlayerEvent> {
         let hero = view.hero?;
         if view
@@ -2008,11 +2011,29 @@ impl Bot {
         {
             return None; // a combat weapon is already equipped
         }
+        let has_equipped_weapon = view
+            .inventory
+            .iter()
+            .any(|item| item.equipped && item.is_weapon);
         let id = view
             .inventory
             .iter()
-            .find(|i| i.is_weapon && !i.is_hunting && !i.equipped)
-            .map(|i| i.id)?;
+            .find(|item| {
+                item.is_weapon && !item.is_hunting && !item.equipped && item.name != "Crude Hatchet"
+            })
+            .or_else(|| {
+                if has_equipped_weapon {
+                    None
+                } else {
+                    view.inventory.iter().find(|item| {
+                        item.name == "Crude Hatchet"
+                            && item.is_weapon
+                            && !item.equipped
+                            && item.quantity > 0
+                    })
+                }
+            })
+            .map(|item| item.id)?;
         Some(PlayerEvent::Equip {
             player_id: self.player_id,
             obj_id: hero.id,

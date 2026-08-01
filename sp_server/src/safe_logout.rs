@@ -14,14 +14,14 @@ use crate::constants::TICKS_PER_SEC;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
 use crate::farm::{CropStages, Crops};
 use crate::game::{
-    BoundMonolith, Burning, Client, Clients, CrisisAssaultUnit, CrisisPhase, GameTick,
+    BoundMonolith, Burning, Client, Clients, CrisisAssaultUnit, CrisisPhase, ExploredMap, GameTick,
     InitialEncounterState, IntroEncounterState, LegendaryThreatState, Merchant, Monolith,
     PlayerIntroState, RunScoreState, SanctuaryZones, SettlementCrisisState,
 };
 use crate::ids::{EntityObjMap, Ids};
 use crate::item::Inventory;
 use crate::map::Map;
-use crate::network::{ResponsePacket, SafeLogoutStatusSnapshot};
+use crate::network::{ProtectedSettlementSnapshot, ResponsePacket, SafeLogoutStatusSnapshot};
 use crate::npc::{self, VisibleTarget};
 use crate::obj::{
     BuildUpgradeState, Campfire, Id, LastAttacker, LastCombatTick, LastDamageTick, PlayerId,
@@ -37,6 +37,7 @@ pub const SAFE_LOGOUT_COUNTDOWN_TICKS: i32 = TICKS_PER_SEC * 10;
 pub const SAFE_LOGOUT_COMBAT_COOLDOWN_TICKS: i32 = TICKS_PER_SEC * 15;
 pub const SAFE_LOGOUT_HOSTILE_RADIUS: u32 = 8;
 pub const SAFE_LOGOUT_STATUS_VERSION: u32 = 1;
+pub const PROTECTED_SETTLEMENTS_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerWorldPresence {
@@ -343,6 +344,20 @@ enum SafeLogoutStatusSendOutcome {
 #[derive(Resource, Debug, Default)]
 struct SafeLogoutStatusDeliveryState {
     sent: HashMap<Uuid, SentSafeLogoutStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SentProtectedSettlements {
+    player_id: i32,
+    settlements: Vec<ProtectedSettlementSnapshot>,
+}
+
+/// Last successfully queued full ward snapshot per authenticated connection.
+/// Empty snapshots are retained like any other value so a later semantic
+/// change is delivered exactly once. Failed sends are deliberately uncached.
+#[derive(Resource, Debug, Default)]
+struct ProtectedSettlementsDeliveryState {
+    sent: HashMap<Uuid, SentProtectedSettlements>,
 }
 
 /// The canonical player-level protection predicate used by simulation systems.
@@ -1203,10 +1218,9 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
         for resume in &resumes {
             if let Some(entry) = encounters.get_mut(&resume.player_id) {
                 rebase_tick(&mut entry.opening_rat_spawn_tick, resume.duration);
-                rebase_tick(&mut entry.villager_ready_tick, resume.duration);
                 rebase_tick(&mut entry.phase1_unlock_tick, resume.duration);
                 rebase_tick(&mut entry.spider_unlock_tick, resume.duration);
-                count(resume.player_id, 4);
+                count(resume.player_id, 3);
             }
         }
     }
@@ -1526,6 +1540,11 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
     }
 }
 
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SafeLogoutPostUpdateSet {
+    Lifecycle,
+}
+
 pub struct SafeLogoutPlugin;
 
 impl Plugin for SafeLogoutPlugin {
@@ -1533,6 +1552,7 @@ impl Plugin for SafeLogoutPlugin {
         app.init_resource::<PlayerWorldPresenceState>()
             .init_resource::<SafeLogoutTelemetryState>()
             .init_resource::<SafeLogoutStatusDeliveryState>()
+            .init_resource::<ProtectedSettlementsDeliveryState>()
             .add_message::<RequestSafeLogout>()
             .add_message::<CancelSafeLogout>()
             .add_systems(
@@ -1547,9 +1567,11 @@ impl Plugin for SafeLogoutPlugin {
                     safe_logout_manual_cancel_system,
                     safe_logout_pending_system,
                     rebase_and_resume_offline_protection_system,
+                    protected_settlements_delivery_system,
                     safe_logout_status_delivery_system,
                 )
                     .chain()
+                    .in_set(SafeLogoutPostUpdateSet::Lifecycle)
                     .run_if(in_state(AppState::Running)),
             );
     }
@@ -3035,6 +3057,126 @@ fn safe_logout_pending_system(
     }
 }
 
+/// Build one recipient's ward presentation from the same presence predicate
+/// used by gameplay protection. A player always receives their own ward; a
+/// foreign ward is disclosed only after its monolith tile is present in that
+/// player's authoritative explored map. Coordinates remain server-side while
+/// the live zone stays authoritative for both discovery and upgrade radius.
+fn build_protected_settlements_snapshot(
+    recipient_player_id: i32,
+    presence: &PlayerWorldPresenceState,
+    zones: &SanctuaryZones,
+    explored_map: &ExploredMap,
+) -> Vec<ProtectedSettlementSnapshot> {
+    let recipient_explored_tiles = explored_map.get(&recipient_player_id);
+    let mut settlements = presence
+        .players
+        .iter()
+        .filter_map(|(player_id, record)| {
+            if !is_player_offline_protected(*player_id, presence) {
+                return None;
+            }
+            let run_key = record.protected_run_key.as_ref()?;
+            let zone = zones.get(&run_key.bound_monolith_id)?;
+            let is_owner = *player_id == recipient_player_id;
+            let monolith_was_explored = recipient_explored_tiles
+                .is_some_and(|tiles| tiles.contains(&(zone.pos.x, zone.pos.y)));
+            if !is_owner && !monolith_was_explored {
+                return None;
+            }
+            Some(ProtectedSettlementSnapshot {
+                player_id: *player_id,
+                monolith_id: run_key.bound_monolith_id,
+                sanctuary_radius: zone.full_radius(),
+            })
+        })
+        .collect::<Vec<_>>();
+    settlements.sort_unstable_by_key(|settlement| (settlement.player_id, settlement.monolith_id));
+    settlements
+}
+
+/// Send a full ward snapshot to every authoritative connection. Each
+/// connection gets an initial packet even when the list is empty, followed
+/// only by semantic changes. Capacity and authority races remain retryable
+/// because the delivery cache advances only after a successful enqueue.
+fn protected_settlements_delivery_system(
+    clients: Res<Clients>,
+    presence: Res<PlayerWorldPresenceState>,
+    zones: Res<SanctuaryZones>,
+    explored_map: Res<ExploredMap>,
+    mut delivery: ResMut<ProtectedSettlementsDeliveryState>,
+) {
+    let active_clients = match clients.lock() {
+        Ok(clients) => clients
+            .iter()
+            .filter(|(client_id, client)| {
+                **client_id == client.id && client.player_id >= 0 && !client.sender.is_closed()
+            })
+            .map(|(client_id, client)| (*client_id, client.player_id))
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let mut active_clients = active_clients
+        .into_iter()
+        .filter(|(client_id, player_id)| clients.is_current_connection(*player_id, *client_id))
+        .collect::<Vec<_>>();
+    active_clients.sort_unstable_by_key(|(client_id, _)| *client_id);
+
+    let active_client_players = active_clients
+        .iter()
+        .map(|(client_id, player_id)| (*client_id, *player_id))
+        .collect::<HashMap<_, _>>();
+    delivery
+        .sent
+        .retain(|client_id, sent| active_client_players.get(client_id) == Some(&sent.player_id));
+    if active_clients.is_empty() {
+        return;
+    }
+
+    for (client_id, player_id) in active_clients {
+        let settlements =
+            build_protected_settlements_snapshot(player_id, &presence, &zones, &explored_map);
+        let should_send = delivery
+            .sent
+            .get(&client_id)
+            .map(|sent| sent.player_id != player_id || sent.settlements != settlements)
+            .unwrap_or(true);
+        if !should_send {
+            continue;
+        }
+
+        let packet = ResponsePacket::ProtectedSettlements {
+            version: PROTECTED_SETTLEMENTS_VERSION,
+            settlements: settlements.clone(),
+        };
+        let Ok(serialized) = serde_json::to_string(&packet) else {
+            error!(
+                "protected_settlements_serialization_failed player_id={}",
+                player_id
+            );
+            continue;
+        };
+
+        match clients.try_send_current_bundle(player_id, client_id, vec![serialized]) {
+            Ok(()) => {
+                delivery.sent.insert(
+                    client_id,
+                    SentProtectedSettlements {
+                        player_id,
+                        settlements: settlements.clone(),
+                    },
+                );
+            }
+            Err(error) => {
+                debug!(
+                    "protected_settlements_send_deferred player_id={} outcome={:?}",
+                    player_id, error
+                );
+            }
+        }
+    }
+}
+
 /// Deliver one exact status per authenticated connection, then only meaningful
 /// changes. The countdown value is ceil-rounded to whole seconds, so equality
 /// deduplication naturally limits pending updates to at most one per second.
@@ -3230,6 +3372,36 @@ mod tests {
         app
     }
 
+    fn protected_settlements_delivery_test_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(Clients::default())
+            .insert_resource(PlayerWorldPresenceState::default())
+            .insert_resource(SanctuaryZones::default())
+            .insert_resource(ExploredMap::default())
+            .insert_resource(ProtectedSettlementsDeliveryState::default())
+            .add_systems(Update, protected_settlements_delivery_system);
+        app
+    }
+
+    fn protected_test_record(
+        player_id: i32,
+        monolith_id: i32,
+        state: PlayerWorldPresence,
+        resume_in_progress: bool,
+    ) -> PlayerPresenceRecord {
+        let mut record = PlayerPresenceRecord::new(resume_in_progress);
+        record.state = state;
+        record.resume_in_progress = resume_in_progress;
+        record.protected_run_key = Some(ProtectedRunKey {
+            player_id,
+            hero_id: player_id * 10,
+            start_location_name: format!("start-{player_id}"),
+            bound_monolith_id: monolith_id,
+            run_object_ids: Vec::new(),
+        });
+        record
+    }
+
     fn add_status_test_client(
         app: &mut App,
         player_id: i32,
@@ -3248,6 +3420,321 @@ mod tests {
             },
         );
         (client_id, receiver)
+    }
+
+    #[test]
+    fn protected_settlements_snapshot_is_canonical_sorted_and_uses_live_radius() {
+        use crate::game::{sanctuary_full_radius, SanctuaryZone};
+
+        let mut presence = PlayerWorldPresenceState::default();
+        presence.players.insert(
+            20,
+            protected_test_record(20, 2001, PlayerWorldPresence::OfflineProtected, false),
+        );
+        presence.players.insert(
+            5,
+            protected_test_record(5, 501, PlayerWorldPresence::OfflineProtected, false),
+        );
+        presence.players.insert(
+            9,
+            protected_test_record(9, 901, PlayerWorldPresence::Online, true),
+        );
+        presence.players.insert(
+            3,
+            protected_test_record(3, 301, PlayerWorldPresence::Online, false),
+        );
+        presence.players.insert(
+            30,
+            protected_test_record(30, 3001, PlayerWorldPresence::OfflineProtected, false),
+        );
+
+        let mut zones = SanctuaryZones::default();
+        zones.insert(
+            2001,
+            SanctuaryZone {
+                pos: Position { x: 20, y: 20 },
+                level: 0,
+            },
+        );
+        zones.insert(
+            501,
+            SanctuaryZone {
+                pos: Position { x: 5, y: 5 },
+                level: 2,
+            },
+        );
+        zones.insert(
+            901,
+            SanctuaryZone {
+                pos: Position { x: 9, y: 9 },
+                level: 1,
+            },
+        );
+
+        let mut explored_map = ExploredMap::default();
+        explored_map.insert(5, vec![(9, 9), (20, 20)]);
+
+        let snapshot = build_protected_settlements_snapshot(5, &presence, &zones, &explored_map);
+        assert_eq!(
+            snapshot,
+            vec![
+                ProtectedSettlementSnapshot {
+                    player_id: 5,
+                    monolith_id: 501,
+                    sanctuary_radius: sanctuary_full_radius(2),
+                },
+                ProtectedSettlementSnapshot {
+                    player_id: 9,
+                    monolith_id: 901,
+                    sanctuary_radius: sanctuary_full_radius(1),
+                },
+                ProtectedSettlementSnapshot {
+                    player_id: 20,
+                    monolith_id: 2001,
+                    sanctuary_radius: sanctuary_full_radius(0),
+                },
+            ]
+        );
+
+        zones.get_mut(&501).unwrap().level = 4;
+        assert_eq!(
+            build_protected_settlements_snapshot(5, &presence, &zones, &explored_map)[0]
+                .sanctuary_radius,
+            sanctuary_full_radius(4)
+        );
+    }
+
+    #[test]
+    fn protected_settlements_delivery_omits_unexplored_adds_explored_clears_and_reconnects() {
+        use crate::game::SanctuaryZone;
+
+        let player_id = 77;
+        let monolith_id = 7701;
+        let mut app = protected_settlements_delivery_test_app();
+        let (_first_client_id, mut first_receiver) = add_status_test_client(&mut app, player_id, 8);
+
+        app.update();
+        let initial: ResponsePacket =
+            serde_json::from_str(&first_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            initial,
+            ResponsePacket::ProtectedSettlements {
+                version: PROTECTED_SETTLEMENTS_VERSION,
+                settlements
+            } if settlements.is_empty()
+        ));
+        app.update();
+        assert!(first_receiver.try_recv().is_err());
+
+        app.world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .insert(
+                12,
+                protected_test_record(
+                    12,
+                    monolith_id,
+                    PlayerWorldPresence::OfflineProtected,
+                    false,
+                ),
+            );
+        app.world_mut().resource_mut::<SanctuaryZones>().insert(
+            monolith_id,
+            SanctuaryZone {
+                pos: Position { x: 10, y: 11 },
+                level: 0,
+            },
+        );
+        app.update();
+        assert!(
+            first_receiver.try_recv().is_err(),
+            "an unexplored foreign ward must remain omitted"
+        );
+
+        app.world_mut()
+            .resource_mut::<ExploredMap>()
+            .entry(player_id)
+            .or_default()
+            .push((10, 11));
+        app.update();
+        let protected: ResponsePacket =
+            serde_json::from_str(&first_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            protected,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.len() == 1
+                    && settlements[0].player_id == 12
+                    && settlements[0].monolith_id == monolith_id
+        ));
+        app.update();
+        assert!(first_receiver.try_recv().is_err());
+
+        let replacement_id = Uuid::new_v4();
+        let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(8);
+        app.world().resource::<Clients>().activate(Client {
+            id: replacement_id,
+            player_id,
+            sender: replacement_sender,
+        });
+        app.update();
+        let replacement: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            replacement,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.len() == 1 && settlements[0].player_id == 12
+        ));
+
+        {
+            let mut presence = app.world_mut().resource_mut::<PlayerWorldPresenceState>();
+            let record = presence.players.get_mut(&12).unwrap();
+            record.state = PlayerWorldPresence::Online;
+            record.resume_in_progress = false;
+        }
+        app.update();
+        let cleared: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            cleared,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.is_empty()
+        ));
+    }
+
+    #[test]
+    fn protected_settlements_delivery_is_recipient_specific_and_owner_needs_no_map() {
+        use crate::game::SanctuaryZone;
+
+        let owner_player_id = 12;
+        let explored_viewer_id = 77;
+        let unexplored_viewer_id = 88;
+        let monolith_id = 1201;
+        let monolith_pos = Position { x: 14, y: 15 };
+        let mut app = protected_settlements_delivery_test_app();
+        let (_explored_client_id, mut explored_receiver) =
+            add_status_test_client(&mut app, explored_viewer_id, 8);
+        let (_unexplored_client_id, mut unexplored_receiver) =
+            add_status_test_client(&mut app, unexplored_viewer_id, 8);
+        let (_owner_client_id, mut owner_receiver) =
+            add_status_test_client(&mut app, owner_player_id, 8);
+
+        app.world_mut()
+            .resource_mut::<PlayerWorldPresenceState>()
+            .players
+            .insert(
+                owner_player_id,
+                protected_test_record(
+                    owner_player_id,
+                    monolith_id,
+                    PlayerWorldPresence::Online,
+                    true,
+                ),
+            );
+        app.world_mut().resource_mut::<SanctuaryZones>().insert(
+            monolith_id,
+            SanctuaryZone {
+                pos: monolith_pos,
+                level: 0,
+            },
+        );
+        app.world_mut()
+            .resource_mut::<ExploredMap>()
+            .insert(explored_viewer_id, vec![(monolith_pos.x, monolith_pos.y)]);
+        assert!(app
+            .world()
+            .resource::<ExploredMap>()
+            .get(&owner_player_id)
+            .is_none());
+
+        app.update();
+
+        let explored: ResponsePacket =
+            serde_json::from_str(&explored_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            explored,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.len() == 1 && settlements[0].player_id == owner_player_id
+        ));
+
+        let unexplored: ResponsePacket =
+            serde_json::from_str(&unexplored_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            unexplored,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.is_empty()
+        ));
+
+        let owner: ResponsePacket =
+            serde_json::from_str(&owner_receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            owner,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.len() == 1 && settlements[0].player_id == owner_player_id
+        ));
+
+        app.update();
+        assert!(explored_receiver.try_recv().is_err());
+        assert!(unexplored_receiver.try_recv().is_err());
+        assert!(owner_receiver.try_recv().is_err());
+
+        {
+            let mut presence = app.world_mut().resource_mut::<PlayerWorldPresenceState>();
+            let record = presence.players.get_mut(&owner_player_id).unwrap();
+            record.state = PlayerWorldPresence::Online;
+            record.resume_in_progress = false;
+        }
+        app.update();
+
+        for receiver in [&mut explored_receiver, &mut owner_receiver] {
+            let cleared: ResponsePacket =
+                serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+            assert!(matches!(
+                cleared,
+                ResponsePacket::ProtectedSettlements { settlements, .. }
+                    if settlements.is_empty()
+            ));
+        }
+        assert!(
+            unexplored_receiver.try_recv().is_err(),
+            "a client that never received the foreign ward needs no redundant clear"
+        );
+    }
+
+    #[test]
+    fn protected_settlements_failed_send_is_retried_and_not_cached() {
+        let mut app = protected_settlements_delivery_test_app();
+        let (client_id, mut receiver) = add_status_test_client(&mut app, 88, 1);
+        let sender = app
+            .world()
+            .resource::<Clients>()
+            .lock()
+            .unwrap()
+            .get(&client_id)
+            .unwrap()
+            .sender
+            .clone();
+        sender.try_send("occupied".to_string()).unwrap();
+
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<ProtectedSettlementsDeliveryState>()
+            .sent
+            .contains_key(&client_id));
+        assert_eq!(receiver.try_recv().unwrap(), "occupied");
+
+        app.update();
+        let packet: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            packet,
+            ResponsePacket::ProtectedSettlements { settlements, .. }
+                if settlements.is_empty()
+        ));
+        assert!(app
+            .world()
+            .resource::<ProtectedSettlementsDeliveryState>()
+            .sent
+            .contains_key(&client_id));
     }
 
     #[test]

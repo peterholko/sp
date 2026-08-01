@@ -1,28 +1,30 @@
 use bevy::prelude::*;
 
 use crate::item::{Inventory, Item};
+use crate::skill::{SkillData, Skills};
+use crate::skill_defs::Skill;
 use crate::templates::{ItemAttr, ItemTemplate, RecipeTemplate, ResReq, Templates};
 use crate::{item, network};
 
-/// Pick the first recipe template whose `structure_req` includes the given
-/// structure name and whose ingredient reqs are satisfiable from `inventory`.
+/// Pick the first known recipe whose station and ingredient requirements are
+/// satisfied.
 /// Used by villager auto-operation at food-production structures (Bakery,
-/// Smoker, Millhouse, Butchery) so an assigned villager can produce without
+/// Smokehouse, Millhouse, Butchery) so an assigned villager can produce without
 /// the player picking a specific recipe.
 pub fn pick_available_recipe_at(
+    owner: i32,
     structure_name: &str,
     inventory: &Inventory,
+    recipes: &Recipes,
+    skills: &Skills,
     templates: &Templates,
-) -> Option<RecipeTemplate> {
-    for rt in templates.recipe_templates.iter() {
-        let Some(structure_req) = &rt.structure_req else {
-            continue;
-        };
-        if !structure_req.iter().any(|s| s == structure_name) {
-            continue;
-        }
-        if inventory.find_by_reqs(rt.req.clone()).is_some() {
-            return Some(rt.clone());
+) -> Option<Recipe> {
+    for recipe in recipes.get_by_owner(owner) {
+        if recipe.supports_structure(structure_name)
+            && inventory.find_by_reqs(recipe.req.clone()).is_some()
+            && recipe.skill_requirement_met(skills, templates)
+        {
+            return Some(recipe);
         }
     }
     None
@@ -56,6 +58,28 @@ impl Recipe {
     pub fn requires_structure(&self) -> bool {
         self.structure_req.is_some()
     }
+
+    pub fn supports_structure(&self, structure: &str) -> bool {
+        self.structure_req
+            .as_ref()
+            .is_some_and(|requirements| requirements.iter().any(|name| name == structure))
+    }
+
+    pub fn crafting_skill(&self) -> Option<Skill> {
+        SkillData::item_class_to_skill(&self.class)
+            .or_else(|| SkillData::item_subclass_to_skill(&self.subclass))
+    }
+
+    pub fn skill_requirement_met(&self, skills: &Skills, templates: &Templates) -> bool {
+        let requirement = self.skill_req.unwrap_or(0);
+        if requirement <= 0 {
+            return true;
+        }
+
+        self.crafting_skill().is_some_and(|skill| {
+            skills.has_proficiency_requirement(skill, requirement, &templates.skill_templates)
+        })
+    }
 }
 
 #[derive(Resource, Debug)]
@@ -77,7 +101,15 @@ impl Recipes {
         self.recipe_templates = recipe_templates;
     }
 
-    pub fn create(&mut self, player: i32, name: String, templates: &Res<Templates>) {
+    pub fn create(&mut self, player: i32, name: String, templates: &Templates) -> bool {
+        if self
+            .recipes
+            .iter()
+            .any(|recipe| recipe.owner == player && recipe.name == name)
+        {
+            return false;
+        }
+
         for recipe_template in self.recipe_templates.iter() {
             if name == recipe_template.name {
                 // Assume every recipe template has a equivalent item template
@@ -158,12 +190,12 @@ impl Recipes {
                 };
 
                 self.recipes.push(new_recipe);
+                debug!("Recipes: {:?}", self.recipes);
+                return true;
             }
         }
 
-        // debug! (not println!) so this full recipe dump doesn't spam stdout on
-        // every game setup — notably when running many headless games.
-        debug!("Recipes: {:?}", self.recipes);
+        false
     }
 
     pub fn get_by_name(&self, name: String) -> Option<Recipe> {
@@ -176,11 +208,18 @@ impl Recipes {
         return None;
     }
 
-    pub fn get_by_structure(&self, structure_id: i32) -> Vec<Recipe> {
+    pub fn get_for_owner_by_name(&self, owner: i32, name: &str) -> Option<Recipe> {
+        self.recipes
+            .iter()
+            .find(|recipe| recipe.owner == owner && recipe.name == name)
+            .cloned()
+    }
+
+    pub fn get_by_owner(&self, owner: i32) -> Vec<Recipe> {
         let mut owner_recipes: Vec<Recipe> = Vec::new();
 
         for recipe in self.recipes.iter() {
-            if recipe.owner == structure_id {
+            if recipe.owner == owner {
                 owner_recipes.push(recipe.clone());
             }
         }
@@ -188,13 +227,13 @@ impl Recipes {
         return owner_recipes;
     }
 
-    pub fn get_basic_recipes_packet(&self) -> Vec<network::Recipe> {
+    pub fn get_basic_recipes_packet(&self, owner: i32) -> Vec<network::Recipe> {
         info!("Getting basic recipes");
         let mut basic_recipes: Vec<network::Recipe> = Vec::new();
 
         for recipe in self.recipes.iter() {
             info!("Recipe: {:?}", recipe);
-            if !recipe.requires_structure() {
+            if recipe.owner == owner && !recipe.requires_structure() {
                 info!("Basic Recipe: {:?}", recipe);
                 let recipe_packet = network::Recipe {
                     name: recipe.name.clone(),
@@ -264,27 +303,29 @@ impl Recipes {
     pub fn get_by_subclass_tier(
         structure: String,
         subclass: String,
-        tier: i32,
-        templates: &Res<Templates>,
+        tier: Option<i32>,
+        templates: &Templates,
     ) -> Vec<RecipeTemplate> {
         let all_recipes = RecipeTemplate::get_by_structure(structure, templates);
 
         let mut recipes_by_subclass_tier = Vec::new();
 
         for recipe in all_recipes.iter() {
-            if let Some(recipe_tier) = recipe.tier {
-                if let Some(recipe_subclass) = &recipe.subclass {
-                    if *recipe_subclass == subclass && recipe_tier == tier {
-                        recipes_by_subclass_tier.push(recipe.clone());
-                    }
-                } else {
-                    // If recipe subclass is not set, get subclass from item template
-                    let item_template =
-                        Item::get_template(recipe.name.clone(), &templates.item_templates);
+            if recipe.tier != tier {
+                continue;
+            }
 
-                    if item_template.subclass == subclass && recipe_tier == tier {
-                        recipes_by_subclass_tier.push(recipe.clone());
-                    }
+            if let Some(recipe_subclass) = &recipe.subclass {
+                if *recipe_subclass == subclass {
+                    recipes_by_subclass_tier.push(recipe.clone());
+                }
+            } else {
+                // If recipe subclass is not set, get subclass from item template
+                let item_template =
+                    Item::get_template(recipe.name.clone(), &templates.item_templates);
+
+                if item_template.subclass == subclass {
+                    recipes_by_subclass_tier.push(recipe.clone());
                 }
             }
         }
@@ -333,6 +374,8 @@ mod tests {
 
     #[test]
     fn basic_recipe_packet_only_includes_hand_recipes() {
+        let mut other_player_recipe = test_recipe("Other Firewood", None);
+        other_player_recipe.owner = 2;
         let recipes = Recipes::from_recipes(vec![
             test_recipe("Firewood", None),
             test_recipe("Crude Torch", None),
@@ -341,15 +384,39 @@ mod tests {
                 "Training Pick Axe",
                 Some(vec!["Crafting Tent".to_string(), "Blacksmith".to_string()]),
             ),
+            other_player_recipe,
         ]);
 
         let names: Vec<String> = recipes
-            .get_basic_recipes_packet()
+            .get_basic_recipes_packet(1)
             .into_iter()
             .map(|recipe| recipe.name)
             .collect();
 
         assert_eq!(names, vec!["Firewood", "Crude Torch"]);
+    }
+
+    #[test]
+    fn recipe_lookup_is_scoped_to_owner() {
+        let mut player_two_recipe = test_recipe("Firewood", None);
+        player_two_recipe.owner = 2;
+        let recipes = Recipes::from_recipes(vec![test_recipe("Firewood", None), player_two_recipe]);
+
+        assert_eq!(
+            recipes
+                .get_for_owner_by_name(1, "Firewood")
+                .expect("player one recipe")
+                .owner,
+            1
+        );
+        assert_eq!(
+            recipes
+                .get_for_owner_by_name(2, "Firewood")
+                .expect("player two recipe")
+                .owner,
+            2
+        );
+        assert!(recipes.get_for_owner_by_name(3, "Firewood").is_none());
     }
 }
 

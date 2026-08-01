@@ -19,6 +19,103 @@ fn load_obj_templates() -> Vec<ObjTemplate> {
 }
 
 #[test]
+fn bleed_template_deserializes_flat_damage_over_time() {
+    let file = File::open("templates/effect_template.yaml").expect("effect templates");
+    let templates: Vec<EffectTemplate> = serde_yaml::from_reader(file).expect("effect yaml");
+    let bleed = templates
+        .iter()
+        .find(|template| template.name == "Bleed")
+        .expect("Bleed template");
+    assert_eq!(bleed.damage_over_time, Some(1.0));
+    assert_eq!(bleed.duration, 20);
+}
+
+#[test]
+fn refreshed_effect_rejects_a_stale_expiry_tick() {
+    let effects = Effects(HashMap::from([(Effect::Bleed, (250, 1.0, 1))]));
+    assert!(!effect_expiry_is_current(&effects, &Effect::Bleed, 200));
+    assert!(effect_expiry_is_current(&effects, &Effect::Bleed, 250));
+}
+
+#[test]
+fn damage_over_time_ticks_once_per_second_and_handles_death() {
+    let mut templates = Templates::from_obj_templates(Vec::new());
+    templates.effect_templates.load(vec![EffectTemplate {
+        name: "Bleed".to_string(),
+        duration: 20,
+        max_hp: None,
+        healing: None,
+        damage: None,
+        damage_over_time: Some(1.0),
+        speed: None,
+        attack_speed: None,
+        defense: None,
+        stackable: None,
+        armor: None,
+        lifeleech: None,
+        viewshed: None,
+        ignore_all_armor: None,
+        instant_kill_chance: None,
+        next_attack: None,
+        vision: None,
+        health: None,
+        stamina: None,
+    }]);
+
+    let mut app = App::new();
+    app.insert_resource(GameTick(TICKS_PER_SEC));
+    app.insert_resource(templates);
+    app.add_systems(Update, damage_over_time_system);
+    let entity = app
+        .world_mut()
+        .spawn((
+            Id(77),
+            PlayerId(1000),
+            Effects(HashMap::from([(Effect::Bleed, (999, 1.0, 1))])),
+            Stats {
+                hp: 2,
+                base_hp: 2,
+                stamina: None,
+                mana: None,
+                base_stamina: None,
+                base_mana: None,
+                base_def: 0,
+                damage_range: Some(0),
+                base_damage: Some(0),
+                base_speed: Some(1),
+                base_vision: Some(1),
+            },
+            State::None,
+            big_brain::thinker::ThinkerBuilder::default(),
+        ))
+        .id();
+
+    app.update();
+    assert_eq!(app.world().get::<Stats>(entity).unwrap().hp, 1);
+    assert_eq!(
+        app.world().get::<LastDamageTick>(entity).map(|tick| tick.0),
+        Some(10)
+    );
+    assert!(app.world().get::<StateDead>(entity).is_none());
+
+    app.world_mut().resource_mut::<GameTick>().0 = TICKS_PER_SEC + 1;
+    app.update();
+    assert_eq!(app.world().get::<Stats>(entity).unwrap().hp, 1);
+
+    app.world_mut().resource_mut::<GameTick>().0 = 2 * TICKS_PER_SEC;
+    app.update();
+    assert_eq!(*app.world().get::<State>(entity).unwrap(), State::Dead);
+    assert_eq!(
+        app.world().get::<StateDead>(entity).unwrap().killer,
+        "Bleed"
+    );
+    assert!(app
+        .world()
+        .get::<big_brain::thinker::ThinkerBuilder>(entity)
+        .is_none());
+}
+
+#[test]
 fn early_game_enemy_templates_are_loaded() {
     let obj_templates = load_obj_templates();
     let expected = [
@@ -63,6 +160,125 @@ fn shipwreck_opening_rat_count_is_randomized_within_one_to_three() {
         .all(|count| (OPENING_RAT_MIN_COUNT..=OPENING_RAT_MAX_COUNT).contains(count)));
     assert!(counts.contains(&OPENING_RAT_MIN_COUNT));
     assert!(counts.contains(&OPENING_RAT_MAX_COUNT));
+}
+
+#[test]
+fn opening_rat_combat_profile_takes_two_to_three_precise_stick_hits() {
+    let rat_template = load_obj_templates()
+        .into_iter()
+        .find(|template| template.template == OPENING_RAT_TEMPLATE)
+        .expect("Giant Rat template");
+    let opening_stats = opening_rat_combat_stats(&rat_template);
+    let item_template_file =
+        File::open("templates/item_template.yaml").expect("Could not open item templates");
+    let item_templates: Vec<crate::templates::ItemTemplate> =
+        serde_yaml::from_reader(item_template_file).expect("Could not read item templates");
+    let stick_damage = item_templates
+        .iter()
+        .find(|template| template.name == "Sharpened Stick")
+        .and_then(|template| template.attrs.as_ref())
+        .and_then(|attrs| attrs.iter().find(|attr| attr.name == "Damage"))
+        .and_then(|attr| attr.value.parse::<i32>().ok())
+        .expect("Sharpened Stick damage");
+
+    assert_eq!(rat_template.base_hp, Some(20));
+    assert_eq!(rat_template.base_dmg, Some(2));
+    assert_eq!(rat_template.base_def, Some(1));
+    assert_eq!(opening_stats.hp, OPENING_RAT_HP);
+    assert_eq!(opening_stats.base_hp, OPENING_RAT_HP);
+    assert_eq!(opening_stats.base_damage, Some(4));
+    assert_eq!(opening_stats.base_def, OPENING_RAT_DEFENSE);
+    assert_eq!(opening_stats.damage_range, rat_template.dmg_range);
+
+    // Precise attacks have a 1.0 damage multiplier. With zero opening-rat
+    // defense, every novice class's base roll plus the stick falls in the
+    // requested two-to-three landed-hit window.
+    for (class, hero_base_damage, hero_damage_range) in
+        [("Warrior", 2, 2), ("Ranger", 1, 3), ("Mage", 1, 2)]
+    {
+        let minimum_damage = hero_base_damage + stick_damage;
+        let maximum_damage = hero_base_damage + stick_damage + hero_damage_range - 1;
+        let minimum_hits = (OPENING_RAT_HP + maximum_damage - 1) / maximum_damage;
+        let maximum_hits = (OPENING_RAT_HP + minimum_damage - 1) / minimum_damage;
+        assert!(
+            (2..=3).contains(&minimum_hits) && (2..=3).contains(&maximum_hits),
+            "{class} precise stick attacks should take 2-3 hits, got {minimum_hits}-{maximum_hits}"
+        );
+    }
+}
+
+#[test]
+fn opening_rats_choose_distinct_spread_out_tiles_around_the_shipwreck() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = flat_land_map();
+    let shipwreck = Position { x: 20, y: 20 };
+    let mut rng = StdRng::seed_from_u64(0x5A17_0FF5);
+    let destinations = opening_rat_disperse_positions(
+        shipwreck,
+        OPENING_RAT_MAX_COUNT,
+        &HashSet::new(),
+        &map,
+        &mut rng,
+    );
+
+    assert_eq!(destinations.len(), OPENING_RAT_MAX_COUNT);
+    assert_eq!(
+        destinations.iter().copied().collect::<HashSet<_>>().len(),
+        3
+    );
+    assert!(destinations
+        .iter()
+        .all(|destination| Map::is_adjacent_excluding_source(shipwreck, *destination)));
+    for first in 0..destinations.len() - 1 {
+        for second in first + 1..destinations.len() {
+            assert_eq!(
+                Map::dist(destinations[first], destinations[second]),
+                2,
+                "three rats on a clear ring should occupy alternating hexes"
+            );
+        }
+    }
+}
+
+#[test]
+fn opening_rat_dispersal_moves_only_to_available_tiles() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut map = flat_land_map();
+    let shipwreck = Position { x: 20, y: 20 };
+    let neighbours = Map::ring((shipwreck.x, shipwreck.y), 1)
+        .into_iter()
+        .map(|(x, y)| Position { x, y })
+        .collect::<Vec<_>>();
+    let only_open_tile = neighbours[4];
+    let occupied = neighbours
+        .iter()
+        .copied()
+        .filter(|position| *position != only_open_tile)
+        .collect::<HashSet<_>>();
+    let mut rng = StdRng::seed_from_u64(0xB10C_0ED);
+
+    assert_eq!(
+        opening_rat_disperse_positions(shipwreck, 3, &occupied, &map, &mut rng),
+        vec![only_open_tile],
+        "only one rat should move when five adjacent tiles are blocked"
+    );
+    set_test_tile_type(
+        &mut map,
+        only_open_tile.x,
+        only_open_tile.y,
+        TileType::Ocean,
+    );
+    assert!(opening_rat_disperse_positions(shipwreck, 3, &occupied, &map, &mut rng).is_empty());
+    assert!(opening_rat_disperse_positions(
+        shipwreck,
+        3,
+        &neighbours.into_iter().collect(),
+        &map,
+        &mut rng,
+    )
+    .is_empty());
 }
 
 #[test]
@@ -515,24 +731,85 @@ fn combat_lock_helper_uses_three_second_window() {
 }
 
 #[test]
-fn campfire_light_sync_is_idempotent_and_preserves_other_effects() {
-    let mut effects = Effects(HashMap::from([(Effect::WatchtowerLight, (10, 0.0, 1))]));
+fn campfire_light_requires_a_living_nearby_hero_and_lit_live_fire() {
+    let hero_pos = Position { x: 10, y: 10 };
+    let same_hex = hero_pos;
+    let adjacent_hex = Position { x: 11, y: 10 };
+    let two_hexes_away = Position { x: 12, y: 10 };
 
-    assert!(sync_campfire_light_effect(&mut effects, true, 20));
-    assert_eq!(effects.0.get(&Effect::CampfireLight), Some(&(21, 0.0, 1)));
-    assert!(effects.has(Effect::WatchtowerLight));
+    for campfire_pos in [same_hex, adjacent_hex] {
+        assert!(hero_activates_campfire_light(
+            hero_pos,
+            State::None,
+            100,
+            false,
+            campfire_pos,
+            State::None,
+            true,
+            false,
+        ));
+    }
 
-    assert!(!sync_campfire_light_effect(&mut effects, true, 30));
-    assert_eq!(
-        effects.0.get(&Effect::CampfireLight),
-        Some(&(21, 0.0, 1)),
-        "duplicate reconciliation must not refresh or stack the effect"
-    );
-
-    assert!(sync_campfire_light_effect(&mut effects, false, 40));
-    assert!(!effects.has(Effect::CampfireLight));
-    assert!(effects.has(Effect::WatchtowerLight));
-    assert!(!sync_campfire_light_effect(&mut effects, false, 50));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::None,
+        100,
+        false,
+        two_hexes_away,
+        State::None,
+        true,
+        false,
+    ));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::Dead,
+        100,
+        false,
+        same_hex,
+        State::None,
+        true,
+        false,
+    ));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::None,
+        0,
+        false,
+        same_hex,
+        State::None,
+        true,
+        false,
+    ));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::None,
+        100,
+        true,
+        same_hex,
+        State::None,
+        true,
+        false,
+    ));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::None,
+        100,
+        false,
+        same_hex,
+        State::None,
+        false,
+        false,
+    ));
+    assert!(!hero_activates_campfire_light(
+        hero_pos,
+        State::None,
+        100,
+        false,
+        same_hex,
+        State::Dead,
+        true,
+        true,
+    ));
 }
 
 fn setup_new_obj_observer_test_app() -> App {
@@ -746,6 +1023,20 @@ fn sanctuary_power_score_requires_non_novice_rank() {
         &inventory,
         100
     )));
+}
+
+#[test]
+fn sanctuary_excursion_accepts_player_heroes_and_villagers_only() {
+    assert!(sanctuary_excursion_actor_is_eligible(1, &Subclass::Hero));
+    assert!(sanctuary_excursion_actor_is_eligible(
+        1,
+        &Subclass::Villager
+    ));
+    assert!(!sanctuary_excursion_actor_is_eligible(
+        NPC_PLAYER_ID,
+        &Subclass::Villager
+    ));
+    assert!(!sanctuary_excursion_actor_is_eligible(1, &Subclass::Npc));
 }
 
 #[test]
@@ -1609,7 +1900,59 @@ fn combat_lock_interrupt_cancels_active_peaceful_work() {
 }
 
 #[test]
-fn upgrading_campfire_to_small_tent_adds_shelter_component() {
+fn combat_lock_interrupt_cancels_active_investigation() {
+    let mut app = App::new();
+    app.add_systems(Update, combat_lock_interrupt_system);
+    app.add_observer(cancel_events_observer);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(GameEvents(HashMap::new()));
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Investigating,
+            SubclassHero,
+            LastCombatTick(100),
+            EventExecuting {
+                event_type: "investigate".to_string(),
+                state: EventExecutingState::Executing,
+            },
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(1, hero);
+    app.world_mut().resource_mut::<MapEvents>().new(
+        1,
+        120,
+        VisibleEvent::InvestigateEvent { target_id: 2 },
+    );
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(hero).get::<State>().unwrap(),
+        State::None
+    );
+    assert_eq!(
+        app.world()
+            .entity(hero)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+}
+
+#[test]
+fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     let mut app = App::new();
     app.add_systems(Update, upgrade_system);
     app.insert_resource(GameTick(10));
@@ -1653,7 +1996,7 @@ fn upgrading_campfire_to_small_tent_adds_shelter_component() {
                 work_per_sec: 0.0,
                 start_time: 0,
             },
-            SelectedUpgrade("Small Tent".to_string()),
+            SelectedUpgrade("Shelter Tent".to_string()),
             StateUpgrading,
         ))
         .id();
@@ -1687,8 +2030,8 @@ fn upgrading_campfire_to_small_tent_adds_shelter_component() {
     app.update();
 
     let structure = app.world().entity(structure_entity);
-    assert_eq!(structure.get::<Name>().unwrap().0, "Small Tent");
-    assert_eq!(structure.get::<Template>().unwrap().0, "Small Tent");
+    assert_eq!(structure.get::<Name>().unwrap().0, "Shelter Tent");
+    assert_eq!(structure.get::<Template>().unwrap().0, "Shelter Tent");
     assert_eq!(*structure.get::<Subclass>().unwrap(), Subclass::Shelter);
     assert!(structure.get::<StateUpgrading>().is_none());
 
@@ -1913,6 +2256,7 @@ fn visible_event_move_packets_keep_source_coordinates() {
     let mut app = App::new();
     app.add_systems(Update, visible_event_system);
     app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(CampfireVisibilityState::default());
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     let client_id = Uuid::new_v4();
@@ -2224,13 +2568,51 @@ fn structure_craft_test_templates() -> Templates {
         },
     );
 
-    let mut templates = Templates::from_obj_templates(Vec::new());
+    let mut templates = Templates::from_obj_templates(vec![ObjTemplate {
+        class: "Structure".to_string(),
+        subclass: "Crafting".to_string(),
+        template: "Crafting Tent".to_string(),
+        image: "crafting_tent".to_string(),
+        family: None,
+        groups: None,
+        base_hp: None,
+        base_stamina: None,
+        base_mana: None,
+        base_dmg: None,
+        dmg_range: None,
+        base_def: None,
+        base_speed: None,
+        base_vision: None,
+        base_work: None,
+        int: None,
+        aggression: None,
+        kill_xp: None,
+        images: None,
+        hsl: None,
+        waterwalk: None,
+        landwalk: None,
+        capacity: Some(100),
+        max_residents: None,
+        campfire: None,
+        build_cost: None,
+        upgrade_cost: None,
+        level: None,
+        refine: None,
+        req: None,
+        upgrade_req: None,
+        upgrade_to: None,
+        profession: None,
+        upkeep: None,
+        activity: None,
+        workspaces: None,
+    }]);
     templates.skill_templates = SkillTemplates::from_map(skill_templates);
     templates
 }
 
 fn structure_craft_test_work_entry(worker_id: i32, status: WorkStatus) -> WorkEntry {
     WorkEntry {
+        entry_id: 1,
         worker_id,
         work_type: WorkType::Craft,
         work_status: status,
@@ -2275,6 +2657,7 @@ fn setup_structure_craft_event_test(
             Id(2),
             PlayerId(1),
             structure_pos,
+            State::None,
             Template("Crafting Tent".to_string()),
             Inventory {
                 owner: 2,
@@ -2307,6 +2690,7 @@ fn setup_structure_craft_event_test(
                 crafter_id: 1,
                 structure_id: 2,
                 recipe_name: "Test Item".to_string(),
+                work_entry_id: Some(1),
             },
         },
     )])));
@@ -2331,6 +2715,7 @@ fn start_work_observer_rejects_worker_off_structure_tile() {
             Id(1),
             PlayerId(1),
             Position { x: 2, y: 2 },
+            Skills::new(),
             ActiveTask::None,
         ))
         .id();
@@ -2340,6 +2725,8 @@ fn start_work_observer_rejects_worker_off_structure_tile() {
             Id(2),
             PlayerId(1),
             Position { x: 5, y: 2 },
+            Template("Crafting Tent".to_string()),
+            State::None,
             Inventory {
                 owner: 2,
                 items: vec![structure_craft_test_material(2)],
@@ -2415,6 +2802,7 @@ fn rejected_off_tile_work_releases_process_order_to_retry() {
                 owner: 1,
                 items: Vec::new(),
             },
+            Skills::new(),
             ActiveTask::None,
             EventExecuting {
                 event_type: String::new(),
@@ -2430,6 +2818,7 @@ fn rejected_off_tile_work_releases_process_order_to_retry() {
             structure_pos,
             Name("Crafting Tent".to_string()),
             Template("Crafting Tent".to_string()),
+            State::None,
             Inventory {
                 owner: 2,
                 items: vec![structure_craft_test_material(2)],
@@ -5346,7 +5735,6 @@ fn core_gameplay_initial_encounter_entry() -> InitialEncounterEntry {
         spawn_pos: Position { x: 10, y: 10 },
         villager_spawn_pos: Position { x: 11, y: 10 },
         opening_rat_spawn_tick: 900,
-        villager_ready_tick: 1110,
         phase1_unlock_tick: 2600,
         spider_unlock_tick: 3600,
         villager_event_scheduled: false,
@@ -5905,8 +6293,23 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
 }
 
 #[test]
-fn core_gameplay_checkpoint1_early_structure_costs_and_requirements_are_unchanged() {
+fn early_structure_costs_keep_stockade_more_lumber_intensive_than_burrow() {
     let templates = load_obj_templates();
+    let burrow = templates
+        .iter()
+        .find(|template| template.template == "Burrow")
+        .expect("Burrow template exists");
+    assert_eq!(
+        burrow
+            .req
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
+            .collect::<Vec<_>>(),
+        vec![("Log", 5)]
+    );
+
     let stockade = templates
         .iter()
         .find(|template| template.template == "Stockade")
@@ -5920,7 +6323,7 @@ fn core_gameplay_checkpoint1_early_structure_costs_and_requirements_are_unchange
             .iter()
             .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
             .collect::<Vec<_>>(),
-        vec![("Log", 3)]
+        vec![("Log", 10)]
     );
 
     let crafting_tent = templates
@@ -6127,36 +6530,103 @@ fn rescue_victory_uses_player_survival_day() {
 }
 
 #[test]
-fn shipwreck_inspection_triggers_villager_only_after_help_speech_and_completed_burrow() {
-    let entry = core_gameplay_initial_encounter_entry();
+fn shipwreck_rescue_requires_search_completed_burrow_and_entire_opening_wave() {
+    let mut entry = core_gameplay_initial_encounter_entry();
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,
         ..Default::default()
     };
 
     assert!(!shipwreck_inspection_can_spawn_villager(
-        2000,
         &entry,
         Some(&PlayerObjectives::default()),
         true,
     ));
     assert!(!shipwreck_inspection_can_spawn_villager(
-        1100,
         &entry,
         Some(&objectives),
         true,
     ));
+
+    entry.opening_enemy_spawned.fill(true);
+    entry.opening_enemy_defeated.fill(true);
+
     assert!(!shipwreck_inspection_can_spawn_villager(
-        1110,
         &entry,
         Some(&objectives),
         false,
     ));
     assert!(shipwreck_inspection_can_spawn_villager(
-        1110,
         &entry,
         Some(&objectives),
         true,
+    ));
+}
+
+#[test]
+fn investigation_completion_rejects_movement_combat_death_and_distance() {
+    let investigator_pos = Position { x: 10, y: 10 };
+    let adjacent_target = Position { x: 11, y: 10 };
+
+    assert!(investigation_can_complete(
+        &State::Investigating,
+        false,
+        Some(&LastCombatTick(50)),
+        Some(&LastDamageTick(50)),
+        100,
+        80,
+        investigator_pos,
+        adjacent_target,
+    ));
+    assert!(!investigation_can_complete(
+        &State::Moving,
+        false,
+        Some(&LastCombatTick(50)),
+        Some(&LastDamageTick(50)),
+        100,
+        80,
+        investigator_pos,
+        adjacent_target,
+    ));
+    assert!(!investigation_can_complete(
+        &State::Investigating,
+        false,
+        Some(&LastCombatTick(100)),
+        Some(&LastDamageTick(50)),
+        100,
+        80,
+        investigator_pos,
+        adjacent_target,
+    ));
+    assert!(!investigation_can_complete(
+        &State::Investigating,
+        true,
+        Some(&LastCombatTick(50)),
+        Some(&LastDamageTick(50)),
+        100,
+        80,
+        investigator_pos,
+        adjacent_target,
+    ));
+    assert!(!investigation_can_complete(
+        &State::Investigating,
+        false,
+        Some(&LastCombatTick(50)),
+        Some(&LastDamageTick(50)),
+        100,
+        80,
+        investigator_pos,
+        Position { x: 13, y: 10 },
+    ));
+    assert!(!investigation_can_complete(
+        &State::Investigating,
+        false,
+        Some(&LastCombatTick(50)),
+        Some(&LastDamageTick(80)),
+        100,
+        80,
+        investigator_pos,
+        adjacent_target,
     ));
 }
 
@@ -6345,7 +6815,7 @@ fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
         live_hero: true,
         hero_idle: true,
         stockade_plan_available: true,
-        stockade_log_units_carried: 3,
+        stockade_log_units_carried: 10,
         can_start_stockade: true,
         ..CrisisPreparationFacts::default()
     };
@@ -6358,7 +6828,7 @@ fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
         hero_idle: true,
         current_tile_wall_present: true,
         stockade_plan_available: true,
-        stockade_log_units_carried: 3,
+        stockade_log_units_carried: 10,
         can_start_stockade: false,
         ..CrisisPreparationFacts::default()
     };

@@ -11,6 +11,16 @@ use crate::constants::{BASE_REFINE_TIME, TICKS_PER_SEC};
 use crate::item::AttrKey;
 use crate::item::AttrVal;
 
+pub const SHELTER_TENT_TEMPLATE: &str = "Shelter Tent";
+pub const LEGACY_SMALL_TENT_TEMPLATE: &str = "Small Tent";
+
+pub fn canonical_obj_template_name(name: &str) -> &str {
+    match name {
+        LEGACY_SMALL_TENT_TEMPLATE => SHELTER_TENT_TEMPLATE,
+        _ => name,
+    }
+}
+
 #[derive(Debug, Resource)]
 pub struct Templates {
     pub item_templates: Vec<ItemTemplate>,
@@ -59,7 +69,144 @@ impl Templates {
         return item_templates;
     }
 
+    /// Validate links that must resolve before a production chain can run.
+    ///
+    /// Item and recipe execution deliberately use strict template lookups, so
+    /// a misspelled station or missing output is a startup error rather than a
+    /// late gameplay panic.
+    pub fn validate_production_catalog(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        let mut item_names = HashSet::new();
+        let mut item_types = HashSet::new();
+        let mut structure_names = HashSet::new();
+
+        for item in self.item_templates.iter() {
+            if !item_names.insert(item.name.as_str()) {
+                errors.push(format!("duplicate item template {:?}", item.name));
+            }
+            item_types.insert(item.name.as_str());
+            item_types.insert(item.class.as_str());
+            item_types.insert(item.subclass.as_str());
+        }
+
+        for structure in self.obj_templates.iter() {
+            if !structure_names.insert(structure.template.as_str()) {
+                errors.push(format!(
+                    "duplicate object template {:?}",
+                    structure.template
+                ));
+            }
+
+            for requirement in structure
+                .req
+                .iter()
+                .flatten()
+                .chain(structure.upgrade_req.iter().flatten())
+                .chain(structure.upkeep.iter().flatten())
+            {
+                if !item_types.contains(requirement.req_type.as_str()) {
+                    errors.push(format!(
+                        "object {:?} requires unknown item type {:?}",
+                        structure.template, requirement.req_type
+                    ));
+                }
+            }
+        }
+
+        for structure in self.obj_templates.iter() {
+            for target in structure.upgrade_to.iter().flatten() {
+                if !structure_names.contains(target.as_str()) {
+                    errors.push(format!(
+                        "object {:?} upgrades to unknown object {:?}",
+                        structure.template, target
+                    ));
+                }
+            }
+            for refine_type in structure.refine.iter().flatten() {
+                if !item_types.contains(refine_type.as_str()) {
+                    errors.push(format!(
+                        "object {:?} refines unknown item type {:?}",
+                        structure.template, refine_type
+                    ));
+                }
+            }
+        }
+
+        let mut recipe_names = HashSet::new();
+        for recipe in self.recipe_templates.iter() {
+            if !recipe_names.insert(recipe.name.as_str()) {
+                errors.push(format!("duplicate recipe template {:?}", recipe.name));
+            }
+            if !item_names.contains(recipe.name.as_str()) {
+                errors.push(format!(
+                    "recipe {:?} has no matching output item template",
+                    recipe.name
+                ));
+            }
+            for requirement in recipe.req.iter() {
+                if !item_types.contains(requirement.req_type.as_str()) {
+                    errors.push(format!(
+                        "recipe {:?} requires unknown item type {:?}",
+                        recipe.name, requirement.req_type
+                    ));
+                }
+            }
+            for station in recipe.structure_req.iter().flatten() {
+                if !structure_names.contains(station.as_str()) {
+                    errors.push(format!(
+                        "recipe {:?} requires unknown structure {:?}",
+                        recipe.name, station
+                    ));
+                }
+            }
+        }
+
+        for item in self.item_templates.iter() {
+            for output in item.produces.iter().flatten() {
+                if !item_names.contains(output.as_str()) {
+                    errors.push(format!(
+                        "item {:?} refines to unknown item {:?}",
+                        item.name, output
+                    ));
+                }
+            }
+        }
+
+        for resource in self.res_templates.values() {
+            for output in resource.produces.iter().flatten() {
+                if !item_names.contains(output.as_str()) {
+                    errors.push(format!(
+                        "resource {:?} produces unknown item {:?}",
+                        resource.name, output
+                    ));
+                }
+            }
+
+            // These resource records are interaction anchors; their dedicated
+            // systems select a concrete water or fish item.
+            if resource.produces.is_none()
+                && resource.res_type != "Spring Water"
+                && resource.res_type != "Fish"
+                && !item_names.contains(resource.name.as_str())
+            {
+                errors.push(format!(
+                    "resource {:?} has no matching gathered item template",
+                    resource.name
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            errors.sort();
+            errors.dedup();
+            Err(errors)
+        }
+    }
+
     pub fn get_obj_template_by_name(&self, name: String) -> ObjTemplate {
+        let name = canonical_obj_template_name(&name);
         for obj_template in self.obj_templates.iter() {
             if name == obj_template.template {
                 return obj_template.clone();
@@ -93,6 +240,7 @@ pub struct ObjTemplates(Vec<ObjTemplate>);
 
 impl ObjTemplates {
     pub fn get(&self, template: String) -> ObjTemplate {
+        let template = canonical_obj_template_name(&template);
         for obj_template in self.iter() {
             if template == obj_template.template {
                 return obj_template.clone();
@@ -105,6 +253,9 @@ impl ObjTemplates {
 
     pub fn get_by_name_template(&self, name: String, template: String) -> ObjTemplate {
         // TODO reconsider name vs template
+
+        let name = canonical_obj_template_name(&name);
+        let template = canonical_obj_template_name(&template);
 
         // Check by name first
         for obj_template in self.iter() {
@@ -125,6 +276,7 @@ impl ObjTemplates {
     }
 
     pub fn get_capacity(&self, name: String) -> i32 {
+        let name = canonical_obj_template_name(&name);
         for obj_template in self.iter() {
             if name == obj_template.template {
                 if let Some(capacity) = obj_template.capacity {
@@ -357,7 +509,7 @@ pub struct RecipeTemplate {
 }
 
 impl RecipeTemplate {
-    pub fn get_by_structure(structure: String, templates: &Res<Templates>) -> Vec<RecipeTemplate> {
+    pub fn get_by_structure(structure: String, templates: &Templates) -> Vec<RecipeTemplate> {
         let mut recipe_templates = Vec::new();
 
         for recipe_template in templates.recipe_templates.iter() {
@@ -371,7 +523,7 @@ impl RecipeTemplate {
         return recipe_templates;
     }
 
-    pub fn get_by_name(name: String, templates: &Res<Templates>) -> Option<RecipeTemplate> {
+    pub fn get_by_name(name: String, templates: &Templates) -> Option<RecipeTemplate> {
         for recipe_template in templates.recipe_templates.iter() {
             if name == recipe_template.name {
                 return Some(recipe_template.clone());
@@ -389,6 +541,7 @@ pub struct EffectTemplate {
     pub max_hp: Option<f32>,
     pub healing: Option<f32>,
     pub damage: Option<f32>,
+    #[serde(alias = "dot")]
     pub damage_over_time: Option<f32>,
     pub speed: Option<f32>,
     pub attack_speed: Option<f32>,
@@ -618,6 +771,17 @@ impl Plugin for TemplatesPlugin {
             price_templates: price_templates,
         };
 
+        if let Err(errors) = templates.validate_production_catalog() {
+            panic!(
+                "Invalid production template catalog:\n{}",
+                errors
+                    .iter()
+                    .map(|error| format!("- {error}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+
         // Code gen for skills enum
         /*let skills_file =
             fs::File::open("templates/skills.yaml").expect("Could not open file.");
@@ -638,5 +802,204 @@ impl Plugin for TemplatesPlugin {
         fs::write("src/skill/skill_defs.rs", enum_code).unwrap();*/
 
         app.insert_resource(templates);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::Ids;
+    use crate::item::Inventory;
+    use crate::recipe::{RecipePlugin, Recipes};
+
+    #[test]
+    fn production_catalog_references_are_valid() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        assert_eq!(templates.validate_production_catalog(), Ok(()));
+    }
+
+    #[test]
+    fn every_harvesting_tool_template_has_durability() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let gather_attrs = [
+            "Mining",
+            "Logging",
+            "Stonecutting",
+            "Fishing",
+            "Farming",
+            "Foraging",
+            "Hunting",
+        ];
+        let missing = templates
+            .item_templates
+            .iter()
+            .filter(|template| {
+                template.attrs.as_ref().is_some_and(|attrs| {
+                    attrs
+                        .iter()
+                        .any(|attr| gather_attrs.contains(&attr.name.as_str()))
+                })
+            })
+            .filter(|template| template.durability.is_none())
+            .map(|template| template.name.clone())
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "harvesting tools without durability: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_small_tent_template_name_resolves_to_shelter_tent() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let template = templates.obj_templates.get("Small Tent".to_string());
+
+        assert_eq!(template.template, "Shelter Tent");
+    }
+
+    fn production_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((TemplatesPlugin, RecipePlugin));
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe_templates = templates.recipe_templates.to_vec();
+                let mut recipes = world.resource_mut::<Recipes>();
+                recipes.set_templates(recipe_templates);
+            });
+        app
+    }
+
+    #[test]
+    fn copper_and_wood_chain_reaches_a_training_axe() {
+        let mut app = production_test_app();
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe = {
+                    let mut recipes = world.resource_mut::<Recipes>();
+                    assert!(recipes.create(1, "Copper Training Axe".to_string(), &templates));
+                    recipes
+                        .get_for_owner_by_name(1, "Copper Training Axe")
+                        .expect("created recipe")
+                };
+
+                let mut inventory = Inventory {
+                    owner: 1,
+                    items: Vec::new(),
+                };
+                let mut ids = Ids::default();
+                let log = inventory.new(
+                    ids.new_item_id(),
+                    "Cragroot Maple Log".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let ore = inventory.new(
+                    ids.new_item_id(),
+                    "Valleyrun Copper Ore".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+
+                inventory
+                    .try_refine(log.id, 1, 100, &templates.item_templates, &mut ids)
+                    .expect("log refinement");
+                inventory
+                    .try_refine(ore.id, 1, 100, &templates.item_templates, &mut ids)
+                    .expect("ore refinement");
+                inventory
+                    .try_craft(
+                        ids.new_item_id(),
+                        1,
+                        "Copper Training Axe".to_string(),
+                        &recipe,
+                        None,
+                        None,
+                        100,
+                    )
+                    .expect("training axe craft");
+
+                assert!(inventory
+                    .items
+                    .iter()
+                    .any(|item| item.name == "Copper Training Axe"));
+                assert!(!inventory
+                    .items
+                    .iter()
+                    .any(|item| item.name == "Valleyrun Copper Ingot"));
+                assert!(!inventory
+                    .items
+                    .iter()
+                    .any(|item| item.name == "Cragroot Maple Timber"));
+            });
+    }
+
+    #[test]
+    fn hunted_animal_and_firewood_chain_reaches_cooked_meat() {
+        let mut app = production_test_app();
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe = {
+                    let mut recipes = world.resource_mut::<Recipes>();
+                    assert!(recipes.create(1, "Cooked Meat".to_string(), &templates));
+                    recipes
+                        .get_for_owner_by_name(1, "Cooked Meat")
+                        .expect("created recipe")
+                };
+
+                let mut inventory = Inventory {
+                    owner: 1,
+                    items: Vec::new(),
+                };
+                let mut ids = Ids::default();
+                let carcass = inventory.new(
+                    ids.new_item_id(),
+                    "Felled Bristleback Boar".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                inventory.new(
+                    ids.new_item_id(),
+                    "Firewood".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+
+                inventory
+                    .try_refine(carcass.id, 1, 100, &templates.item_templates, &mut ids)
+                    .expect("carcass refinement");
+                inventory
+                    .try_craft(
+                        ids.new_item_id(),
+                        1,
+                        "Bristleback Cooked Meat".to_string(),
+                        &recipe,
+                        None,
+                        None,
+                        100,
+                    )
+                    .expect("cooked meat craft");
+
+                let meal = inventory
+                    .items
+                    .iter()
+                    .find(|item| item.name == "Bristleback Cooked Meat")
+                    .expect("cooked meat output");
+                assert!(meal.attrs.contains_key(&crate::item::AttrKey::Feed));
+                assert!(!meal
+                    .attrs
+                    .contains_key(&crate::item::AttrKey::FoodPoisoning));
+            });
     }
 }

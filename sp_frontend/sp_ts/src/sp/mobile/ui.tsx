@@ -811,10 +811,11 @@ export default class UI extends React.Component<any, UIState> {
   handleCombatState(message) {
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
+    const hasTargetEffects = message && Array.isArray(message.target_effects) && message.target_effects.length > 0;
 
     this.setState({
       combatState: message,
-      hideAttacksPanel: attackHistory.length == 0 && !hasComboHint,
+      hideAttacksPanel: attackHistory.length == 0 && !hasComboHint && !hasTargetEffects,
     });
   }
 
@@ -1754,7 +1755,7 @@ export default class UI extends React.Component<any, UIState> {
           {mobileActionButton('craftbutton', 'Craft', this.handleHeroCraftClick)}
         </div>
 
-        <button type="button" className={styles.combobutton} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
+        <button type="button" className={`${styles.combobutton} ${this.state.combatState?.available_finisher ? styles.combobuttonReady : ''}`} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
           <img src="/static/art/ui/combobutton.png" />
         </button>
 

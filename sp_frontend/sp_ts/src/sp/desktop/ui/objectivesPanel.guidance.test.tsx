@@ -90,6 +90,55 @@ const blockedRow = descendants(blockedRender)
 assert.ok(blockedRow, 'the objective row tooltip includes the authoritative blocker');
 assert.match(blockedRow.props.title, /Blocked: Finish the current action before inspecting the wreck/);
 
+const enabledToggle = descendants(blockedRender)
+  .find((node) => node.type === 'button' && node.props?.['aria-label'] === 'Turn tutorial off');
+assert.ok(enabledToggle, 'the Tutorial & Help header exposes a native toggle');
+assert.equal(enabledToggle.props['aria-pressed'], true);
+enabledToggle.props.onClick();
+const disabledRender = panel.render();
+const disabledText = textContent(disabledRender);
+assert.doesNotMatch(disabledText, /Why:|Next:|Defeat the opening threat/);
+const disabledToggle = descendants(disabledRender)
+  .find((node) => node.type === 'button' && node.props?.['aria-label'] === 'Turn tutorial on');
+assert.ok(disabledToggle, 'the re-enable affordance remains when guidance is hidden');
+assert.equal(disabledToggle.props['aria-pressed'], false);
+disabledToggle.props.onClick();
+
+const realDateNow = Date.now;
+let now = 0;
+Date.now = () => now;
+panel.handleObjectiveState(panel.state.objectiveState);
+now = 60_000;
+panel.handleObjectiveState(panel.state.objectiveState);
+(globalThis as any).window.innerWidth = 1024;
+panel.state.viewportWidth = 1024;
+panel.state.compactExpanded = false;
+const collapsedHintRender = panel.render();
+const collapsedHint = descendants(collapsedHintRender)
+  .find((node) => node.props?.['aria-label'] === 'Tutorial hint for Inspect the shipwreck');
+assert.ok(collapsedHint, 'a due hint remains visible above a collapsed compact guide');
+assert.equal(collapsedHint.props['aria-live'], 'polite');
+assert.match(textContent(collapsedHint), /Before that:\s+Finish the current action/);
+const openGuide = descendants(collapsedHintRender)
+  .find((node) => node.props?.['aria-label'] === 'Open Tutorial and Help for this hint');
+assert.ok(openGuide);
+openGuide.props.onClick();
+assert.equal(panel.state.compactExpanded, true);
+assert.equal(panel.state.tutorialHintVisible, false);
+panel.handleHeroInit('hero-a');
+panel.handleObjectiveState(panel.state.objectiveState);
+assert.ok(panel.tutorialHintPolicy.objective, 'fresh objective state restores reconnect guidance');
+panel.handleHeroInit('hero-a');
+assert.equal(
+  panel.tutorialHintPolicy.objective,
+  null,
+  'same-hero reconnect clears hint history until the next authoritative snapshot',
+);
+assert.equal(panel.state.tutorialHintVisible, false);
+Date.now = realDateNow;
+(globalThis as any).window.innerWidth = 1440;
+panel.state.viewportWidth = 1440;
+
 delete panel.state.objectiveState.objectives[0].blocker;
 const availableRender = panel.render();
 assert.doesNotMatch(textContent(availableRender), /Blocked:/);

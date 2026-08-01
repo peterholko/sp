@@ -35,10 +35,12 @@ Run frontend commands from `sp_ts/`:
 
 ```bash
 npm ci
-./check-imports.sh
-npm run dev
-./copy.sh
+npm run rebuild:ux
 ```
+
+For the same checked production build-and-copy flow from the repository root,
+run `./sp_frontend/rebuild-ux.sh`. It verifies that both copied bundles match
+the Webpack output. `npm run serve` starts the interactive development server.
 
 `npm run dev` runs webpack in development mode and writes:
 
@@ -68,6 +70,10 @@ npm run dev
 - Desktop and mobile code should depend on `core/`, but `core/` must not import either UI shell.
 - `desktop/` must not import from `mobile/`, and `mobile/` must not import from `desktop/`; use `./check-imports.sh` to verify.
 - Runtime assets are loaded from `/static/art/...` and `/static/tileset.json`; keep those URL shapes stable unless the serving model changes too.
+- Both shells use shared authoritative perception and ordinary burning-object
+  presentation. Tutorial & Help, protected-settlement wards, the public
+  Campfire action, and the lit standalone-Campfire overlay are currently
+  desktop-only.
 
 ## Important Files
 
@@ -88,4 +94,13 @@ npm run dev
 - Keep shared behavior in `core/`; keep layout and panel differences in `desktop/` or `mobile/`.
 - Webpack aliases map `ui` and `ui_comp` to `priv/static/art/ui`, and `art` and `art_comp` to `priv/static/art`.
 - TypeScript is intentionally relaxed (`strict: false`, `noImplicitAny: false`).
-- There is no active unit test suite; use `./check-imports.sh`, `npm run dev`, and focused manual browser checks for frontend changes.
+- Focused TypeScript regression scripts live beside the helpers/components they
+  cover. Project-configured TypeScript emission can run the pure policy and
+  presentation scripts directly with Node; React component scripts may also
+  need the repository's asset/module stubs. Run `./check-imports.sh`,
+  `npx tsc --noEmit --skipLibCheck`, a finite production Webpack build, and
+  focused manual browser checks for presentation changes.
+
+Plain `npx tsc --noEmit` remains blocked by collisions in the generated
+`src/phaser.d.ts` and its missing local Matter declaration. `--skipLibCheck`
+is the supported whole-project type check.

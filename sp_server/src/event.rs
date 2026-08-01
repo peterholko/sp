@@ -334,6 +334,7 @@ impl GameEvents {
                         crafter_id: *event_crafter_id,
                         structure_id: None,
                         recipe_name: recipe_name.clone(),
+                        work_entry_id: None,
                     });
                 }
             }
@@ -347,6 +348,7 @@ impl GameEvents {
                 crafter_id: event_crafter_id,
                 structure_id,
                 recipe_name,
+                work_entry_id,
             } = &game_event.event_type
             {
                 if *event_crafter_id == crafter_id {
@@ -357,6 +359,7 @@ impl GameEvents {
                         crafter_id: *event_crafter_id,
                         structure_id: Some(*structure_id),
                         recipe_name: recipe_name.clone(),
+                        work_entry_id: *work_entry_id,
                     });
                 }
             }
@@ -379,6 +382,7 @@ impl GameEvents {
                         refiner_id: *event_refiner_id,
                         structure_id: None,
                         item_id: *item_id,
+                        work_entry_id: None,
                     });
                 }
             }
@@ -392,6 +396,7 @@ impl GameEvents {
                 refiner_id: event_refiner_id,
                 structure_id,
                 item_id,
+                work_entry_id,
             } = &game_event.event_type
             {
                 if *event_refiner_id == refiner_id {
@@ -402,6 +407,7 @@ impl GameEvents {
                         refiner_id: *event_refiner_id,
                         structure_id: Some(*structure_id),
                         item_id: *item_id,
+                        work_entry_id: *work_entry_id,
                     });
                 }
             }
@@ -498,11 +504,13 @@ pub enum GameEventType {
         refiner_id: i32,
         structure_id: i32,
         item_id: i32,
+        work_entry_id: Option<i32>,
     },
     StructureCraftEvent {
         crafter_id: i32,
         structure_id: i32,
         recipe_name: String,
+        work_entry_id: Option<i32>,
     },
     StructureOperateEvent {
         operator_id: i32,
@@ -557,6 +565,16 @@ pub enum GameEventType {
     },
 }
 
+impl GameEventType {
+    pub fn work_entry_id(&self) -> Option<i32> {
+        match self {
+            GameEventType::StructureRefineEvent { work_entry_id, .. }
+            | GameEventType::StructureCraftEvent { work_entry_id, .. } => *work_entry_id,
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GameCraftEvent {
     pub event_id: i32,
@@ -565,6 +583,7 @@ pub struct GameCraftEvent {
     pub crafter_id: i32,
     pub structure_id: Option<i32>,
     pub recipe_name: String,
+    pub work_entry_id: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +594,7 @@ pub struct GameRefineEvent {
     pub refiner_id: i32,
     pub structure_id: Option<i32>,
     pub item_id: i32,
+    pub work_entry_id: Option<i32>,
 }
 
 #[derive(Debug, Clone)]

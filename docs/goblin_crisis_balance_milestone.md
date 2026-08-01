@@ -35,6 +35,12 @@ raw outcomes, validation record, and limitations are in
 complete: prepared solo victory for every class, prepared-over-basic outcome
 ordering, and two repeated preparation-value signals remain outstanding.
 
+Source-alignment note: Milestone 5 later moved weapons, class equipment,
+supplies, and the 10-point Health Potion from the hero/free-Burrow opening into
+the run-owned Shipwreck and removed the completed starter Burrow. Historical
+balance rows and fixture descriptions below retain the loadout they measured;
+the current runtime loadout is described in the revised “heroes” section.
+
 ## Milestone goal and checkpoint plan
 
 The milestone will turn measurements of the current crisis into a deliberate
@@ -220,21 +226,21 @@ Consequently, current “structure damage” from the personal assault is primar
 wall damage; the baseline must not imply that ordinary buildings were exposed
 when the attacker's targeting rules exclude them.
 
-### Current heroes, villagers, defences, and sanctuary
+### Current heroes, recovered equipment, villagers, defences, and sanctuary
 
 New runs use the following novice hero templates:
 
-| Class | HP | Stamina | Mana | Base damage | Damage span | Defence | Speed | Vision | Runtime starting combat equipment |
+| Class | HP | Stamina | Mana | Base damage | Damage span | Defence | Speed | Vision | Combat equipment recovered from the run-owned Shipwreck |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Warrior | 110 | 110 | 0 | 2 | 2 | 4 | 5 | 3 | Sharpened Stick; runtime-created Copper Helm with defence 3 |
-| Ranger | 80 | 120 | 0 | 1 | 3 | 1 | 7 | 5 | Runtime-created Training Bow with damage 8, attack range 2, accuracy 85, hunting 2 |
+| Warrior | 110 | 110 | 0 | 2 | 2 | 4 | 5 | 3 | Sharpened Stick; Copper Helm with defence 3 |
+| Ranger | 80 | 120 | 0 | 1 | 3 | 1 | 7 | 5 | Sharpened Stick; Training Bow with damage 8, attack range 2, accuracy 85, hunting 2 |
 | Mage | 60 | 100 | 100 | 1 | 2 | 0 | 5 | 4 | Sharpened Stick and 5 Mana |
 
-All three start with equipped Tattered Shirt and Tattered Pants, a Crude Torch
-(equipped off-hand only for a dusk/night spawn), and one runtime-created Health
-Potion with healing 10. That runtime potion value intentionally differs from
-the generic item-template healing value of 50; the baseline records the actual
-starting instance rather than silently treating the YAML value as its effect.
+All three start with only equipped Tattered Shirt and Tattered Pants. The
+Crude Torch, class equipment, Mana, and one runtime-created Health Potion with
+healing 10 are recovered manually from the Shipwreck. That potion value
+intentionally differs from the generic item-template healing value of 50. The
+older balance artifacts retain their then-current “starting item” terminology.
 
 `Human Villager` currently has 500 HP, 10,000 stamina, zero base damage, zero
 damage span, zero defence, zero speed, vision two, and base work 25. A villager
@@ -389,7 +395,7 @@ staged assault probe must never be mistaken for a natural preparation path.
 | Scenario / cohort | Current bounded driver |
 | --- | --- |
 | `passive` / natural | Maintains only existing emergency survival behavior; does not build, recruit, hire, upgrade, or explore voluntarily |
-| `basic_survival` / natural | Existing survival/gathering behavior; builds a Campfire from starting Stick and Resin, with no planned walls, villagers, hires, or sanctuary upgrade |
+| `basic_survival` / natural | Existing survival/gathering behavior; uses the lit starter Campfire, with no planned walls, villagers, hires, or sanctuary upgrade |
 | `prepared_solo` / natural | Attempts up to three Stockades and sanctuary upgrades, has no villagers/hiring, and returns home during Preparing/Ready |
 | `fortified_solo` / natural | Attempts up to six Stockades and sanctuary upgrades, has no villagers/hiring, and returns home during Preparing/Ready |
 | `no_villagers` / natural | Same six-wall policy as fortified, explicitly without recruitment/hiring |
@@ -415,7 +421,7 @@ Monolith relocation also changes the anchor and spawn geometry and is therefore
 reported as a limitation.
 
 The reporting bot previously encoded Stockade as `Stick ×3`, conflicting with
-the authoritative object template's `Log ×3`. Checkpoint 1 corrects only that
+the authoritative object template's former `Log ×3` cost. Checkpoint 1 corrected that
 headless-driver recipe and makes the driver retry a normal `Build` event when a
 combat lock rejected or interrupted the previous attempt. Production recipes,
 costs, structure systems, and the resource economy are unchanged.
@@ -542,7 +548,7 @@ gameplay semantic change.
 | Seeded deterministic repetitions | The bot and matrix order are deterministic, but production systems use `thread_rng` and the runner has no injectable world seed | Record a stable run identifier and repeat bounded runs; disclose that worlds are not bit-identical instead of refactoring production RNG |
 | Prepared and fortified scenarios | Existing content cannot guarantee best gear, repairs, walls, villagers, or sanctuary tiers before a cap | Drive legitimate attempts and report actual snapshots/actions; do not assign a synthetic prepared score or treat the label as achieved state |
 | Natural progression versus assault outcomes | The bounded natural bot path may never combine enough current pressure facts to launch, which would leave combat/disconnect/Safe Logout outcome fields unexercised | Preserve natural rows, add separately flagged staged-attainable-facts probes, never mix their launch probability or time-to-preparation conclusions, and disclose the fixture and changed anchor geometry |
-| Headless Stockade recipe | The reporting bot used `Stick ×3`, while the authoritative Stockade template requires `Log ×3`; a combat-locked Build rejection could also strand a foundation forever | Correct the headless-only recipe and retry normal Build events while the foundation remains incomplete; do not change the template, production build system, resources, or costs |
+| Headless Stockade recipe | The reporting bot used `Stick ×3`, while the authoritative Stockade template then required `Log ×3`; a combat-locked Build rejection could also strand a foundation forever | Correct the headless-only recipe and retry normal Build events while the foundation remains incomplete; later balance changes may adjust the authoritative cost |
 | Helper-supported comparison | One `Bot` controls one player and the existing helper fixture is a focused combat helper, not a complete second-player policy | Keep the label but omit it from the baseline matrix; retain focused helper attribution tests and mark outcome balance insufficient |
 | Adjacent-settlement comparison | There is no bounded driver that develops a second legitimate settlement alongside the owner | Keep the label but omit it; rely only on focused ownership/isolation regression tests, not a fabricated balance row |
 | Total settlement destruction | Personal attackers target human units and blocking walls, not ordinary buildings, storage, or monoliths | Measure exact attributed wall/structure damage that can occur and state the target-selection boundary; do not interpret zero ordinary-building damage as strong defence |

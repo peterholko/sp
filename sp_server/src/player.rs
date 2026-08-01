@@ -18,17 +18,19 @@ use crate::crisis_balance::{
     CrisisBalanceTelemetryState,
 };
 use crate::encounter::Encounter;
-use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent};
+use crate::event::{
+    EventCompleted, GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent,
+};
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
 
-use crate::combat::{AttackOptions, Combat, CombatQuery, CombatQueryItem};
-use crate::effect::{Effect, Effects};
+use crate::combat::{AttackOptions, Combat, CombatEffectsChanged, CombatQuery, CombatQueryItem};
+use crate::effect::{ControlEffectDiminishingReturns, Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
     survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase,
-    DamageRecord, DebugObjs, GameTick, InitialEncounterState, IntroEncounterState,
+    DamageRecord, DebugObjs, EventInProgress, GameTick, InitialEncounterState, IntroEncounterState,
     LogLevelOverrides, Merchant, Monolith, MonolithInvestigation, MonolithProgress,
     NetworkReceiver, ObjQuery, Objectives, PersonalCrisisHistory, PlayerIntroState,
     PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
@@ -45,11 +47,11 @@ use crate::obj::{
     HeroClassProfile, Id, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, Order,
     Personality, PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade,
     State, StateBuilding, StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager,
-    Template, UpdateObj, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    Template, TrueDeath, UpdateObj, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::Recipes;
-use crate::resource::{Resource, Resources};
+use crate::resource::{Resource, ResourceDiscoveries, Resources};
 use crate::safe_logout::{
     initialize_player_presence, is_owner_offline_protected, is_player_offline_protected,
     mark_player_logged_in, object_belongs_to_protected_run, record_player_combat_activity,
@@ -999,6 +1001,7 @@ impl Plugin for PlayerPlugin {
                 new_player_system,
                 login_system,
                 move_system,
+                combo_tracker_timeout_system.before(attack_system),
                 attack_system,
             )
                 .in_set(PlayerInputSet::Handle)
@@ -1103,6 +1106,7 @@ impl Plugin for PlayerPlugin {
         .add_observer(info_monolith_system)
         .add_observer(info_poi_system)
         .add_observer(info_npc_system)
+        .add_observer(combat_effects_changed_observer)
         .insert_resource(player_events)
         .insert_resource(active_infos)
         .insert_resource(start_locations)
@@ -1245,6 +1249,7 @@ fn new_player_system(
         ResMut<CrisisBalanceTelemetryState>,
         ResMut<CrisisBalanceObservationState>,
         ResMut<PersonalCrisisHistory>,
+        ResMut<ResourceDiscoveries>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -1340,6 +1345,7 @@ fn new_player_system(
                         run_intro_state.6.remove(player_id);
                         run_intro_state.7 .0.remove(player_id);
                         run_intro_state.8.by_player.remove(player_id);
+                        run_intro_state.9.clear_player(*player_id);
                         initialize_player_presence(
                             *player_id,
                             clients.is_player_online(*player_id),
@@ -1637,6 +1643,126 @@ fn combo_hints_for_history(
     }
 
     return (matching_combos, available_finisher);
+}
+
+pub(crate) fn combo_chain_cooldown_ticks(chain_length: usize) -> i32 {
+    match chain_length {
+        0 | 1 => ATTACK_COOLDOWN_TICKS,
+        2 => 40,
+        3 => 30,
+        _ => 25,
+    }
+}
+
+fn cooldown_seconds(cooldown_ticks: i32) -> f32 {
+    cooldown_ticks as f32 / TICKS_PER_SEC as f32
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlayerAttackCooldown {
+    attack_tick: i32,
+    cooldown_ticks: i32,
+}
+
+fn attack_is_on_cooldown(
+    cooldowns: &HashMap<i32, PlayerAttackCooldown>,
+    player_id: i32,
+    game_tick: i32,
+) -> bool {
+    cooldowns.get(&player_id).is_some_and(|cooldown| {
+        cooldown.attack_tick > 0
+            && game_tick.saturating_sub(cooldown.attack_tick) < cooldown.cooldown_ticks
+    })
+}
+
+fn record_attack_cooldown(
+    cooldowns: &mut HashMap<i32, PlayerAttackCooldown>,
+    player_id: i32,
+    game_tick: i32,
+    cooldown_ticks: i32,
+) {
+    cooldowns.insert(
+        player_id,
+        PlayerAttackCooldown {
+            attack_tick: game_tick,
+            cooldown_ticks,
+        },
+    );
+}
+
+fn is_first_combo_discovery(
+    discoveries: &mut HashSet<(i32, String)>,
+    source_id: i32,
+    combo_name: &str,
+) -> bool {
+    discoveries.insert((source_id, combo_name.to_string()))
+}
+
+fn combo_finisher_can_fire(
+    available_finisher: Option<&str>,
+    _basic_attack_cooldown_active: bool,
+) -> bool {
+    // Finishers are the payoff for completing a chain and intentionally bypass
+    // the basic-attack cooldown. The finisher itself starts the next cooldown.
+    available_finisher.is_some()
+}
+
+fn combo_tracker_timeout_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    entity_map: Res<EntityObjMap>,
+    mut query: Query<(&PlayerId, &mut crate::combat::ComboTracker)>,
+    target_query: Query<(&Template, &Effects, Option<&CrisisAssaultUnit>)>,
+) {
+    for (player_id, mut tracker) in query.iter_mut() {
+        if !tracker.attacks.is_empty()
+            && game_tick.0.saturating_sub(tracker.last_attack_tick)
+                > crate::combat::COMBO_CHAIN_TIMEOUT_TICKS
+        {
+            let target_id = tracker.target_id;
+            tracker.attacks.clear();
+            tracker.target_id = -1;
+
+            let (enemy_intent, target_effects) = entity_map
+                .get_entity(target_id)
+                .and_then(|entity| target_query.get(entity).ok())
+                .map(|(template, effects, crisis_assault)| {
+                    let mut target_effects = effects
+                        .0
+                        .keys()
+                        .cloned()
+                        .map(Effect::to_str)
+                        .collect::<Vec<_>>();
+                    target_effects.sort();
+                    (
+                        enemy_intent_for_template(&template.0, crisis_assault.is_some()),
+                        target_effects,
+                    )
+                })
+                .unwrap_or_else(|| (String::new(), Vec::new()));
+            send_to_client(
+                player_id.0,
+                ResponsePacket::CombatState {
+                    version: 2,
+                    target_id,
+                    enemy_intent,
+                    attack_history: Vec::new(),
+                    matching_combos: Vec::new(),
+                    available_finisher: None,
+                    target_effects,
+                    stamina_costs: network::StaminaCosts {
+                        quick: 5,
+                        precise: 5,
+                        fierce: 5,
+                        block: 0,
+                    },
+                    abilities: Vec::new(),
+                    counter_hint: String::new(),
+                },
+                &clients,
+            );
+        }
+    }
 }
 
 fn enemy_intent_for_template(template: &str, personal_assault: bool) -> String {
@@ -2131,12 +2257,11 @@ fn add_timed_effect(
     duration_ticks: i32,
     amplifier: f32,
 ) {
-    effects
-        .0
-        .insert(effect.clone(), (duration_ticks, amplifier, 1));
+    let expires_at = game_tick.saturating_add(duration_ticks);
+    effects.0.insert(effect.clone(), (expires_at, amplifier, 1));
     map_events.new(
         obj_id,
-        game_tick + duration_ticks,
+        expires_at,
         VisibleEvent::EffectExpiredEvent { effect },
     );
 }
@@ -2255,13 +2380,22 @@ fn send_combat_state(
     clients: &Res<Clients>,
 ) {
     let (matching_combos, available_finisher) = combo_hints_for_history(&attack_history, templates);
+    let mut target_effects = target
+        .effects
+        .0
+        .keys()
+        .cloned()
+        .map(Effect::to_str)
+        .collect::<Vec<_>>();
+    target_effects.sort();
     let packet = ResponsePacket::CombatState {
-        version: 1,
+        version: 2,
         target_id,
         enemy_intent: enemy_intent_for_template(&target_template, target.crisis_assault.is_some()),
         attack_history: attack_history.clone(),
         matching_combos,
         available_finisher,
+        target_effects,
         stamina_costs: network::StaminaCosts {
             quick: 5,
             precise: 5,
@@ -2272,6 +2406,57 @@ fn send_combat_state(
         counter_hint: counter_hint_for_template(&target_template, &attack_history),
     };
     send_to_client(player_id, packet, clients);
+}
+
+fn combat_effects_changed_observer(
+    event: On<CombatEffectsChanged>,
+    clients: Res<Clients>,
+    entity_map: Res<EntityObjMap>,
+    templates: Res<Templates>,
+    mut query_set: ParamSet<(
+        Query<(Entity, &PlayerId, &crate::combat::ComboTracker)>,
+        Query<CombatQuery>,
+    )>,
+) {
+    let Some(target_entity) = entity_map.get_entity(event.target_id) else {
+        return;
+    };
+    let observers = query_set
+        .p0()
+        .iter()
+        .filter(|(_, player_id, tracker)| {
+            player_id.0 < 1000 && tracker.target_id == event.target_id
+        })
+        .map(|(entity, player_id, tracker)| {
+            (
+                entity,
+                player_id.0,
+                tracker
+                    .attacks
+                    .iter()
+                    .cloned()
+                    .map(|attack| attack.to_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (actor_entity, player_id, attack_history) in observers {
+        let mut combat_query = query_set.p1();
+        let Ok([actor, target]) = combat_query.get_many_mut([actor_entity, target_entity]) else {
+            continue;
+        };
+        send_combat_state(
+            player_id,
+            event.target_id,
+            target.template.0.clone(),
+            attack_history,
+            &actor,
+            &target,
+            &templates,
+            &clients,
+        );
+    }
 }
 
 fn attack_system(
@@ -2286,7 +2471,8 @@ fn attack_system(
     map: Res<Map>,
     player_stats: ResMut<PlayerStats>,
     mut query_set: ParamSet<(Query<CombatQuery>, Query<ObjQuery>)>,
-    mut last_player_attack: Local<HashMap<i32, i32>>,
+    mut last_player_attack: Local<HashMap<i32, PlayerAttackCooldown>>,
+    mut discovered_combos: Local<HashSet<(i32, String)>>,
     mut presence: ResMut<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -2409,8 +2595,7 @@ fn attack_system(
                 }
 
                 // Check global attack cooldown (per-player, not affected by being attacked)
-                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
-                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                if attack_is_on_cooldown(&last_player_attack, *player_id, game_tick.0) {
                     let packet = ResponsePacket::Error {
                         errmsg: "Attack is on cooldown.".to_string(),
                     };
@@ -2435,25 +2620,43 @@ fn attack_system(
                     &target,
                 );
 
-                let mut attack_history = attacker
-                    .combo_tracker
-                    .as_ref()
-                    .filter(|combo_tracker| combo_tracker.target_id == target.id.0)
-                    .map(|combo_tracker| {
-                        combo_tracker
-                            .attacks
-                            .iter()
-                            .map(|attack| attack.clone().to_str())
-                            .collect::<Vec<String>>()
-                    })
-                    .unwrap_or_else(Vec::new);
+                let attack_type_enum = Combat::attack_type_to_enum(attack_type.to_string());
+                let previous_attacks = Combat::live_combo_attacks_before_append(
+                    attacker.combo_tracker.as_deref(),
+                    target.id.0,
+                    game_tick.0,
+                );
+                let mut live_attacks = Combat::next_combo_attacks(
+                    &previous_attacks,
+                    attack_type_enum.clone(),
+                    &templates,
+                );
+                let mut attack_history = live_attacks
+                    .iter()
+                    .cloned()
+                    .map(|attack| attack.to_str())
+                    .collect::<Vec<_>>();
                 let target_template = target.template.0.clone();
 
                 if attack_profile.is_ranged && !ranged_attack_hits(attack_profile, target_distance)
                 {
+                    // A miss does not land a chain step. Keep the UI aligned
+                    // with the authoritative tracker instead of previewing the
+                    // suffix that would have been recorded on a hit.
+                    live_attacks = previous_attacks;
+                    attack_history = live_attacks
+                        .iter()
+                        .cloned()
+                        .map(|attack| attack.to_str())
+                        .collect();
                     attacker.stats.stamina = Some(attacker_stamina - attack_profile.stamina_cost);
                     attacker.last_combat_tick.0 = game_tick.0;
-                    last_player_attack.insert(*player_id, game_tick.0);
+                    record_attack_cooldown(
+                        &mut last_player_attack,
+                        *player_id,
+                        game_tick.0,
+                        ATTACK_COOLDOWN_TICKS,
+                    );
                     record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                     Combat::add_damage_event(
@@ -2470,7 +2673,7 @@ fn attack_system(
                     let packet = ResponsePacket::Attack {
                         source_id: *source_id,
                         attack_type: attack_type.clone(),
-                        cooldown: 5,
+                        cooldown: cooldown_seconds(ATTACK_COOLDOWN_TICKS),
                         stamina_cost: attack_profile.stamina_cost,
                     };
 
@@ -2488,25 +2691,26 @@ fn attack_system(
                     continue;
                 }
 
-                attack_history.push(attack_type.clone());
-
                 // Calculate and process damage
-                let (damage, combo, skill_updated, _countered) =
-                    Combat::process_attack_with_options(
-                        Combat::attack_type_to_enum(attack_type.to_string()),
-                        &mut attacker,
-                        &mut target,
-                        &mut commands,
-                        &templates,
-                        &map,
-                        &mut ids,
-                        &game_tick,
-                        &mut map_events,
-                        AttackOptions {
-                            stamina_cost: attack_profile.stamina_cost,
-                            damage_bonus: attack_profile.damage_bonus,
-                        },
-                    );
+                let (damage, combo, skill_updated, countered) = Combat::process_attack_with_options(
+                    attack_type_enum,
+                    &mut attacker,
+                    &mut target,
+                    &mut commands,
+                    &templates,
+                    &map,
+                    &mut ids,
+                    &game_tick,
+                    &mut map_events,
+                    AttackOptions {
+                        stamina_cost: attack_profile.stamina_cost,
+                        damage_bonus: attack_profile.damage_bonus,
+                    },
+                );
+                if countered.is_some() {
+                    live_attacks.clear();
+                    attack_history.clear();
+                }
 
                 // Add visible damage event to broadcast to everyone nearby
                 Combat::add_damage_event(
@@ -2522,14 +2726,20 @@ fn attack_system(
 
                 // Track player attack cooldown
                 attacker.last_combat_tick.0 = game_tick.0;
-                last_player_attack.insert(*player_id, game_tick.0);
+                let effective_cooldown = combo_chain_cooldown_ticks(live_attacks.len());
+                record_attack_cooldown(
+                    &mut last_player_attack,
+                    *player_id,
+                    game_tick.0,
+                    effective_cooldown,
+                );
                 record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {
                     source_id: *source_id,
                     attack_type: attack_type.clone(),
-                    cooldown: 5,
+                    cooldown: cooldown_seconds(effective_cooldown),
                     stamina_cost: attack_profile.stamina_cost,
                 };
 
@@ -2547,7 +2757,7 @@ fn attack_system(
 
                 // Update skill
                 if let Some(skill_updated) = skill_updated {
-                    if let Some(mut attacker_skills) = attacker.skills {
+                    if let Some(ref mut attacker_skills) = attacker.skills {
                         match Skill::from_str(&skill_updated.xp_type) {
                             Some(skill_name) => {
                                 attacker_skills.update(
@@ -2591,8 +2801,7 @@ fn attack_system(
                     continue;
                 };
 
-                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
-                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                if attack_is_on_cooldown(&last_player_attack, *player_id, game_tick.0) {
                     let packet = ResponsePacket::Error {
                         errmsg: "Ability is on cooldown.".to_string(),
                     };
@@ -2655,7 +2864,12 @@ fn attack_system(
                         _ => {}
                     }
 
-                    last_player_attack.insert(*player_id, game_tick.0);
+                    record_attack_cooldown(
+                        &mut last_player_attack,
+                        *player_id,
+                        game_tick.0,
+                        ATTACK_COOLDOWN_TICKS,
+                    );
                     send_to_client(
                         *player_id,
                         ability_response_packet(*source_id, ability, ability_cost),
@@ -2910,7 +3124,12 @@ fn attack_system(
                     AbilityEffect::Ward => {}
                 }
 
-                last_player_attack.insert(*player_id, game_tick.0);
+                record_attack_cooldown(
+                    &mut last_player_attack,
+                    *player_id,
+                    game_tick.0,
+                    ATTACK_COOLDOWN_TICKS,
+                );
                 if ability_is_damaging(ability) {
                     record_player_combat_activity(*player_id, game_tick.0, &mut presence);
                 }
@@ -2953,6 +3172,24 @@ fn attack_system(
                 };
 
                 let entities = [attacker_entity, target_entity];
+
+                let adjacent_npc_entities = {
+                    let obj_query = query_set.p1();
+                    let Ok(attacker_obj) = obj_query.get(attacker_entity) else {
+                        continue;
+                    };
+                    obj_query
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.entity != target_entity
+                                && candidate.player_id.0 >= 1000
+                                && candidate.class.0 == CLASS_UNIT
+                                && *candidate.state != State::Dead
+                                && Map::dist(*attacker_obj.pos, *candidate.pos) <= 1
+                        })
+                        .map(|candidate| candidate.entity)
+                        .collect::<Vec<_>>()
+                };
 
                 let mut combat_query = query_set.p0();
                 let Ok([mut attacker, mut target]) = combat_query.get_many_mut(entities) else {
@@ -3050,7 +3287,12 @@ fn attack_system(
                     .unwrap_or_default();
                 let (_matching_combos, available_finisher) =
                     combo_hints_for_history(&attack_history, &templates);
-                if available_finisher.is_none() {
+                let basic_attack_cooldown_active =
+                    attack_is_on_cooldown(&last_player_attack, *player_id, game_tick.0);
+                if !combo_finisher_can_fire(
+                    available_finisher.as_deref(),
+                    basic_attack_cooldown_active,
+                ) {
                     let packet = ResponsePacket::Error {
                         errmsg: "No combo is ready.".to_string(),
                     };
@@ -3074,6 +3316,9 @@ fn attack_system(
 
                 let target_template = target.template.0.clone();
 
+                // Intentionally no ATTACK_COOLDOWN_TICKS gate here: a ready
+                // finisher fires immediately after the chain's final basic
+                // attack. Executing it still starts the next basic cooldown.
                 // Calculate and process damage
                 let (damage, combo, skill_updated) = Combat::process_combo(
                     &mut attacker,
@@ -3101,14 +3346,19 @@ fn attack_system(
                 );
 
                 // Track player attack cooldown
-                last_player_attack.insert(*player_id, game_tick.0);
+                record_attack_cooldown(
+                    &mut last_player_attack,
+                    *player_id,
+                    game_tick.0,
+                    ATTACK_COOLDOWN_TICKS,
+                );
                 record_player_combat_activity(*player_id, game_tick.0, &mut presence);
 
                 // Response to client with attack response packet
                 let packet = ResponsePacket::Attack {
                     source_id: *source_id,
                     attack_type: "combo".to_string(),
-                    cooldown: 5,
+                    cooldown: cooldown_seconds(ATTACK_COOLDOWN_TICKS),
                     stamina_cost: 5,
                 };
 
@@ -3124,7 +3374,9 @@ fn attack_system(
                     &clients,
                 );
 
-                if let Some(combo_name) = combo.clone() {
+                if let Some(combo_name) = combo.clone().filter(|combo_name| {
+                    is_first_combo_discovery(&mut discovered_combos, *source_id, combo_name)
+                }) {
                     let discovery_packet = ResponsePacket::DiscoveryEvent {
                         version: 1,
                         discovery_type: "combat".to_string(),
@@ -3140,7 +3392,7 @@ fn attack_system(
 
                 // Update skill
                 if let Some(skill_updated) = skill_updated {
-                    if let Some(mut attacker_skills) = attacker.skills {
+                    if let Some(ref mut attacker_skills) = attacker.skills {
                         match Skill::from_str(&skill_updated.xp_type) {
                             Some(skill_name) => {
                                 attacker_skills.update(
@@ -3153,6 +3405,72 @@ fn attack_system(
                                 warn!(
                                     "No combat skill mapped for weapon subclass '{}', skipping XP gain",
                                     skill_updated.xp_type
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let combo_area = combo.as_deref().and_then(|combo_name| {
+                    Combat::combo_area_profile(combo_name).and_then(|profile| {
+                        templates
+                            .combo_templates
+                            .get(combo_name)
+                            .cloned()
+                            .map(|template| (combo_name.to_string(), template, profile))
+                    })
+                });
+                drop(attacker);
+                drop(target);
+                drop(combat_query);
+
+                if let Some((combo_name, combo_template, profile)) = combo_area {
+                    for secondary_entity in adjacent_npc_entities {
+                        let mut combat_query = query_set.p0();
+                        let Ok([mut secondary_attacker, mut secondary]) =
+                            combat_query.get_many_mut([attacker_entity, secondary_entity])
+                        else {
+                            continue;
+                        };
+                        if !Combat::valid_combo_secondary(
+                            *secondary_attacker.pos,
+                            *target_id,
+                            &secondary,
+                        ) || object_belongs_to_protected_run(secondary.id.0, &ids, &presence)
+                        {
+                            continue;
+                        }
+
+                        let (secondary_damage, secondary_skill) = Combat::process_combo_secondary(
+                            &mut secondary_attacker,
+                            &mut secondary,
+                            &combo_template,
+                            &profile,
+                            &mut commands,
+                            &templates,
+                            &map,
+                            &game_tick,
+                            &mut map_events,
+                        );
+                        Combat::add_damage_event(
+                            game_tick.0,
+                            "combo".to_string(),
+                            secondary_damage,
+                            Some(combo_name.clone()),
+                            false,
+                            &secondary_attacker,
+                            &secondary,
+                            &mut map_events,
+                        );
+
+                        if let (Some(skill_updated), Some(mut attacker_skills)) =
+                            (secondary_skill, secondary_attacker.skills)
+                        {
+                            if let Some(skill_name) = Skill::from_str(&skill_updated.xp_type) {
+                                attacker_skills.update(
+                                    skill_name,
+                                    skill_updated.xp,
+                                    &templates.skill_templates,
                                 );
                             }
                         }
@@ -3212,8 +3530,7 @@ fn attack_system(
                 }
 
                 // Check cooldown
-                let last_attack = last_player_attack.get(player_id).copied().unwrap_or(0);
-                if last_attack > 0 && (game_tick.0 - last_attack) < ATTACK_COOLDOWN_TICKS {
+                if attack_is_on_cooldown(&last_player_attack, *player_id, game_tick.0) {
                     let packet = ResponsePacket::Error {
                         errmsg: "Attack is on cooldown.".to_string(),
                     };
@@ -3259,12 +3576,17 @@ fn attack_system(
                     stance_amp,
                 );
 
-                last_player_attack.insert(*player_id, game_tick.0);
+                record_attack_cooldown(
+                    &mut last_player_attack,
+                    *player_id,
+                    game_tick.0,
+                    ATTACK_COOLDOWN_TICKS,
+                );
 
                 let packet = ResponsePacket::Attack {
                     source_id: *source_id,
                     attack_type: "block".to_string(),
-                    cooldown: 5,
+                    cooldown: cooldown_seconds(ATTACK_COOLDOWN_TICKS),
                     stamina_cost: 0,
                 };
 
@@ -3289,6 +3611,7 @@ fn gather_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     hero_query: Query<(&Position, &State, &mut Inventory, Option<&LastCombatTick>)>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -3333,38 +3656,34 @@ fn gather_system(
                 // gets priority *if* its resource is actually on the tile; otherwise we
                 // fall through to plant-picking / forage so the player isn't forced to
                 // unequip just to grab grapes or berries with a sword in hand.
-                let tool_resource_type = hero_inventory.get_equipped_main_hand().and_then(|t| {
-                    if t.attrs.get(&AttrKey::Mining).is_some() {
-                        Some(ORE.to_string())
-                    } else if t.attrs.get(&AttrKey::Logging).is_some() {
-                        Some(LOG.to_string())
-                    } else if t.attrs.get(&AttrKey::Stonecutting).is_some() {
-                        Some(STONE.to_string())
-                    } else if t.attrs.get(&AttrKey::Fishing).is_some() {
-                        Some(FISH.to_string())
-                    } else if t.attrs.get(&AttrKey::Farming).is_some() {
-                        Some(FOOD.to_string())
-                    } else if t.attrs.get(&AttrKey::Foraging).is_some() {
-                        Some(PLANT.to_string())
-                    } else if t.attrs.get(&AttrKey::Hunting).is_some() {
-                        Some(GAME_ANIMAL.to_string())
-                    } else {
-                        None
-                    }
+                let tool_resource_type = hero_inventory.get_equipped_main_hand().and_then(|tool| {
+                    item::gather_resource_type_for_tool(&tool).map(str::to_string)
                 });
 
                 // Decide what to do, in priority order:
                 //   1. Tool's preferred resource is on the tile -> gather that.
                 //   2. A Plant resource (grapes, berries) is on the tile -> pick it.
                 //   3. Nothing specific -> terrain-based forage.
-                let event_type = if let Some(rt) = tool_resource_type
-                    .filter(|rt| Resource::is_valid_type(rt.clone(), *hero_pos, &resources))
-                {
+                let event_type = if let Some(rt) = tool_resource_type.filter(|rt| {
+                    Resource::is_valid_type_for_player(
+                        rt.clone(),
+                        *hero_pos,
+                        &resources,
+                        &discoveries,
+                        *player_id,
+                    )
+                }) {
                     GameEventType::GatherEvent {
                         gatherer_id: hero_id,
                         res_type: rt,
                     }
-                } else if Resource::is_valid_type(PLANT.to_string(), *hero_pos, &resources) {
+                } else if Resource::is_valid_type_for_player(
+                    PLANT.to_string(),
+                    *hero_pos,
+                    &resources,
+                    &discoveries,
+                    *player_id,
+                ) {
                     GameEventType::GatherEvent {
                         gatherer_id: hero_id,
                         res_type: PLANT.to_string(),
@@ -3375,6 +3694,18 @@ fn gather_system(
                     }
                 };
 
+                let gather_duration = match &event_type {
+                    GameEventType::GatherEvent { res_type, .. } => hero_inventory
+                        .get_equipped_tool_for_res_type(res_type)
+                        .and_then(|tool| {
+                            item::required_tool_attr_for_res_type(res_type)
+                                .map(|attr| tool.attr_num(&attr))
+                        })
+                        .map(|rating| item::gather_duration_ticks(GATHER_TIME_SEC, rating))
+                        .unwrap_or(GATHER_TIME_SEC * TICKS_PER_SEC),
+                    _ => GATHER_TIME_SEC * TICKS_PER_SEC,
+                };
+
                 commands.trigger(StateChange {
                     entity: hero_entity,
                     new_state: State::Gathering,
@@ -3383,7 +3714,7 @@ fn gather_system(
                 let event = GameEvent {
                     event_id: ids.new_map_event_id(),
                     start_tick: game_tick.0,
-                    run_tick: game_tick.0 + GATHER_TIME_SEC * TICKS_PER_SEC,
+                    run_tick: game_tick.0 + gather_duration,
                     event_type,
                 };
 
@@ -3413,6 +3744,7 @@ fn gather_farm_refine_craft_system(
     mut map_events: ResMut<MapEvents>,
     game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     active_infos: ResMut<ActiveInfos>,
@@ -3443,7 +3775,8 @@ fn gather_farm_refine_craft_system(
                     continue;
                 };
 
-                let nearby_resources = Resource::get_nearby_resources(*hero.pos, &resources);
+                let nearby_resources =
+                    Resource::get_nearby_resources(*hero.pos, &resources, &discoveries, *player_id);
 
                 let nearby_resources_packet = ResponsePacket::NearbyResources {
                     data: nearby_resources,
@@ -3790,7 +4123,14 @@ fn refine_system(
                     .refine_skill_req
                     .expect("Missing refine skill req");
 
-                if !hero_skills.has_skill_level(refine_skill, refine_skill_req) {
+                let refine_skill_allowed = Skill::from_str(&refine_skill).is_some_and(|skill| {
+                    hero_skills.has_proficiency_requirement(
+                        skill,
+                        refine_skill_req,
+                        &templates.skill_templates,
+                    )
+                });
+                if !refine_skill_allowed {
                     let packet = ResponsePacket::Error {
                         errmsg: "Insufficient refine skill level".to_string(),
                     };
@@ -3845,7 +4185,7 @@ fn refine_system(
                     continue;
                 };
 
-                let Ok((_hero_pos, hero_state, hero_inventory, _hero_skills, last_combat_tick)) =
+                let Ok((_hero_pos, hero_state, hero_inventory, hero_skills, last_combat_tick)) =
                     hero_query.get(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
@@ -3865,7 +4205,7 @@ fn refine_system(
                     continue;
                 }
 
-                let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                let Some(recipe) = recipes.get_for_owner_by_name(*player_id, recipe_name) else {
                     error!("Invalid recipe name {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
                         errmsg: "Invalid recipe".to_string(),
@@ -3878,6 +4218,14 @@ fn refine_system(
                     error!("Recipe requires a crafting structure {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
                         errmsg: "Recipe requires a crafting structure".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !recipe.skill_requirement_met(hero_skills, &templates) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Insufficient crafting skill level".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -3949,6 +4297,7 @@ fn structure_refine_system(
         Option<&LastCombatTick>,
     )>,
     skills_query: Query<&mut Skills>,
+    template_query: Query<&Template>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -4026,6 +4375,14 @@ fn structure_refine_system(
                     continue;
                 }
 
+                if !Structure::is_built(*structure_state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Structure is not active".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Hero and Structure on the same location
                 if hero_pos != structure_pos {
                     error!("Hero and Structure are not on the same location");
@@ -4041,6 +4398,26 @@ fn structure_refine_system(
                     error!("Cannot find item for {:?}", item_id);
                     continue;
                 };
+
+                let Ok(structure_template) = template_query.get(structure_entity) else {
+                    error!("Cannot find structure template for {:?}", structure_entity);
+                    continue;
+                };
+                let station_template = templates.obj_templates.get(structure_template.0.clone());
+                let supports_item = station_template.refine.as_ref().is_some_and(|types| {
+                    types.iter().any(|item_type| {
+                        item_type == &item.name
+                            || item_type == &item.class
+                            || item_type == &item.subclass
+                    })
+                });
+                if !supports_item {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "This structure cannot refine that item".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
 
                 if *hero_state == State::Refining {
                     let packet = ResponsePacket::Error {
@@ -4062,7 +4439,14 @@ fn structure_refine_system(
                     .refine_skill_req
                     .expect("Missing refine skill req");
 
-                if !hero_skills.has_skill_level(refine_skill, refine_skill_req) {
+                let refine_skill_allowed = Skill::from_str(&refine_skill).is_some_and(|skill| {
+                    hero_skills.has_proficiency_requirement(
+                        skill,
+                        refine_skill_req,
+                        &templates.skill_templates,
+                    )
+                });
+                if !refine_skill_allowed {
                     let packet = ResponsePacket::Error {
                         errmsg: "Insufficient refine skill level".to_string(),
                     };
@@ -4088,6 +4472,7 @@ fn structure_refine_system(
                         refiner_id: hero_id,
                         structure_id: *structure_id,
                         item_id: *item_id,
+                        work_entry_id: None,
                     },
                 };
 
@@ -4167,7 +4552,23 @@ fn structure_refine_system(
                     continue;
                 }
 
-                let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                if !Structure::is_built(*structure_state) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Structure is not active".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if hero_pos != structure_pos {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Must be on structure to craft".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                let Some(recipe) = recipes.get_for_owner_by_name(*player_id, recipe_name) else {
                     error!("Invalid recipe name {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
                         errmsg: "Invalid recipe".to_string(),
@@ -4175,6 +4576,30 @@ fn structure_refine_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 };
+
+                let Ok(structure_template) = template_query.get(structure_entity) else {
+                    error!("Cannot find structure template for {:?}", structure_entity);
+                    continue;
+                };
+                if !recipe.supports_structure(&structure_template.0) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Recipe is not compatible with this structure".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                let Ok(hero_skills) = skills_query.get(hero_entity) else {
+                    error!("Cannot find hero skills for {:?}", hero_entity);
+                    continue;
+                };
+                if !recipe.skill_requirement_met(hero_skills, &templates) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Insufficient crafting skill level".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
 
                 if !structure_inventory.has_reqs(recipe.req.clone()) {
                     error!("Insufficient resources to craft {:?}", *recipe_name);
@@ -4203,6 +4628,7 @@ fn structure_refine_system(
                         crafter_id: hero_id,
                         structure_id: *structure_id,
                         recipe_name: recipe_name.clone(),
+                        work_entry_id: None,
                     },
                 };
 
@@ -5400,6 +5826,7 @@ fn info_tile_system(
     clients: Res<Clients>,
     map: Res<Map>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     survey_history: Res<SurveyHistory>,
     terrain_features: Res<TerrainFeatures>,
     obj_query: Query<ObjQuery>,
@@ -5436,6 +5863,8 @@ fn info_tile_system(
                     unrevealed: Resource::num_unrevealed_on_tile(
                         Position { x: *x, y: *y },
                         &resources,
+                        &discoveries,
+                        *player_id,
                     ),
                     sanctuary: sanctuary,
                     passable: Map::is_passable(*x, *y, &map),
@@ -5445,7 +5874,12 @@ fn info_tile_system(
                         Position { x: *x, y: *y },
                         &survey_history,
                     ),
-                    resources: Resource::get_on_tile(Position { x: *x, y: *y }, &resources),
+                    resources: Resource::get_on_tile(
+                        Position { x: *x, y: *y },
+                        &resources,
+                        &discoveries,
+                        *player_id,
+                    ),
                     terrain_features: TerrainFeature::get_by_tile(
                         Position { x: *x, y: *y },
                         &terrain_features,
@@ -5464,7 +5898,12 @@ fn info_tile_system(
                     x: *x,
                     y: *y,
                     name: Map::tile_name(tile_type),
-                    resources: Resource::get_on_tile(Position { x: *x, y: *y }, &resources),
+                    resources: Resource::get_on_tile(
+                        Position { x: *x, y: *y },
+                        &resources,
+                        &discoveries,
+                        *player_id,
+                    ),
                 };
 
                 send_to_client(*player_id, info_tile_resources_packet, &clients);
@@ -7032,6 +7471,7 @@ fn order_gather_system(
     mut events: ResMut<PlayerEvents>,
     mut map_events: ResMut<MapEvents>,
     resources: Res<Resources>,
+    discoveries: Res<ResourceDiscoveries>,
     templates: Res<Templates>,
     query: Query<CoreQuery>,
     structure_query: Query<
@@ -7089,7 +7529,13 @@ fn order_gather_system(
                     continue;
                 }
 
-                if !Resource::is_valid_type(res_type.to_string(), *hero.pos, &resources) {
+                if !Resource::is_valid_type_for_player(
+                    res_type.to_string(),
+                    *hero.pos,
+                    &resources,
+                    &discoveries,
+                    *player_id,
+                ) {
                     error!("Invalid resource type {:?}", res_type);
                     let packet = ResponsePacket::Error {
                         errmsg: "Invalid resource type".to_string(),
@@ -7325,6 +7771,7 @@ fn create_foundation_system(
                         base_vision: None,
                     },
                     effects: Effects(HashMap::new()),
+                    control_effect_dr: ControlEffectDiminishingReturns::default(),
                     inventory: Inventory {
                         owner: structure_id,
                         items: Vec::new(),
@@ -7892,11 +8339,28 @@ fn activate_system(
     entity_map: Res<EntityObjMap>,
     ids: Res<Ids>,
     templates: Res<Templates>,
-    mut query: Query<(&PlayerId, &Position, &Template, &State, &mut Inventory)>,
+    mut query: Query<(
+        &PlayerId,
+        &Position,
+        &Template,
+        &Subclass,
+        &State,
+        &Stats,
+        &mut Inventory,
+        Option<&StateDead>,
+        Option<&TrueDeath>,
+    )>,
     campfire_query: Query<&Campfire>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
+    let mut pending_activations: HashSet<i32> = map_events
+        .values()
+        .filter_map(|event| match &event.event_type {
+            VisibleEvent::ActivateEvent { structure_id } => Some(*structure_id),
+            _ => None,
+        })
+        .collect();
 
     for (event_id, event) in events.iter() {
         match event {
@@ -7926,12 +8390,26 @@ fn activate_system(
                 };
 
                 let Ok(
-                    [(_, hero_pos, _, _, mut hero_inventory), (
+                    [(
+                        hero_player_id,
+                        hero_pos,
+                        _,
+                        hero_subclass,
+                        hero_state,
+                        hero_stats,
+                        mut hero_inventory,
+                        hero_dead,
+                        hero_true_death,
+                    ), (
                         structure_player_id,
                         structure_pos,
                         structure_template,
+                        structure_subclass,
                         structure_state,
+                        structure_stats,
                         structure_inventory,
+                        structure_dead,
+                        structure_true_death,
                     )],
                 ) = query.get_many_mut([hero_entity, structure_entity])
                 else {
@@ -7942,20 +8420,73 @@ fn activate_system(
                     continue;
                 };
 
-                // Check if hero is on the same pos as structure
-                if hero_pos != structure_pos {
-                    error!("Hero is not nearby the structure {:?}", *structure_id);
+                if hero_player_id.0 != *player_id
+                    || *hero_subclass != Subclass::Hero
+                    || hero_dead.is_some()
+                    || hero_true_death.is_some()
+                    || hero_stats.hp <= 0
+                    || !hero_state.is_alive()
+                {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Hero must be nearby the structure to activate it".to_string(),
+                        errmsg: "Only your living hero can light a Campfire".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
 
-                if structure_player_id.0 != *player_id {
+                if *hero_state != State::None {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Finish the current action before lighting a Campfire".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                let is_standalone_campfire = *structure_subclass == Subclass::Campfire;
+                // A living hero can tend a standalone Campfire from its tile
+                // or any adjacent hex. Preserve exact-tile activation for
+                // other fire-capable owned structures such as Shelter Tents.
+                let out_of_range = if is_standalone_campfire {
+                    Map::dist(*hero_pos, *structure_pos) > 1
+                } else {
+                    hero_pos != structure_pos
+                };
+                if out_of_range {
+                    error!("Hero is not nearby the structure {:?}", *structure_id);
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Hero must be on or adjacent to the Campfire to light it"
+                            .to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if structure_player_id.0 != *player_id && !is_standalone_campfire {
                     error!("Structure not owned by player {:?}", *player_id);
                     let packet = ResponsePacket::Error {
                         errmsg: "Structure not owned by player".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                let structure_template_data =
+                    templates.obj_templates.get(structure_template.0.clone());
+                if !structure_template_data.campfire.unwrap_or(false) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "This structure cannot be lit".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if structure_dead.is_some()
+                    || structure_true_death.is_some()
+                    || structure_stats.hp <= 0
+                    || !structure_state.is_alive()
+                {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "A destroyed Campfire cannot be lit".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -7965,6 +8496,14 @@ fn activate_system(
                     error!("Structure is not in None state {:?}", *structure_id);
                     let packet = ResponsePacket::Error {
                         errmsg: "Structure cannot be upgraded in this state.".to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if pending_activations.contains(structure_id) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: "Campfire is already being lit".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -8004,19 +8543,16 @@ fn activate_system(
 
                 hero_inventory.update_durability(ignition_tool.id, 1);
 
-                let structure_template = templates.obj_templates.get(structure_template.0.clone());
+                let activate_event = VisibleEvent::ActivateEvent {
+                    structure_id: *structure_id,
+                };
 
-                if structure_template.campfire.unwrap_or(false) {
-                    let activate_event = VisibleEvent::ActivateEvent {
-                        structure_id: *structure_id,
-                    };
-
-                    map_events.new(
-                        hero_id,
-                        game_tick.0 + 1, // in the future
-                        activate_event,
-                    );
-                }
+                map_events.new(
+                    hero_id,
+                    game_tick.0 + 1, // in the future
+                    activate_event,
+                );
+                pending_activations.insert(*structure_id);
             }
             _ => {}
         }
@@ -8158,9 +8694,14 @@ fn prospect_system(
                     new_state: State::Prospecting,
                 });
 
-                map_events.new(hero.id.0, game_tick.0 + 20, VisibleEvent::ProspectEvent);
+                let prospect_time = 5 * TICKS_PER_SEC;
+                map_events.new(
+                    hero.id.0,
+                    game_tick.0 + prospect_time,
+                    VisibleEvent::ProspectEvent,
+                );
 
-                let packet = ResponsePacket::Prospect { prospect_time: 20 };
+                let packet = ResponsePacket::Prospect { prospect_time };
                 send_to_client(*player_id, packet, &clients);
             }
             _ => {}
@@ -8226,6 +8767,11 @@ fn investigate_system(
                     continue;
                 }
 
+                if combat_locked(hero.last_combat_tick, game_tick.0) {
+                    send_combat_locked_error(*player_id, &clients);
+                    continue;
+                }
+
                 if is_discovery_action_state(hero.state) {
                     let packet = ResponsePacket::Error {
                         errmsg: "Already surveying, prospecting, or investigating".to_string(),
@@ -8267,14 +8813,14 @@ fn investigate_system(
 
                 map_events.new(
                     hero.id.0,
-                    game_tick.0 + 20,
+                    game_tick.0 + INVESTIGATE_TICKS,
                     VisibleEvent::InvestigateEvent {
                         target_id: *target_id,
                     },
                 );
 
                 let packet = ResponsePacket::Investigate {
-                    investigate_time: 20,
+                    investigate_time: INVESTIGATE_TICKS,
                 };
                 send_to_client(*player_id, packet, &clients);
             }
@@ -9005,7 +9551,8 @@ fn info_craft_system(
                 let mut crafting_item = None;
 
                 if let Some(crafting_event) = game_events.get_craft_event(*crafter_id) {
-                    let Some(recipe) = recipes.get_by_name(crafting_event.recipe_name.clone())
+                    let Some(recipe) =
+                        recipes.get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                     else {
                         error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                         continue;
@@ -9028,7 +9575,7 @@ fn info_craft_system(
                 let packet = ResponsePacket::InfoCraft {
                     crafter_id: *crafter_id,
                     structure_id: None,
-                    recipes: recipes.get_basic_recipes_packet(),
+                    recipes: recipes.get_basic_recipes_packet(*player_id),
                     items: items,
                     crafting_item: crafting_item,
                 };
@@ -9103,7 +9650,8 @@ fn info_structure_craft_system(
                 let mut crafting_item = None;
 
                 if let Some(crafting_event) = game_events.get_structure_craft_event(hero_id) {
-                    let Some(recipe) = recipes.get_by_name(crafting_event.recipe_name.clone())
+                    let Some(recipe) =
+                        recipes.get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                     else {
                         error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                         continue;
@@ -9223,8 +9771,8 @@ fn info_structure_queue_system(
                         if let Some(crafting_event) =
                             game_events.get_structure_craft_event(work_entry.worker_id)
                         {
-                            let Some(recipe) =
-                                recipes.get_by_name(crafting_event.recipe_name.clone())
+                            let Some(recipe) = recipes
+                                .get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                             else {
                                 error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                                 continue;
@@ -9577,18 +10125,47 @@ fn order_operate_system(
     }
 }
 
+fn queued_craft_inputs_available(
+    inventory: &Inventory,
+    work_queue: &WorkQueue,
+    new_recipe: &crate::recipe::Recipe,
+    recipes: &Recipes,
+    owner: i32,
+) -> bool {
+    let mut available_inventory = inventory.clone();
+
+    for entry in work_queue
+        .0
+        .iter()
+        .filter(|entry| entry.work_type == WorkType::Craft)
+    {
+        let Some(recipe_name) = entry.recipe_name.as_deref() else {
+            return false;
+        };
+        let Some(recipe) = recipes.get_for_owner_by_name(owner, recipe_name) else {
+            return false;
+        };
+        if available_inventory.try_consume_reqs(&recipe.req).is_none() {
+            return false;
+        }
+    }
+
+    available_inventory.has_reqs(new_recipe.req.clone())
+}
+
 fn structure_queue_system(
+    mut commands: Commands,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     mut events: ResMut<PlayerEvents>,
-    game_events: Res<GameEvents>,
+    mut game_events: ResMut<GameEvents>,
     clients: Res<Clients>,
     recipes: Res<Recipes>,
     templates: Res<Templates>,
     mut active_infos: ResMut<ActiveInfos>,
     villager_query: Query<VillagerQuery, With<SubclassVillager>>,
     mut structure_query: Query<StructureQuery, With<ClassStructure>>,
-    ids: Res<Ids>,
+    mut ids: ResMut<Ids>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -9644,8 +10221,19 @@ fn structure_queue_system(
                     continue;
                 }
 
+                if !Structure::is_built(*structure.state) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Structure is not active".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 info!("Adding Order Craft to {:?}", structure_id);
-                let Some(recipe) = recipes.get_by_name(recipe_name.clone()) else {
+                let Some(recipe) = recipes.get_for_owner_by_name(*player_id, recipe_name) else {
                     error!("Invalid recipe name {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
                         errmsg: "Invalid recipe".to_string(),
@@ -9653,6 +10241,17 @@ fn structure_queue_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 };
+
+                if !recipe.supports_structure(&structure.template.0) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Recipe is not compatible with this structure".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
 
                 if structure.work_queue.0.iter().count() >= MAX_CRAFTING_QUEUE {
                     info!(
@@ -9666,11 +10265,17 @@ fn structure_queue_system(
                     continue;
                 }
 
-                //TODO consider if checking reqs is required here
-                if structure.inventory.has_reqs(recipe.req) {
+                if queued_craft_inputs_available(
+                    &structure.inventory,
+                    &structure.work_queue,
+                    &recipe,
+                    &recipes,
+                    *player_id,
+                ) {
                     info!("Adding CraftingEntry to {:?} queue", structure_id);
 
                     let work_entry = WorkEntry {
+                        entry_id: ids.new_map_event_id(),
                         worker_id: -1,
                         work_type: WorkType::Craft,
                         work_status: WorkStatus::Idle,
@@ -9695,8 +10300,8 @@ fn structure_queue_system(
                             if let Some(crafting_event) =
                                 game_events.get_craft_event(work_entry.worker_id)
                             {
-                                let Some(recipe) =
-                                    recipes.get_by_name(crafting_event.recipe_name.clone())
+                                let Some(recipe) = recipes
+                                    .get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                                 else {
                                     error!(
                                         "Cannot find recipe for {:?}",
@@ -9783,12 +10388,77 @@ fn structure_queue_system(
                     continue;
                 }
 
+                if !Structure::is_built(*structure.state) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Structure is not active".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                if structure.work_queue.0.len() >= MAX_CRAFTING_QUEUE {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Work queue is full".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 let Some(refine_item) = structure.inventory.get_by_id(*refine_item_id) else {
                     error!("Cannot find item for {:?}", *refine_item_id);
                     continue;
                 };
 
+                let structure_template = templates.obj_templates.get(structure.template.0.clone());
+                let supports_item = structure_template.refine.as_ref().is_some_and(|types| {
+                    types.iter().any(|item_type| {
+                        item_type == &refine_item.name
+                            || item_type == &refine_item.class
+                            || item_type == &refine_item.subclass
+                    })
+                });
+                let item_is_refineable =
+                    Item::find_template(refine_item.name.clone(), &templates.item_templates)
+                        .is_some_and(|template| template.produces.is_some());
+                if !supports_item || !item_is_refineable {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "This structure cannot refine that item".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                let reserved_quantity = structure
+                    .work_queue
+                    .0
+                    .iter()
+                    .filter(|entry| {
+                        entry.work_type == WorkType::Refine
+                            && entry.refine_item_id == Some(*refine_item_id)
+                    })
+                    .count() as i32;
+                if reserved_quantity >= refine_item.quantity {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "All units in that stack are already queued".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 let work_entry = WorkEntry {
+                    entry_id: ids.new_map_event_id(),
                     worker_id: -1,
                     work_type: WorkType::Refine,
                     work_status: WorkStatus::Idle,
@@ -9813,8 +10483,8 @@ fn structure_queue_system(
                         if let Some(crafting_event) =
                             game_events.get_craft_event(work_entry.worker_id)
                         {
-                            let Some(recipe) =
-                                recipes.get_by_name(crafting_event.recipe_name.clone())
+                            let Some(recipe) = recipes
+                                .get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                             else {
                                 error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                                 continue;
@@ -9894,7 +10564,52 @@ fn structure_queue_system(
                     continue;
                 }
 
-                structure.work_queue.0.remove(*index as usize);
+                let Some(work_entry) = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| structure.work_queue.0.get(index))
+                    .cloned()
+                else {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Invalid work queue entry".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                };
+
+                let timed_events = game_events
+                    .iter()
+                    .filter_map(|(event_id, event)| {
+                        (event.event_type.work_entry_id() == Some(work_entry.entry_id))
+                            .then_some(*event_id)
+                    })
+                    .collect::<Vec<_>>();
+                for event_id in timed_events {
+                    game_events.remove(&event_id);
+                }
+
+                if work_entry.worker_id != -1 {
+                    if let Some(worker_entity) = entity_map.get_entity(work_entry.worker_id) {
+                        commands.trigger(StateChange {
+                            entity: worker_entity,
+                            new_state: State::None,
+                        });
+                        commands.entity(worker_entity).remove::<EventInProgress>();
+                        commands.entity(worker_entity).insert(EventCompleted {
+                            event_id: Uuid::new_v4(),
+                            event_type: "work_queue_cancelled".to_string(),
+                            at_tick: game_tick.0,
+                            success: false,
+                        });
+                    }
+                }
+
+                structure
+                    .work_queue
+                    .0
+                    .retain(|entry| entry.entry_id != work_entry.entry_id);
 
                 let mut work_queue_packet = Vec::new();
 
@@ -9907,8 +10622,8 @@ fn structure_queue_system(
                         if let Some(crafting_event) =
                             game_events.get_craft_event(work_entry.worker_id)
                         {
-                            let Some(recipe) =
-                                recipes.get_by_name(crafting_event.recipe_name.clone())
+                            let Some(recipe) = recipes
+                                .get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                             else {
                                 error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                                 continue;
@@ -9973,13 +10688,27 @@ fn structure_queue_system(
                     continue;
                 };
 
-                let work_entry = structure.work_queue.0[*index as usize].clone();
+                let Some(work_entry) = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| structure.work_queue.0.get(index))
+                    .cloned()
+                else {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Invalid work queue entry".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                };
 
                 // Get progress of work entry
                 if work_entry.work_type == WorkType::Craft {
                     if let Some(crafting_event) = game_events.get_craft_event(work_entry.worker_id)
                     {
-                        let Some(recipe) = recipes.get_by_name(crafting_event.recipe_name.clone())
+                        let Some(recipe) =
+                            recipes.get_for_owner_by_name(*player_id, &crafting_event.recipe_name)
                         else {
                             error!("Cannot find recipe for {:?}", crafting_event.recipe_name);
                             continue;
@@ -12218,14 +12947,14 @@ mod tests {
     }
 
     #[test]
-    fn campfire_upgrades_to_small_tent_with_tent_requirements() {
+    fn campfire_upgrades_to_shelter_tent_with_tent_requirements() {
         let campfire = template_by_name("Campfire");
-        assert_eq!(campfire.upgrade_to, Some(vec!["Small Tent".to_string()]));
+        assert_eq!(campfire.upgrade_to, Some(vec!["Shelter Tent".to_string()]));
 
-        let small_tent = template_by_name("Small Tent");
-        assert_eq!(small_tent.upgrade_cost, Some(50));
+        let shelter_tent = template_by_name("Shelter Tent");
+        assert_eq!(shelter_tent.upgrade_cost, Some(50));
         assert_eq!(
-            small_tent.upgrade_req,
+            shelter_tent.upgrade_req,
             Some(vec![
                 ResReq {
                     req_type: LOG.to_string(),
@@ -12304,7 +13033,11 @@ mod tests {
 
         assert_eq!(
             effects.0.get(&Effect::Bracing),
-            Some(&(WARRIOR_BRACE_DURATION_TICKS, WARRIOR_BRACE_AMPLIFIER, 1))
+            Some(&(
+                100 + WARRIOR_BRACE_DURATION_TICKS,
+                WARRIOR_BRACE_AMPLIFIER,
+                1
+            ))
         );
         assert!(map_events.values().any(|event| {
             event.obj_id == 42
@@ -12486,7 +13219,7 @@ mod tests {
 
         assert_eq!(
             effects.0.get(&Effect::WeakSanctuary),
-            Some(&(MAGE_WARD_DURATION_TICKS, MAGE_WARD_AMPLIFIER, 1))
+            Some(&(200 + MAGE_WARD_DURATION_TICKS, MAGE_WARD_AMPLIFIER, 1))
         );
         assert!(map_events.values().any(|event| {
             event.obj_id == 9
@@ -12912,5 +13645,124 @@ mod tests {
                 .map(|telemetry| telemetry.protected_input_rejections),
             Some(1)
         );
+    }
+
+    #[test]
+    fn crafting_queue_cannot_overbook_the_same_inputs() {
+        let inventory = Inventory {
+            owner: 10,
+            items: vec![Item {
+                id: 1,
+                owner: 10,
+                name: "Wood".to_string(),
+                quantity: 1,
+                durability: None,
+                class: "Material".to_string(),
+                subclass: "Wood".to_string(),
+                slot: None,
+                image: "wood".to_string(),
+                weight: 1.0,
+                equipped: false,
+                experiment: None,
+                start_time: 0,
+                attrs: HashMap::new(),
+                produces: Vec::new(),
+            }],
+        };
+        let recipe = crate::recipe::Recipe {
+            name: "Firewood".to_string(),
+            class: "Material".to_string(),
+            subclass: "Firewood".to_string(),
+            image: "firewood".to_string(),
+            weight: 1.0,
+            durability: None,
+            attrs: None,
+            owner: 1,
+            tier: None,
+            slot: None,
+            damage: None,
+            speed: None,
+            armor: None,
+            crafting_time: Some(10),
+            structure_req: Some(vec!["Crafting Tent".to_string()]),
+            stamina_req: None,
+            skill_req: None,
+            amount: Some(1),
+            req: vec![ResReq {
+                req_type: "Wood".to_string(),
+                quantity: 1,
+                cquantity: None,
+            }],
+            item_name_from_req: None,
+        };
+        let recipes = Recipes::from_recipes(vec![recipe.clone()]);
+        let queue = WorkQueue(vec![WorkEntry {
+            entry_id: 100,
+            worker_id: -1,
+            work_type: WorkType::Craft,
+            work_status: WorkStatus::Idle,
+            recipe_name: Some("Firewood".to_string()),
+            recipe_image: Some("firewood".to_string()),
+            refine_item_id: None,
+            refine_item_image: None,
+            refine_item_class: None,
+        }]);
+
+        assert!(!queued_craft_inputs_available(
+            &inventory, &queue, &recipe, &recipes, 1
+        ));
+        assert_eq!(inventory.items[0].quantity, 1);
+    }
+
+    #[test]
+    fn combo_prefix_hints_and_exact_finisher_match_templates() {
+        let mut templates = Templates::from_obj_templates(Vec::new());
+        templates
+            .combo_templates
+            .load(vec![crate::templates::ComboTemplate {
+                name: "Hamstring".to_string(),
+                attacks: vec!["quick".to_string(), "quick".to_string()],
+                effects: vec!["Hamstrung".to_string()],
+                quick_damage: 1.0,
+                precise_damage: 1.0,
+                fierce_damage: 1.0,
+            }]);
+
+        let (hints, finisher) = combo_hints_for_history(&vec!["quick".to_string()], &templates);
+        assert_eq!(finisher, None);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].name, "Hamstring");
+        assert_eq!(hints[0].remaining_attacks, vec!["quick".to_string()]);
+
+        let (hints, finisher) =
+            combo_hints_for_history(&vec!["quick".to_string(), "quick".to_string()], &templates);
+        assert!(hints.is_empty());
+        assert_eq!(finisher.as_deref(), Some("Hamstring"));
+    }
+
+    #[test]
+    fn combo_tempo_uses_the_decided_cooldown_ladder() {
+        assert_eq!(combo_chain_cooldown_ticks(0), 50);
+        assert_eq!(combo_chain_cooldown_ticks(1), 50);
+        assert_eq!(combo_chain_cooldown_ticks(2), 40);
+        assert_eq!(combo_chain_cooldown_ticks(3), 30);
+        assert_eq!(combo_chain_cooldown_ticks(4), 25);
+        assert_eq!(cooldown_seconds(combo_chain_cooldown_ticks(4)), 2.5);
+    }
+
+    #[test]
+    fn ready_finisher_ignores_active_basic_cooldown_but_missing_finisher_does_not() {
+        assert!(combo_finisher_can_fire(Some("Hamstring"), true));
+        assert!(combo_finisher_can_fire(Some("Hamstring"), false));
+        assert!(!combo_finisher_can_fire(None, false));
+    }
+
+    #[test]
+    fn combo_discovery_is_sent_once_per_combo_and_hero_run() {
+        let mut discoveries = HashSet::new();
+        assert!(is_first_combo_discovery(&mut discoveries, 10, "Hamstring"));
+        assert!(!is_first_combo_discovery(&mut discoveries, 10, "Hamstring"));
+        assert!(is_first_combo_discovery(&mut discoveries, 10, "Gouge"));
+        assert!(is_first_combo_discovery(&mut discoveries, 11, "Hamstring"));
     }
 }

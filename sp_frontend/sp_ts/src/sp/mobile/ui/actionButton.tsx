@@ -21,7 +21,8 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
 
     this.state = {
       timerId: -1,
-      cooldown: -1
+      cooldown: -1,
+      cooldownEndsAt: 0,
     };
 
     this.startTimer = this.startTimer.bind(this);
@@ -35,14 +36,26 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
     Global.gameEmitter.on(NetworkEvent.ATTACK, this.handleAttack, this);
   }
 
+  componentWillUnmount() {
+    Global.gameEmitter.off(NetworkEvent.ATTACK, this.handleAttack, this);
+    this.stopTimer();
+  }
+
   handleAttack(message) {
     this.stopTimer();
-    this.setState({cooldown: message.cooldown})
-    this.startTimer();
+    const duration = Math.max(0, Number(message.cooldown) || 0);
+    if (duration <= 0) {
+      this.setState({ cooldown: -1, cooldownEndsAt: 0 });
+      return;
+    }
+    this.setState({
+      cooldown: Math.ceil(duration),
+      cooldownEndsAt: Date.now() + duration * 1000,
+    }, this.startTimer);
   }
 
    startTimer() {
-    var timerId = setInterval(this.timer, 1000);
+    var timerId = setInterval(this.timer, 100);
     this.setState({timerId: timerId});
   }
 
@@ -51,11 +64,12 @@ export default class ActionButton extends React.Component<ActionButtonProps, any
   }
 
   timer() {
-    if(this.state.cooldown > 1) {
-      this.setState({cooldown: this.state.cooldown - 1});
-    } else {
-      this.setState({cooldown: -1});
+    const remainingMs = this.state.cooldownEndsAt - Date.now();
+    if (remainingMs <= 0) {
+      this.setState({cooldown: -1, cooldownEndsAt: 0});
       this.stopTimer();
+    } else {
+      this.setState({cooldown: Math.ceil(remainingMs / 1000)});
     }
   }
 

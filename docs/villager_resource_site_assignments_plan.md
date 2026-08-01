@@ -1,8 +1,13 @@
 # Villager Resource-Site Assignments
 
-Status: implementation plan
+Status: proposed; not implemented
 
-Branch: `codex/villager-resource-assignments`
+Source baseline: current `main` and the checked-out worktree as of 2026-07-27.
+No `StandingGatherSites` resource, gather-site protocol packet, shared client
+store, Phaser badge layer, or site candidate picker exists in the current
+source. Villager gathering still uses `order_gather`; the server copies the
+hero's current position into `Order::Gather`. The rest of this document is the
+proposed design for changing that behavior, not a description of shipped UI.
 
 ## Outcome
 

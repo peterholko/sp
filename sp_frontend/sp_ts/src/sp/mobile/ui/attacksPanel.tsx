@@ -21,6 +21,7 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
     const attackHistory = combatState.attack_history || this.props.attacks || [];
     const combos = combatState.matching_combos || [];
     const availableFinisher = combatState.available_finisher;
+    const targetEffects = Array.isArray(combatState.target_effects) ? combatState.target_effects : [];
     const counterHint = combatState.counter_hint;
     const enemyIntent = combatState.enemy_intent;
 
@@ -36,7 +37,14 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
 
       const style = {
         transform: 'translate(' + xPos + 'px, ' + 3 + 'px)',
-        position: 'fixed'
+        position: 'fixed',
+        width: '15px',
+        height: '15px',
+        padding: '1px',
+        border: '1px solid #f4c95d',
+        borderRadius: '50%',
+        background: 'rgba(76, 43, 12, 0.9)',
+        boxShadow: '0 0 6px rgba(255, 196, 75, 0.85)',
       } as React.CSSProperties
 
       attacks.push(<img key={i} src={'/static/art/ui/small_' + attackHistory[i] + '.png'}
@@ -112,6 +120,35 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       userSelect: 'none',
     } as React.CSSProperties
 
+    const nextPipStyle = {
+      width: '20px',
+      height: '20px',
+      padding: '2px',
+      border: '1px solid #84d8ff',
+      borderRadius: '50%',
+      background: 'rgba(16, 49, 67, 0.95)',
+      boxShadow: '0 0 7px rgba(85, 196, 255, 0.75)',
+    } as React.CSSProperties
+
+    const debuffsStyle = {
+      ...hintsStyle,
+      bottom: '178px',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+    } as React.CSSProperties
+
+    const debuffBadgeStyle = {
+      color: '#ffd6d6',
+      fontFamily: 'Verdana',
+      fontSize: '10px',
+      fontWeight: 700,
+      background: 'rgba(91, 18, 24, 0.9)',
+      border: '1px solid #e26c73',
+      borderRadius: '10px',
+      padding: '2px 7px',
+      whiteSpace: 'nowrap',
+    } as React.CSSProperties
+
     return (
       <div>
         {(combos.length > 0 || availableFinisher) &&
@@ -127,13 +164,20 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
                 <span style={arrowStyle}>-&gt;</span>
                 {(combo.remaining_attacks || []).map((atk, j) => (
                   <img key={j} src={'/static/art/ui/small_' + atk + '.png'}
-                    style={{ width: '14px', height: '14px' }} />
+                    style={nextPipStyle} title={'Next: ' + atk} />
                 ))}
                 <span style={arrowStyle}>=</span>
                 <span style={hintNameStyle}>{combo.name}</span>
                 {combo.effect &&
                   <span style={hintEffectStyle}>({combo.effect})</span>}
               </div>
+            ))}
+          </div>
+        }
+        {targetEffects.length > 0 &&
+          <div style={debuffsStyle} aria-label="Target effects">
+            {targetEffects.map((effect) => (
+              <span key={effect} style={debuffBadgeStyle}>{effect}</span>
             ))}
           </div>
         }

@@ -12,7 +12,7 @@ pub const BACKSTABBED: &str = "Backstabbed";
 pub const DAZED: &str = "Dazed";
 pub const DISARMED: &str = "Disarmed";
 pub const DEMORALIZINGSHOUT: &str = "Demoralizing Shout";
-pub const EXPOSEDARMOR: &str = "Exposed Armor";
+pub const EXPOSEDARMOR: &str = "Expose Armor";
 pub const HAMSTRUNG: &str = "Hamstrung";
 pub const FEAR: &str = "Fear";
 pub const STUNNED: &str = "Stunned";
@@ -154,8 +154,23 @@ type Duration = i32;
 type Amplifier = f32;
 type Stacks = i32;
 
+/// Active timed effects store their authoritative expiry game tick in the
+/// first tuple slot. Permanent and presentation-only effects may continue to
+/// use a sentinel value because they never schedule an expiry event.
 #[derive(Debug, Component, Clone)]
 pub struct Effects(pub HashMap<Effect, (Duration, Amplifier, Stacks)>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlEffectDrEntry {
+    pub stage: u8,
+    pub last_applied_tick: i32,
+}
+
+/// Per-target diminishing-return history for control effects. Keeping this
+/// separate from `Effects` lets the ladder survive an individual effect's
+/// expiry while remaining attached to the authoritative target entity.
+#[derive(Debug, Component, Clone, Default)]
+pub struct ControlEffectDiminishingReturns(pub HashMap<Effect, ControlEffectDrEntry>);
 
 impl Effects {
     pub fn get_info_list(&self, effect_templates: &EffectTemplates) -> Vec<EffectInfo> {

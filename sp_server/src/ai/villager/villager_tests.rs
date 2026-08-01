@@ -726,6 +726,8 @@ use crate::event::{GameEvents, MapEvents};
 use crate::ids::Ids;
 use crate::item::{AttrKey, AttrVal, Item, Slot};
 use crate::map::{MoistureType, TemperatureType, TileInfo, TileType, HEIGHT, WIDTH};
+use crate::player::PlayerEvents;
+use crate::resource::{Resource, Resources};
 use crate::skill::Skills;
 use crate::templates::EffectTemplate;
 use big_brain::actions::spawn_action;
@@ -1033,6 +1035,23 @@ fn create_drink_item(owner: i32) -> Item {
     }
 }
 
+fn create_spring_resource(pos: Position, reveal: bool) -> Resource {
+    Resource {
+        name: "Moonlit Spring Water".to_string(),
+        image: "moonlitspringwater".to_string(),
+        res_type: SPRING_WATER.to_string(),
+        pos,
+        max: 100,
+        yield_level: 1,
+        yield_mod: 1.0,
+        quantity_level: 1,
+        quantity: 100,
+        properties: Vec::new(),
+        produces: None,
+        reveal,
+    }
+}
+
 /// Creates a food item for testing
 fn create_food_item(owner: i32) -> Item {
     Item {
@@ -1110,6 +1129,11 @@ macro_rules! setup_action_test_app {
         app.world_mut().insert_resource(MapEvents(HashMap::new()));
         app.world_mut().insert_resource(GameEvents(HashMap::new()));
         app.world_mut().insert_resource(Clients::default());
+        app.world_mut().insert_resource(open_test_map());
+        app.world_mut().insert_resource(minimal_templates());
+        app.world_mut().insert_resource(Resources::default());
+        app.world_mut()
+            .insert_resource(PlayerEvents(HashMap::new()));
         app
     }};
 }
@@ -2334,6 +2358,229 @@ fn set_flee_destination_holds_fortified_position_instead_of_fleeing_to_hero() {
         app.world().entity(villager).get::<Destination>().is_none(),
         "Fortified villagers should not keep stale flee destinations toward the hero"
     );
+}
+
+// ==================== Drink Search Tests ====================
+
+fn complete_find_drink_action(app: &mut App, villager: Entity) -> Entity {
+    let action = spawn_action_as_requested(app, &FindDrink, villager);
+
+    app.update();
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Executing
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<EventExecuting>()
+        .unwrap()
+        .state = EventExecutingState::Completed;
+    app.update();
+
+    action
+}
+
+#[test]
+fn routine_thirst_without_stocked_water_does_not_route_to_natural_water() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(62.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let distant_spring_pos = Position { x: 25, y: 25 };
+    let spring = create_spring_resource(distant_spring_pos, true);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(distant_spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_none());
+    assert!(app.world().entity(villager).get::<NoDrinks>().is_some());
+}
+
+#[test]
+fn emergency_thirst_searches_exactly_one_safe_adjacent_tile() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(95.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    let destination = app.world().entity(villager).get::<Destination>().unwrap();
+    let search = app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .unwrap();
+    assert_eq!(Map::dist(start, destination.pos), 1);
+    assert_eq!(search.pos, destination.pos);
+    assert!(app.world().entity(villager).get::<NoDrinks>().is_none());
+}
+
+#[test]
+fn emergency_thirst_does_not_search_while_an_enemy_is_nearby() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(95.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        2,
+        NPC_PLAYER_ID,
+        Position { x: 6, y: 5 },
+        Subclass::Npc,
+    );
+    register_test_obj(&mut app, 2, NPC_PLAYER_ID, enemy);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_none());
+}
+
+#[test]
+fn villager_discovers_and_drinks_from_spring_only_after_arrival() {
+    let mut app = setup_action_test_app!((transfer_drink_system, drink_action_system));
+    let spring_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(spring_pos)
+        .with_thirst(95.0)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        DrinkingFromWater { pos: spring_pos },
+        Destination { pos: spring_pos },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(spring_pos, false);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+
+    let transfer = spawn_action_as_requested(&mut app, &TransferDrink, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(transfer).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .resource::<Resources>()
+            .get_by_type(spring_pos, SPRING_WATER.to_string(), true)
+            .len(),
+        1
+    );
+    assert_eq!(app.world().resource::<PlayerEvents>().len(), 1);
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_some());
+
+    let drink = spawn_action_as_requested(&mut app, &Drink, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(drink).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world().entity(villager).get::<Thirst>().unwrap().thirst,
+        0.0
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_none());
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+}
+
+#[test]
+fn villager_abandons_discovered_spring_if_danger_appears() {
+    let mut app = setup_action_test_app!(drink_action_system);
+    let spring_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(spring_pos)
+        .with_thirst(95.0)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        DrinkingFromWater { pos: spring_pos },
+        Destination { pos: spring_pos },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(spring_pos, true);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        2,
+        NPC_PLAYER_ID,
+        Position { x: 7, y: 5 },
+        Subclass::Npc,
+    );
+    register_test_obj(&mut app, 2, NPC_PLAYER_ID, enemy);
+
+    let drink = spawn_action_as_requested(&mut app, &Drink, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(drink).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        app.world().entity(villager).get::<Thirst>().unwrap().thirst,
+        95.0
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_none());
 }
 
 // ==================== Drink Action Tests ====================
@@ -4205,6 +4452,7 @@ macro_rules! setup_behavior_test_app {
         app.world_mut().insert_resource(Ids::default());
         app.world_mut().insert_resource(MapEvents(HashMap::new()));
         app.world_mut().insert_resource(GameEvents(HashMap::new()));
+        app.world_mut().insert_resource(Resources::default());
         app
     }};
 }

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use crate::constants::*;
 use crate::item::{req_matches_build, Inventory, Item};
 use crate::obj::{Class, State};
-use crate::templates::{ObjTemplate, ObjTemplates, ResReq, Templates};
+use crate::templates::{canonical_obj_template_name, ObjTemplate, ObjTemplates, ResReq, Templates};
 use crate::{network, obj};
 
 pub const RESOURCE: &str = "resource";
@@ -33,6 +33,7 @@ pub struct Plans(Vec<Plan>);
 
 impl Plans {
     pub fn add(&mut self, player_id: i32, structure: String, level: i32, tier: i32) {
+        let structure = canonical_obj_template_name(&structure).to_string();
         if self
             .iter()
             .any(|p| p.player_id == player_id && p.structure == structure)
@@ -64,7 +65,7 @@ impl Structure {
         for plan in plans.iter() {
             if player_id == plan.player_id {
                 for obj_template in obj_templates.iter() {
-                    if plan.structure == obj_template.template {
+                    if canonical_obj_template_name(&plan.structure) == obj_template.template {
                         let structure = network::Structure {
                             name: obj_template.template.clone(),
                             image: obj_template.image.clone(),
@@ -88,6 +89,7 @@ impl Structure {
     }
 
     pub fn get_template(template: String, obj_templates: &ObjTemplates) -> Option<ObjTemplate> {
+        let template = canonical_obj_template_name(&template);
         for obj_template in obj_templates.iter() {
             if obj_template.template == *template {
                 return Some(obj_template.clone());
@@ -98,6 +100,7 @@ impl Structure {
     }
 
     pub fn get_template_by_name(name: String, obj_templates: &ObjTemplates) -> Option<ObjTemplate> {
+        let name = canonical_obj_template_name(&name);
         for obj_template in obj_templates.iter() {
             if obj_template.template == *name {
                 return Some(obj_template.clone());
@@ -262,6 +265,17 @@ mod tests {
     fn is_built_allows_completed_structure_states() {
         assert!(Structure::is_built(State::None));
         assert!(Structure::is_built(State::Burning));
+    }
+
+    #[test]
+    fn legacy_small_tent_plan_is_canonicalized_and_deduplicated() {
+        let mut plans = Plans(Vec::new());
+
+        plans.add(7, "Small Tent".to_string(), 0, 0);
+        plans.add(7, "Shelter Tent".to_string(), 0, 0);
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].structure, "Shelter Tent");
     }
 }
 

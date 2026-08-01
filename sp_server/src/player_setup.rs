@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::constants::*;
-use crate::effect::Effect;
 use crate::encounter::Encounter;
 use crate::event::{EventExecuting, EventExecutingState};
 use crate::game::{
@@ -15,8 +14,7 @@ use crate::game::{
 };
 use crate::item::{Inventory, Slot};
 use crate::obj::{
-    ActiveShelter, AddLightEffect, Assignments, Campfire, LastCombatTick, NewObj, UpdateObj,
-    WorkQueue,
+    ActiveShelter, Assignments, Campfire, LastCombatTick, NewObj, UpdateObj, WorkQueue,
 };
 use crate::tax_collector::{MerchantScorer, MoveToPos, SetDestination};
 use crate::trade::WantedItem;
@@ -33,7 +31,7 @@ use crate::villager::{
 };
 
 use crate::{
-    effect::Effects,
+    effect::{ControlEffectDiminishingReturns, Effects},
     event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent},
     game::{BoundMonolith, EncounterMoves, GameTick},
     ids::{EntityObjMap, Ids},
@@ -237,6 +235,7 @@ pub fn new(
             base_vision: hero_template.base_vision,
         },
         effects: Effects(HashMap::new()),
+        control_effect_dr: ControlEffectDiminishingReturns::default(),
         inventory: inventory.clone(),
         last_combat_tick: LastCombatTick::default(),
     };
@@ -381,12 +380,6 @@ pub fn new(
             entity: campfire_entity_id,
             attrs: vec![(IMAGE.to_string(), "campfirelit".to_string())],
         });
-
-        // Apply campfire light effect so nearby heroes get vision
-        commands.trigger(AddLightEffect {
-            entity: campfire_entity_id,
-            effect: Effect::CampfireLight,
-        });
     }
 
     // Villager obj
@@ -433,6 +426,7 @@ pub fn new(
             base_vision: villager_template.base_vision,
         },
         effects: Effects(HashMap::new()),
+        control_effect_dr: ControlEffectDiminishingReturns::default(),
         inventory: Inventory {
             owner: villager_id,
             items: Vec::new(),
@@ -696,6 +690,7 @@ pub fn new(
     // Starting plans (survival basics only — more plans acquired through exploration and villager)
     plans.add(player_id, "Campfire".to_string(), 0, 0);
     plans.add(player_id, "Burrow".to_string(), 0, 0);
+    plans.add(player_id, "Shelter Tent".to_string(), 0, 0);
     plans.add(player_id, "Stockade".to_string(), 0, 0);
     plans.add(player_id, "Crafting Tent".to_string(), 0, 0);
 
@@ -929,21 +924,25 @@ pub fn new(
         items: Vec::new(),
     };
 
-    // General survival supplies. The starter-only Sharpened Stick keeps its
-    // normal combat/hunting values and gains Logging 1 so every class can use
-    // the ordinary logging path after recovering the initial settlement wood.
-    shipwreck_inventory.new_with_attrs(
+    // General survival supplies. The Crude Hatchet matches the Sharpened
+    // Stick's starter combat profile while providing the ordinary Logging tool
+    // attribute needed to lumberjack trees.
+    shipwreck_inventory.new(
         ids.new_item_id(),
-        shipwreck_id,
         "Sharpened Stick".to_string(),
         1,
-        starter_shipwreck_stick_attrs(),
+        &templates.item_templates,
+    );
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Crude Hatchet".to_string(),
+        1,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Crude Torch".to_string(),
-        1,
+        3,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
@@ -1160,12 +1159,13 @@ pub fn new(
     }
 
     // Register the initial encounter chain: one rat wave, then boar/crab, then spider.
-    // The villager waits for shipwreck inspection, but only after the help call has fired.
+    // The first completed Shipwreck investigation discovers the survivor. The
+    // rescued villager appears only after this entire rat wave is defeated and
+    // the player has completed a normal Burrow.
     let villager_spawn_pos = Position {
         x: start_location.villager_pos[0],
         y: start_location.villager_pos[1],
     };
-    let villager_help_tick = game_tick.0 + 1100;
     let phase1_spawn = if rand::thread_rng().gen_range(0..2) == 0 {
         "Giant Crab".to_string()
     } else {
@@ -1224,7 +1224,6 @@ pub fn new(
             spawn_pos: shipwreck_pos,
             villager_spawn_pos,
             opening_rat_spawn_tick: game_tick.0 + 900,
-            villager_ready_tick: villager_help_tick + TICKS_PER_SEC,
             phase1_unlock_tick: game_tick.0 + 2600,
             spider_unlock_tick: game_tick.0 + 3600,
             villager_event_scheduled: false,
@@ -1252,29 +1251,6 @@ pub fn new(
     // BB-B: the campfire lesson is now delivered as an action-driven nudge when
     // the player actually builds a campfire (see objectives_system), instead of
     // firing on a fixed clock here.
-
-    let distress_notice = GameEvent {
-        event_id: ids.new_map_event_id(),
-        start_tick: game_tick.0,
-        run_tick: villager_help_tick,
-        event_type: GameEventType::PlayerNotice {
-            player_id,
-            message: "A voice cries out from the shipwreck. Someone may still be alive."
-                .to_string(),
-            expiry: Some(10000),
-        },
-    };
-    game_events.insert(distress_notice.event_id, distress_notice);
-
-    // Distress call from the shipwreck after the first pressure beat. Anchored to
-    // the shipwreck object (rather than a bare position) so it renders as an HTML
-    // speech bubble in the UI layer (SpeechBubbleLayer) instead of canvas text.
-    // Intensity 5 preserves the original audible radius.
-    let distress_event = VisibleEvent::SpeechEvent {
-        speech: "A desperate voice calls from the shipwreck: \"Is anyone out there?!\"".to_string(),
-        intensity: 5,
-    };
-    map_events.new(shipwreck_id, villager_help_tick, distress_event);
 
     // Wolf howl sound event after the player has learned the first camp loop
     let hero_pos = Position {
@@ -1598,15 +1574,6 @@ pub fn new(
     Ok(())
 }
 
-fn starter_shipwreck_stick_attrs() -> HashMap<item::AttrKey, item::AttrVal> {
-    let mut weapon_attrs = HashMap::new();
-    weapon_attrs.insert(item::AttrKey::Damage, item::AttrVal::Num(1.0));
-    weapon_attrs.insert(item::AttrKey::Speed, item::AttrVal::Num(5.0));
-    weapon_attrs.insert(item::AttrKey::Hunting, item::AttrVal::Num(1.0));
-    weapon_attrs.insert(item::AttrKey::Logging, item::AttrVal::Num(1.0));
-    weapon_attrs
-}
-
 fn find_nearest_monolith(
     hero_pos: Vec<i32>,
     monoliths: &Query<ObjQuery, With<Monolith>>,
@@ -1735,36 +1702,42 @@ impl StartLocations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item::{Item, LOG, WEAPON};
+    use crate::item::{Inventory, LOG};
+    use std::fs::File;
 
     #[test]
-    fn starter_shipwreck_stick_can_gather_logs_after_the_opening() {
-        let stick = Item {
-            id: 1,
+    fn starter_hatchet_matches_stick_combat_profile_and_can_gather_logs() {
+        let item_template_file =
+            File::open("templates/item_template.yaml").expect("Could not open item templates");
+        let item_templates: Vec<crate::templates::ItemTemplate> =
+            serde_yaml::from_reader(item_template_file).expect("Could not read item templates");
+        let mut inventory = Inventory {
             owner: 1,
-            name: "Sharpened Stick".to_string(),
-            quantity: 1,
-            durability: None,
-            class: WEAPON.to_string(),
-            subclass: "Spear".to_string(),
-            slot: Some(Slot::MainHand),
-            image: "sharpenedstick".to_string(),
-            weight: 10.0,
-            equipped: false,
-            experiment: None,
-            start_time: 0,
-            attrs: starter_shipwreck_stick_attrs(),
-            produces: Vec::new(),
+            items: Vec::new(),
         };
+        inventory.new(1, "Sharpened Stick".to_string(), 1, &item_templates);
+        inventory.new(2, "Crude Hatchet".to_string(), 1, &item_templates);
 
-        assert!(stick.is_gather_tool_for_res_type(LOG));
+        let stick = inventory
+            .items
+            .iter()
+            .find(|item| item.name == "Sharpened Stick")
+            .expect("starter stick");
+        let hatchet = inventory
+            .items
+            .iter()
+            .find(|item| item.name == "Crude Hatchet")
+            .expect("starter hatchet");
+
+        assert!(!stick.is_gather_tool_for_res_type(LOG));
+        assert!(hatchet.is_gather_tool_for_res_type(LOG));
         assert_eq!(
-            stick.attrs.get(&item::AttrKey::Damage),
-            Some(&item::AttrVal::Num(1.0))
+            hatchet.attrs.get(&item::AttrKey::Damage),
+            stick.attrs.get(&item::AttrKey::Damage)
         );
         assert_eq!(
-            stick.attrs.get(&item::AttrKey::Hunting),
-            Some(&item::AttrVal::Num(1.0))
+            hatchet.attrs.get(&item::AttrKey::Speed),
+            stick.attrs.get(&item::AttrKey::Speed)
         );
     }
 }

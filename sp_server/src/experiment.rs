@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use rand::Rng;
 
 use crate::{
-    item::{Inventory, Item, Items},
+    item::{req_matches, Inventory, Item, Items},
     network::{self},
     recipe::Recipes,
     templates::{RecipeTemplate, RecipeTemplates, ResReq, Templates},
@@ -104,10 +104,18 @@ impl Experiment {
         let mut all_reqs_match = true;
 
         for res_req in experiment.req.iter() {
+            if res_req.quantity <= 0 {
+                continue;
+            }
             let mut req_match = false;
 
             for reagent in experiment_reagents.iter() {
-                if res_req.req_type == reagent.subclass {
+                if req_matches(
+                    &res_req.req_type,
+                    &reagent.name,
+                    &reagent.class,
+                    &reagent.subclass,
+                ) {
                     req_match = true;
                     break;
                 }
@@ -142,18 +150,36 @@ impl Experiment {
         let mut res_reqs_reached = true;
         let (_exp_source, experiment_reagents) = inventory.get_experiment_source_reagents();
 
+        let mut available = experiment_reagents
+            .iter()
+            .map(|reagent| reagent.quantity)
+            .collect::<Vec<_>>();
+        let mut consumed = HashMap::<i32, i32>::new();
+
         for res_req in experiment.req.iter_mut() {
             debug!("exp res_req: {:?}", res_req);
-            for reagent in experiment_reagents.iter() {
+            for (index, reagent) in experiment_reagents.iter().enumerate() {
+                if res_req.quantity <= 0 {
+                    break;
+                }
                 debug!("reagent: {:?}", reagent);
-                if res_req.req_type == reagent.subclass {
-                    if res_req.quantity > 0 {
-                        res_req.quantity -= 1;
+                if req_matches(
+                    &res_req.req_type,
+                    &reagent.name,
+                    &reagent.class,
+                    &reagent.subclass,
+                ) {
+                    let quantity = res_req.quantity.min(available[index]);
+                    if quantity > 0 {
+                        res_req.quantity -= quantity;
+                        available[index] -= quantity;
+                        *consumed.entry(reagent.id).or_default() += quantity;
                     }
-
-                    inventory.remove_quantity(reagent.id, 1);
                 }
             }
+        }
+        for (item_id, quantity) in consumed {
+            inventory.remove_quantity(item_id, quantity);
         }
 
         // Check if minimum required resources reached
@@ -191,11 +217,12 @@ impl Experiment {
     }
 
     pub fn find_recipe(
+        player_id: i32,
         structure_id: i32,
         structure_name: String,
         structure_inventory: &Inventory,
-        recipes: &ResMut<Recipes>,
-        templates: &Res<Templates>,
+        recipes: &Recipes,
+        templates: &Templates,
     ) -> Option<RecipeTemplate> {
         let (experiment_source, experiment_reagents) =
             structure_inventory.get_experiment_source_reagents();
@@ -218,13 +245,10 @@ impl Experiment {
             return None;
         };
 
-        let Some(source_recipe_tier) = source_recipe.tier else {
-            debug!(
-                "Source recipe does not have a tier attribute {:?}",
-                source_recipe
-            );
-            return None;
-        };
+        // Tiered experimentation advances vertically. Untiered families
+        // (bows, leather gear, food, and tools) discover peers in the same
+        // family instead of being excluded from experimentation entirely.
+        let target_recipe_tier = source_recipe.tier.map(|tier| tier + 1);
 
         // Get source recipe subclass from recipe template or item template
         let source_recipe_subclass = if let Some(source_recipe_subclass) = source_recipe.subclass {
@@ -235,14 +259,15 @@ impl Experiment {
             item_template.subclass.clone()
         };
 
-        let player_recipes = recipes.get_by_structure(structure_id);
+        let player_recipes = recipes.get_by_owner(player_id);
         debug!("player_recipes: {:?}", player_recipes);
 
-        // Find matching recipes to the source by tier and subclass
+        // Find the next tier for tiered recipes, or another member of the
+        // untiered family.
         let matching_recipe_templates = Recipes::get_by_subclass_tier(
             structure_name,
             source_recipe_subclass,
-            source_recipe_tier,
+            target_recipe_tier,
             templates,
         );
         debug!("matching_recipe_templates: {:?}", matching_recipe_templates);
@@ -280,7 +305,12 @@ impl Experiment {
                 let mut req_matched = false;
 
                 for reagent in experiment_reagents.iter() {
-                    if reagent.subclass == req.req_type {
+                    if req_matches(
+                        &req.req_type,
+                        &reagent.name,
+                        &reagent.class,
+                        &reagent.subclass,
+                    ) {
                         req_matched = true;
                     }
                 }
@@ -403,5 +433,79 @@ impl Plugin for ExperimentPlugin {
         let experiments = Experiments(HashMap::new());
 
         app.insert_resource(experiments);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ids::Ids, recipe::RecipePlugin, templates::TemplatesPlugin};
+
+    #[test]
+    fn discovery_advances_one_tier_and_is_scoped_to_the_player() {
+        let mut app = App::new();
+        app.add_plugins((TemplatesPlugin, RecipePlugin));
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe_templates = templates.recipe_templates.to_vec();
+                {
+                    let mut recipes = world.resource_mut::<Recipes>();
+                    recipes.set_templates(recipe_templates);
+                    assert!(recipes.create(1, "Copper Short Sword".to_string(), &templates,));
+                    assert!(recipes.create(2, "Copper Short Sword".to_string(), &templates,));
+                    assert!(recipes.create(2, "Iron Sword".to_string(), &templates));
+                }
+
+                let mut ids = Ids::default();
+                let mut inventory = Inventory {
+                    owner: 10,
+                    items: Vec::new(),
+                };
+                let source = inventory.new(
+                    ids.new_item_id(),
+                    "Copper Short Sword".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let iron = inventory.new(
+                    ids.new_item_id(),
+                    "Quickforge Iron Ingot".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let timber = inventory.new(
+                    ids.new_item_id(),
+                    "Cragroot Maple Timber".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                inventory.set_experiment_source(source.id);
+                inventory.set_experiment_reagent(iron.id);
+                inventory.set_experiment_reagent(timber.id);
+
+                let recipes = world.resource::<Recipes>();
+                let player_one_result = Experiment::find_recipe(
+                    1,
+                    10,
+                    "Blacksmith".to_string(),
+                    &inventory,
+                    &recipes,
+                    &templates,
+                )
+                .expect("player one should discover the next sword tier");
+                assert_eq!(player_one_result.name, "Iron Sword");
+                assert_eq!(player_one_result.tier, Some(2));
+
+                assert!(Experiment::find_recipe(
+                    2,
+                    10,
+                    "Blacksmith".to_string(),
+                    &inventory,
+                    &recipes,
+                    &templates,
+                )
+                .is_none());
+            });
     }
 }

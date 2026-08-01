@@ -125,6 +125,13 @@
   sell_quantity: 100
   impact_factor: 0.1
 
+- name: Shelter Tent Deed
+  buy_price: 20
+  buy_quantity: 100
+  sell_price: 40
+  sell_quantity: 100
+  impact_factor: 0.1
+
 - name: Small Tent Deed
   buy_price: 20
   buy_quantity: 100

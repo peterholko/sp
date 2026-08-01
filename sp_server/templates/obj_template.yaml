@@ -1234,10 +1234,10 @@
 ###### SHELTER #############
 ############################
 
-- name: Small Tent
+- name: Shelter Tent
   class: structure
   subclass: shelter
-  template: Small Tent
+  template: Shelter Tent
   image: tent
   base_hp: 100
   base_def: 0
@@ -1390,7 +1390,7 @@
   level: 0
   req:
     - type: Log
-      quantity: 3
+      quantity: 10
   upkeep:
     - type: Log
       quantity: 1
@@ -1576,7 +1576,7 @@
   capacity: 25
   level: 0
   campfire: true
-  upgrade_to: [Small Tent]
+  upgrade_to: [Shelter Tent]
   req: 
     - type: Stick
       quantity: 1

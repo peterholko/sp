@@ -433,6 +433,16 @@ pub struct SafeLogoutStatusSnapshot {
     pub resumed_from_protection: bool,
 }
 
+/// One settlement currently protected by Safe Logout. Coordinates are
+/// intentionally omitted: clients anchor presentation to a monolith already
+/// learned through ordinary perception instead of receiving hidden map data.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProtectedSettlementSnapshot {
+    pub player_id: i32,
+    pub monolith_id: i32,
+    pub sanctuary_radius: u32,
+}
+
 #[skip_serializing_none]
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "packet")]
@@ -885,7 +895,7 @@ pub enum ResponsePacket {
     Attack {
         source_id: i32,
         attack_type: String,
-        cooldown: i32,
+        cooldown: f32,
         stamina_cost: i32,
     },
     #[serde(rename = "ability")]
@@ -1099,6 +1109,11 @@ pub enum ResponsePacket {
         #[serde(flatten)]
         status: SafeLogoutStatusSnapshot,
     },
+    #[serde(rename = "protected_settlements")]
+    ProtectedSettlements {
+        version: u32,
+        settlements: Vec<ProtectedSettlementSnapshot>,
+    },
     #[serde(rename = "threat_state")]
     ThreatState {
         version: i32,
@@ -1117,6 +1132,7 @@ pub enum ResponsePacket {
         attack_history: Vec<String>,
         matching_combos: Vec<ComboHint>,
         available_finisher: Option<String>,
+        target_effects: Vec<String>,
         stamina_costs: StaminaCosts,
         abilities: Vec<AbilityHint>,
         counter_hint: String,
@@ -4740,6 +4756,59 @@ mod tests {
             .unwrap();
             assert_eq!(value["state"], state);
         }
+    }
+
+    #[test]
+    fn protected_settlements_packet_is_flat_versioned_and_round_trips() {
+        let packet = ResponsePacket::ProtectedSettlements {
+            version: 1,
+            settlements: vec![
+                ProtectedSettlementSnapshot {
+                    player_id: 7,
+                    monolith_id: 701,
+                    sanctuary_radius: 6,
+                },
+                ProtectedSettlementSnapshot {
+                    player_id: 12,
+                    monolith_id: 1201,
+                    sanctuary_radius: 8,
+                },
+            ],
+        };
+        let encoded = serde_json::to_string(&packet).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "packet": "protected_settlements",
+                "version": 1,
+                "settlements": [
+                    {
+                        "player_id": 7,
+                        "monolith_id": 701,
+                        "sanctuary_radius": 6
+                    },
+                    {
+                        "player_id": 12,
+                        "monolith_id": 1201,
+                        "sanctuary_radius": 8
+                    }
+                ]
+            })
+        );
+
+        assert_eq!(
+            serde_json::from_str::<ResponsePacket>(&encoded).unwrap(),
+            packet
+        );
+
+        let empty = serde_json::to_value(ResponsePacket::ProtectedSettlements {
+            version: 1,
+            settlements: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(empty["settlements"], serde_json::json!([]));
     }
 
     #[test]

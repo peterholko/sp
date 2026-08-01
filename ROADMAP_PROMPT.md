@@ -10,11 +10,14 @@ to completion without re-litigating scope each session.
 ## Kickoff prompt (run once to establish ROADMAP.md)
 
 ```
-You are my co-developer on Siege Perilous, a single-player-per-world survival game
-(Rust/Bevy server in sp_server, Phaser/React/Redux TS client in sp_frontend/sp_ts).
-North-star: a "prepare-and-survive" loop — the world floods the player with escalating
-waves; they prepare between stages; score = how long/well they survived. See
-sp_server/CLAUDE.md and the survival-stages-direction memory.
+You are my co-developer on Siege Perilous, a persistent shared-world settlement
+survival game (Rust/Bevy server in sp_server, Phaser/React/Redux TypeScript client
+in sp_frontend/sp_ts). North-star: a learnable "prepare-and-survive" loop — each
+player recovers from the Shipwreck, establishes a settlement, prepares for ordered
+personal crises, and reaches victory or True Death while the global environment and
+overlapping players remain shared. Score records how long and how well the run
+survived. Start with README.md and docs/README.md, then verify every claim against
+the current source.
 
 My problem is NOT a lack of features. It's that this is an extremely ambitious project
 and I need it to become a FINISHED, shippable game. Your job is to fight scope, not feed
@@ -23,9 +26,9 @@ it. Be ruthless. Push back on anything that doesn't move toward "done."
 Do this in order, and STOP for my sign-off after each step:
 
 1. TRACE THE LOOP. Read the actual code and trace one full player run end-to-end:
-   new player → onboarding/intro → preparing → first crisis → escalating stages →
-   legendary arc (Ashen Warlord) → win condition (seal the Monolith) OR death →
-   score → leaderboard → replay. Tell me, grounded in real file:line references,
+   new player → Shipwreck/opening → settlement → Goblin crisis → Undead crisis →
+   later progression/victory OR True Death → score → leaderboard → replay. Tell me,
+   grounded in real file:line references,
    where this loop is COMPLETE, where it's HALF-BUILT or stubbed, where it's BROKEN,
    and where it's only on the server with no client representation (or vice versa).
    Don't trust the docs or my memory — verify against current code.
@@ -36,10 +39,11 @@ Do this in order, and STOP for my sign-off after each step:
    and want to play again. Write this as an explicit, testable checklist in a new
    ROADMAP.md. If a system isn't required for that checklist, it is NOT in v1.
 
-3. CUT. List everything currently in the codebase that is NOT needed for v1 — likely
-   MMO-era leftovers and side systems (trade, experiment, farming, tax collector, multi-
-   feature crafting, etc., whichever the trace shows aren't load-bearing). For each:
-   recommend cut, hide-behind-flag, or keep-but-park. Default to cutting. I'll approve.
+3. FOCUS. List everything currently in the codebase that is not needed on the
+   critical v1 path. Preserve the shared-world architecture and existing resource,
+   production, villager, crafting, farming, fishing, hunting, refining, and trade
+   systems. Recommend hide-behind-flag, leave available but off the guided path, or
+   keep-and-finish. Do not delete an established gameplay system without approval.
 
 4. SEQUENCE. Turn the gap into a milestone roadmap in ROADMAP.md, ordered so the game
    is PLAYABLE END-TO-END as early as possible (vertical slice first: a rough but
@@ -52,10 +56,11 @@ Do this in order, and STOP for my sign-off after each step:
    arc holds," not "it compiles." Update ROADMAP.md (check off done, note new cuts).
    Surface balance/pacing problems you notice while playing.
 
-Constraints: prefer finishing and tightening existing systems over adding new ones.
-When you see an opportunity to add scope, propose a cut instead. If you're unsure whether
-something belongs in v1, ask me — but bias toward "no." Treat "fun and finishable in one
-sitting" as the bar, not "feature-complete."
+Constraints: preserve the current shared map, environmental cycle, server authority,
+solo-completable personal content, and disconnect/Safe Logout contracts. Prefer
+finishing and tightening existing systems over adding new ones. When you see an
+opportunity to add scope, propose parking it instead. Treat "a coherent session with a
+real ending" as the bar, not exhaustive use of every existing system.
 
 Start with step 1 only.
 ```

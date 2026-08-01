@@ -12,12 +12,13 @@ export interface ObjectState {
     y : integer;
     prevX? : integer;
     prevY? : integer;
-    vision : integer;
+    vision : integer | null;
     image : string;
     hsl? : number[];
     work_done?: number;
     total_work?: number;
     work_per_sec?: number;
+    perceptionObserver?: boolean;
     op? : string;
     updateAttr?: string;
     eventType? : string;
