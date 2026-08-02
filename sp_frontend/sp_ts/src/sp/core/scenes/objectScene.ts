@@ -29,6 +29,7 @@ import {
   isVisibilitySource,
   needsZeroVisionShroud,
 } from '../visibilitySourcePolicy';
+import { anchorActionProgress } from '../actionProgress';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -46,6 +47,8 @@ interface ActionProgressBar {
   state: string;
   startTime: number;
   durationMs: number;
+  actionId?: number;
+  authoritativeElapsedMs?: number;
 }
 
 interface StructureWorkProgress {
@@ -594,24 +597,38 @@ export class ObjectScene extends Phaser.Scene {
     }
 
     var progressBar = this.actionProgressBars[objectState.id];
-    var durationMs = this.getActionProgressDurationMs(objectState.state);
+    var now = this.time.now;
+    var authoritative = anchorActionProgress(objectState, now);
+    var durationMs = authoritative?.durationMs || this.getActionProgressDurationMs(objectState.state);
 
     if (!progressBar) {
       progressBar = {
         graphics: this.add.graphics(),
         state: objectState.state,
-        startTime: this.time.now,
-        durationMs: durationMs
+        startTime: authoritative?.startTimeMs ?? now,
+        durationMs: durationMs,
+        actionId: authoritative?.actionId,
+        authoritativeElapsedMs: authoritative?.elapsedMs,
       };
       progressBar.graphics.setDepth(ACTION_PROGRESS_DEPTH);
       this.actionProgressBars[objectState.id] = progressBar;
-    } else if (progressBar.state != objectState.state) {
+    } else if (progressBar.state != objectState.state ||
+               progressBar.actionId != authoritative?.actionId) {
       progressBar.state = objectState.state;
-      progressBar.startTime = this.time.now;
+      progressBar.startTime = authoritative?.startTimeMs ?? now;
       progressBar.durationMs = durationMs;
+      progressBar.actionId = authoritative?.actionId;
+      progressBar.authoritativeElapsedMs = authoritative?.elapsedMs;
+    } else if (authoritative &&
+               (progressBar.durationMs != authoritative.durationMs ||
+                progressBar.authoritativeElapsedMs != authoritative.elapsedMs)) {
+      // A perception refresh or reconnect carries an updated server snapshot.
+      progressBar.startTime = authoritative.startTimeMs;
+      progressBar.durationMs = authoritative.durationMs;
+      progressBar.authoritativeElapsedMs = authoritative.elapsedMs;
     }
 
-    this.drawActionProgressBar(progressBar, objectState, renderObject, this.time.now);
+    this.drawActionProgressBar(progressBar, objectState, renderObject, now);
   }
 
   private updateActionProgressBars(time: number): void {
@@ -628,9 +645,12 @@ export class ObjectScene extends Phaser.Scene {
 
       var progressBar = this.actionProgressBars[objectId];
       if (progressBar.state != objectState.state) {
+        var authoritative = anchorActionProgress(objectState, now);
         progressBar.state = objectState.state;
-        progressBar.startTime = now;
-        progressBar.durationMs = this.getActionProgressDurationMs(objectState.state);
+        progressBar.startTime = authoritative?.startTimeMs ?? now;
+        progressBar.durationMs = authoritative?.durationMs || this.getActionProgressDurationMs(objectState.state);
+        progressBar.actionId = authoritative?.actionId;
+        progressBar.authoritativeElapsedMs = authoritative?.elapsedMs;
       }
 
       this.drawActionProgressBar(progressBar, objectState, renderObject, now);

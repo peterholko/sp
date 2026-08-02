@@ -195,6 +195,13 @@ assert.deepEqual(Global.protectedSettlements['44'], {
   sanctuary_radius: 4,
 });
 assert.equal(emitter.count(NetworkEvent.PROTECTED_SETTLEMENTS) > 0, true);
+secondSocket.message({
+  packet: 'sanctuary_state',
+  version: 1,
+  zones: [{ monolith_id: 700, radius: 5 }],
+});
+assert.deepEqual(Global.sanctuaryZones['700'], { monolith_id: 700, radius: 5 });
+assert.equal(emitter.count(NetworkEvent.SANCTUARY_STATE) > 0, true);
 
 const completionCountBeforeStalePacket = emitter.count(NetworkEvent.SAFE_LOGOUT_COMPLETE);
 firstSocket.message({ ...protectedPacket, message: 'Delayed old-socket packet.' });
@@ -218,6 +225,7 @@ assert.deepEqual(
   {},
   'a new connection lifecycle clears the prior world protection snapshot',
 );
+assert.deepEqual(Global.sanctuaryZones, {}, 'a new connection clears the prior live sanctuary');
 const thirdSocket = FakeWebSocket.instances[2];
 thirdSocket.open();
 thirdSocket.message(protectedPacket);
@@ -285,8 +293,14 @@ replacementSocket.message(status({
   message: 'Pending before True Death.',
 }));
 assert.equal(replacementNetwork.getLatestSafeLogoutStatus()?.state, 'pending');
+replacementSocket.message({
+  packet: 'sanctuary_state',
+  version: 1,
+  zones: [{ monolith_id: 900, radius: 6 }],
+});
 replacementSocket.message({ packet: 'info_true_death' });
 assert.equal(replacementNetwork.getLatestSafeLogoutStatus(), null, 'True Death clears pending status');
+assert.deepEqual(Global.sanctuaryZones, {}, 'True Death clears the live sanctuary border');
 replacementSocket.message(status({ can_request: true, message: 'Prior run.' }));
 replacementSocket.message({ packet: 'select_class', player: 7 });
 assert.equal(replacementNetwork.getLatestSafeLogoutStatus(), null, 'fresh hero selection clears prior-run status');
@@ -296,6 +310,11 @@ replacementSocket.message({
   packet: 'protected_settlements',
   version: 1,
   settlements: [{ player_id: 55, monolith_id: 701, sanctuary_radius: 3 }],
+});
+replacementSocket.message({
+  packet: 'sanctuary_state',
+  version: 1,
+  zones: [{ monolith_id: 701, radius: 5 }],
 });
 replacementSocket.message({
   packet: 'init_perception',
@@ -308,6 +327,7 @@ const offlineEventsBeforeAuthReset = emitter.count(NetworkEvent.SERVER_OFFLINE);
 replacementNetwork.resetForAuthentication();
 assert.equal(replacementNetwork.getLatestSafeLogoutStatus(), null, 'authentication start clears prior-account status');
 assert.deepEqual(Global.protectedSettlements, {}, 'authentication reset clears prior-account wards');
+assert.deepEqual(Global.sanctuaryZones, {}, 'authentication reset clears prior-account sanctuary');
 assert.equal(clock.callbacks.size, 0, 'authentication start cancels prior-account callbacks');
 assert.equal(replacementSocket.closeCount, 1, 'authentication start closes the superseded socket once');
 replacementSocket.message(protectedPacket);

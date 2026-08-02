@@ -24,8 +24,9 @@ use crate::map::Map;
 use crate::network::{ProtectedSettlementSnapshot, ResponsePacket, SafeLogoutStatusSnapshot};
 use crate::npc::{self, VisibleTarget};
 use crate::obj::{
-    BuildUpgradeState, Campfire, Id, LastAttacker, LastCombatTick, LastDamageTick, PlayerId,
-    Position, State, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, Template, TrueDeath,
+    ActionProgress, BuildUpgradeState, Campfire, Id, LastAttacker, LastCombatTick, LastDamageTick,
+    PlayerId, Position, State, StateDead, Stats, Subclass, SubclassHero, SubclassNPC, Template,
+    TrueDeath,
 };
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs};
 use crate::tax_collector::TaxCollector;
@@ -1361,6 +1362,11 @@ fn rebase_and_resume_offline_protection_system(world: &mut World) {
                 rebase_tick(&mut value.start_time, duration);
                 count(player_id, 1);
             }
+        }
+        if let Some(mut value) = entity.get_mut::<ActionProgress>() {
+            rebase_tick(&mut value.start_tick, duration);
+            rebase_tick(&mut value.end_tick, duration);
+            count(player_id, 2);
         }
         if let Some(mut inventory) = entity.get_mut::<Inventory>() {
             for item in &mut inventory.items {

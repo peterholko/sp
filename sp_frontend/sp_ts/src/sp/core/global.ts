@@ -4,6 +4,7 @@ import { MultiImage } from './multiImage';
 import { WeatherState } from './weatherState';
 import { ZIndexManager } from './zIndexManager';
 import { ProtectedSettlementLookup } from './protectedSettlements';
+import { SanctuaryZoneLookup } from './sanctuaryState';
 
 
 
@@ -42,6 +43,7 @@ export class Global {
 
     public static objectStates : Record<string, ObjectState> = {};
     public static protectedSettlements: ProtectedSettlementLookup = {};
+    public static sanctuaryZones: SanctuaryZoneLookup = {};
     public static tileStates : Record<string, TileState> = {};
     public static weatherStates : Record<string, WeatherState> = {};
 

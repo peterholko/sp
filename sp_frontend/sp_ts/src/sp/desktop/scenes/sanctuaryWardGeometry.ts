@@ -1,3 +1,5 @@
+// Safe Logout ward geometry; live sanctuary boundaries use this perimeter helper separately.
+
 import { ObjectState } from '../../core/objectState';
 import {
   ProtectedSettlement,

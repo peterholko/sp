@@ -28,13 +28,14 @@ use crate::combat::{AttackOptions, Combat, CombatEffectsChanged, CombatQuery, Co
 use crate::effect::{ControlEffectDiminishingReturns, Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_loot_poi, is_pos_empty, sanctuary_upgrade_cost, sanctuary_weak_radius,
-    survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase,
-    DamageRecord, DebugObjs, EventInProgress, GameTick, InitialEncounterState, IntroEncounterState,
-    LogLevelOverrides, Merchant, Monolith, MonolithInvestigation, MonolithProgress,
-    NetworkReceiver, ObjQuery, Objectives, PersonalCrisisHistory, PlayerIntroState,
-    PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
-    SettlementCrisisState, SpawnPositions, SurveyHistory, WeakSanctuary, SANCTUARY_MAX_LEVEL,
+    is_loot_poi, is_pos_empty, sanctuary_full_radius, sanctuary_upgrade_cost,
+    sanctuary_weak_radius, survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit,
+    CrisisKind, CrisisPhase, DamageRecord, DebugObjs, EventInProgress, GameTick,
+    InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
+    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
+    PersonalCrisisHistory, PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat,
+    PlayerStats, RunScoreState, SettlementCrisisState, SpawnPositions, SurveyHistory,
+    WeakSanctuary, SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -1645,13 +1646,44 @@ fn combo_hints_for_history(
     return (matching_combos, available_finisher);
 }
 
+fn live_combo_history_for_target(
+    tracker: Option<&crate::combat::ComboTracker>,
+    target_id: i32,
+    game_tick: i32,
+) -> Vec<String> {
+    Combat::live_combo_attacks_before_append(tracker, target_id, game_tick)
+        .into_iter()
+        .map(|attack| attack.to_str())
+        .collect()
+}
+
 pub(crate) fn combo_chain_cooldown_ticks(chain_length: usize) -> i32 {
     match chain_length {
         0 | 1 => ATTACK_COOLDOWN_TICKS,
         2 => 40,
         3 => 30,
+        // Current templates top out at four attacks, so strict-prefix tempo
+        // cannot reach this rung until a five-attack combo is introduced.
         _ => 25,
     }
+}
+
+pub(crate) fn combo_tempo_prefix_len(
+    attacks: &[crate::combat::AttackType],
+    templates: &Templates,
+) -> usize {
+    templates
+        .combo_templates
+        .iter()
+        .any(|(_, combo)| {
+            attacks.len() < combo.attacks.len()
+                && attacks
+                    .iter()
+                    .zip(combo.attacks.iter())
+                    .all(|(attack, expected)| attack.clone().to_str() == *expected)
+        })
+        .then_some(attacks.len())
+        .unwrap_or_default()
 }
 
 fn cooldown_seconds(cooldown_ticks: i32) -> f32 {
@@ -1707,14 +1739,26 @@ fn combo_finisher_can_fire(
     available_finisher.is_some()
 }
 
+fn combo_finisher_rejection(
+    available_finisher: Option<&str>,
+    basic_attack_cooldown_active: bool,
+) -> Option<&'static str> {
+    (!combo_finisher_can_fire(available_finisher, basic_attack_cooldown_active))
+        .then_some("No combo is ready.")
+}
+
 fn combo_tracker_timeout_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     entity_map: Res<EntityObjMap>,
-    mut query: Query<(&PlayerId, &mut crate::combat::ComboTracker)>,
+    mut query: Query<(
+        &PlayerId,
+        &mut crate::combat::ComboTracker,
+        Option<&SubclassHero>,
+    )>,
     target_query: Query<(&Template, &Effects, Option<&CrisisAssaultUnit>)>,
 ) {
-    for (player_id, mut tracker) in query.iter_mut() {
+    for (player_id, mut tracker, hero) in query.iter_mut() {
         if !tracker.attacks.is_empty()
             && game_tick.0.saturating_sub(tracker.last_attack_tick)
                 > crate::combat::COMBO_CHAIN_TIMEOUT_TICKS
@@ -1722,6 +1766,13 @@ fn combo_tracker_timeout_system(
             let target_id = tracker.target_id;
             tracker.attacks.clear();
             tracker.target_id = -1;
+
+            // Villagers also use ComboTracker internally, but CombatState is
+            // the owning hero's UI. Always expire stale NPC histories while
+            // allowing only the hero tracker to publish that UI state.
+            if hero.is_none() {
+                continue;
+            }
 
             let (enemy_intent, target_effects) = entity_map
                 .get_entity(target_id)
@@ -2414,7 +2465,7 @@ fn combat_effects_changed_observer(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     mut query_set: ParamSet<(
-        Query<(Entity, &PlayerId, &crate::combat::ComboTracker)>,
+        Query<(Entity, &PlayerId, &crate::combat::ComboTracker), With<SubclassHero>>,
         Query<CombatQuery>,
     )>,
 ) {
@@ -2726,7 +2777,8 @@ fn attack_system(
 
                 // Track player attack cooldown
                 attacker.last_combat_tick.0 = game_tick.0;
-                let effective_cooldown = combo_chain_cooldown_ticks(live_attacks.len());
+                let tempo_prefix_len = combo_tempo_prefix_len(&live_attacks, &templates);
+                let effective_cooldown = combo_chain_cooldown_ticks(tempo_prefix_len);
                 record_attack_cooldown(
                     &mut last_player_attack,
                     *player_id,
@@ -3273,28 +3325,21 @@ fn attack_system(
                     continue;
                 }
 
-                let attack_history = attacker
-                    .combo_tracker
-                    .as_ref()
-                    .filter(|combo_tracker| combo_tracker.target_id == target.id.0)
-                    .map(|combo_tracker| {
-                        combo_tracker
-                            .attacks
-                            .iter()
-                            .map(|attack| attack.clone().to_str())
-                            .collect::<Vec<String>>()
-                    })
-                    .unwrap_or_default();
+                let attack_history = live_combo_history_for_target(
+                    attacker.combo_tracker.as_deref(),
+                    target.id.0,
+                    game_tick.0,
+                );
                 let (_matching_combos, available_finisher) =
                     combo_hints_for_history(&attack_history, &templates);
                 let basic_attack_cooldown_active =
                     attack_is_on_cooldown(&last_player_attack, *player_id, game_tick.0);
-                if !combo_finisher_can_fire(
+                if let Some(errmsg) = combo_finisher_rejection(
                     available_finisher.as_deref(),
                     basic_attack_cooldown_active,
                 ) {
                     let packet = ResponsePacket::Error {
-                        errmsg: "No combo is ready.".to_string(),
+                        errmsg: errmsg.to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -5830,6 +5875,7 @@ fn info_tile_system(
     survey_history: Res<SurveyHistory>,
     terrain_features: Res<TerrainFeatures>,
     obj_query: Query<ObjQuery>,
+    monolith_query: Query<(&Position, &Monolith), With<Monolith>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -5842,15 +5888,12 @@ fn info_tile_system(
                 let tile_type = Map::tile_type(*x, *y, &map);
                 let mut sanctuary = "None".to_string();
 
-                for obj in obj_query.iter() {
-                    if obj.subclass.is_monolith() {
-                        if Map::dist(Position { x: *x, y: *y }, *obj.pos) <= SANCTUARY_RANGE {
-                            sanctuary = "Strong".to_string();
-                        } else if Map::dist(Position { x: *x, y: *y }, *obj.pos)
-                            <= WEAK_SANCTUARY_RANGE
-                        {
-                            sanctuary = "Weak".to_string();
-                        }
+                for (monolith_pos, monolith) in monolith_query.iter() {
+                    let distance = Map::dist(Position { x: *x, y: *y }, *monolith_pos);
+                    if distance < sanctuary_full_radius(monolith.sanctuary_level) {
+                        sanctuary = "Strong".to_string();
+                    } else if distance < sanctuary_weak_radius(monolith.sanctuary_level) {
+                        sanctuary = "Weak".to_string();
                     }
                 }
 
@@ -11795,7 +11838,7 @@ fn upgrade_sanctuary_system(
         else {
             continue;
         };
-        if Map::dist(*hero_pos, *monolith_pos) > sanctuary_weak_radius(monolith.sanctuary_level) {
+        if Map::dist(*hero_pos, *monolith_pos) >= sanctuary_weak_radius(monolith.sanctuary_level) {
             send_to_client(
                 *player_id,
                 ResponsePacket::Error {
@@ -12505,7 +12548,7 @@ pub fn is_player(player_id: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Fortified, SettlementCrisis};
+    use crate::game::{Client, Fortified, SettlementCrisis};
     use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence};
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
@@ -12600,6 +12643,18 @@ mod tests {
                 LastCombatTick(0),
             ))
             .id()
+    }
+
+    fn connected_test_client(player_id: i32) -> (Clients, tokio::sync::mpsc::Receiver<String>) {
+        let clients = Clients::default();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        let client_id = Uuid::new_v4();
+        clients.activate(Client {
+            id: client_id,
+            player_id,
+            sender,
+        });
+        (clients, receiver)
     }
 
     #[test]
@@ -13740,6 +13795,28 @@ mod tests {
         assert_eq!(finisher.as_deref(), Some("Hamstring"));
     }
 
+    fn tempo_test_templates() -> Templates {
+        let mut templates = Templates::from_obj_templates(Vec::new());
+        let combo = |name: &str, attacks: &[&str]| crate::templates::ComboTemplate {
+            name: name.to_string(),
+            attacks: attacks.iter().map(|attack| (*attack).to_string()).collect(),
+            effects: Vec::new(),
+            quick_damage: 1.0,
+            precise_damage: 1.0,
+            fierce_damage: 1.0,
+        };
+        templates.combo_templates.load(vec![
+            combo("Hamstring", &["quick", "quick"]),
+            combo("Intimidating Shout", &["fierce", "fierce"]),
+            combo("Shrouded Slash", &["precise", "fierce", "quick"]),
+            combo(
+                "Nightmare Strike",
+                &["fierce", "precise", "quick", "fierce"],
+            ),
+        ]);
+        templates
+    }
+
     #[test]
     fn combo_tempo_uses_the_decided_cooldown_ladder() {
         assert_eq!(combo_chain_cooldown_ticks(0), 50);
@@ -13748,6 +13825,185 @@ mod tests {
         assert_eq!(combo_chain_cooldown_ticks(3), 30);
         assert_eq!(combo_chain_cooldown_ticks(4), 25);
         assert_eq!(cooldown_seconds(combo_chain_cooldown_ticks(4)), 2.5);
+    }
+
+    #[test]
+    fn combo_tempo_accelerates_only_strict_template_prefixes() {
+        use crate::combat::AttackType::{Fierce, Precise, Quick};
+
+        let templates = tempo_test_templates();
+        let cooldown = |attacks: &[crate::combat::AttackType]| {
+            combo_chain_cooldown_ticks(combo_tempo_prefix_len(attacks, &templates))
+        };
+
+        assert_eq!(cooldown(&[Quick]), 50);
+        assert_eq!(cooldown(&[Precise, Fierce]), 40);
+        assert_eq!(cooldown(&[Fierce, Precise, Quick]), 30);
+        assert_eq!(cooldown(&[Quick, Quick]), 50);
+        assert_eq!(cooldown(&[Fierce, Fierce]), 50);
+
+        let mut history = Vec::new();
+        for _ in 0..6 {
+            history = Combat::next_combo_attacks(&history, Quick, &templates);
+            assert_eq!(cooldown(&history), 50);
+        }
+    }
+
+    #[test]
+    fn stale_combo_history_cannot_make_a_finisher_ready() {
+        use crate::combat::{AttackType::Quick, ComboTracker, COMBO_CHAIN_TIMEOUT_TICKS};
+
+        let templates = tempo_test_templates();
+        let tracker = ComboTracker {
+            target_id: 9,
+            attacks: vec![Quick, Quick],
+            last_attack_tick: 100,
+        };
+        let attack_history =
+            live_combo_history_for_target(Some(&tracker), 9, 100 + COMBO_CHAIN_TIMEOUT_TICKS + 1);
+        let (_matching_combos, available_finisher) =
+            combo_hints_for_history(&attack_history, &templates);
+
+        assert!(attack_history.is_empty());
+        assert_eq!(
+            combo_finisher_rejection(available_finisher.as_deref(), false),
+            Some("No combo is ready.")
+        );
+    }
+
+    #[test]
+    fn villager_combo_timeout_clears_tracker_without_sending_combat_state() {
+        use crate::combat::{AttackType::Quick, ComboTracker, COMBO_CHAIN_TIMEOUT_TICKS};
+
+        let player_id = 7;
+        let (clients, mut receiver) = connected_test_client(player_id);
+        let mut app = App::new();
+        let villager = app
+            .world_mut()
+            .spawn((
+                PlayerId(player_id),
+                SubclassVillager,
+                ComboTracker {
+                    target_id: 99,
+                    attacks: vec![Quick],
+                    last_attack_tick: 10,
+                },
+            ))
+            .id();
+        app.insert_resource(GameTick(10 + COMBO_CHAIN_TIMEOUT_TICKS + 1))
+            .insert_resource(clients)
+            .insert_resource(EntityObjMap(HashMap::new()))
+            .add_systems(Update, combo_tracker_timeout_system);
+
+        app.update();
+
+        let tracker = app.world().entity(villager).get::<ComboTracker>().unwrap();
+        assert!(tracker.attacks.is_empty());
+        assert_eq!(tracker.target_id, -1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn hero_combo_timeout_sends_empty_combat_state() {
+        use crate::combat::{AttackType::Quick, ComboTracker, COMBO_CHAIN_TIMEOUT_TICKS};
+
+        let player_id = 7;
+        let (clients, mut receiver) = connected_test_client(player_id);
+        let mut app = App::new();
+        app.world_mut().spawn((
+            PlayerId(player_id),
+            SubclassHero,
+            ComboTracker {
+                target_id: 99,
+                attacks: vec![Quick],
+                last_attack_tick: 10,
+            },
+        ));
+        app.insert_resource(GameTick(10 + COMBO_CHAIN_TIMEOUT_TICKS + 1))
+            .insert_resource(clients)
+            .insert_resource(EntityObjMap(HashMap::new()))
+            .add_systems(Update, combo_tracker_timeout_system);
+
+        app.update();
+
+        let packet: ResponsePacket =
+            serde_json::from_str(&receiver.try_recv().expect("hero timeout state")).unwrap();
+        assert!(matches!(
+            packet,
+            ResponsePacket::CombatState {
+                target_id: 99,
+                attack_history,
+                available_finisher: None,
+                ..
+            } if attack_history.is_empty()
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn combat_effect_updates_skip_villager_tracker_and_serve_hero_tracker() {
+        use crate::combat::{AttackType::Quick, ComboTracker};
+
+        let player_id = 7;
+        let target_id = 99;
+        let (clients, mut receiver) = connected_test_client(player_id);
+        let mut app = App::new();
+        app.insert_resource(clients)
+            .insert_resource(tempo_test_templates())
+            .add_observer(combat_effects_changed_observer);
+
+        let target = spawn_ability_test_actor(
+            app.world_mut(),
+            target_id,
+            NPC_PLAYER_ID,
+            Position { x: 1, y: 0 },
+            Subclass::Npc,
+            TestAbilityTarget,
+        );
+        let villager = spawn_ability_test_actor(
+            app.world_mut(),
+            8,
+            player_id,
+            Position { x: 0, y: 0 },
+            Subclass::Villager,
+            SubclassVillager,
+        );
+        app.world_mut().entity_mut(villager).insert(ComboTracker {
+            target_id,
+            attacks: vec![Quick],
+            last_attack_tick: 10,
+        });
+        app.insert_resource(EntityObjMap(HashMap::from([(target_id, target)])));
+
+        app.world_mut().trigger(CombatEffectsChanged { target_id });
+        assert!(receiver.try_recv().is_err());
+
+        let hero = spawn_ability_test_actor(
+            app.world_mut(),
+            7,
+            player_id,
+            Position { x: 0, y: 0 },
+            Subclass::Hero,
+            SubclassHero,
+        );
+        app.world_mut().entity_mut(hero).insert(ComboTracker {
+            target_id,
+            attacks: vec![Quick],
+            last_attack_tick: 10,
+        });
+
+        app.world_mut().trigger(CombatEffectsChanged { target_id });
+        let packet: ResponsePacket =
+            serde_json::from_str(&receiver.try_recv().expect("hero effect state")).unwrap();
+        assert!(matches!(
+            packet,
+            ResponsePacket::CombatState {
+                target_id: 99,
+                attack_history,
+                ..
+            } if attack_history == vec!["quick".to_string()]
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::{
     event::{
         DrinkEventCompleted, EatEventCompleted, EventCompleted, EventExecuting,
         EventExecutingState, FindEventCompleted, GameEvent, GameEventType, GameEvents, MapEvents,
-        SleepEventCompleted, VisibleEvent,
+        SleepEventCompleted, VisibleEvent, VisibleEvents,
     },
     experiment::{self, Experiment, Experiments},
     game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
@@ -1930,6 +1930,7 @@ pub fn process_order_system(
     protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
+    mut visible_events: ResMut<VisibleEvents>,
     templates: Res<Templates>,
     event_completed: Query<&EventCompleted>,
     (
@@ -2081,9 +2082,37 @@ pub fn process_order_system(
                             .map(|rating| item::gather_duration_ticks(base_seconds, rating))
                             .unwrap_or(base_seconds * TICKS_PER_SEC);
 
-                        // Add Game Event to start work
+                        // Give every gather cycle an authoritative identity and
+                        // timing payload. This lets the client reset consecutive
+                        // cycles even though the unit remains in Gathering.
+                        let action_id = ids.new_map_event_id();
+                        let action_progress = ActionProgress {
+                            action_id,
+                            start_tick: game_tick.0,
+                            end_tick: game_tick.0 + work_duration,
+                        };
+                        commands.entity(*actor).insert(action_progress);
+
+                        visible_events.new(
+                            villager_id.0,
+                            game_tick.0,
+                            VisibleEvent::UpdateObjEvent {
+                                attrs: vec![
+                                    ("state".to_string(), STATE_GATHERING.to_string()),
+                                    ("action_id".to_string(), action_id.to_string()),
+                                    (
+                                        "action_duration_ms".to_string(),
+                                        (work_duration.saturating_mul(1000) / TICKS_PER_SEC)
+                                            .to_string(),
+                                    ),
+                                    ("action_elapsed_ms".to_string(), "0".to_string()),
+                                ],
+                            },
+                        );
+
+                        // Add Game Event to finish work.
                         let event = GameEvent {
-                            event_id: ids.new_map_event_id(),
+                            event_id: action_id,
                             start_tick: game_tick.0,
                             run_tick: game_tick.0 + work_duration,
                             event_type: GameEventType::GatherEvent {

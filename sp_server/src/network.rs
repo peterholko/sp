@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use chrono::DateTime;
 use chrono::Utc;
 
-use crate::constants::{CREATING_HERO, DATABASE_MANAGER_ID, HERO_DEAD, PLAYING};
+use crate::constants::{CREATING_HERO, DATABASE_MANAGER_ID, HERO_DEAD, PLAYING, TICKS_PER_SEC};
 use crate::database::DatabaseEvent;
 use crate::effect;
 use crate::game::{DatabaseClient, DatabaseManagers};
@@ -39,8 +39,8 @@ use crate::{
 use crate::{
     game::{ObjQueryItem, ObjQueryMutReadOnlyItem},
     item,
-    obj::BuildUpgradeState,
     obj::HeroClassList,
+    obj::{ActionProgress, BuildUpgradeState},
     resource::Property,
     templates::ResReq,
     trade::WantedItem,
@@ -441,6 +441,17 @@ pub struct ProtectedSettlementSnapshot {
     pub player_id: i32,
     pub monolith_id: i32,
     pub sanctuary_radius: u32,
+}
+
+/// The connected player's own live sanctuary boundary. Coordinates are
+/// intentionally omitted so the client anchors it to an ordinarily perceived
+/// Monolith instead of learning hidden map information.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SanctuaryZoneSnapshot {
+    pub monolith_id: i32,
+    /// Outer sanctuary-protection boundary. Today this is the weak radius; the
+    /// protocol remains tier-neutral if sanctuary tiers change later.
+    pub radius: u32,
 }
 
 #[skip_serializing_none]
@@ -1114,6 +1125,11 @@ pub enum ResponsePacket {
         version: u32,
         settlements: Vec<ProtectedSettlementSnapshot>,
     },
+    #[serde(rename = "sanctuary_state")]
+    SanctuaryState {
+        version: u32,
+        zones: Vec<SanctuaryZoneSnapshot>,
+    },
     #[serde(rename = "threat_state")]
     ThreatState {
         version: i32,
@@ -1246,6 +1262,9 @@ pub struct MapObj {
     pub work_done: Option<i32>,
     pub total_work: Option<i32>,
     pub work_per_sec: Option<i32>,
+    pub action_id: Option<i32>,
+    pub action_duration_ms: Option<i32>,
+    pub action_elapsed_ms: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1668,8 +1687,31 @@ pub fn build_progress_fields(
     (None, None, None)
 }
 
-pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>) -> MapObj {
+pub fn action_progress_fields(
+    action: Option<&ActionProgress>,
+    game_tick: i32,
+) -> (Option<i32>, Option<i32>, Option<i32>) {
+    let Some(action) = action else {
+        return (None, None, None);
+    };
+
+    let duration_ticks = action.end_tick.saturating_sub(action.start_tick).max(1);
+    let elapsed_ticks = game_tick
+        .saturating_sub(action.start_tick)
+        .clamp(0, duration_ticks);
+    let ticks_to_ms = |ticks: i32| ticks.saturating_mul(1000) / TICKS_PER_SEC;
+
+    (
+        Some(action.action_id),
+        Some(ticks_to_ms(duration_ticks)),
+        Some(ticks_to_ms(elapsed_ticks)),
+    )
+}
+
+pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
     let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+    let (action_id, action_duration_ms, action_elapsed_ms) =
+        action_progress_fields(obj.action_progress, game_tick);
 
     let network_obj = MapObj {
         id: obj.id.0,
@@ -1688,6 +1730,9 @@ pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>) -> MapObj {
         work_done,
         total_work,
         work_per_sec,
+        action_id,
+        action_duration_ms,
+        action_elapsed_ms,
     };
 
     network_obj
@@ -1724,13 +1769,18 @@ pub fn network_obj(
         work_done: None,
         total_work: None,
         work_per_sec: None,
+        action_id: None,
+        action_duration_ms: None,
+        action_elapsed_ms: None,
     };
 
     network_obj
 }
 
-pub fn to_map_obj(obj: ObjQueryItem<'_, '_>) -> MapObj {
+pub fn to_map_obj(obj: ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
     let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+    let (action_id, action_duration_ms, action_elapsed_ms) =
+        action_progress_fields(obj.action_progress, game_tick);
 
     let network_obj = MapObj {
         id: obj.id.0,
@@ -1749,6 +1799,9 @@ pub fn to_map_obj(obj: ObjQueryItem<'_, '_>) -> MapObj {
         work_done,
         total_work,
         work_per_sec,
+        action_id,
+        action_duration_ms,
+        action_elapsed_ms,
     };
 
     network_obj
@@ -1772,6 +1825,9 @@ pub fn to_map_without_vision(obj: ObjQueryMutReadOnlyItem<'_, '_>) -> MapObj {
         work_done: None,
         total_work: None,
         work_per_sec: None,
+        action_id: None,
+        action_duration_ms: None,
+        action_elapsed_ms: None,
     };
 
     network_obj
@@ -4536,6 +4592,25 @@ fn handle_get_log_levels(
 mod tests {
     use super::*;
 
+    #[test]
+    fn action_progress_fields_resume_from_server_elapsed_time() {
+        let action = ActionProgress {
+            action_id: 41,
+            start_tick: 100,
+            end_tick: 400,
+        };
+
+        assert_eq!(
+            action_progress_fields(Some(&action), 220),
+            (Some(41), Some(30_000), Some(12_000))
+        );
+        assert_eq!(
+            action_progress_fields(Some(&action), 500),
+            (Some(41), Some(30_000), Some(30_000))
+        );
+        assert_eq!(action_progress_fields(None, 220), (None, None, None));
+    }
+
     fn no_crisis_status() -> CrisisStatusSnapshot {
         CrisisStatusSnapshot {
             version: 1,
@@ -4809,6 +4884,42 @@ mod tests {
         })
         .unwrap();
         assert_eq!(empty["settlements"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn sanctuary_state_packet_is_flat_versioned_and_round_trips() {
+        let packet = ResponsePacket::SanctuaryState {
+            version: 1,
+            zones: vec![SanctuaryZoneSnapshot {
+                monolith_id: 701,
+                radius: 7,
+            }],
+        };
+        let encoded = serde_json::to_string(&packet).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "packet": "sanctuary_state",
+                "version": 1,
+                "zones": [{
+                    "monolith_id": 701,
+                    "radius": 7
+                }]
+            })
+        );
+        assert_eq!(
+            serde_json::from_str::<ResponsePacket>(&encoded).unwrap(),
+            packet
+        );
+
+        let empty = serde_json::to_value(ResponsePacket::SanctuaryState {
+            version: 1,
+            zones: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(empty["zones"], serde_json::json!([]));
     }
 
     #[test]

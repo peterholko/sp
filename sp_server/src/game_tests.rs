@@ -1849,6 +1849,11 @@ fn combat_lock_interrupt_cancels_active_peaceful_work() {
             PlayerId(1),
             Position { x: 0, y: 0 },
             State::Gathering,
+            ActionProgress {
+                action_id: 7,
+                start_tick: 0,
+                end_tick: 10,
+            },
             SubclassHero,
             LastCombatTick(100),
             EventExecuting {
@@ -1897,6 +1902,7 @@ fn combat_lock_interrupt_cancels_active_peaceful_work() {
     );
     assert!(app.world().resource::<MapEvents>().is_empty());
     assert!(app.world().resource::<GameEvents>().is_empty());
+    assert!(app.world().entity(hero).get::<ActionProgress>().is_none());
 }
 
 #[test]
@@ -2255,6 +2261,7 @@ fn watchtower_does_not_reveal_out_of_range_or_friendly_hidden_units() {
 fn visible_event_move_packets_keep_source_coordinates() {
     let mut app = App::new();
     app.add_systems(Update, visible_event_system);
+    app.insert_resource(GameTick(10));
     app.insert_resource(EntityObjMap(HashMap::new()));
     app.insert_resource(CampfireVisibilityState::default());
 
@@ -2779,6 +2786,7 @@ fn rejected_off_tile_work_releases_process_order_to_retry() {
     app.insert_resource(PlayerWorldPresenceState::default());
     app.insert_resource(MapEvents(HashMap::new()));
     app.insert_resource(GameEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
     app.insert_resource(Recipes::from_recipes(vec![structure_craft_test_recipe()]));
     app.insert_resource(structure_craft_test_templates());
 
@@ -2973,6 +2981,11 @@ fn gather_event_system_marks_gatherer_event_completed() {
             Template("Human Villager".to_string()),
             Subclass::Villager,
             State::Gathering,
+            ActionProgress {
+                action_id: 7,
+                start_tick: 0,
+                end_tick: 10,
+            },
             Effects(HashMap::new()),
             Inventory {
                 owner: 1,
@@ -2995,6 +3008,11 @@ fn gather_event_system_marks_gatherer_event_completed() {
 
     let game_events = app.world().resource::<GameEvents>();
     assert!(game_events.is_empty());
+    assert!(app
+        .world()
+        .entity(gatherer_entity)
+        .get::<ActionProgress>()
+        .is_none());
 }
 
 #[test]
@@ -3220,6 +3238,152 @@ fn personal_crisis_is_the_default_survival_director_mode() {
         SurvivalDirectorConfig::default().mode,
         SurvivalDirectorMode::PersonalCrisis
     );
+}
+
+#[test]
+fn sanctuary_state_snapshot_uses_bound_monolith_weak_radius_and_fails_closed() {
+    let mut world = World::new();
+    world.spawn((
+        PlayerId(7),
+        State::None,
+        BoundMonolith {
+            id: 701,
+            pos: Position { x: 8, y: 9 },
+        },
+        SubclassHero,
+    ));
+    world.spawn((PlayerId(8), State::None, SubclassHero));
+    world.spawn((
+        PlayerId(9),
+        State::None,
+        BoundMonolith {
+            id: 999,
+            pos: Position { x: 1, y: 1 },
+        },
+        SubclassHero,
+    ));
+    world.spawn((
+        PlayerId(10),
+        State::None,
+        BoundMonolith {
+            id: 701,
+            pos: Position { x: 8, y: 9 },
+        },
+        TrueDeath { true_death_at: 20 },
+        SubclassHero,
+    ));
+
+    let zones = SanctuaryZones(HashMap::from([(
+        701,
+        SanctuaryZone {
+            pos: Position { x: 8, y: 9 },
+            level: 3,
+        },
+    )]));
+    let mut hero_query = world.query_filtered::<(
+        &PlayerId,
+        &State,
+        Option<&BoundMonolith>,
+        Option<&StateDead>,
+        Option<&TrueDeath>,
+    ), With<SubclassHero>>();
+
+    assert_eq!(
+        build_sanctuary_state_snapshot(7, &zones, hero_query.iter(&world)),
+        vec![SanctuaryZoneSnapshot {
+            monolith_id: 701,
+            radius: WEAK_SANCTUARY_RANGE + 3,
+        }]
+    );
+    assert!(build_sanctuary_state_snapshot(8, &zones, hero_query.iter(&world)).is_empty());
+    assert!(build_sanctuary_state_snapshot(9, &zones, hero_query.iter(&world)).is_empty());
+    assert!(build_sanctuary_state_snapshot(10, &zones, hero_query.iter(&world)).is_empty());
+    assert!(build_sanctuary_state_snapshot(11, &zones, hero_query.iter(&world)).is_empty());
+}
+
+#[test]
+fn sanctuary_zone_weak_boundary_uses_strict_distance() {
+    let zone = SanctuaryZone {
+        pos: Position { x: 10, y: 10 },
+        level: 0,
+    };
+    assert!(zone.contains_weak(Position { x: 14, y: 10 }));
+    assert!(!zone.contains_weak(Position { x: 15, y: 10 }));
+}
+
+#[test]
+fn sanctuary_state_delivery_deduplicates_changes_and_clears_dead_hero() {
+    let player_id = 7;
+    let monolith_id = 701;
+    let client_id = Uuid::from_u128(701);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    let clients = Clients::default();
+    clients.activate(test_client(client_id, player_id, sender));
+
+    let mut app = App::new();
+    app.insert_resource(clients)
+        .insert_resource(SanctuaryZones(HashMap::from([(
+            monolith_id,
+            SanctuaryZone {
+                pos: Position { x: 8, y: 9 },
+                level: 0,
+            },
+        )])))
+        .insert_resource(SanctuaryStateDeliveryState::default())
+        .add_systems(Update, sanctuary_state_delivery_system);
+    let hero = app
+        .world_mut()
+        .spawn((
+            PlayerId(player_id),
+            State::None,
+            BoundMonolith {
+                id: monolith_id,
+                pos: Position { x: 8, y: 9 },
+            },
+            SubclassHero,
+        ))
+        .id();
+
+    app.update();
+    let initial: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+    assert!(matches!(
+        initial,
+        ResponsePacket::SanctuaryState {
+            version: SANCTUARY_STATE_VERSION,
+            zones
+        } if zones == vec![SanctuaryZoneSnapshot {
+            monolith_id,
+            radius: WEAK_SANCTUARY_RANGE,
+        }]
+    ));
+    app.update();
+    assert!(receiver.try_recv().is_err());
+
+    app.world_mut()
+        .resource_mut::<SanctuaryZones>()
+        .get_mut(&monolith_id)
+        .unwrap()
+        .level = 2;
+    app.update();
+    let upgraded: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+    assert!(matches!(
+        upgraded,
+        ResponsePacket::SanctuaryState { zones, .. }
+            if zones.first().map(|zone| zone.radius) == Some(WEAK_SANCTUARY_RANGE + 2)
+    ));
+    app.update();
+    assert!(receiver.try_recv().is_err());
+
+    app.world_mut().entity_mut(hero).insert(StateDead {
+        dead_at: 10,
+        killer: "test".to_string(),
+    });
+    app.update();
+    let cleared: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+    assert!(matches!(
+        cleared,
+        ResponsePacket::SanctuaryState { zones, .. } if zones.is_empty()
+    ));
 }
 
 fn test_client(id: Uuid, player_id: i32, sender: tokio::sync::mpsc::Sender<String>) -> Client {

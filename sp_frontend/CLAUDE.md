@@ -71,9 +71,9 @@ the Webpack output. `npm run serve` starts the interactive development server.
 - `desktop/` must not import from `mobile/`, and `mobile/` must not import from `desktop/`; use `./check-imports.sh` to verify.
 - Runtime assets are loaded from `/static/art/...` and `/static/tileset.json`; keep those URL shapes stable unless the serving model changes too.
 - Both shells use shared authoritative perception and ordinary burning-object
-  presentation. Tutorial & Help, protected-settlement wards, the public
-  Campfire action, and the lit standalone-Campfire overlay are currently
-  desktop-only.
+  presentation. Tutorial & Help, protected-settlement wards, the live sanctuary
+  boundary, the public Campfire action, and the lit standalone-Campfire overlay
+  are currently desktop-only.
 
 ## Important Files
 

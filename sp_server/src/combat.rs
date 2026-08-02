@@ -1218,8 +1218,10 @@ impl Combat {
             2 => Some(0.25),
             _ => None,
         };
-        entry.stage = entry.stage.saturating_add(1).min(3);
-        entry.last_applied_tick = game_tick;
+        if multiplier.is_some() {
+            entry.stage = entry.stage.saturating_add(1).min(3);
+            entry.last_applied_tick = game_tick;
+        }
         multiplier
     }
 
@@ -1923,7 +1925,15 @@ mod tests {
             None
         );
         assert_eq!(
-            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 190),
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 100),
+            None
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 179),
+            None
+        );
+        assert_eq!(
+            Combat::control_effect_duration_multiplier(&mut dr, &Effect::Fear, 180),
             Some(1.0)
         );
     }

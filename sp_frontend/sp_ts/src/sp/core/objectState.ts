@@ -18,6 +18,9 @@ export interface ObjectState {
     work_done?: number;
     total_work?: number;
     work_per_sec?: number;
+    action_id?: number;
+    action_duration_ms?: number;
+    action_elapsed_ms?: number;
     perceptionObserver?: boolean;
     op? : string;
     updateAttr?: string;

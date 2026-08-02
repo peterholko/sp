@@ -264,6 +264,7 @@ pub struct Bot {
     // Test/audit marker for the most recent ordinary cooldown-reposition event.
     // It has no gameplay effect and is never sent to production systems.
     last_ranger_cooldown_reposition_tick: Option<i32>,
+    last_ranger_cooldown_reposition_target_id: Option<i32>,
     mage_warded_target_id: Option<i32>,
     mage_offensive_commands_since_ward: u8,
 }
@@ -310,6 +311,7 @@ impl Bot {
             ranger_disengaged_target_id: None,
             ranger_offensive_commands_since_disengage: 0,
             last_ranger_cooldown_reposition_tick: None,
+            last_ranger_cooldown_reposition_target_id: None,
             mage_warded_target_id: None,
             mage_offensive_commands_since_ward: 0,
         }
@@ -327,6 +329,11 @@ impl Bot {
     }
 
     pub fn step(&mut self, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
+        // This is per-decision audit evidence, not persistent tactical state.
+        // Clearing it prevents an earlier fixture phase whose tick is later
+        // restored from masquerading as a reposition in the current decision.
+        self.last_ranger_cooldown_reposition_tick = None;
+        self.last_ranger_cooldown_reposition_target_id = None;
         let hero = view.hero?;
         if hero.dead || hero.true_death {
             return None;
@@ -1325,7 +1332,7 @@ impl Bot {
         if hero_soulshards(&view.inventory) < sanctuary_upgrade_cost(mono.level) {
             return None;
         }
-        if hex_dist(hero.pos, mono.pos) <= sanctuary_weak_radius(mono.level) {
+        if hex_dist(hero.pos, mono.pos) < sanctuary_weak_radius(mono.level) {
             return Some(PlayerEvent::UpgradeSanctuary {
                 player_id: self.player_id,
                 monolith_id: mono.id,
@@ -1832,6 +1839,7 @@ impl Bot {
                         self.ranger_bow_reposition_step(hero.pos, enemy.pos, bow_range, view, map);
                     if reposition.is_some() {
                         self.last_ranger_cooldown_reposition_tick = Some(view.game_tick);
+                        self.last_ranger_cooldown_reposition_target_id = Some(enemy.id);
                     }
                     return reposition;
                 }
@@ -2680,6 +2688,14 @@ mod tests {
             }
             bot.advance_phase(&view);
             game.tick(DECISION_TICKS);
+            if investigated_owned_wreck {
+                // The production investigation deliberately installs the real
+                // one-second rat deadline. Reapply this fixture's unrelated-
+                // combat deferral after each fixture pump so it also covers
+                // the broker/handler update boundary.
+                game.defer_intro_encounter_deadlines_for_fixture()
+                    .expect("deferred post-investigation intro deadlines");
+            }
         }
 
         let view = game.observe_for_player(player_id);
@@ -3452,6 +3468,7 @@ mod tests {
     ) -> bool {
         const DECISION_TICKS: u32 = 8;
         const MAX_DECISIONS: usize = 1_500;
+        let mut owned_shipwreck_investigation_issued = false;
 
         for _ in 0..MAX_DECISIONS {
             let view = game.observe_for_player(player_id);
@@ -3478,10 +3495,25 @@ mod tests {
             }
 
             if let Some(event) = bot.step(&view, game.map()) {
+                owned_shipwreck_investigation_issued |= matches!(
+                    &event,
+                    PlayerEvent::InvestigatePOI { target_id, .. }
+                        if view.pois.iter().any(|poi| {
+                            poi.id == *target_id
+                                && poi.template == "Shipwreck"
+                                && poi.run_owned
+                        })
+                );
                 game.inject(event);
             }
             bot.advance_phase(&view);
             game.tick(DECISION_TICKS);
+            if owned_shipwreck_investigation_issued {
+                // Investigation resets the production rat deadline, so defer
+                // it after each fixture pump across the input boundary.
+                game.defer_intro_encounter_deadlines_for_fixture()
+                    .expect("deferred post-investigation intro deadlines");
+            }
         }
 
         false
@@ -3579,7 +3611,10 @@ mod tests {
                 }
 
                 let event = bot.step(&view, game.map());
-                if let Some(target_id) = bot.observed_assault_target_id() {
+                if let Some(target_id) = bot
+                    .observed_assault_target_id()
+                    .or(bot.last_ranger_cooldown_reposition_target_id)
+                {
                     assert!(
                         game.record_observed_crisis_target(target_id),
                         "bot target must belong to the live owner assault"
@@ -3600,8 +3635,8 @@ mod tests {
                             {
                                 let hero = view.hero.expect("Ranger reposition source");
                                 let target_id = bot
-                                    .observed_assault_target_id()
-                                    .expect("retained Ranger assault target");
+                                    .last_ranger_cooldown_reposition_target_id
+                                    .expect("Ranger reposition assault target");
                                 let target = view
                                     .enemies
                                     .iter()

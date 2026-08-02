@@ -1,3 +1,5 @@
+// Safe Logout ward state; live owner-sanctuary boundaries use sanctuaryState.ts.
+
 import { ObjectState } from './objectState';
 
 export const PROTECTED_SETTLEMENTS_VERSION = 1;

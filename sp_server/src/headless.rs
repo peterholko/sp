@@ -8733,7 +8733,31 @@ mod tests {
             HashSet::from([campfire_id])
         );
 
-        let adjacent_pos = passable_unoccupied_adjacent_position(&mut game, campfire_pos);
+        // Select both legs together. Choosing an arbitrary adjacent tile first
+        // made this fixture map-dependent because that tile was not guaranteed
+        // to have a passable outward neighbor two hexes from the Campfire.
+        let occupied = game.observe().occupied;
+        let (adjacent_pos, two_hexes_away) = Map::range((campfire_pos.x, campfire_pos.y), 1)
+            .into_iter()
+            .map(|(x, y)| Position { x, y })
+            .filter(|position| {
+                Map::is_adjacent_excluding_source(*position, campfire_pos)
+                    && Map::is_passable(position.x, position.y, game.map())
+                    && !occupied.contains(&(position.x, position.y))
+            })
+            .find_map(|adjacent| {
+                Map::range((adjacent.x, adjacent.y), 1)
+                    .into_iter()
+                    .map(|(x, y)| Position { x, y })
+                    .find(|position| {
+                        Map::is_adjacent_excluding_source(*position, adjacent)
+                            && Map::dist(*position, campfire_pos) == 2
+                            && Map::is_passable(position.x, position.y, game.map())
+                            && !occupied.contains(&(position.x, position.y))
+                    })
+                    .map(|outward| (adjacent, outward))
+            })
+            .expect("passable two-step route away from the Campfire");
         move_primary_hero_and_wait(&mut game, adjacent_pos);
         let (_, moved_pos, moved_vision, moved_light) = primary_hero_light_snapshot(&mut game);
         assert_eq!(moved_pos, adjacent_pos);
@@ -8783,17 +8807,6 @@ mod tests {
             HashSet::from([campfire_id])
         );
 
-        let occupied = game.observe().occupied;
-        let two_hexes_away = Map::range((adjacent_pos.x, adjacent_pos.y), 1)
-            .into_iter()
-            .map(|(x, y)| Position { x, y })
-            .find(|position| {
-                Map::is_adjacent_excluding_source(*position, adjacent_pos)
-                    && Map::dist(*position, campfire_pos) == 2
-                    && Map::is_passable(position.x, position.y, game.map())
-                    && !occupied.contains(&(position.x, position.y))
-            })
-            .expect("passable second step away from the Campfire");
         move_primary_hero_and_wait(&mut game, two_hexes_away);
         assert!(
             active_campfire_light_ids(&game, player_id).is_empty(),
@@ -15290,6 +15303,24 @@ mod tests {
                 .find(|(owner, _)| owner.0 == player_id)
                 .expect("hero stats");
             stats.hp = stats.base_hp - 20;
+
+            // The fixture launches a real assault, which may already have an
+            // attack queued against the hero. Remove only those pending enemy
+            // actions so this assertion measures the production bandage heal,
+            // while the crisis remains AssaultActive for telemetry.
+            let assault_actor_ids = {
+                let mut assault_units = world.query::<(&Id, &CrisisAssaultUnit)>();
+                assault_units
+                    .iter(world)
+                    .filter_map(|(id, assault)| {
+                        (assault.owner_player_id == player_id).then_some(id.0)
+                    })
+                    .collect::<HashSet<_>>()
+            };
+            assert!(!assault_actor_ids.is_empty());
+            world
+                .resource_mut::<MapEvents>()
+                .retain(|_, event| !assault_actor_ids.contains(&event.obj_id));
         }
         let before = game.observe();
         let before_hero = before.hero.expect("hero");
@@ -15304,7 +15335,9 @@ mod tests {
             item_id: bandage.id,
         };
         game.inject(use_event.clone());
-        game.tick(3);
+        // The command ingress creates a future UseItemEvent and production
+        // execution uses a strict `run_tick < game_tick` boundary.
+        game.tick(4);
 
         let after = game.observe();
         assert_eq!(
@@ -15325,7 +15358,7 @@ mod tests {
         assert_eq!(engagement.healing_hp_restored_during_assault, 10);
 
         game.inject(use_event);
-        game.tick(3);
+        game.tick(4);
         let duplicate = game.crisis_balance_telemetry().engagement;
         assert_eq!(duplicate.healing_items_used_during_assault, 1);
         assert_eq!(duplicate.healing_hp_restored_during_assault, 10);

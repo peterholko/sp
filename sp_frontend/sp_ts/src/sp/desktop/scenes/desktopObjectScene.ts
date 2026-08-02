@@ -1,3 +1,5 @@
+// Desktop overlays: blue Safe Logout wards and the distinct green live sanctuary border.
+
 import Phaser from 'phaser';
 
 import { Global } from '../../core/global';
@@ -9,6 +11,10 @@ import {
   WardSegment,
   sanctuaryWardPresentation,
 } from './sanctuaryWardGeometry';
+import {
+  SanctuaryZoneBorderPresentation,
+  sanctuaryZoneBorderPresentation,
+} from './sanctuaryZoneBorderPresentation';
 
 interface SanctuaryWardVisual {
   perimeter: Phaser.GameObjects.Graphics;
@@ -18,15 +24,25 @@ interface SanctuaryWardVisual {
   signature: string;
 }
 
+interface SanctuaryZoneBorderVisual {
+  perimeter: Phaser.GameObjects.Graphics;
+  perimeterTween: Phaser.Tweens.Tween;
+  signature: string;
+}
+
 const WARD_BLUE = 0x72d6e8;
 const WARD_GOLD = 0xe4c66f;
 const WARD_INK = 0x10283a;
 const WARD_PERIMETER_DEPTH = -1;
 const WARD_MARKER_DEPTH = 4;
+const ZONE_BORDER_GREEN = 0x4cc06a;
+const ZONE_BORDER_ACCENT = 0x8fe0a0;
+const ZONE_BORDER_DEPTH = -1;
 
 /** Desktop-only presentation layer; mobile continues to register ObjectScene. */
 export class DesktopObjectScene extends ObjectScene {
   private sanctuaryWards: Record<string, SanctuaryWardVisual> = {};
+  private sanctuaryZoneBorders: Record<string, SanctuaryZoneBorderVisual> = {};
   private wardListenersRegistered = false;
 
   create(): void {
@@ -34,8 +50,9 @@ export class DesktopObjectScene extends ObjectScene {
 
     this.registerWardListeners();
     this.syncSanctuaryWards();
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdownSanctuaryWards, this);
-    this.events.once(Phaser.Scenes.Events.DESTROY, this.shutdownSanctuaryWards, this);
+    this.syncSanctuaryZoneBorders();
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.shutdownSanctuaryOverlays, this);
+    this.events.once(Phaser.Scenes.Events.DESTROY, this.shutdownSanctuaryOverlays, this);
   }
 
   update(time: number): void {
@@ -57,12 +74,23 @@ export class DesktopObjectScene extends ObjectScene {
       Global.gameEmitter.on(event, this.syncSanctuaryWards, this);
     }
     for (const event of [
+      NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.PROTECTED_SETTLEMENTS,
+      NetworkEvent.PERCEPTION,
+      NetworkEvent.NEW_PERCEPTION,
+      NetworkEvent.OBJ_PERCEPTION,
+      NetworkEvent.CHANGES,
+    ]) {
+      Global.gameEmitter.on(event, this.syncSanctuaryZoneBorders, this);
+    }
+    for (const event of [
       NetworkEvent.SAFE_LOGOUT_RESET,
       NetworkEvent.SAFE_LOGOUT_COMPLETE,
       NetworkEvent.SERVER_OFFLINE,
       NetworkEvent.NETWORK_ERROR,
     ]) {
       Global.gameEmitter.on(event, this.clearSanctuaryWards, this);
+      Global.gameEmitter.on(event, this.clearSanctuaryZoneBorders, this);
     }
     this.wardListenersRegistered = true;
   }
@@ -82,12 +110,23 @@ export class DesktopObjectScene extends ObjectScene {
       Global.gameEmitter.off(event, this.syncSanctuaryWards, this);
     }
     for (const event of [
+      NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.PROTECTED_SETTLEMENTS,
+      NetworkEvent.PERCEPTION,
+      NetworkEvent.NEW_PERCEPTION,
+      NetworkEvent.OBJ_PERCEPTION,
+      NetworkEvent.CHANGES,
+    ]) {
+      Global.gameEmitter.off(event, this.syncSanctuaryZoneBorders, this);
+    }
+    for (const event of [
       NetworkEvent.SAFE_LOGOUT_RESET,
       NetworkEvent.SAFE_LOGOUT_COMPLETE,
       NetworkEvent.SERVER_OFFLINE,
       NetworkEvent.NETWORK_ERROR,
     ]) {
       Global.gameEmitter.off(event, this.clearSanctuaryWards, this);
+      Global.gameEmitter.off(event, this.clearSanctuaryZoneBorders, this);
     }
     this.wardListenersRegistered = false;
   }
@@ -136,6 +175,48 @@ export class DesktopObjectScene extends ObjectScene {
       presentation.settlement.player_id,
       presentation.settlement.sanctuary_radius,
     ].join(':');
+  }
+
+  private syncSanctuaryZoneBorders(): void {
+    const activeAnchors = new Set<string>();
+
+    for (const objectId in Global.objectStates) {
+      const objectState = Global.objectStates[objectId] as ObjectState;
+      const presentation = sanctuaryZoneBorderPresentation(
+        objectState,
+        Global.sanctuaryZones,
+        Global.protectedSettlements,
+      );
+      if (!presentation) {
+        continue;
+      }
+
+      const anchorId = presentation.zone.monolith_id.toString();
+      activeAnchors.add(anchorId);
+      const signature = this.sanctuaryZoneBorderSignature(objectState, presentation);
+      if (this.sanctuaryZoneBorders[anchorId]?.signature === signature) {
+        continue;
+      }
+
+      this.destroySanctuaryZoneBorder(anchorId);
+      this.sanctuaryZoneBorders[anchorId] = this.createSanctuaryZoneBorder(
+        presentation,
+        signature,
+      );
+    }
+
+    for (const anchorId in this.sanctuaryZoneBorders) {
+      if (!activeAnchors.has(anchorId)) {
+        this.destroySanctuaryZoneBorder(anchorId);
+      }
+    }
+  }
+
+  private sanctuaryZoneBorderSignature(
+    objectState: ObjectState,
+    presentation: SanctuaryZoneBorderPresentation,
+  ): string {
+    return [objectState.x, objectState.y, presentation.zone.radius].join(':');
   }
 
   private createSanctuaryWard(
@@ -199,6 +280,56 @@ export class DesktopObjectScene extends ObjectScene {
     Array.from(runePoints.values()).forEach((point, index) => {
       if (index % 3 === 0) {
         graphics.fillCircle(point.x, point.y, 2.2);
+      }
+    });
+  }
+
+  private createSanctuaryZoneBorder(
+    presentation: SanctuaryZoneBorderPresentation,
+    signature: string,
+  ): SanctuaryZoneBorderVisual {
+    const perimeter = this.add.graphics();
+    perimeter.setDepth(ZONE_BORDER_DEPTH);
+    this.drawSanctuaryZoneBorder(perimeter, presentation.segments);
+
+    const perimeterTween = this.tweens.add({
+      targets: perimeter,
+      alpha: { from: 0.5, to: 0.82 },
+      duration: 2600,
+      ease: 'Sine.InOut',
+      yoyo: true,
+      repeat: -1,
+    });
+
+    return { perimeter, perimeterTween, signature };
+  }
+
+  private drawSanctuaryZoneBorder(
+    graphics: Phaser.GameObjects.Graphics,
+    segments: WardSegment[],
+  ): void {
+    graphics.lineStyle(6, ZONE_BORDER_GREEN, 0.1);
+    graphics.beginPath();
+    for (const segment of segments) {
+      graphics.moveTo(segment.start.x, segment.start.y);
+      graphics.lineTo(segment.end.x, segment.end.y);
+    }
+    graphics.strokePath();
+
+    graphics.lineStyle(2, ZONE_BORDER_GREEN, 0.72);
+    for (const segment of segments) {
+      this.strokeDashedSegment(graphics, segment, 12, 7);
+    }
+
+    const accentPoints = new Map<string, { x: number; y: number }>();
+    for (const segment of segments) {
+      accentPoints.set(`${segment.start.x}:${segment.start.y}`, segment.start);
+      accentPoints.set(`${segment.end.x}:${segment.end.y}`, segment.end);
+    }
+    graphics.fillStyle(ZONE_BORDER_ACCENT, 0.58);
+    Array.from(accentPoints.values()).forEach((point, index) => {
+      if (index % 4 === 0) {
+        graphics.fillCircle(point.x, point.y, 1.8);
       }
     });
   }
@@ -283,8 +414,27 @@ export class DesktopObjectScene extends ObjectScene {
     }
   }
 
-  private shutdownSanctuaryWards(): void {
+  private destroySanctuaryZoneBorder(anchorId: string): void {
+    const border = this.sanctuaryZoneBorders[anchorId];
+    if (!border) {
+      return;
+    }
+
+    border.perimeterTween.stop();
+    this.tweens.killTweensOf(border.perimeter);
+    border.perimeter.destroy();
+    delete this.sanctuaryZoneBorders[anchorId];
+  }
+
+  private clearSanctuaryZoneBorders(): void {
+    for (const anchorId of Object.keys(this.sanctuaryZoneBorders)) {
+      this.destroySanctuaryZoneBorder(anchorId);
+    }
+  }
+
+  private shutdownSanctuaryOverlays(): void {
     this.unregisterWardListeners();
     this.clearSanctuaryWards();
+    this.clearSanctuaryZoneBorders();
   }
 }

@@ -722,7 +722,7 @@ fn minimal_templates() -> Templates {
 // ==================== Action State Tests ====================
 
 use crate::effect::{Effect, Effects};
-use crate::event::{GameEvents, MapEvents};
+use crate::event::{GameEvents, MapEvents, VisibleEvents};
 use crate::ids::Ids;
 use crate::item::{AttrKey, AttrVal, Item, Slot};
 use crate::map::{MoistureType, TemperatureType, TileInfo, TileType, HEIGHT, WIDTH};
@@ -1359,6 +1359,7 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
     app.world_mut().insert_resource(Ids::default());
     app.world_mut().insert_resource(MapEvents(HashMap::new()));
     app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(VisibleEvents(Vec::new()));
     app.world_mut().insert_resource(open_test_map());
     app.world_mut().insert_resource(minimal_templates());
 
@@ -1429,6 +1430,24 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
             res_type
         } if *gatherer_id == 1 && res_type == ORE
     )));
+
+    let progress = app
+        .world()
+        .entity(villager)
+        .get::<ActionProgress>()
+        .expect("gather timing component");
+    assert_eq!(progress.start_tick, TICKS_PER_SEC);
+    assert_eq!(progress.end_tick - progress.start_tick, 12 * TICKS_PER_SEC);
+
+    let visible_events = app.world().resource::<VisibleEvents>();
+    assert_eq!(visible_events.len(), 1);
+    let VisibleEvent::UpdateObjEvent { attrs } = &visible_events[0].event_type else {
+        panic!("expected authoritative gathering progress update");
+    };
+    assert!(attrs.contains(&("state".to_string(), STATE_GATHERING.to_string())));
+    assert!(attrs.contains(&("action_id".to_string(), progress.action_id.to_string())));
+    assert!(attrs.contains(&("action_duration_ms".to_string(), "12000".to_string())));
+    assert!(attrs.contains(&("action_elapsed_ms".to_string(), "0".to_string())));
 }
 
 #[test]
@@ -1441,6 +1460,7 @@ fn plant_gather_order_does_not_require_tool() {
     app.world_mut().insert_resource(Ids::default());
     app.world_mut().insert_resource(MapEvents(HashMap::new()));
     app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(VisibleEvents(Vec::new()));
     app.world_mut().insert_resource(open_test_map());
     app.world_mut().insert_resource(minimal_templates());
 

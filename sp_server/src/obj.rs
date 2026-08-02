@@ -784,6 +784,16 @@ pub struct BuildUpgradeState {
     pub start_time: i32,
 }
 
+/// Server-authoritative timing for a unit action rendered with an on-map
+/// progress bar. The action id distinguishes consecutive cycles that retain
+/// the same [`State`] (for example, a villager repeatedly gathering Logs).
+#[derive(Debug, Component, Clone, Copy, Eq, PartialEq)]
+pub struct ActionProgress {
+    pub action_id: i32,
+    pub start_tick: i32,
+    pub end_tick: i32,
+}
+
 #[derive(Debug, Component, Clone)]
 pub struct WorkQueue(pub Vec<WorkEntry>);
 

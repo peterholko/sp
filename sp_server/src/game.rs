@@ -65,15 +65,15 @@ use crate::item::{self, AttrKey, Inventory, Item, ItemAction, ItemPlugin, GOLD, 
 use crate::map::{Map, MapPlugin, Season, TileType};
 use crate::network::{
     self, send_to_client, send_to_database, BroadcastEvents, CrisisAssaultIntent,
-    CrisisPreparationOption, CrisisStatusSnapshot, ObjAttr, RefiningItem,
+    CrisisPreparationOption, CrisisStatusSnapshot, ObjAttr, RefiningItem, SanctuaryZoneSnapshot,
 };
 use crate::network::{ResponsePacket, StatsData};
 use crate::npc::{NPCPlugin, VisibleTarget};
 use crate::obj::{
-    is_combat_locked, is_peaceful_interruptible_state, ActiveShelter, ActiveTask, AddLightEffect,
-    Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState, Campfire,
-    CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, HeroClass, Id,
-    LastAttacker, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order,
+    is_combat_locked, is_peaceful_interruptible_state, ActionProgress, ActiveShelter, ActiveTask,
+    AddLightEffect, Assignment, Assignments, BaseAttrs, BuildProgressUpdate, BuildUpgradeState,
+    Campfire, CancelEvents, Class, ClassStructure, EndRepeatAction, FoodPoisoningEffect, HeroClass,
+    Id, LastAttacker, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, ObjStatQuery, Order,
     PlayerId, Position, RemoveLightEffect, RemoveObj, RemoveWorker, SelectedUpgrade, Shelter,
     Sheltered, StartBuild, StartUpgrade, StartWork, State, StateAboard, StateBuilding, StateChange,
     StateDead, StateUpgrading, Stats, Storage, Subclass, SubclassHero, SubclassNPC,
@@ -1236,6 +1236,7 @@ pub struct SanctuaryExcursions(pub HashMap<i32, SanctuaryExcursionEntry>);
 pub const SANCTUARY_UPGRADE_COST: i32 = 3;
 // Highest sanctuary level (keeps the suppression radius from swallowing the map).
 pub const SANCTUARY_MAX_LEVEL: i32 = 5;
+pub const SANCTUARY_STATE_VERSION: u32 = 1;
 
 /// Soulshards required to go from `current_level` to the next level. Escalates:
 /// 3, 6, 9, 12, 15 (45 total to max), so each tier is a bigger commitment.
@@ -1274,6 +1275,12 @@ impl SanctuaryZone {
     pub fn weak_radius(&self) -> u32 {
         sanctuary_weak_radius(self.level)
     }
+    pub fn contains_full(&self, pos: Position) -> bool {
+        Map::distance((pos.x, pos.y), (self.pos.x, self.pos.y)) < self.full_radius()
+    }
+    pub fn contains_weak(&self, pos: Position) -> bool {
+        Map::distance((pos.x, pos.y), (self.pos.x, self.pos.y)) < self.weak_radius()
+    }
 }
 
 /// monolith obj id -> its current sanctuary zone. Rebuilt each tick by
@@ -1285,9 +1292,7 @@ impl SanctuaryZones {
     /// True if `pos` is within the full-suppression radius of any sanctuary
     /// (matches the `dist < full_radius` boundary used for encounter suppression).
     pub fn in_full_zone(&self, pos: Position) -> bool {
-        self.0
-            .values()
-            .any(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)) < z.full_radius())
+        self.0.values().any(|zone| zone.contains_full(pos))
     }
 
     /// The nearest sanctuary zone to `pos`, if any (by centre distance).
@@ -1297,6 +1302,20 @@ impl SanctuaryZones {
             .min_by_key(|z| Map::distance((pos.x, pos.y), (z.pos.x, z.pos.y)))
             .copied()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SentSanctuaryState {
+    player_id: i32,
+    zones: Vec<SanctuaryZoneSnapshot>,
+}
+
+/// Last successfully queued live-sanctuary snapshot per authenticated
+/// connection. Empty full-replacement snapshots are cached like any other
+/// value; failed sends remain retryable on the following update.
+#[derive(Resource, Debug, Default)]
+struct SanctuaryStateDeliveryState {
+    sent: HashMap<Uuid, SentSanctuaryState>,
 }
 
 // Rebuild the SanctuaryZones lookup from the live Monolith entities each tick.
@@ -1315,6 +1334,120 @@ fn sanctuary_zones_sync_system(
                 level: monolith.sanctuary_level,
             },
         );
+    }
+}
+
+fn build_sanctuary_state_snapshot<'a>(
+    player_id: i32,
+    zones: &SanctuaryZones,
+    heroes: impl Iterator<
+        Item = (
+            &'a PlayerId,
+            &'a State,
+            Option<&'a BoundMonolith>,
+            Option<&'a StateDead>,
+            Option<&'a TrueDeath>,
+        ),
+    >,
+) -> Vec<SanctuaryZoneSnapshot> {
+    heroes
+        .filter(|(owner, _, _, _, _)| owner.0 == player_id)
+        .find_map(|(_, state, bound_monolith, state_dead, true_death)| {
+            if !state.is_alive() || state_dead.is_some() || true_death.is_some() {
+                return None;
+            }
+            let bound_monolith = bound_monolith?;
+            let zone = zones.get(&bound_monolith.id)?;
+            Some(SanctuaryZoneSnapshot {
+                monolith_id: bound_monolith.id,
+                radius: zone.weak_radius(),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Send each current connection only its own live sanctuary boundary. The
+/// snapshot deliberately omits coordinates and advances its cache only after
+/// an authoritative enqueue succeeds.
+fn sanctuary_state_delivery_system(
+    clients: Res<Clients>,
+    zones: Res<SanctuaryZones>,
+    hero_query: Query<
+        (
+            &PlayerId,
+            &State,
+            Option<&BoundMonolith>,
+            Option<&StateDead>,
+            Option<&TrueDeath>,
+        ),
+        With<SubclassHero>,
+    >,
+    mut delivery: ResMut<SanctuaryStateDeliveryState>,
+) {
+    let active_clients = match clients.lock() {
+        Ok(clients) => clients
+            .iter()
+            .filter(|(client_id, client)| {
+                **client_id == client.id && client.player_id >= 0 && !client.sender.is_closed()
+            })
+            .map(|(client_id, client)| (*client_id, client.player_id))
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let mut active_clients = active_clients
+        .into_iter()
+        .filter(|(client_id, player_id)| clients.is_current_connection(*player_id, *client_id))
+        .collect::<Vec<_>>();
+    active_clients.sort_unstable_by_key(|(client_id, _)| *client_id);
+
+    let active_client_players = active_clients
+        .iter()
+        .map(|(client_id, player_id)| (*client_id, *player_id))
+        .collect::<HashMap<_, _>>();
+    delivery
+        .sent
+        .retain(|client_id, sent| active_client_players.get(client_id) == Some(&sent.player_id));
+
+    for (client_id, player_id) in active_clients {
+        let snapshot = build_sanctuary_state_snapshot(player_id, &zones, hero_query.iter());
+        let should_send = delivery
+            .sent
+            .get(&client_id)
+            .map(|sent| sent.player_id != player_id || sent.zones != snapshot)
+            .unwrap_or(true);
+        if !should_send {
+            continue;
+        }
+
+        let Ok(serialized) = serde_json::to_string(&ResponsePacket::SanctuaryState {
+            version: SANCTUARY_STATE_VERSION,
+            zones: snapshot.clone(),
+        }) else {
+            error!(
+                "sanctuary_state_serialization_failed player_id={}",
+                player_id
+            );
+            continue;
+        };
+
+        match clients.try_send_current_bundle(player_id, client_id, vec![serialized]) {
+            Ok(()) => {
+                delivery.sent.insert(
+                    client_id,
+                    SentSanctuaryState {
+                        player_id,
+                        zones: snapshot,
+                    },
+                );
+            }
+            Err(error) => {
+                debug!(
+                    "sanctuary_state_send_deferred player_id={} outcome={:?}",
+                    player_id, error
+                );
+            }
+        }
     }
 }
 
@@ -3302,6 +3435,7 @@ pub struct MapObjQuery {
     pub state: &'static State,
     pub misc: &'static Misc,
     pub build_upgrade_state: Option<&'static BuildUpgradeState>,
+    pub action_progress: Option<&'static ActionProgress>,
 }
 
 #[derive(QueryData)]
@@ -3319,6 +3453,7 @@ pub struct ObjQuery {
     //pub viewshed: &'static Viewshed,
     pub misc: &'static Misc,
     pub build_upgrade_state: Option<&'static BuildUpgradeState>,
+    pub action_progress: Option<&'static ActionProgress>,
 }
 
 #[derive(QueryData)]
@@ -3352,6 +3487,7 @@ pub struct ObjQueryVision {
     pub viewshed: &'static Viewshed,
     pub misc: &'static Misc,
     pub build_upgrade_state: Option<&'static BuildUpgradeState>,
+    pub action_progress: Option<&'static ActionProgress>,
 }
 
 #[derive(QueryData)]
@@ -3598,6 +3734,7 @@ impl Plugin for GamePlugin {
         app.add_systems(OnEnter(AppState::Running), inject_log_reload_handle);
         app.init_resource::<SanctuaryExcursions>();
         app.init_resource::<SanctuaryLoginChecks>();
+        app.init_resource::<SanctuaryStateDeliveryState>();
         app.init_resource::<SurveyHistory>();
         app.init_resource::<InvestigatedPOIs>();
         app.init_resource::<IntroEncounterState>();
@@ -3812,6 +3949,15 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
+                sanctuary_state_delivery_system
+                    .after(sanctuary_zones_sync_system)
+                    .after(state_dead_system)
+                    .after(hero_dead_system)
+                    .after(true_death_system)
+                    .run_if(in_state(AppState::Running)),
+            )
+            .add_systems(
+                Update,
                 merchant_sailing_system.run_if(in_state(AppState::Running)),
             )
             .add_systems(
@@ -3899,6 +4045,7 @@ impl Plugin for GamePlugin {
                 Update,
                 sanctuary_login_system
                     .after(game_event_system)
+                    .after(sanctuary_zones_sync_system)
                     .run_if(in_state(AppState::Running)),
             )
             .add_systems(
@@ -5410,8 +5557,12 @@ fn move_event_completed_system(
                 };
 
                 let distance = Map::dist(*mover_pos, monolith.pos);
+                let (full_radius, weak_radius) = sanctuary_zones
+                    .get(&monolith.id)
+                    .map(|zone| (zone.full_radius(), zone.weak_radius()))
+                    .unwrap_or((SANCTUARY_RANGE, WEAK_SANCTUARY_RANGE));
 
-                if distance >= SANCTUARY_RANGE && distance < WEAK_SANCTUARY_RANGE {
+                if distance >= full_radius && distance < weak_radius {
                     // Add weak sanctuary
                     effects
                         .0
@@ -5472,8 +5623,12 @@ fn move_event_completed_system(
                 };
 
                 let distance = Map::dist(*mover_pos, weak_sanctuary.pos);
+                let weak_radius = sanctuary_zones
+                    .get(&weak_sanctuary.id)
+                    .map(SanctuaryZone::weak_radius)
+                    .unwrap_or(WEAK_SANCTUARY_RANGE);
 
-                if distance >= WEAK_SANCTUARY_RANGE {
+                if distance >= weak_radius {
                     effects.0.remove(&Effect::WeakSanctuary);
 
                     commands.entity(mover_entity).remove::<WeakSanctuary>();
@@ -5633,6 +5788,8 @@ fn move_event_completed_system(
                 {
                     let (work_done, total_work, work_per_sec) =
                         network::build_progress_fields(map_obj.build_upgrade_state);
+                    let (action_id, action_duration_ms, action_elapsed_ms) =
+                        network::action_progress_fields(map_obj.action_progress, game_tick.0);
 
                     // Convert to network::MapObj
                     let network_map_obj = network::MapObj {
@@ -5652,6 +5809,9 @@ fn move_event_completed_system(
                         work_done,
                         total_work,
                         work_per_sec,
+                        action_id,
+                        action_duration_ms,
+                        action_elapsed_ms,
                     };
 
                     new_objs.push(network_map_obj);
@@ -7270,6 +7430,7 @@ fn gather_event_system(
                         entity: gatherer_entity,
                         new_state: State::None,
                     });
+                    commands.entity(gatherer_entity).remove::<ActionProgress>();
 
                     // Get gatherer capacity
                     let capacity =
@@ -12948,6 +13109,7 @@ struct EventVisibilityObserver {
 
 fn visible_event_system(
     clients: Res<Clients>,
+    game_tick: Res<GameTick>,
     mut visible_events: ResMut<VisibleEvents>,
     entity_map: Res<EntityObjMap>,
     campfire_visibility: Res<CampfireVisibilityState>,
@@ -12996,7 +13158,7 @@ fn visible_event_system(
             debug!("Entity: {:?}", entity);
             if let Ok(event_obj) = obj_query.get(entity) {
                 debug!("Event obj: {:?}", event_obj);
-                let network_obj = network::create_network_obj(&event_obj);
+                let network_obj = network::create_network_obj(&event_obj, game_tick.0);
 
                 for observer in event_observers.iter() {
                     // Skip corpse observers
@@ -13603,6 +13765,8 @@ fn perception_system(
                             debug!("Adding visible obj to percetion");
                             let (work_done, total_work, work_per_sec) =
                                 network::build_progress_fields(obj.build_upgrade_state);
+                            let (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::action_progress_fields(obj.action_progress, game_tick.0);
 
                             let visible_obj = network::MapObj {
                                 id: obj.id.0,
@@ -13621,6 +13785,9 @@ fn perception_system(
                                 work_done,
                                 total_work,
                                 work_per_sec,
+                                action_id,
+                                action_duration_ms,
+                                action_elapsed_ms,
                             };
 
                             visible_objs_map
@@ -13633,6 +13800,8 @@ fn perception_system(
 
                 let (work_done, total_work, work_per_sec) =
                     network::build_progress_fields(observer.build_upgrade_state);
+                let (action_id, action_duration_ms, action_elapsed_ms) =
+                    network::action_progress_fields(observer.action_progress, game_tick.0);
 
                 // Add observer to perception data
                 let observer_obj = network::MapObj {
@@ -13652,6 +13821,9 @@ fn perception_system(
                     work_done,
                     total_work,
                     work_per_sec,
+                    action_id,
+                    action_duration_ms,
+                    action_elapsed_ms,
                 };
 
                 observer_objs_map
@@ -13696,7 +13868,7 @@ fn perception_system(
                 continue;
             }
 
-            let mut light_source = network::create_network_obj(&campfire_obj);
+            let mut light_source = network::create_network_obj(&campfire_obj, game_tick.0);
             light_source.vision = Some(CAMPFIRE_VISIBILITY_RANGE);
             observer_objs_map
                 .entry(*perception_player)
@@ -13711,7 +13883,7 @@ fn perception_system(
                     visible_objs_map
                         .entry(*perception_player)
                         .or_default()
-                        .insert(network::create_network_obj(&obj));
+                        .insert(network::create_network_obj(&obj, game_tick.0));
                 }
             }
 
@@ -13932,9 +14104,9 @@ fn sanctuary_login_system(
     game_tick: Res<GameTick>,
     clients: Res<Clients>,
     presence: Res<PlayerWorldPresenceState>,
+    sanctuary_zones: Res<SanctuaryZones>,
     mut login_checks: ResMut<SanctuaryLoginChecks>,
     mut hero_query: Query<(Entity, &Id, &PlayerId, &Position, &mut Effects), With<SubclassHero>>,
-    monolith_query: Query<(&Id, &Position), With<Monolith>>,
 ) {
     if login_checks.is_empty() {
         return;
@@ -13967,14 +14139,14 @@ fn sanctuary_login_system(
             let mut in_range_sanctuary: Option<(i32, Position)> = None;
             let mut in_range_weak_sanctuary: Option<(i32, Position)> = None;
 
-            for (monolith_id, monolith_pos) in monolith_query.iter() {
-                let distance = Map::dist(*hero_pos, *monolith_pos);
+            for (monolith_id, zone) in sanctuary_zones.iter() {
+                let distance = Map::dist(*hero_pos, zone.pos);
 
-                if distance < SANCTUARY_RANGE {
-                    in_range_sanctuary = Some((monolith_id.0, monolith_pos.clone()));
+                if distance < zone.full_radius() {
+                    in_range_sanctuary = Some((*monolith_id, zone.pos));
                     break;
-                } else if distance < WEAK_SANCTUARY_RANGE && in_range_weak_sanctuary.is_none() {
-                    in_range_weak_sanctuary = Some((monolith_id.0, monolith_pos.clone()));
+                } else if distance < zone.weak_radius() && in_range_weak_sanctuary.is_none() {
+                    in_range_weak_sanctuary = Some((*monolith_id, zone.pos));
                 }
             }
 
@@ -20427,7 +20599,7 @@ fn resurrect_system(
                 let distance = Map::distance((hero.pos.x, hero.pos.y), (obj.pos.x, obj.pos.y));
 
                 if hero.viewshed.range >= distance && obj.state.is_visible() {
-                    new_objs.push(network::to_map_obj(obj));
+                    new_objs.push(network::to_map_obj(obj, game_tick.0));
                 }
             }
 
@@ -21675,6 +21847,7 @@ fn cancel_events_observer(
         entity: event.entity,
         new_state: State::None,
     });
+    commands.entity(event.entity).remove::<ActionProgress>();
 
     // TODO check if this is needed
     commands.entity(event.entity).remove::<EventInProgress>();

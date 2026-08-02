@@ -15,15 +15,22 @@ stamina costs, per-target ownership, or adjacent finisher requirement.
 - Basic attacks, primary finishers, and secondary finisher damage share one
   physical-damage calculation, including weapon skill and Expose Armor stacks.
 - Combo histories time out after 150 ticks and recover to their longest live
-  suffix after a dead end.
-- Valid chain lengths use 50/40/30/25-tick basic-attack cooldowns. A ready
-  finisher remains immediate and starts a fresh 50-tick cooldown afterward.
+  suffix after a dead end. Finisher input performs the same timeout check
+  directly, so a stale tracker cannot execute during a system-order gap.
+- Strict combo prefixes use the 50/40/30/25-tick basic-attack cooldown ladder.
+  Exact completed recipes stay live for finisher hints but reset basic attacks
+  to 50 ticks; suffix recovery cannot turn repeated completed inputs into a
+  tempo exploit. With the current four-attack maximum, the 25-tick rung is
+  reserved for a future five-or-more-attack recipe.
 - Stunned, Fear, Concussed, and Hamstrung use per-target, per-effect
-  100%/50%/25%/immune diminishing returns, resetting after 150 ticks.
+  100%/50%/25%/immune diminishing returns, resetting 150 ticks after the last
+  successfully applied effect. Immune attempts do not refresh that timestamp.
 - Intimidating Shout, Shatter Cleave, and Massive Pummel apply their specified
   adjacent-NPC secondary behavior while excluding protected, dead, fortified,
   non-unit, and player-owned targets.
-- Combat State v2 exposes target effects. Desktop and mobile show live/next
+- Combat State v2 is emitted only from the owning hero's combo tracker; villager
+  trackers still expire and drive combat internally without overwriting hero UI.
+  Desktop and mobile show live/next
   chain pips, target-effect badges, ready-finisher pulse, dynamic cooldowns,
   and distinct finisher popup/shake feedback.
 
@@ -42,7 +49,8 @@ events are emitted per secondary target, so clients can present every sweep hit.
 ## Verification contract
 
 The checkpoint is covered by focused Rust tests for combo matching and suffixes,
-timeout, expiry and stacking, Bleed ticking/death, DR, cooldown tempo, secondary
-selection, shared damage, and immediate finishers. Completion also requires the
-repository server format/check/Clippy/test commands, the bounded 6,000-tick
-headless run, and frontend import/type/production-build checks.
+timeout (including stale finisher input), hero-only Combat State emission,
+expiry and stacking, Bleed ticking/death, DR, strict-prefix cooldown tempo,
+secondary selection, shared damage, and immediate finishers. Completion also
+requires the repository server format/check/Clippy/test commands and the bounded
+6,000-tick headless run. This fix pass does not change desktop or mobile UX.

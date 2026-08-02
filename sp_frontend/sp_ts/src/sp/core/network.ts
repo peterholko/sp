@@ -4,7 +4,7 @@ import { NetworkEvent } from './networkEvent';
 import { ObjectState } from './objectState';
 import { TileState } from './tileState';
 import { GameEvent } from './gameEvent';
-import { DEAD, NONE } from "./config";
+import { DEAD, GATHERING, NONE } from "./config";
 import { WeatherState } from './weatherState';
 import type { CrisisStatusPacket } from './crisisStatus';
 import {
@@ -24,6 +24,10 @@ import {
   ProtectedSettlementsPacket,
   protectedSettlementLookup,
 } from './protectedSettlements';
+import {
+  SanctuaryStatePacket,
+  sanctuaryZoneLookup,
+} from './sanctuaryState';
 import {
   mergedIncrementalVision,
   resetVisibilitySourceForInit,
@@ -343,6 +347,9 @@ export interface MapObj {
   work_done?: number;
   total_work?: number;
   work_per_sec?: number;
+  action_id?: number;
+  action_duration_ms?: number;
+  action_elapsed_ms?: number;
 }
 
 export interface MapWeather {
@@ -693,6 +700,11 @@ export class Network {
     Global.gameEmitter.emit(NetworkEvent.PROTECTED_SETTLEMENTS, Global.protectedSettlements);
   }
 
+  private clearSanctuaryZones(): void {
+    Global.sanctuaryZones = {};
+    Global.gameEmitter.emit(NetworkEvent.SANCTUARY_STATE, Global.sanctuaryZones);
+  }
+
   /**
    * End the current connection lifecycle before deliberate authentication or
    * an account switch. Invalidating `this.websocket` first makes every pending
@@ -710,6 +722,7 @@ export class Network {
     this.websocket = null;
     Global.connected = false;
     this.clearProtectedSettlements();
+    this.clearSanctuaryZones();
 
     try {
       clearSafeLogoutReconnectSuppression(window.sessionStorage);
@@ -1772,6 +1785,7 @@ export class Network {
     this.latestSafeLogoutStatus = null;
     this.reloadAfterSafeLogoutClose = false;
     this.clearProtectedSettlements();
+    this.clearSanctuaryZones();
     try {
       clearSafeLogoutReconnectSuppression(window.sessionStorage);
     } catch (error) {
@@ -1993,6 +2007,7 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.INFO_CROP, jsonData);
       } else if (jsonData.packet == "info_true_death") {
         this.clearLatestSafeLogoutStatus();
+        this.clearSanctuaryZones();
         Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
         Global.gameEmitter.emit(NetworkEvent.INFO_TRUE_DEATH, jsonData);
       } else if (jsonData.packet == "nearby_resources") {
@@ -2123,6 +2138,9 @@ export class Network {
           NetworkEvent.PROTECTED_SETTLEMENTS,
           Global.protectedSettlements,
         );
+      } else if (jsonData.packet == 'sanctuary_state') {
+        Global.sanctuaryZones = sanctuaryZoneLookup(jsonData as SanctuaryStatePacket);
+        Global.gameEmitter.emit(NetworkEvent.SANCTUARY_STATE, Global.sanctuaryZones);
       } else if (jsonData.packet == 'combat_state') {
         Global.combatState = jsonData;
         Global.gameEmitter.emit(NetworkEvent.COMBAT_STATE, jsonData);
@@ -2153,6 +2171,9 @@ export class Network {
         work_done: obj.work_done,
         total_work: obj.total_work,
         work_per_sec: obj.work_per_sec,
+        action_id: obj.action_id,
+        action_duration_ms: obj.action_duration_ms,
+        action_elapsed_ms: obj.action_elapsed_ms,
         perceptionObserver,
         op: 'added'
       };
@@ -2211,6 +2232,9 @@ export class Network {
         Global.objectStates[observer.id].work_done = observer.work_done;
         Global.objectStates[observer.id].total_work = observer.total_work;
         Global.objectStates[observer.id].work_per_sec = observer.work_per_sec;
+        Global.objectStates[observer.id].action_id = observer.action_id;
+        Global.objectStates[observer.id].action_duration_ms = observer.action_duration_ms;
+        Global.objectStates[observer.id].action_elapsed_ms = observer.action_elapsed_ms;
         Global.objectStates[observer.id].perceptionObserver = true;
         Global.objectStates[observer.id].op = 'updated';
         Global.objectStates[observer.id].updateAttr = undefined;
@@ -2235,6 +2259,9 @@ export class Network {
           work_done: observer.work_done,
           total_work: observer.total_work,
           work_per_sec: observer.work_per_sec,
+          action_id: observer.action_id,
+          action_duration_ms: observer.action_duration_ms,
+          action_elapsed_ms: observer.action_elapsed_ms,
           perceptionObserver: true,
           op: 'added',
           eventType: undefined
@@ -2273,6 +2300,9 @@ export class Network {
         Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
         Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
         Global.objectStates[visibleObj.id].work_per_sec = visibleObj.work_per_sec;
+        Global.objectStates[visibleObj.id].action_id = visibleObj.action_id;
+        Global.objectStates[visibleObj.id].action_duration_ms = visibleObj.action_duration_ms;
+        Global.objectStates[visibleObj.id].action_elapsed_ms = visibleObj.action_elapsed_ms;
         Global.objectStates[visibleObj.id].perceptionObserver = false;
         Global.objectStates[visibleObj.id].op = 'updated';
         Global.objectStates[visibleObj.id].updateAttr = undefined;
@@ -2297,6 +2327,9 @@ export class Network {
           work_done: visibleObj.work_done,
           total_work: visibleObj.total_work,
           work_per_sec: visibleObj.work_per_sec,
+          action_id: visibleObj.action_id,
+          action_duration_ms: visibleObj.action_duration_ms,
+          action_elapsed_ms: visibleObj.action_elapsed_ms,
           perceptionObserver: false,
           op: 'added',
           eventType: undefined
@@ -2336,6 +2369,9 @@ export class Network {
         Global.objectStates[obj.id].work_done = obj.work_done;
         Global.objectStates[obj.id].total_work = obj.total_work;
         Global.objectStates[obj.id].work_per_sec = obj.work_per_sec;
+        Global.objectStates[obj.id].action_id = obj.action_id;
+        Global.objectStates[obj.id].action_duration_ms = obj.action_duration_ms;
+        Global.objectStates[obj.id].action_elapsed_ms = obj.action_elapsed_ms;
         Global.objectStates[obj.id].op = 'updated';
         Global.objectStates[obj.id].updateAttr = undefined;
         Global.objectStates[obj.id].eventType = undefined;
@@ -2401,6 +2437,12 @@ export class Network {
             Global.objectStates[obj_id].state = value;
             Global.objectStates[obj_id].updateAttr = 'state';
 
+            if (value != GATHERING) {
+              Global.objectStates[obj_id].action_id = undefined;
+              Global.objectStates[obj_id].action_duration_ms = undefined;
+              Global.objectStates[obj_id].action_elapsed_ms = undefined;
+            }
+
             // Is hero dead?
             if (obj_id == Global.heroId && value == DEAD) {
               Global.heroDead = true;
@@ -2421,6 +2463,15 @@ export class Network {
           } else if (attr == 'player_id') {
             Global.objectStates[obj_id].player = value;
             Global.objectStates[obj_id].updateAttr = 'player_id';
+          } else if (attr == 'action_id') {
+            Global.objectStates[obj_id].action_id = parseInt(value);
+            Global.objectStates[obj_id].updateAttr = 'action_progress';
+          } else if (attr == 'action_duration_ms') {
+            Global.objectStates[obj_id].action_duration_ms = parseInt(value);
+            Global.objectStates[obj_id].updateAttr = 'action_progress';
+          } else if (attr == 'action_elapsed_ms') {
+            Global.objectStates[obj_id].action_elapsed_ms = parseInt(value);
+            Global.objectStates[obj_id].updateAttr = 'action_progress';
           }
 
           Global.objectStates[obj_id].op = 'updated';
@@ -2441,6 +2492,9 @@ export class Network {
           Global.objectStates[obj.id].prevY = Global.objectStates[obj.id].y;
           Global.objectStates[obj.id].x = obj.x;
           Global.objectStates[obj.id].y = obj.y;
+          Global.objectStates[obj.id].action_id = obj.action_id;
+          Global.objectStates[obj.id].action_duration_ms = obj.action_duration_ms;
+          Global.objectStates[obj.id].action_elapsed_ms = obj.action_elapsed_ms;
           Global.objectStates[obj.id].op = 'updated';
           Global.objectStates[obj.id].updateAttr = undefined;
           Global.objectStates[obj.id].eventType = 'obj_move';
