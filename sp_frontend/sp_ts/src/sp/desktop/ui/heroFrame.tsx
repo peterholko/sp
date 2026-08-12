@@ -7,19 +7,16 @@ import hpbar from "ui_comp/hpbar.png";
 import stabar from "ui_comp/stabar.png";
 import manabar from "ui_comp/manabar.png";
 import { NetworkEvent } from "../../core/networkEvent";
+import { toggleSanctuaryBorderVisibility } from "../../core/sanctuaryBorderVisibility";
 import { STAT_BAR_WIDTH, STAT_BAR_HEIGHT } from "../../core/config";
 import { getNeedStatusIcon, isCriticalNeed, NeedKind } from "./needStatus";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 const NEED_STATUS_SIZE = 30;
 
-// Effect names as sent by the server (see sp_server effect.rs SANCTUARY / WEAK_SANCTUARY).
+// Single Sanctuary effect name sent by the server.
 const SANCTUARY_EFFECT = "Sanctuary";
-const WEAK_SANCTUARY_EFFECT = "Weak Sanctuary";
-
-// Sanctuary strength shown beside the HP/Stamina panel: green when strong, yellow when weak.
-type SanctuaryState = "strong" | "weak" | null;
-const SANCTUARY_STRONG_COLOR = "#3fb84f";
-const SANCTUARY_WEAK_COLOR = "#e2b007";
+const SANCTUARY_COLOR = "#3fb84f";
 
 const CRITICAL_NEED_WARNING_STYLE = `
 @keyframes criticalNeedIconPulse {
@@ -97,7 +94,8 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
 
     this.state = {
       hideHero : true,
-      sanctuary : null as SanctuaryState,
+      sanctuary : false,
+      sanctuaryBorderVisible: Global.sanctuaryBorderVisible,
     };
   }
 
@@ -105,8 +103,13 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     Global.gameEmitter.on(NetworkEvent.PERCEPTION, this.handlePerception, this);
     Global.gameEmitter.on(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
     Global.gameEmitter.on(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
-    Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
-    Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_DEATH_STATE, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.on(
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
+      this.handleSanctuaryBorderVisibility,
+      this,
+    );
   }
 
   componentWillUnmount() {
@@ -114,47 +117,51 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     Global.gameEmitter.off(NetworkEvent.PERCEPTION, this.handlePerception, this);
     Global.gameEmitter.off(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
     Global.gameEmitter.off(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
-    Global.gameEmitter.off(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
-    Global.gameEmitter.off(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
+    Global.gameEmitter.off(NetworkEvent.HERO_DEATH_STATE, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.off(
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
+      this.handleSanctuaryBorderVisibility,
+      this,
+    );
   }
 
   handlePerception() {
     this.setState({hideHero: false});
   }
 
-  // Track the hero's Sanctuary strength from effect-change packets. The server only
-  // sends these for the hero (villagers are skipped) as it crosses monolith ranges:
-  // gained -> entered, increased -> weak became strong, reduced -> strong became weak,
-  // lost -> left entirely.
+  // The server now has one Sanctuary tier: gained means green shield, lost means none.
   handleGainedEffect(message) {
     if (message.id != Global.heroId) return;
     if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "strong" });
-    } else if (message.effect == WEAK_SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "weak" });
+      this.setState({ sanctuary: true });
     }
   }
 
   handleLostEffect(message) {
     if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT || message.effect == WEAK_SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: null });
+    if (message.effect == SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: false });
     }
   }
 
-  handleIncreasedEffect(message) {
-    if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "strong" });
-    }
+  handleSanctuaryCleared() {
+    this.setState({ sanctuary: false });
   }
 
-  handleReducedEffect(message) {
-    if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "weak" });
-    }
+  handleSanctuaryBorderVisibility(visible: boolean) {
+    this.setState({ sanctuaryBorderVisible: visible });
   }
+
+  handleSanctuaryBorderToggle = () => {
+    toggleSanctuaryBorderVisibility(
+      Global,
+      (visible) => Global.gameEmitter.emit(
+        NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
+        visible,
+      ),
+    );
+  };
 
   render() {
     let imagePath = '';
@@ -183,9 +190,9 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
 
     let heroName = '';
     if(Global.heroId in Global.objectStates) {
-      let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
-      imagePath = '/static/art/' + imageName  + '_single.png';
-      heroName = Global.objectStates[Global.heroId].name || '';
+      const heroState = Global.objectStates[Global.heroId];
+      imagePath = characterImageUrl(heroState.portrait, heroState.image);
+      heroName = heroState.name || '';
     }
 
     const heroringStyle = {
@@ -245,7 +252,11 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     const heroStyle = {
       transform: 'translate(13px, 24px)',
       zIndex: 3,
-      position: 'fixed'
+      position: 'fixed',
+      width: '72px',
+      height: '72px',
+      borderRadius: '50%',
+      objectFit: 'cover'
     } as React.CSSProperties
 
     const thirstStatusStyle = {
@@ -284,22 +295,24 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
-    // Sanctuary indicator sits just right of the HP/Stamina panel (hpframe ends ~x229).
-    // pointerEvents must stay 'auto' so the hover tooltip below can appear.
-    const sanctuaryStyle = {
+    // The green Sanctuary shield is also the desktop boundary visibility control.
+    const sanctuaryButtonStyle = {
       transform: 'translate(238px, 21px)',
       zIndex: 4,
       position: 'fixed',
       pointerEvents: 'auto',
-      cursor: 'help',
+      cursor: 'pointer',
+      width: '26px',
+      height: '30px',
+      padding: 0,
+      border: 0,
+      background: 'transparent',
       filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.85))'
     } as React.CSSProperties
 
-    const sanctuary: SanctuaryState = this.state.sanctuary;
-    const sanctuaryColor = sanctuary === "strong" ? SANCTUARY_STRONG_COLOR : SANCTUARY_WEAK_COLOR;
-    const sanctuaryLabel = sanctuary === "strong"
-      ? "Sanctuary (Strong) — the Monolith's protection greatly reduces the damage you take. Stay near the Monolith to keep it."
-      : "Sanctuary (Weak) — the Monolith's protection slightly reduces the damage you take. Move closer to the Monolith to strengthen it.";
+    const sanctuary = this.state.sanctuary === true;
+    const borderVisible = this.state.sanctuaryBorderVisible === true;
+    const sanctuaryLabel = `Sanctuary — the Monolith protects you. Click to ${borderVisible ? 'hide' : 'show'} its map boundary.`;
 
     return (
       
@@ -332,16 +345,24 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
           }
 
           {sanctuary &&
-            <svg width="26" height="30" viewBox="0 0 24 28" style={sanctuaryStyle} role="img" aria-label={sanctuaryLabel}>
-              <title>{sanctuaryLabel}</title>
-              <path
-                d="M12 1 L22 4.5 V13 C22 20 17.5 25 12 27 C6.5 25 2 20 2 13 V4.5 Z"
-                fill={sanctuaryColor}
-                stroke="#0c0e10"
-                strokeWidth="1.6"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <button
+              type="button"
+              style={sanctuaryButtonStyle}
+              onClick={this.handleSanctuaryBorderToggle}
+              title={sanctuaryLabel}
+              aria-label={sanctuaryLabel}
+              aria-pressed={borderVisible}
+            >
+              <svg width="26" height="30" viewBox="0 0 24 28" aria-hidden="true">
+                <path
+                  d="M12 1 L22 4.5 V13 C22 20 17.5 25 12 27 C6.5 25 2 20 2 13 V4.5 Z"
+                  fill={SANCTUARY_COLOR}
+                  stroke="#0c0e10"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
           }
       </div>
     );

@@ -64,11 +64,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     const ownerCanEquip = ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
 
     if (ownerState) {
-      if (Util.isSprite(ownerState.image)) {
-        imageName = ownerState.image + '_single.png';
-      } else {
-        imageName = ownerState.image + '.png';
-      }
+      imageName = Util.getImagePreviewName(ownerState.image) || '';
       name = ownerState.name;
     }
 

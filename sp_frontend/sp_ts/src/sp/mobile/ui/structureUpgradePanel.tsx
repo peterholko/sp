@@ -5,6 +5,7 @@ import upgradebutton from "ui_comp/upgradebutton.png";
 import leftbutton from "ui_comp/leftbutton.png";
 import rightbutton from "ui_comp/rightbutton.png";
 import { GameEvent } from "../../core/gameEvent";
+import { structureUpgradePreviewImageName } from "../../core/structureUpgradePresentation";
 import {
   MobilePanelActions,
   MobileRequirementGrid,
@@ -63,8 +64,10 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
   render() {
     console.log(this.state);
 
-    let structureImage = this.state.upgradeStructure.template.toLowerCase().replace(/\s/g, '');
-    let structureImagePath = '/static/art/' + structureImage + '.png';
+    const structureImageName = structureUpgradePreviewImageName(this.state.upgradeStructure);
+    const structureImagePath = structureImageName
+      ? '/static/art/' + structureImageName
+      : undefined;
 
     let nextStructureName = this.state.upgradeStructure.name;
 

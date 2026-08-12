@@ -7,7 +7,9 @@ import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 
 interface ConfirmProps {
-  msg
+  msg,
+  onConfirm?: () => void,
+  onCancel?: () => void,
 }
 
 export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
@@ -23,10 +25,18 @@ export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
 
   handleOkClick() {
     console.log('Handle Ok Click');
+    if (this.props.onConfirm) {
+      this.props.onConfirm();
+      return;
+    }
     Global.gameEmitter.emit(GameEvent.CONFIRM_OK_CLICK, {});
   }
 
   handleExitClick(event : React.MouseEvent) {
+    if (this.props.onCancel) {
+      this.props.onCancel();
+      return;
+    }
     const eventData = {panelType: "confirm"};
     Global.gameEmitter.emit(GameEvent.EXIT_HALFPANEL_CLICK, eventData);
   }
@@ -79,4 +89,3 @@ export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
     );
   }
 }
-

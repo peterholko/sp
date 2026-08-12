@@ -13,6 +13,9 @@ import { NetworkEvent } from '../networkEvent';
 import { ObjectState } from '../objectState';
 import { TileState } from '../tileState';
 import { desktopCameraZoom } from '../config';
+import { MAP_RENDER_EVENTS } from '../mapRenderEvents';
+import { LEGACY_MAP_ART_SCALE, mapArtScale } from '../mapArtScale';
+import { MAP_RESOURCE_ICON_INSET } from '../mapGeometry';
 
 export class MapScene extends Phaser.Scene {
 
@@ -32,6 +35,15 @@ export class MapScene extends Phaser.Scene {
 
   public centerOn(x, y) : void {
     this.cameras.main.centerOn(x, y);
+  }
+
+  private mapScaleForTileKey(tileKey: string): number {
+    if (!tileKey.startsWith('tileset')) {
+      return LEGACY_MAP_ART_SCALE;
+    }
+
+    const tileTypeId = Number(tileKey.slice('tileset'.length));
+    return mapArtScale(Global.tileset[tileTypeId]);
   }
 
   constructor() {
@@ -129,8 +141,9 @@ export class MapScene extends Phaser.Scene {
 
   loadingComplete() {
     console.log('Loading complete');
-    Global.gameEmitter.on(NetworkEvent.PERCEPTION, this.setRender, this);
-    Global.gameEmitter.on(NetworkEvent.OBJ_PERCEPTION, this.setRender, this);
+    for (const event of MAP_RENDER_EVENTS) {
+      Global.gameEmitter.on(event, this.setRender, this);
+    }
     Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.processNearbyResources, this);
     Global.gameEmitter.on(GameEvent.RESOURCE_LAYER_CLICK, this.hideResourceLayer, this);
     Global.gameEmitter.on(GameEvent.SELECTED_OBJ_MOVED, this.selectedObjMoved, this);
@@ -165,13 +178,13 @@ export class MapScene extends Phaser.Scene {
 
     this.selectHex = new Phaser.GameObjects.Image(this, 0, 0, 'selecthex');
     this.selectHex.setOrigin(0);
+    this.selectHex.setScale(LEGACY_MAP_ART_SCALE);
     this.select.add(this.selectHex);
 
     var _this = this;
 
     this.input.on('gameobjectdown', function(pointer, gameObject) {
       if(pointer.downElement instanceof HTMLCanvasElement) {
-
         _this.selectHex.x = gameObject.x;
         _this.selectHex.y = gameObject.y;
 
@@ -230,7 +243,7 @@ export class MapScene extends Phaser.Scene {
 
     for(var key in bestResourceOnTile) {
       var resourceData = bestResourceOnTile[key];
-      var imageName = resourceData.name.replace(/\s/g,'').toLowerCase();
+      var imageName = (resourceData.image || resourceData.name).replace(/\s/g,'').toLowerCase();
       var pixel = Util.hex_to_pixel(resourceData.x, resourceData.y);
       /*var key = pixel.x + '_' + pixel.y;
 
@@ -256,14 +269,14 @@ export class MapScene extends Phaser.Scene {
 
       var resource = new Resource({
         scene: this,
-        x: pixel.x + 12,
-        y: pixel.y + 12,
+        x: pixel.x + MAP_RESOURCE_ICON_INSET,
+        y: pixel.y + MAP_RESOURCE_ICON_INSET,
         imageName: imageName,            
         hexX: resourceData.x,
         hexY: resourceData.y
       });     
       
-      resource.setScale(0.90);
+      resource.setScale(0.90 * LEGACY_MAP_ART_SCALE);
 
       if(resourceData.color === 4) {
         resource.postFX.addGlow(0x0070dd, 2, 0, false);
@@ -488,6 +501,7 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
+    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     mapTile.setInteractive();
 
     this.base.add(mapTile);  
@@ -505,6 +519,7 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
+    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.trans.add(mapTile);  
   
   }
@@ -520,6 +535,7 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
+    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.extra.add(mapTile);  
   
   }
@@ -541,6 +557,7 @@ export class MapScene extends Phaser.Scene {
           hexY: hexY
         });
 
+    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.void.add(mapTile);
   }
 }

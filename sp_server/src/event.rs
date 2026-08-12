@@ -50,7 +50,6 @@ pub struct MoveEvent {
     pub is_dst_open: bool,
     pub objs_on_tile: Vec<(i32, i32, String)>,
     pub in_range_sanctuary: Option<(i32, Position)>,
-    pub in_range_weak_sanctuary: Option<(i32, Position)>,
     pub is_dst_shelter: Option<i32>,
 }
 
@@ -198,6 +197,7 @@ pub enum VisibleEvent {
     },
     HarvestEvent {
         structure_id: i32,
+        tool_item_id: i32,
     },
     RepairEvent {
         structure_id: i32,
@@ -229,9 +229,13 @@ pub enum VisibleEvent {
     },
     FishingEvent {
         obj_id: i32,
+        item_id: i32,
     },
     SpellRaiseDeadEvent {
+        /// World corpse object id, or the container id when `corpse_item_id` is set.
         corpse_id: i32,
+        /// Exact non-stackable corpse item consumed from the source container.
+        corpse_item_id: Option<i32>,
     },
     SpellDamageEvent {
         spell: Spell,
@@ -324,6 +328,7 @@ impl GameEvents {
             if let GameEventType::CraftEvent {
                 crafter_id: event_crafter_id,
                 recipe_name,
+                signature_item_id,
             } = &game_event.event_type
             {
                 if *event_crafter_id == crafter_id {
@@ -334,6 +339,7 @@ impl GameEvents {
                         crafter_id: *event_crafter_id,
                         structure_id: None,
                         recipe_name: recipe_name.clone(),
+                        signature_item_id: *signature_item_id,
                         work_entry_id: None,
                     });
                 }
@@ -348,6 +354,7 @@ impl GameEvents {
                 crafter_id: event_crafter_id,
                 structure_id,
                 recipe_name,
+                signature_item_id,
                 work_entry_id,
             } = &game_event.event_type
             {
@@ -359,6 +366,7 @@ impl GameEvents {
                         crafter_id: *event_crafter_id,
                         structure_id: Some(*structure_id),
                         recipe_name: recipe_name.clone(),
+                        signature_item_id: *signature_item_id,
                         work_entry_id: *work_entry_id,
                     });
                 }
@@ -445,14 +453,37 @@ pub struct GameEvent {
     pub event_type: GameEventType,
 }
 
-#[derive(Clone, Reflect, Debug)]
+/// Snapshot-safe representation of the UUID attached to a delayed login event.
+///
+/// Bevy's reflected scene serializer does not support `u128`, so retain all 128
+/// UUID bits as two supported `u64` values while this event is waiting to run.
+#[derive(Clone, Copy, Default, Eq, PartialEq, Reflect, Debug)]
+pub struct LoginConnectionId {
+    high: u64,
+    low: u64,
+}
 
+impl From<Uuid> for LoginConnectionId {
+    fn from(connection_id: Uuid) -> Self {
+        let value = connection_id.as_u128();
+        Self {
+            high: (value >> 64) as u64,
+            low: value as u64,
+        }
+    }
+}
+
+impl From<LoginConnectionId> for Uuid {
+    fn from(connection_id: LoginConnectionId) -> Self {
+        Self::from_u128(((connection_id.high as u128) << 64) | connection_id.low as u128)
+    }
+}
+
+#[derive(Clone, Reflect, Debug)]
 pub enum GameEventType {
     Login {
         player_id: i32,
-        /// Stored as u128 because this reflected event participates in Bevy's
-        /// runtime metadata while the network registry uses `Uuid`.
-        connection_id: u128,
+        connection_id: LoginConnectionId,
     },
     PlayerNotice {
         player_id: i32,
@@ -499,6 +530,7 @@ pub enum GameEventType {
     CraftEvent {
         crafter_id: i32,
         recipe_name: String,
+        signature_item_id: Option<i32>,
     },
     StructureRefineEvent {
         refiner_id: i32,
@@ -510,6 +542,7 @@ pub enum GameEventType {
         crafter_id: i32,
         structure_id: i32,
         recipe_name: String,
+        signature_item_id: Option<i32>,
         work_entry_id: Option<i32>,
     },
     StructureOperateEvent {
@@ -583,6 +616,7 @@ pub struct GameCraftEvent {
     pub crafter_id: i32,
     pub structure_id: Option<i32>,
     pub recipe_name: String,
+    pub signature_item_id: Option<i32>,
     pub work_entry_id: Option<i32>,
 }
 

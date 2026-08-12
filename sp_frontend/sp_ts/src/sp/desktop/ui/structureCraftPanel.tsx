@@ -18,6 +18,7 @@ import wideframe from "ui_comp/wide_frame2.png";
 import ResourceItem from "./resourceItem";
 import BaseInventoryPanel from "./baseInventoryPanel";
 import SmallButton from "./smallButton";
+import { canBeSignatureForRecipe, itemRarity, rarityColor } from "../../core/itemRarity";
 
 interface StructureCraftPanelProp {
   structureId,
@@ -46,6 +47,7 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
       index: 0,
       maxProgress: maxProgress,
       progress: progress,
+      signatureItemId: null,
     };
 
     this.handleSelect = this.handleSelect.bind(this);
@@ -110,6 +112,14 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
 
   handleSelect(eventData) {
     console.log('handleSelect ' + JSON.stringify(eventData));
+    const item = (this.props.structureInventory.items || [])
+      .find((candidate) => candidate.id == eventData.itemId);
+    if (item && canBeSignatureForRecipe(item, this.state.recipe)) {
+      this.setState({
+        signatureItemId: this.state.signatureItemId == item.id ? null : item.id,
+      });
+      return;
+    }
     Global.infoItemAction = TRIGGER_STRUCTURE_CRAFTING_ITEM;
     Global.network.sendInfoItem(eventData.itemId, "None");
   }
@@ -119,7 +129,8 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
       const newIndex = this.state.index - 1;
       this.setState({
         recipe: this.props.recipesData[newIndex],
-        index: newIndex
+        index: newIndex,
+        signatureItemId: null,
       })
     }
   }
@@ -129,13 +140,18 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
       const newIndex = this.state.index + 1;
       this.setState({
         recipe: this.props.recipesData[newIndex],
-        index: newIndex
+        index: newIndex,
+        signatureItemId: null,
       })
     }
   }
 
   handleCraftClick() {
-    Global.network.sendStructureCraft(this.props.structureId, this.state.recipe.name);
+    Global.network.sendStructureCraft(
+      this.props.structureId,
+      this.state.recipe.name,
+      this.state.signatureItemId ?? undefined,
+    );
   }
 
   handleCraftQueueClick() {
@@ -200,6 +216,9 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
     var showCraftingItemPanel = this.state.progress > -1;
 
     const reqs = [];
+    const signatureItem = (this.props.structureInventory.items || [])
+      .find((item) => item.id == this.state.signatureItemId);
+    const signatureRarity = signatureItem ? itemRarity(signatureItem) : 'Common';
 
     for (var i = 0; i < this.state.recipe.req.length; i++) {
       var req = this.state.recipe.req[i];
@@ -347,6 +366,7 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
           panelType={'structure_craft'}
           hideExitButton={true}
           hideSelect={false}
+          selectedItemId={this.state.signatureItemId}
           handleSelect={this.handleSelect} />
 
         <HalfPanel left={false}
@@ -414,6 +434,17 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
                 <tr>
                   <td>Requirements:</td>
                   <td></td>
+                </tr>
+                <tr>
+                  <td>Signature:</td>
+                  <td style={{ color: rarityColor(signatureRarity) }}>
+                    {signatureItem
+                      ? `${signatureRarity} ${signatureItem.name}`
+                      : 'Common materials only'}
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={2}>Click a colored matching component to select it.</td>
                 </tr>
                 <tr>
                   <td colSpan={2}>

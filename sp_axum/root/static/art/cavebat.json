@@ -1,26 +1,47 @@
 {
     "frames": {
-        "width": 72,
-        "height": 72
+        "width": 144,
+        "height": 144
     },
     "animations": {
-        "combat": [0],
-        "none": [0],
+        "combat": [
+            0
+        ],
+        "none": [
+            0
+        ],
         "moving": {
-            "frames": [0, 1, 2, 3],
+            "frames": [
+                0,
+                1,
+                2,
+                3
+            ],
             "repeat": -1,
             "speed": 450
         },
         "attack": {
-            "frames": [4, 5, 6],
+            "frames": [
+                4,
+                5,
+                6
+            ],
             "repeat": 0,
             "speed": 350
         },
         "die": {
-            "frames": [0, 8, 9, 7],
+            "frames": [
+                0,
+                8,
+                9,
+                7
+            ],
             "repeat": 0,
             "speed": 650
         },
-        "dead": [7]
-    }
+        "dead": [
+            7
+        ]
+    },
+    "map_scale": 1
 }

@@ -121,13 +121,14 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
     //The default Grass was "above" forest, solved it via sort
     var tileId = tiles.sort().reverse()[0];
     var imageName = Global.tileset[tileId].image;
+    const isForestTile = imageName.indexOf('tileset/forest/') !== -1;
 
     var passable = (this.props.tileData.passable ? 'Yes' : 'No');
     var movementCost = String(this.props.tileData.mc * 100);
     movementCost = movementCost + '%';
     var sanctuary = (this.props.tileData.sanctuary ? 'Yes' : 'No');
     const landscape = isLandscapeMobile();
-    const imageSize = tileId == 32 ? (landscape ? 86 : 120) : tileId == 19 ? (landscape ? 76 : 100) : (landscape ? 58 : 82);
+    const imageSize = tileId == 32 ? (landscape ? 86 : 120) : isForestTile ? (landscape ? 76 : 100) : (landscape ? 58 : 82);
 
         return (
       <MobilePanelScreen

@@ -28,6 +28,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::net::{IpAddr, SocketAddr};
@@ -61,8 +62,12 @@ struct AuthRequest {
 
 #[derive(Serialize)]
 struct AuthResponse {
+    #[serde(rename = "playerId")]
     player_id: i32,
-    device_token: String,
+    account_status: AccountStatus,
+    has_recovery_email: bool,
+    needs_hero: bool,
+    account_name: Option<String>,
 }
 
 // Registration carries an optional recovery email on top of the login fields.
@@ -132,39 +137,67 @@ struct Score {
 }
 
 #[derive(Deserialize)]
-struct FingerprintAuthRequest {
-    fingerprint: String,
-    device_token: Option<String>,
+struct DeviceAuthRequest {
+    #[serde(default)]
+    create_guest: bool,
+}
+
+struct ResolvedAccount {
+    player_id: i32,
+    account_name: Option<String>,
+    password: Option<String>,
+    email: Option<String>,
+    player_state: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FingerprintAuthResponse {
+struct DeviceAuthResponse {
     player_id: i32,
     has_account: bool,
     new_player: bool,
+    account_status: AccountStatus,
+    has_recovery_email: bool,
+    needs_hero: bool,
     #[serde(rename = "account_name")]
     account_name: Option<String>,
-    #[serde(rename = "device_token")]
-    device_token: String,
 }
 
 #[derive(Serialize)]
 struct SessionResponse {
+    #[serde(rename = "playerId")]
+    player_id: i32,
     account_name: Option<String>,
-    device_token: String,
+    account_status: AccountStatus,
+    has_recovery_email: bool,
+    needs_hero: bool,
 }
 
 #[derive(Serialize)]
 struct AuthError {
+    #[serde(rename = "error")]
     msg: String,
 }
 
-// No account_name: we never echo which account is tied to a device/fingerprint
-// (anti-enumeration, R8). The client shows an empty login form to fill in.
-#[derive(Serialize)]
-struct PasswordRequiredResponse {
-    error: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AccountStatus {
+    Guest,
+    Secured,
+}
+
+impl AccountStatus {
+    fn from_password(password: Option<&str>) -> Self {
+        if password.is_some() {
+            Self::Secured
+        } else {
+            Self::Guest
+        }
+    }
+
+    fn is_secured(self) -> bool {
+        self == Self::Secured
+    }
 }
 
 #[derive(Serialize)]
@@ -183,10 +216,14 @@ struct AppState {
     rate_limiter: Arc<Mutex<HashMap<IpAddr, (Instant, u32)>>>,
 }
 
-// Auth endpoints (/auth, /register, /fingerprint-auth) allow at most
+// Auth endpoints allow at most
 // AUTH_RATE_MAX attempts per AUTH_RATE_WINDOW per client IP.
 const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_RATE_MAX: u32 = 20;
+const SESSION_IDLE_DAYS: i64 = 7;
+const TRUSTED_DEVICE_TTL_DAYS: i64 = 90;
+const MAX_TRUSTED_DEVICES_PER_PLAYER: i64 = 5;
+const TRUSTED_DEVICE_COOKIE: &str = "__Host-trusted_device";
 
 impl AppState {
     // Records a hit for this IP and returns true if it is still under the limit.
@@ -232,12 +269,69 @@ fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> IpAddr {
     peer.ip()
 }
 
-// The game server (sp_server network.rs) rejects sessions older than 1 day,
-// so handing back a stored session indefinitely lets a returning player
-// authenticate here but never connect to the WebSocket. Rotate well before
-// that cutoff.
-fn session_is_stale(created_at: DateTime<Utc>) -> bool {
-    Utc::now().signed_duration_since(created_at) > chrono::Duration::hours(20)
+fn session_is_expired(created_at: DateTime<Utc>, last_login: Option<DateTime<Utc>>) -> bool {
+    let last_active = last_login.unwrap_or(created_at);
+    Utc::now().signed_duration_since(last_active) > chrono::Duration::days(SESSION_IDLE_DAYS)
+}
+
+fn valid_account_name(account_name: &str) -> bool {
+    (3..=20).contains(&account_name.len())
+        && account_name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn valid_new_password(password: &str) -> bool {
+    (8..=128).contains(&password.len())
+}
+
+fn valid_email(email: &str) -> bool {
+    if email.len() > 255 || email.contains(char::is_whitespace) {
+        return false;
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && !domain.contains('@')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+}
+
+fn append_session_cookie(headers: &mut HeaderMap, session: &str) {
+    let cookie =
+        format!("session={session}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=604800");
+    headers.append("Set-Cookie", HeaderValue::from_str(&cookie).unwrap());
+}
+
+fn trusted_device_hash(credential: &str) -> String {
+    format!("{:x}", Sha256::digest(credential.as_bytes()))
+}
+
+fn append_trusted_device_cookie(headers: &mut HeaderMap, credential: &str) {
+    let max_age = TRUSTED_DEVICE_TTL_DAYS * 24 * 60 * 60;
+    let cookie = format!(
+        "{TRUSTED_DEVICE_COOKIE}={credential}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}"
+    );
+    headers.append("Set-Cookie", HeaderValue::from_str(&cookie).unwrap());
+}
+
+fn append_cleared_trusted_device_cookie(headers: &mut HeaderMap) {
+    headers.append(
+        "Set-Cookie",
+        HeaderValue::from_static(
+            "__Host-trusted_device=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
+        ),
+    );
+}
+
+fn append_cleared_auth_cookies(headers: &mut HeaderMap) {
+    headers.append(
+        "Set-Cookie",
+        HeaderValue::from_static("session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"),
+    );
+    append_cleared_trusted_device_cookie(headers);
 }
 
 fn too_many_requests() -> Response {
@@ -250,26 +344,38 @@ fn too_many_requests() -> Response {
         .into_response()
 }
 
-// Issues a fresh device token for the player and prunes their expired tokens
-// (90-day TTL) so the device_tokens table can't grow without bound (R9).
-async fn issue_device_token(conn: &tokio_postgres::Client, player_id: i32) -> String {
-    let device_token = Uuid::new_v4().to_string();
-    if let Err(e) = conn
+// Issues a fresh trusted-device credential and prunes expired credentials so
+// the trusted_devices table cannot grow without bound.
+async fn issue_trusted_device(
+    conn: &tokio_postgres::Client,
+    player_id: i32,
+) -> Result<String, String> {
+    let trusted_device = Uuid::new_v4().to_string();
+    let credential_hash = trusted_device_hash(&trusted_device);
+    conn.execute(
+        "INSERT INTO trusted_devices (player_id, credential_hash, created_at) VALUES ($1, $2, NOW())",
+        &[&player_id, &credential_hash],
+    )
+    .await
+    .map_err(|error| format!("Error storing device token: {error}"))?;
+
+    conn
         .execute(
-            "INSERT INTO device_tokens (player_id, token, created_at) VALUES ($1, $2, NOW())",
-            &[&player_id, &device_token],
-        )
-        .await
-    {
-        println!("Error storing device token: {}", e);
-    }
-    let _ = conn
-        .execute(
-            "DELETE FROM device_tokens WHERE player_id = $1 AND created_at < NOW() - INTERVAL '90 days'",
+            "DELETE FROM trusted_devices WHERE player_id = $1 AND created_at < NOW() - INTERVAL '90 days'",
             &[&player_id],
         )
-        .await;
-    device_token
+        .await
+        .map_err(|error| format!("Error pruning expired trusted devices: {error}"))?;
+
+    conn
+        .execute(
+            "DELETE FROM trusted_devices WHERE id IN (SELECT id FROM trusted_devices WHERE player_id = $1 ORDER BY created_at DESC, id DESC OFFSET $2)",
+            &[&player_id, &MAX_TRUSTED_DEVICES_PER_PLAYER],
+        )
+        .await
+        .map_err(|error| format!("Error capping trusted devices: {error}"))?;
+
+    Ok(trusted_device)
 }
 
 #[tokio::main]
@@ -313,10 +419,12 @@ async fn main() {
         .route("/session", get(session_handler))
         .route("/auth", post(auth_handler))
         .route("/register", post(register_handler))
-        .route("/request-password-reset", post(request_password_reset_handler))
+        .route(
+            "/request-password-reset",
+            post(request_password_reset_handler),
+        )
         .route("/reset-password", post(reset_password_handler))
-        .route("/fingerprint-auth", post(fingerprint_auth_handler))
-        .route("/clear-fingerprint", post(clear_fingerprint_handler))
+        .route("/device-auth", post(device_auth_handler))
         .route("/logout", post(logout_handler))
         .route("/scores", get(scores_handler))
         .route("/health", get(health_handler))
@@ -397,8 +505,6 @@ fn is_revalidated_asset_path(path: &str) -> bool {
 async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Response {
     // Retrieve a specific cookie by name
     if let Some(cookie) = jar.get("session") {
-        println!("Session cookie found: {}", cookie.value());
-
         let conn = state
             .pool
             .get()
@@ -407,29 +513,17 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
 
         let session_row = conn
             .query_one(
-                "SELECT s.created_at, s.last_login, s.player_id, a.account_name FROM sessions s JOIN accounts a ON s.player_id = a.player_id WHERE s.session = $1",
+                "SELECT s.created_at, s.last_login, s.player_id, a.account_name, a.password, a.email, a.player_state FROM sessions s JOIN accounts a ON s.player_id = a.player_id WHERE s.session = $1",
                 &[&cookie.value()],
             )
             .await;
 
         match session_row {
             Ok(session_row) => {
-                // Sliding idle window: a session stays valid as long as it is
-                // used at least once every SESSION_IDLE_DAYS. Activity is tracked
-                // via last_login (falling back to created_at for legacy rows) and
-                // refreshed on every successful check, so an active same-device
-                // player is never bounced. The window matches the cookie Max-Age.
-                const SESSION_IDLE_DAYS: i64 = 7;
-
                 let created_at: DateTime<Utc> = session_row.get::<_, DateTime<Utc>>("created_at");
                 let last_login: Option<DateTime<Utc>> = session_row.get("last_login");
-                let last_active = last_login.unwrap_or(created_at);
 
-                let now = Utc::now(); // Already a DateTime<Utc>
-                let diff = now.signed_duration_since(last_active);
-                println!("last_active: {}, now: {}, diff: {}", last_active, now, diff);
-
-                if diff.num_minutes() > SESSION_IDLE_DAYS * 24 * 60 {
+                if session_is_expired(created_at, last_login) {
                     println!("Session expired");
                     // Delete session from database
                     let _ = conn
@@ -455,20 +549,20 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
                         .await;
 
                     let account_name: Option<String> = session_row.get("account_name");
+                    let password: Option<String> = session_row.get("password");
+                    let email: Option<String> = session_row.get("email");
+                    let player_state: String = session_row.get("player_state");
                     let player_id: i32 = session_row.get("player_id");
-                    println!(
-                        "Session found: {}, account_name: {:?}",
-                        session_row.get::<_, DateTime<Utc>>("created_at"),
-                        account_name
-                    );
-
-                    let device_token = issue_device_token(&conn, player_id).await;
+                    let account_status = AccountStatus::from_password(password.as_deref());
 
                     return (
                         StatusCode::OK,
                         Json(SessionResponse {
+                            player_id,
                             account_name,
-                            device_token,
+                            account_status,
+                            has_recovery_email: email.is_some(),
+                            needs_hero: player_state == "CREATING_HERO",
                         }),
                     )
                         .into_response();
@@ -495,80 +589,38 @@ async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Respo
     }
 }
 
-// TEMPORARY TEST ENDPOINT: nulls the fingerprint and deletes the device tokens
-// of the account matching the supplied fingerprint, so this device is treated as
-// a brand-new player on the next Enter World. Remove before production.
-#[debug_handler]
-async fn clear_fingerprint_handler(
-    State(state): State<AppState>,
-    Json(payload): Json<FingerprintAuthRequest>,
-) -> Response {
-    let fingerprint = payload.fingerprint.trim().to_string();
-
-    let conn = state
-        .pool
-        .get()
-        .await
-        .expect("Error getting connection from pool");
-
-    let row = conn
-        .query_opt(
-            "SELECT player_id FROM accounts WHERE fingerprint = $1",
-            &[&fingerprint],
-        )
-        .await;
-
-    if let Ok(Some(row)) = row {
-        let player_id: i32 = row.get("player_id");
-        let _ = conn
-            .execute(
-                "DELETE FROM device_tokens WHERE player_id = $1",
-                &[&player_id],
-            )
-            .await;
-        let _ = conn
-            .execute(
-                "UPDATE accounts SET fingerprint = NULL WHERE player_id = $1",
-                &[&player_id],
-            )
-            .await;
-        println!(
-            "[test] Cleared fingerprint and device tokens for player {}",
-            player_id
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(MessageResponse {
-            message: "Device fingerprint cleared".to_string(),
-        }),
-    )
-        .into_response()
-}
-
 #[debug_handler]
 async fn logout_handler(State(state): State<AppState>, jar: CookieJar) -> Response {
-    if let Some(cookie) = jar.get("session") {
+    let session = jar.get("session").map(|cookie| cookie.value().to_string());
+    let trusted_device = jar
+        .get(TRUSTED_DEVICE_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+
+    if session.is_some() || trusted_device.is_some() {
         let conn = state
             .pool
             .get()
             .await
             .expect("Error getting connection from pool");
 
-        let _ = conn
-            .execute(
-                "DELETE FROM sessions WHERE session = $1",
-                &[&cookie.value()],
-            )
-            .await;
+        if let Some(session) = session {
+            let _ = conn
+                .execute("DELETE FROM sessions WHERE session = $1", &[&session])
+                .await;
+        }
+        if let Some(trusted_device) = trusted_device {
+            let credential_hash = trusted_device_hash(&trusted_device);
+            let _ = conn
+                .execute(
+                    "DELETE FROM trusted_devices WHERE credential_hash = $1",
+                    &[&credential_hash],
+                )
+                .await;
+        }
     }
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "Set-Cookie",
-        HeaderValue::from_static("session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0"),
-    );
+    append_cleared_auth_cookies(&mut headers);
 
     (
         StatusCode::OK,
@@ -692,12 +744,26 @@ async fn auth_handler(
     let password_match: bool;
     let mut player_id: i32 = 0;
 
-    let account_name = payload.account_name;
+    let account_name = payload.account_name.trim().to_string();
     let password = payload.password;
+
+    if account_name.is_empty()
+        || account_name.len() > 50
+        || password.is_empty()
+        || password.len() > 128
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthError {
+                msg: "Incorrect account or password".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
     let row = conn
         .query_one(
-            "SELECT player_id, password FROM accounts WHERE account_name = $1",
+            "SELECT player_id, account_name, password, email, player_state FROM accounts WHERE LOWER(account_name) = LOWER($1)",
             &[&account_name],
         )
         .await;
@@ -705,19 +771,24 @@ async fn auth_handler(
     match row {
         Ok(row) => {
             found_account = true;
-            println!("found_account: {}", found_account);
             player_id = row.get("player_id");
-            println!("player_id: {}", player_id);
 
-            let account_password: &str = row.get("password");
+            let account_password: Option<String> = row.get("password");
+            let Some(account_password) = account_password else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(AuthError {
+                        msg: "Incorrect account or password".to_string(),
+                    }),
+                )
+                    .into_response();
+            };
 
-            let verify_password =
-                Account::verify_password(password.clone(), account_password.to_string());
+            let verify_password = Account::verify_password(&password, &account_password);
 
             match verify_password {
                 Ok(_) => {
                     password_match = true;
-                    println!("password_match: {}", password_match);
                 }
                 Err(_) => {
                     // Return 401 Unauthorized
@@ -750,57 +821,53 @@ async fn auth_handler(
 
     if found_account && password_match {
         let session_row = conn
-            .query_one(
-                "SELECT session, created_at FROM sessions WHERE player_id = $1",
+            .query_opt(
+                "SELECT session FROM sessions WHERE player_id = $1",
                 &[&player_id],
             )
             .await;
 
         match session_row {
-            Ok(session_row) => {
-                let stored_session: String = session_row.get("session");
-                let created_at: DateTime<Utc> = session_row.get("created_at");
-
-                if session_is_stale(created_at) {
-                    // Rotate in place so the game server accepts the session.
-                    let new_session = {
-                        let mut rng = state.rng.lock().await;
-                        rng.gen::<u128>().to_string()
-                    };
-                    let result = conn
-                        .execute(
-                            "UPDATE sessions SET session = $1, created_at = current_timestamp WHERE player_id = $2",
-                            &[&new_session, &player_id],
-                        )
-                        .await;
-                    match result {
-                        Ok(_) => {
-                            println!("Rotated stale session for player {}", player_id);
-                            session = Some(new_session);
-                        }
-                        Err(e) => {
-                            println!("Error rotating session: {}", e);
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(AuthError {
-                                    msg: "Unknown error".to_string(),
-                                }),
-                            )
-                                .into_response();
-                        }
-                    }
-                } else {
-                    session = Some(stored_session);
+            Ok(Some(_)) => {
+                // Rotate on every password authentication to prevent an older
+                // browser session from surviving a fresh credential boundary.
+                let new_session = {
+                    let mut rng = state.rng.lock().await;
+                    rng.gen::<u128>().to_string()
+                };
+                if let Err(error) = conn
+                    .execute(
+                        "UPDATE sessions SET session = $1, created_at = NOW(), last_login = NOW() WHERE player_id = $2",
+                        &[&new_session, &player_id],
+                    )
+                    .await
+                {
+                    println!("Error rotating authenticated session: {error}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AuthError {
+                            msg: "Unable to establish a session".to_string(),
+                        }),
+                    )
+                        .into_response();
                 }
+                session = Some(new_session);
             }
-            Err(_) => {
+            Ok(None) => {
                 let mut rng = state.rng.lock().await;
-
-                // generate new session and convert to string
                 let session_num = rng.gen::<u128>().to_string();
                 session = Some(session_num);
-
                 store_new_session = true;
+            }
+            Err(error) => {
+                println!("Error loading authenticated session: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AuthError {
+                        msg: "Unable to establish a session".to_string(),
+                    }),
+                )
+                    .into_response();
             }
         }
     }
@@ -809,7 +876,7 @@ async fn auth_handler(
         println!("Storing new session in database");
         // store new session in database and return error if it fails
         let result = conn.execute(
-            "INSERT INTO sessions (player_id, session, created_at) VALUES ($1, $2, current_timestamp)",
+            "INSERT INTO sessions (player_id, session, created_at, last_login) VALUES ($1, $2, NOW(), NOW())",
             &[&player_id, &session],
         )
         .await;
@@ -828,22 +895,57 @@ async fn auth_handler(
     }
 
     if let Some(session) = session {
-        let device_token = issue_device_token(&conn, player_id).await;
+        let trusted_device = match issue_trusted_device(&conn, player_id).await {
+            Ok(credential) => credential,
+            Err(error) => {
+                println!("{error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AuthError {
+                        msg: "Unable to establish a trusted device".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
-        let cookie_value = format!(
-            "session={}; HttpOnly; Secure; SameSite=Strict; Max-Age=604800",
-            session
-        );
+        let account_row = match conn
+            .query_one(
+                "SELECT account_name, email, player_state FROM accounts WHERE player_id = $1",
+                &[&player_id],
+            )
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                println!("Error loading authenticated account state: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AuthError {
+                        msg: "Unable to load account state".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let canonical_account_name: Option<String> = account_row.get("account_name");
+        let email: Option<String> = account_row.get("email");
+        let player_state: String = account_row.get("player_state");
+
         let mut headers = HeaderMap::new();
-        headers.insert("Set-Cookie", HeaderValue::from_str(&cookie_value).unwrap());
+        append_session_cookie(&mut headers, &session);
+        append_trusted_device_cookie(&mut headers, &trusted_device);
 
         println!("Successfully authenticated: {}", player_id);
         (
             StatusCode::OK,
             headers,
             Json(AuthResponse {
-                player_id: player_id,
-                device_token,
+                player_id,
+                account_status: AccountStatus::Secured,
+                has_recovery_email: email.is_some(),
+                needs_hero: player_state == "CREATING_HERO",
+                account_name: canonical_account_name,
             }),
         )
             .into_response()
@@ -860,154 +962,143 @@ async fn auth_handler(
 }
 
 #[debug_handler]
-async fn fingerprint_auth_handler(
+async fn device_auth_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(payload): Json<FingerprintAuthRequest>,
+    jar: CookieJar,
+    Json(payload): Json<DeviceAuthRequest>,
 ) -> Response {
     if !state.rate_limit_ok(client_ip(&headers, addr)).await {
         return too_many_requests();
     }
-    let fingerprint = payload.fingerprint.trim().to_string();
-    let request_device_token = payload.device_token;
-
-    // Validate fingerprint: must be non-empty, 8-64 chars, alphanumeric
-    if fingerprint.is_empty() || fingerprint.len() < 8 || fingerprint.len() > 64 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(AuthError {
-                msg: "Invalid fingerprint: must be between 8 and 64 characters".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    if !fingerprint.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(AuthError {
-                msg: "Invalid fingerprint: must contain only alphanumeric characters".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    let conn = state
+    let mut conn = state
         .pool
         .get()
         .await
         .expect("Error getting connection from pool");
-
-    // Look up the fingerprint in the accounts table
-    let row = conn
-        .query_opt(
-            "SELECT player_id, account_name, password FROM accounts WHERE fingerprint = $1",
-            &[&fingerprint],
-        )
-        .await;
-
-    let row = match row {
-        Ok(r) => r,
-        Err(e) => {
-            println!("Error looking up fingerprint: {}", e);
+    let transaction = match conn.transaction().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            println!("Error starting trusted-device transaction: {error}");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(AuthError {
-                    msg: "Unknown error".to_string(),
+                    msg: "Unable to authenticate this device".to_string(),
                 }),
             )
                 .into_response();
         }
     };
 
-    // Resolve player identity: fingerprint match -> device_token fallback -> new player
-    let mut resolved_player: Option<(i32, Option<String>, bool)> = None; // (player_id, account_name, has_account)
+    // The trusted-device cookie is the only passwordless credential. It is
+    // server-generated, HttpOnly, rotated whenever it restores a session, and
+    // never exposed to JavaScript or accepted in a request body.
+    let mut resolved_player: Option<ResolvedAccount> = None;
     let mut new_player = false;
+    let mut trusted_device_to_set: Option<String> = None;
 
-    // Step 1: Try fingerprint match
-    if let Some(row) = row {
-        let player_id: i32 = row.get("player_id");
-        let account_name: Option<String> = row.get("account_name");
-        let password: Option<String> = row.get("password");
-
-        if password.is_some() {
-            println!(
-                "Fingerprint auth denied: player {} has password set, must use account login",
-                player_id
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(PasswordRequiredResponse {
-                    error: "password_required".to_string(),
-                }),
+    if let Some(trusted_device) = jar
+        .get(TRUSTED_DEVICE_COOKIE)
+        .map(|cookie| cookie.value().to_string())
+    {
+        let credential_hash = trusted_device_hash(&trusted_device);
+        match transaction
+            .query_opt(
+                "SELECT a.player_id, a.account_name, a.password, a.email, a.player_state FROM trusted_devices d JOIN accounts a ON a.player_id = d.player_id WHERE d.credential_hash = $1 AND d.created_at > NOW() - INTERVAL '90 days' FOR UPDATE OF d",
+                &[&credential_hash],
             )
-                .into_response();
-        }
-
-        let has_account = account_name.is_some();
-        println!("Fingerprint auth: found existing player {}", player_id);
-        resolved_player = Some((player_id, account_name, has_account));
-    }
-
-    // Step 2: If fingerprint didn't match, try device_token fallback
-    if resolved_player.is_none() {
-        if let Some(ref token) = request_device_token {
-            let token_row = conn
-                .query_opt(
-                    "SELECT player_id FROM device_tokens WHERE token = $1 AND created_at > NOW() - INTERVAL '90 days'",
-                    &[token],
-                )
-                .await;
-
-            if let Ok(Some(token_row)) = token_row {
-                let player_id: i32 = token_row.get("player_id");
-
-                let account_row = conn
-                    .query_opt(
-                        "SELECT account_name FROM accounts WHERE player_id = $1",
-                        &[&player_id],
+            .await
+        {
+            Ok(Some(row)) => {
+                let rotated_token = Uuid::new_v4().to_string();
+                let rotated_hash = trusted_device_hash(&rotated_token);
+                let rotated = transaction
+                    .execute(
+                        "UPDATE trusted_devices SET credential_hash = $1, created_at = NOW() WHERE credential_hash = $2",
+                        &[&rotated_hash, &credential_hash],
                     )
                     .await;
-
-                if let Ok(Some(account_row)) = account_row {
-                    // A valid, server-issued device token proves this is a
-                    // trusted device, so we log in silently even when the
-                    // account has a password set. Securing an account adds a
-                    // recovery option; it must not break silent return on a
-                    // device the player has already used. (The fingerprint-only
-                    // match path above still requires the password, since a
-                    // fingerprint alone is spoofable and can collide.)
-
-                    // Update fingerprint for this player
-                    if let Err(e) = conn
-                        .execute(
-                            "UPDATE accounts SET fingerprint = $1 WHERE player_id = $2",
-                            &[&fingerprint, &player_id],
-                        )
-                        .await
-                    {
-                        println!("Error updating fingerprint for player {}: {}", player_id, e);
+                match rotated {
+                    Ok(1) => {
+                        trusted_device_to_set = Some(rotated_token);
                     }
-
-                    let account_name: Option<String> = account_row.get("account_name");
-                    let has_account = account_name.is_some();
-                    println!("Device token auth: found existing player {}", player_id);
-                    resolved_player = Some((player_id, account_name, has_account));
+                    Ok(_) => {
+                        let mut response = (
+                            StatusCode::UNAUTHORIZED,
+                            Json(AuthError {
+                                msg: "authentication_required".to_string(),
+                            }),
+                        )
+                            .into_response();
+                        append_cleared_trusted_device_cookie(response.headers_mut());
+                        return response;
+                    }
+                    Err(error) => {
+                        println!("Error rotating trusted-device credential: {error}");
+                        return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AuthError {
+                            msg: "Unable to restore this device".to_string(),
+                        }),
+                    )
+                        .into_response();
+                    }
                 }
+                resolved_player = Some(ResolvedAccount {
+                    player_id: row.get("player_id"),
+                    account_name: row.get("account_name"),
+                    password: row.get("password"),
+                    email: row.get("email"),
+                    player_state: row.get("player_state"),
+                });
+            }
+            Ok(None) => {
+                let _ = transaction
+                    .execute(
+                        "DELETE FROM trusted_devices WHERE credential_hash = $1",
+                        &[&credential_hash],
+                    )
+                    .await;
+            }
+            Err(error) => {
+                println!("Error looking up trusted-device credential: {error}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AuthError {
+                        msg: "Unable to restore this device".to_string(),
+                    }),
+                )
+                    .into_response();
             }
         }
     }
 
-    // Step 3: If neither matched, create new player
     if resolved_player.is_none() {
+        if !payload.create_guest {
+            let mut response = (
+                StatusCode::UNAUTHORIZED,
+                Json(AuthError {
+                    msg: "authentication_required".to_string(),
+                }),
+            )
+                .into_response();
+            append_cleared_trusted_device_cookie(response.headers_mut());
+            return response;
+        }
+
         let no_name: Option<String> = None;
         let no_password: Option<String> = None;
-
-        let result = conn
+        let initial_trusted_device = Uuid::new_v4().to_string();
+        let initial_trusted_device_hash = trusted_device_hash(&initial_trusted_device);
+        let initial_session = {
+            let mut rng = state.rng.lock().await;
+            rng.gen::<u128>().to_string()
+        };
+        let result = transaction
             .query_one(
-                "INSERT INTO accounts (account_name, password, email, fingerprint, created_at) VALUES ($1, $2, $3, $4, current_timestamp) RETURNING player_id",
-                &[&no_name, &no_password, &no_name, &fingerprint],
+                "INSERT INTO accounts (account_name, password, email, created_at) VALUES ($1, $2, $3, current_timestamp) RETURNING player_id",
+                &[&no_name, &no_password, &no_name],
             )
             .await;
 
@@ -1016,27 +1107,71 @@ async fn fingerprint_auth_handler(
                 let player_id: i32 = row.get("player_id");
                 let account_name = format!("account{}", player_id);
 
-                // Set the account_name to account<PlayerId>
-                if let Err(e) = conn
+                if let Err(error) = transaction
                     .execute(
                         "UPDATE accounts SET account_name = $1 WHERE player_id = $2",
                         &[&account_name, &player_id],
                     )
                     .await
                 {
-                    println!("Error setting account_name for player {}: {}", player_id, e);
+                    println!("Error setting guest account name: {error}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AuthError {
+                            msg: "Failed to create guest account".to_string(),
+                        }),
+                    )
+                        .into_response();
                 }
-
-                println!("Fingerprint auth: created new player {}", player_id);
+                if let Err(error) = transaction
+                    .execute(
+                        "INSERT INTO sessions (player_id, session, created_at, last_login) VALUES ($1, $2, NOW(), NOW())",
+                        &[&player_id, &initial_session],
+                    )
+                    .await
+                {
+                    println!("Error creating guest session: {error}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AuthError {
+                            msg: "Failed to create guest account".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+                if let Err(error) = transaction
+                    .execute(
+                        "INSERT INTO trusted_devices (player_id, credential_hash, created_at) VALUES ($1, $2, NOW())",
+                        &[&player_id, &initial_trusted_device_hash],
+                    )
+                    .await
+                {
+                    println!("Error creating trusted-device credential: {error}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AuthError {
+                            msg: "Failed to create guest account".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+                println!("Created guest player {}", player_id);
                 new_player = true;
-                resolved_player = Some((player_id, Some(account_name), false));
+                trusted_device_to_set = Some(initial_trusted_device);
+                resolved_player = Some(ResolvedAccount {
+                    player_id,
+                    account_name: Some(account_name),
+                    password: None,
+                    email: None,
+                    player_state: "CREATING_HERO".to_string(),
+                });
             }
-            Err(e) => {
-                println!("Error creating account for fingerprint: {}", e);
+            Err(error) => {
+                println!("Error creating guest account: {error}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(AuthError {
-                        msg: "Failed to create account".to_string(),
+                        msg: "Failed to create guest account".to_string(),
                     }),
                 )
                     .into_response();
@@ -1044,67 +1179,55 @@ async fn fingerprint_auth_handler(
         }
     }
 
-    let (player_id, account_name, has_account) = resolved_player.unwrap();
+    let ResolvedAccount {
+        player_id,
+        account_name,
+        password,
+        email,
+        player_state,
+    } = resolved_player.unwrap();
+    let account_status = AccountStatus::from_password(password.as_deref());
+    let has_account = account_status.is_secured();
 
-    let device_token = issue_device_token(&conn, player_id).await;
+    let Some(trusted_device) = trusted_device_to_set else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to establish a trusted device".to_string(),
+            }),
+        )
+            .into_response();
+    };
 
-    // Create a session (same logic as /auth)
-    // First check for existing session
-    let session_row = conn
+    // Restore or create the browser session associated with this device.
+    let session_row = transaction
         .query_opt(
-            "SELECT session, created_at FROM sessions WHERE player_id = $1",
+            "SELECT session FROM sessions WHERE player_id = $1",
             &[&player_id],
         )
         .await;
 
     let (session, store_new) = match session_row {
-        Ok(Some(row)) => {
-            let session: String = row.get("session");
-            let created_at: DateTime<Utc> = row.get("created_at");
-
-            if session_is_stale(created_at) {
-                // Rotate in place so the game server accepts the session.
-                let new_session = {
-                    let mut rng = state.rng.lock().await;
-                    rng.gen::<u128>().to_string()
-                };
-                let result = conn
-                    .execute(
-                        "UPDATE sessions SET session = $1, created_at = current_timestamp WHERE player_id = $2",
-                        &[&new_session, &player_id],
-                    )
-                    .await;
-                match result {
-                    Ok(_) => {
-                        println!("Rotated stale session for player {}", player_id);
-                        (new_session, false)
-                    }
-                    Err(e) => {
-                        // Fall back to the stored session — broken for the game
-                        // server but better than failing auth outright.
-                        println!("Error rotating session: {}", e);
-                        (session, false)
-                    }
-                }
-            } else {
-                (session, false)
-            }
-        }
+        Ok(Some(row)) => (row.get("session"), false),
         Ok(None) => {
             let mut rng = state.rng.lock().await;
             let session_num = rng.gen::<u128>().to_string();
             (session_num, true)
         }
-        Err(e) => {
-            println!("Error checking session: {}", e);
-            let mut rng = state.rng.lock().await;
-            let session_num = rng.gen::<u128>().to_string();
-            (session_num, true)
+        Err(error) => {
+            println!("Error checking session: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError {
+                    msg: "Unable to establish a session".to_string(),
+                }),
+            )
+                .into_response();
         }
     };
 
     if store_new {
-        let result = conn
+        let result = transaction
             .execute(
                 "INSERT INTO sessions (player_id, session, created_at) VALUES ($1, $2, current_timestamp)",
                 &[&player_id, &session],
@@ -1122,27 +1245,53 @@ async fn fingerprint_auth_handler(
                 .into_response();
         }
     }
+    if let Err(error) = transaction
+        .execute(
+            "UPDATE sessions SET last_login = NOW() WHERE player_id = $1 AND session = $2",
+            &[&player_id, &session],
+        )
+        .await
+    {
+        println!("Error refreshing session activity: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to refresh the session".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
-    let cookie_value = format!(
-        "session={}; HttpOnly; Secure; SameSite=Strict; Max-Age=604800",
-        session
-    );
+    if let Err(error) = transaction.commit().await {
+        println!("Error committing trusted-device authentication: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to authenticate this device".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     let mut headers = HeaderMap::new();
-    headers.insert("Set-Cookie", HeaderValue::from_str(&cookie_value).unwrap());
+    append_session_cookie(&mut headers, &session);
+    append_trusted_device_cookie(&mut headers, &trusted_device);
 
     println!(
-        "Fingerprint auth successful: player_id={}, has_account={}, new_player={}",
+        "Trusted-device auth successful: player_id={}, has_account={}, new_player={}",
         player_id, has_account, new_player
     );
     (
         StatusCode::OK,
         headers,
-        Json(FingerprintAuthResponse {
+        Json(DeviceAuthResponse {
             player_id,
             has_account,
             new_player,
+            account_status,
+            has_recovery_email: email.is_some(),
+            needs_hero: player_state == "CREATING_HERO",
             account_name,
-            device_token,
         }),
     )
         .into_response()
@@ -1175,10 +1324,11 @@ async fn register_handler(
         .await
         .expect("Error getting connection from pool");
 
-    // Look up player_id from the current session
+    // Look up player_id from a still-valid current session. A stale cookie is
+    // not sufficient authority to claim or replace account credentials.
     let session_row = conn
         .query_one(
-            "SELECT player_id FROM sessions WHERE session = $1",
+            "SELECT s.player_id, s.created_at, s.last_login, a.password, a.player_state FROM sessions s JOIN accounts a ON a.player_id = s.player_id WHERE s.session = $1",
             &[&cookie.value()],
         )
         .await;
@@ -1194,9 +1344,49 @@ async fn register_handler(
     };
 
     let player_id = session_row.get::<_, i32>("player_id");
+    let created_at: DateTime<Utc> = session_row.get("created_at");
+    let last_login: Option<DateTime<Utc>> = session_row.get("last_login");
+    if session_is_expired(created_at, last_login) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthError {
+                msg: "Session expired".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    let existing_password: Option<String> = session_row.get("password");
+    if existing_password.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(AuthError {
+                msg: "This account is already secured".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
-    let account_name = payload.account_name;
+    let account_name = payload.account_name.trim().to_string();
     let password = payload.password;
+
+    if !valid_account_name(&account_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "Account name must be 3-20 letters, numbers, or underscores".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if !valid_new_password(&password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AuthError {
+                msg: "Password must be 8-128 characters".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
     // Email is optional; normalize and drop blanks. It is the only way to
     // recover a forgotten password, so we store it when provided.
@@ -1206,7 +1396,7 @@ async fn register_handler(
         .filter(|e| !e.is_empty());
 
     if let Some(ref email) = email {
-        if email.len() > 255 || !email.contains('@') || email.starts_with('@') || email.ends_with('@') {
+        if !valid_email(email) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(AuthError {
@@ -1217,12 +1407,54 @@ async fn register_handler(
         }
     }
 
-    let account = Account::new(account_name, password);
+    let identity_conflict = conn
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM accounts WHERE player_id <> $1 AND (LOWER(account_name) = LOWER($2) OR ($3::TEXT IS NOT NULL AND LOWER(email) = LOWER($3))))",
+            &[&player_id, &account_name, &email],
+        )
+        .await;
+    match identity_conflict {
+        Ok(row) if row.get::<_, bool>(0) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(AuthError {
+                    msg: "That account name or email is already in use".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
+        Err(error) => {
+            println!("Error checking account identity uniqueness: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError {
+                    msg: "Unable to secure the account".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    let account = match Account::new(account_name.clone(), password) {
+        Ok(account) => account,
+        Err(error) => {
+            println!("Error hashing registration password: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError {
+                    msg: "Unable to secure the account".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
     // Update the existing account row for this player_id (atomically including
     // the recovery email when one was provided).
-    let result = match email {
-        Some(ref email) => {
+    let has_recovery_email = email.is_some();
+    let result = match &email {
+        Some(email) => {
             conn.execute(
                 "UPDATE accounts SET account_name = $1, password = $2, email = $3 WHERE player_id = $4",
                 &[&account.account_name, &account.password, email, &player_id],
@@ -1258,17 +1490,31 @@ async fn register_handler(
             .into_response();
     }
 
-    let device_token = issue_device_token(&conn, player_id).await;
+    let trusted_device = match issue_trusted_device(&conn, player_id).await {
+        Ok(credential) => credential,
+        Err(error) => {
+            println!("{error}");
+            String::new()
+        }
+    };
+    let player_state: String = session_row.get("player_state");
 
     println!("Successfully registered: {}", player_id);
-    (
+    let mut response = (
         StatusCode::OK,
         Json(AuthResponse {
-            player_id: player_id,
-            device_token,
+            player_id,
+            account_status: AccountStatus::Secured,
+            has_recovery_email,
+            needs_hero: player_state == "CREATING_HERO",
+            account_name: Some(account_name),
         }),
     )
-        .into_response()
+        .into_response();
+    if !trusted_device.is_empty() {
+        append_trusted_device_cookie(response.headers_mut(), &trusted_device);
+    }
+    response
 }
 
 // How long a password-reset link stays valid.
@@ -1290,8 +1536,13 @@ fn reset_requested_response() -> Response {
 #[debug_handler]
 async fn request_password_reset_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<PasswordResetRequest>,
 ) -> Response {
+    if !state.rate_limit_ok(client_ip(&headers, addr)).await {
+        return too_many_requests();
+    }
     let identifier = payload.identifier.trim().to_lowercase();
     if identifier.is_empty() {
         return reset_requested_response();
@@ -1319,6 +1570,12 @@ async fn request_password_reset_handler(
         if let Some(email) = email {
             let token = Uuid::new_v4().simple().to_string();
 
+            let _ = conn
+                .execute(
+                    "UPDATE password_resets SET used_at = NOW() WHERE player_id = $1 AND used_at IS NULL",
+                    &[&player_id],
+                )
+                .await;
             if let Err(e) = conn
                 .execute(
                     "INSERT INTO password_resets (token, player_id, created_at) VALUES ($1, $2, NOW())",
@@ -1344,30 +1601,49 @@ async fn request_password_reset_handler(
 #[debug_handler]
 async fn reset_password_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<ResetPasswordRequest>,
 ) -> Response {
+    if !state.rate_limit_ok(client_ip(&headers, addr)).await {
+        return too_many_requests();
+    }
     let token = payload.token.trim().to_string();
     let password = payload.password;
 
-    if password.len() < 6 {
+    if !valid_new_password(&password) {
         return (
             StatusCode::BAD_REQUEST,
             Json(AuthError {
-                msg: "Password must be at least 6 characters".to_string(),
+                msg: "Password must be 8-128 characters".to_string(),
             }),
         )
             .into_response();
     }
 
-    let conn = state
+    let mut conn = state
         .pool
         .get()
         .await
         .expect("Error getting connection from pool");
 
-    let row = conn
+    let transaction = match conn.transaction().await {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            println!("Error starting password reset transaction: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError {
+                    msg: "Unable to reset password".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let row = transaction
         .query_opt(
-            "SELECT player_id, created_at, used_at FROM password_resets WHERE token = $1",
+            "SELECT player_id, created_at, used_at FROM password_resets WHERE token = $1 FOR UPDATE",
             &[&token],
         )
         .await;
@@ -1405,9 +1681,21 @@ async fn reset_password_handler(
     }
 
     let player_id: i32 = row.get("player_id");
-    let password_hash = Account::hash_password(&password);
+    let password_hash = match Account::hash_password(&password) {
+        Ok(password_hash) => password_hash,
+        Err(error) => {
+            println!("Error hashing reset password: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError {
+                    msg: "Unable to reset password".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
-    if let Err(e) = conn
+    if let Err(e) = transaction
         .execute(
             "UPDATE accounts SET password = $1 WHERE player_id = $2",
             &[&password_hash, &player_id],
@@ -1424,22 +1712,75 @@ async fn reset_password_handler(
             .into_response();
     }
 
-    // Burn the token so it cannot be replayed.
-    let _ = conn
+    // Burn every outstanding reset token and revoke every established browser
+    // credential. A password reset is an account-recovery boundary, so a
+    // previously stolen session or device token must not remain authoritative.
+    if let Err(error) = transaction
         .execute(
-            "UPDATE password_resets SET used_at = NOW() WHERE token = $1",
-            &[&token],
+            "UPDATE password_resets SET used_at = NOW() WHERE player_id = $1 AND used_at IS NULL",
+            &[&player_id],
         )
-        .await;
+        .await
+    {
+        println!("Error invalidating password reset tokens: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to reset password".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if let Err(error) = transaction
+        .execute("DELETE FROM sessions WHERE player_id = $1", &[&player_id])
+        .await
+    {
+        println!("Error revoking sessions after password reset: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to reset password".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if let Err(error) = transaction
+        .execute(
+            "DELETE FROM trusted_devices WHERE player_id = $1",
+            &[&player_id],
+        )
+        .await
+    {
+        println!("Error revoking devices after password reset: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to reset password".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if let Err(error) = transaction.commit().await {
+        println!("Error committing password reset: {error}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError {
+                msg: "Unable to reset password".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
     println!("Password reset for player {}", player_id);
-    (
+    let mut response = (
         StatusCode::OK,
         Json(MessageResponse {
             message: "Your password has been updated. Please log in.".to_string(),
         }),
     )
-        .into_response()
+        .into_response();
+    append_cleared_auth_cookies(response.headers_mut());
+    response
 }
 
 async fn send_password_reset_email(to: &str, reset_url: &str) {
@@ -1480,8 +1821,8 @@ async fn send_email(to: &str, subject: &str, html: &str, text: &str) {
 
     let account_id = env::var("CLOUDFLARE_ACCOUNT_ID")
         .unwrap_or_else(|_| "514db0d52efacfc2b7d0c685d7b57cf6".to_string());
-    let from =
-        env::var("EMAIL_FROM_ADDRESS").unwrap_or_else(|_| "welcome@surviveperilous.com".to_string());
+    let from = env::var("EMAIL_FROM_ADDRESS")
+        .unwrap_or_else(|_| "welcome@surviveperilous.com".to_string());
 
     let url = format!(
         "https://api.cloudflare.com/client/v4/accounts/{}/email/sending/send",
@@ -1548,10 +1889,10 @@ async fn set_display_name_handler(
         .await
         .expect("Error getting connection from pool");
 
-    // Get player_id from session
+    // Get player_id from a still-valid session.
     let session_row = conn
         .query_one(
-            "SELECT player_id FROM sessions WHERE session = $1",
+            "SELECT player_id, created_at, last_login FROM sessions WHERE session = $1",
             &[&cookie.value()],
         )
         .await;
@@ -1567,6 +1908,17 @@ async fn set_display_name_handler(
     };
 
     let player_id: i32 = session_row.get("player_id");
+    let created_at: DateTime<Utc> = session_row.get("created_at");
+    let last_login: Option<DateTime<Utc>> = session_row.get("last_login");
+    if session_is_expired(created_at, last_login) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(AuthError {
+                msg: "Session expired".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
     // Only update if account has no password (guest account)
     let account_row = conn
@@ -1702,4 +2054,77 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
 
     println!("Successfully registered: {:?}", scores);
     (StatusCode::OK, Json(ScoreResponse(scores))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_status_depends_on_credentials_not_generated_name() {
+        assert_eq!(AccountStatus::from_password(None), AccountStatus::Guest);
+        assert_eq!(
+            AccountStatus::from_password(Some("argon2-hash")),
+            AccountStatus::Secured
+        );
+    }
+
+    #[test]
+    fn account_name_validation_matches_registration_contract() {
+        assert!(valid_account_name("Player_1"));
+        assert!(!valid_account_name("ab"));
+        assert!(!valid_account_name("player-name"));
+        assert!(!valid_account_name("this_account_name_is_too_long"));
+    }
+
+    #[test]
+    fn password_validation_enforces_bounded_length() {
+        assert!(!valid_new_password("short"));
+        assert!(valid_new_password("eight888"));
+        assert!(!valid_new_password(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn email_validation_rejects_missing_or_ambiguous_domains() {
+        assert!(valid_email("hero@example.com"));
+        assert!(!valid_email("hero@example"));
+        assert!(!valid_email("hero@example@invalid.com"));
+        assert!(!valid_email("hero @example.com"));
+    }
+
+    #[test]
+    fn session_expiration_uses_last_activity_when_present() {
+        let old_creation = Utc::now() - chrono::Duration::days(8);
+        assert!(session_is_expired(old_creation, None));
+        assert!(!session_is_expired(
+            old_creation,
+            Some(Utc::now() - chrono::Duration::days(1))
+        ));
+    }
+
+    #[test]
+    fn trusted_device_cookie_is_http_only_secure_and_strict() {
+        let mut headers = HeaderMap::new();
+        append_trusted_device_cookie(&mut headers, "server-generated-secret");
+
+        let cookie = headers
+            .get("Set-Cookie")
+            .and_then(|value| value.to_str().ok())
+            .expect("trusted-device Set-Cookie header");
+        assert!(cookie.starts_with("__Host-trusted_device=server-generated-secret;"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Max-Age=7776000"));
+    }
+
+    #[test]
+    fn trusted_device_database_value_is_a_one_way_digest() {
+        let credential = "server-generated-secret";
+        let digest = trusted_device_hash(credential);
+
+        assert_ne!(digest, credential);
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, trusted_device_hash(credential));
+    }
 }

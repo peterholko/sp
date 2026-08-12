@@ -1,14 +1,14 @@
 """
 passive_run.py — Passive/neglectful player harness for game-state analysis.
 
-Creates (or reuses) a passwordless account via /fingerprint-auth, selects a class,
+Creates a fresh passwordless guest account via /device-auth, selects a class,
 then does NOTHING except observe: every server packet is appended to a JSONL log
 with a wall-clock timestamp, and the hero's needs (hunger/thirst/hp) are polled
 every POLL_INTERVAL seconds via info_obj. Runs until true death + grace period,
 or until --duration seconds elapse.
 
 Usage:
-    python passive_run.py --fingerprint passive-bot-001 --hero-name PassiveBot \
+    python passive_run.py --hero-name PassiveBot \
         --log runs/passive.jsonl --duration 5400
 """
 
@@ -27,11 +27,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 POLL_INTERVAL = 20.0
 
 
-def fingerprint_auth(base_url: str, fingerprint: str) -> tuple[str, int]:
-    """POST /fingerprint-auth, return (session_cookie, player_id)."""
+def create_guest_session(base_url: str) -> tuple[str, int]:
+    """Create a fresh guest through /device-auth and return its session."""
     resp = requests.post(
-        base_url.rstrip("/") + "/fingerprint-auth",
-        json={"fingerprint": fingerprint, "device_token": None},
+        base_url.rstrip("/") + "/device-auth",
+        json={"create_guest": True},
         verify=False,
         timeout=10,
     )
@@ -39,16 +39,10 @@ def fingerprint_auth(base_url: str, fingerprint: str) -> tuple[str, int]:
     data = resp.json()
     player_id = data.get("playerId", data.get("player_id"))
 
-    session = None
-    raw_cookie = resp.headers.get("Set-Cookie", "")
-    for part in raw_cookie.split(";"):
-        part = part.strip()
-        if part.startswith("session="):
-            session = part.split("=", 1)[1]
-            break
+    session = resp.cookies.get("session")
     if session is None:
-        raise RuntimeError(f"No session cookie in fingerprint-auth response: {data}")
-    print(f"[auth] fingerprint auth ok player_id={player_id} new_player={data.get('newPlayer')}")
+        raise RuntimeError(f"No session cookie in device-auth response: {data}")
+    print(f"[auth] guest session created player_id={player_id} new_player={data.get('newPlayer')}")
     return session, player_id
 
 
@@ -155,13 +149,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--auth-base", default="https://192.168.1.28:3030")
     ap.add_argument("--ws-url", default="wss://192.168.1.28:8443")
-    ap.add_argument("--fingerprint", required=True)
     ap.add_argument("--hero-name", default="PassiveBot")
     ap.add_argument("--log", required=True)
     ap.add_argument("--duration", type=float, default=5400)
     args = ap.parse_args()
 
-    session, player_id = fingerprint_auth(args.auth_base, args.fingerprint)
+    session, player_id = create_guest_session(args.auth_base)
     run = PassiveRun(args.ws_url, session, player_id, args.hero_name, args.log)
     asyncio.run(run.run(args.duration))
 

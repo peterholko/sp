@@ -9,16 +9,27 @@ use std::fs;
 
 use crate::constants::{BASE_REFINE_TIME, TICKS_PER_SEC};
 use crate::item::AttrKey;
-use crate::item::AttrVal;
+use crate::item::{AttrVal, LOGS_OR_TIMBER};
 
 pub const SHELTER_TENT_TEMPLATE: &str = "Shelter Tent";
 pub const LEGACY_SMALL_TENT_TEMPLATE: &str = "Small Tent";
+pub const CAMPFIRE_TEMPLATE: &str = "Campfire";
+pub const DROPPED_BAG_TEMPLATE: &str = "Dropped Bag";
 
 pub fn canonical_obj_template_name(name: &str) -> &str {
     match name {
         LEGACY_SMALL_TENT_TEMPLATE => SHELTER_TENT_TEMPLATE,
         _ => name,
     }
+}
+
+/// Structure upgrades can retain capabilities from the structure they replace.
+/// A Shelter Tent contains the upgraded Campfire, so every recipe that accepts
+/// a Campfire must also accept the combined shelter without duplicating that
+/// requirement across individual recipe templates.
+pub fn structure_supports_recipe_requirement(structure: &str, requirement: &str) -> bool {
+    structure == requirement
+        || (structure == SHELTER_TENT_TEMPLATE && requirement == CAMPFIRE_TEMPLATE)
 }
 
 #[derive(Debug, Resource)]
@@ -104,7 +115,9 @@ impl Templates {
                 .chain(structure.upgrade_req.iter().flatten())
                 .chain(structure.upkeep.iter().flatten())
             {
-                if !item_types.contains(requirement.req_type.as_str()) {
+                if requirement.req_type != LOGS_OR_TIMBER
+                    && !item_types.contains(requirement.req_type.as_str())
+                {
                     errors.push(format!(
                         "object {:?} requires unknown item type {:?}",
                         structure.template, requirement.req_type
@@ -514,7 +527,9 @@ impl RecipeTemplate {
 
         for recipe_template in templates.recipe_templates.iter() {
             if let Some(structure_req) = &recipe_template.structure_req {
-                if structure_req.contains(&structure) {
+                if structure_req.iter().any(|requirement| {
+                    structure_supports_recipe_requirement(&structure, requirement)
+                }) {
                     recipe_templates.push(recipe_template.clone());
                 }
             }
@@ -809,7 +824,7 @@ impl Plugin for TemplatesPlugin {
 mod tests {
     use super::*;
     use crate::ids::Ids;
-    use crate::item::Inventory;
+    use crate::item::{Inventory, LOG, TIMBER};
     use crate::recipe::{RecipePlugin, Recipes};
 
     #[test]
@@ -819,6 +834,231 @@ mod tests {
 
         let templates = app.world().resource::<Templates>();
         assert_eq!(templates.validate_production_catalog(), Ok(()));
+    }
+
+    #[test]
+    fn structure_wood_requirements_are_explicitly_flexible_or_strict() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let structure = |name: &str| {
+            templates
+                .obj_templates
+                .iter()
+                .find(|template| template.template == name)
+                .unwrap_or_else(|| panic!("missing object template {name}"))
+        };
+        let wood_requirements = |template: &ObjTemplate| {
+            template
+                .req
+                .iter()
+                .flatten()
+                .chain(template.upgrade_req.iter().flatten())
+                .chain(template.upkeep.iter().flatten())
+                .filter(|requirement| {
+                    matches!(requirement.req_type.as_str(), LOG | TIMBER | LOGS_OR_TIMBER)
+                })
+                .map(|requirement| (requirement.req_type.clone(), requirement.quantity))
+                .collect::<Vec<_>>()
+        };
+
+        for name in [
+            "Crafting Tent",
+            "Blacksmith",
+            "Workshop",
+            "Mason",
+            "Butchery",
+            "Smokehouse",
+            "Tannery",
+            "Millhouse",
+            "Textile Mill",
+            "Bakery",
+            "Tailor",
+            "Herbalist",
+            "Alchemist",
+            "Tavern",
+            "Mine",
+            "Lumbercamp",
+            "Quarry",
+            "Trapper",
+            "Farm",
+            "Shelter Tent",
+            "Large Tent",
+            "Yurt",
+            "Large Yurt",
+            "Burrow",
+            "Cache",
+            "Warehouse",
+            "Watchtower",
+        ] {
+            let requirements = wood_requirements(structure(name));
+            assert!(!requirements.is_empty(), "{name} should require wood");
+            assert!(
+                requirements
+                    .iter()
+                    .all(|(requirement, _)| requirement == LOGS_OR_TIMBER),
+                "{name} should display and accept Logs or Timber: {requirements:?}"
+            );
+        }
+
+        assert_eq!(
+            wood_requirements(structure("Stockade")),
+            vec![
+                (LOG.to_string(), 15),
+                (TIMBER.to_string(), 5),
+                (LOG.to_string(), 1)
+            ]
+        );
+        assert_eq!(
+            wood_requirements(structure("Palisade")),
+            vec![
+                (TIMBER.to_string(), 5),
+                (TIMBER.to_string(), 3),
+                (TIMBER.to_string(), 1)
+            ]
+        );
+        assert_eq!(
+            wood_requirements(structure("Fieldstone Walls")),
+            vec![(TIMBER.to_string(), 3)]
+        );
+    }
+
+    #[test]
+    fn early_survival_recipes_are_split_between_handcraft_and_crafting_tent() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let recipe = |name: &str| {
+            templates
+                .recipe_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing recipe template {name}"))
+        };
+
+        for name in [
+            "Firewood",
+            "Sharpened Stick",
+            "Crude Torch",
+            "Crude Bandage",
+            "Twine",
+            "Flint Hatchet",
+        ] {
+            assert_eq!(
+                recipe(name).structure_req,
+                None,
+                "{name} should remain available through Handcraft"
+            );
+        }
+
+        for name in [
+            "Fishing Rod",
+            "Improvised Sling",
+            "Stone Knife",
+            "Bone Dagger",
+            "Stone-Tipped Spear",
+            "Bone War Club",
+            "Throwing Spear",
+        ] {
+            assert_eq!(
+                recipe(name)
+                    .structure_req
+                    .as_ref()
+                    .map(|requirements| requirements
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()),
+                Some(vec!["Crafting Tent"]),
+                "{name} should require a Crafting Tent"
+            );
+        }
+
+        assert_eq!(
+            recipe("Crude Bandage")
+                .req
+                .iter()
+                .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
+                .collect::<Vec<_>>(),
+            vec![("Plant Fibers", 2)],
+            "Crude Bandages should be renewable from gathered fiber"
+        );
+
+        let herbal_poultice = recipe("Herbal Poultice");
+        assert_eq!(
+            herbal_poultice
+                .attrs
+                .as_ref()
+                .and_then(|attrs| attrs.iter().find(|attr| attr.name == "Healing"))
+                .map(|attr| attr.value.as_str()),
+            Some("20")
+        );
+        assert_eq!(
+            templates
+                .item_templates
+                .iter()
+                .find(|item| item.name == "Herbal Poultice")
+                .and_then(|item| item.attrs.as_ref())
+                .and_then(|attrs| attrs.iter().find(|attr| attr.name == "Healing"))
+                .map(|attr| attr.value.as_str()),
+            Some("20")
+        );
+    }
+
+    #[test]
+    fn hunting_resources_are_ground_tiers_with_random_carcass_pools() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let expected = [
+            (
+                "Sparse Hunting Grounds",
+                "fruitfulhuntinggroundsclearing",
+                3,
+            ),
+            (
+                "Fruitful Hunting Grounds",
+                "fruitfulhuntinggroundswoodland",
+                3,
+            ),
+            (
+                "Bountiful Hunting Grounds",
+                "fruitfulhuntinggroundswater",
+                4,
+            ),
+        ];
+        let hunting_resources = templates
+            .res_templates
+            .values()
+            .filter(|template| template.res_type == crate::constants::GAME_ANIMAL)
+            .collect::<Vec<_>>();
+
+        assert_eq!(hunting_resources.len(), expected.len());
+        for (name, image, output_count) in expected {
+            let template = templates
+                .res_templates
+                .get(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.image, image);
+            assert_eq!(template.produces.as_ref().map(Vec::len), Some(output_count));
+            assert!(
+                template.properties.as_ref().is_none_or(Vec::is_empty),
+                "{name} must not expose animal properties on the hunting ground"
+            );
+        }
+
+        for old_species_resource in [
+            "Windstride Stag",
+            "Bristleback Boar",
+            "Swiftstep Hare",
+            "Frostmane Elk",
+            "Dunehorn Antelope",
+            "Stonegrove Ibex",
+        ] {
+            assert!(!templates.res_templates.contains_key(old_species_resource));
+        }
     }
 
     #[test]
@@ -867,6 +1107,19 @@ mod tests {
         assert_eq!(template.template, "Shelter Tent");
     }
 
+    #[test]
+    fn static_sailor_test_unit_template_is_registered() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let template = templates.obj_templates.get("Sailor".to_string());
+
+        assert_eq!(template.class, "unit");
+        assert_eq!(template.subclass, "npc");
+        assert_eq!(template.image, "sailor");
+    }
+
     fn production_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((TemplatesPlugin, RecipePlugin));
@@ -880,16 +1133,16 @@ mod tests {
     }
 
     #[test]
-    fn copper_and_wood_chain_reaches_a_training_axe() {
+    fn copper_and_wood_chain_reaches_a_felling_axe() {
         let mut app = production_test_app();
 
         app.world_mut()
             .resource_scope(|world, templates: Mut<Templates>| {
                 let recipe = {
                     let mut recipes = world.resource_mut::<Recipes>();
-                    assert!(recipes.create(1, "Copper Training Axe".to_string(), &templates));
+                    assert!(recipes.create(1, "Copper Felling Axe".to_string(), &templates));
                     recipes
-                        .get_for_owner_by_name(1, "Copper Training Axe")
+                        .get_for_owner_by_name(1, "Copper Felling Axe")
                         .expect("created recipe")
                 };
 
@@ -921,18 +1174,29 @@ mod tests {
                     .try_craft(
                         ids.new_item_id(),
                         1,
-                        "Copper Training Axe".to_string(),
+                        "Copper Felling Axe".to_string(),
                         &recipe,
                         None,
                         None,
                         100,
                     )
-                    .expect("training axe craft");
+                    .expect("felling axe craft");
 
-                assert!(inventory
+                let felling_axe = inventory
                     .items
                     .iter()
-                    .any(|item| item.name == "Copper Training Axe"));
+                    .find(|item| item.name == "Copper Felling Axe")
+                    .expect("crafted felling axe");
+                assert!(matches!(
+                    felling_axe.attrs.get(&crate::item::AttrKey::Damage),
+                    Some(crate::item::AttrVal::Num(value)) if *value == 6.0
+                ));
+                assert!(matches!(
+                    felling_axe.attrs.get(&crate::item::AttrKey::Logging),
+                    Some(crate::item::AttrVal::Num(value)) if *value == 3.0
+                ));
+                assert_eq!(felling_axe.class, crate::constants::TOOL);
+                assert_eq!(felling_axe.durability, Some(75));
                 assert!(!inventory
                     .items
                     .iter()
@@ -941,6 +1205,404 @@ mod tests {
                     .items
                     .iter()
                     .any(|item| item.name == "Cragroot Maple Timber"));
+            });
+    }
+
+    #[test]
+    fn combat_axes_and_logging_tools_have_separate_template_progressions() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for name in [
+            "Copper Training Axe",
+            "Copper Broad Axe",
+            "Copper Heavy Axe",
+            "Iron War Axe",
+            "Mithril War Axe",
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::WEAPON);
+            assert!(!template
+                .convert_attrs()
+                .contains_key(&crate::item::AttrKey::Logging));
+        }
+
+        for (name, rating, durability) in [
+            ("Crude Hatchet", 1.0, 30),
+            ("Flint Hatchet", 2.0, 45),
+            ("Copper Felling Axe", 3.0, 75),
+            ("Iron Felling Axe", 4.0, 120),
+            ("Mithril Felling Axe", 4.0, 180),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(matches!(
+                template.convert_attrs().get(&crate::item::AttrKey::Logging),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+            assert_eq!(template.durability, Some(durability));
+        }
+
+        let crude_hatchet = templates
+            .item_templates
+            .iter()
+            .find(|template| template.name == "Crude Hatchet")
+            .expect("missing Crude Hatchet");
+        assert_eq!(crude_hatchet.class, crate::constants::WEAPON);
+        assert_eq!(crude_hatchet.subclass, "Axe");
+
+        for name in [
+            "Flint Hatchet",
+            "Copper Felling Axe",
+            "Iron Felling Axe",
+            "Mithril Felling Axe",
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::TOOL);
+        }
+    }
+
+    #[test]
+    fn mining_tools_have_a_dedicated_material_progression() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for (name, image, rating, durability, tier) in [
+            ("Training Pick Axe", "pickaxe", 2.0, 60, 0),
+            ("Copper Pick Axe", "copperpickaxe", 3.0, 90, 1),
+            ("Iron Pick Axe", "ironpickaxe", 4.0, 140, 2),
+            ("Mithril Pick Axe", "mithrilpickaxe", 4.0, 210, 3),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::TOOL);
+            assert_eq!(template.subclass, "Pick Axe");
+            assert_eq!(template.image, image);
+            assert_eq!(template.durability, Some(durability));
+            assert!(matches!(
+                template.convert_attrs().get(&crate::item::AttrKey::Mining),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+
+            let recipe = RecipeTemplate::get_by_name(name.to_string(), templates)
+                .unwrap_or_else(|| panic!("missing recipe {name}"));
+            assert_eq!(recipe.class.as_deref(), Some(crate::constants::TOOL));
+            assert_eq!(recipe.subclass.as_deref(), Some("Pick Axe"));
+            assert_eq!(recipe.tier, Some(tier));
+        }
+    }
+
+    #[test]
+    fn stonecutting_tools_have_a_dedicated_material_progression() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for (name, image, rating, durability, tier) in [
+            (
+                "Training Stonecutter Hammer",
+                "trainingstonecutterhammer",
+                2.0,
+                60,
+                0,
+            ),
+            (
+                "Copper Stonecutter Hammer",
+                "copperstonecutterhammer",
+                3.0,
+                90,
+                1,
+            ),
+            (
+                "Iron Stonecutter Hammer",
+                "ironstonecutterhammer",
+                4.0,
+                140,
+                2,
+            ),
+            (
+                "Mithril Stonecutter Hammer",
+                "mithrilstonecutterhammer",
+                4.0,
+                210,
+                3,
+            ),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::TOOL);
+            assert_eq!(template.subclass, "Stonecutter Hammer");
+            assert_eq!(template.image, image);
+            assert_eq!(template.durability, Some(durability));
+            assert!(matches!(
+                template
+                    .convert_attrs()
+                    .get(&crate::item::AttrKey::Stonecutting),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+
+            let recipe = RecipeTemplate::get_by_name(name.to_string(), templates)
+                .unwrap_or_else(|| panic!("missing recipe {name}"));
+            assert_eq!(recipe.class.as_deref(), Some(crate::constants::TOOL));
+            assert_eq!(recipe.subclass.as_deref(), Some("Stonecutter Hammer"));
+            assert_eq!(recipe.tier, Some(tier));
+        }
+    }
+
+    #[test]
+    fn fishing_rods_have_a_dedicated_material_progression() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for (name, image, rating, durability, tier) in [
+            ("Fishing Rod", "fishingrod", 1.0, 40, 0),
+            ("Copper Fishing Rod", "copperfishingrod", 2.0, 75, 1),
+            ("Iron Fishing Rod", "ironfishingrod", 3.0, 120, 2),
+            ("Mithril Fishing Rod", "mithrilfishingrod", 4.0, 180, 3),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::TOOL);
+            assert_eq!(template.subclass, crate::constants::FISHING_ROD);
+            assert_eq!(template.image, image);
+            assert_eq!(template.durability, Some(durability));
+            assert!(matches!(
+                template.convert_attrs().get(&crate::item::AttrKey::Fishing),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+
+            let recipe = RecipeTemplate::get_by_name(name.to_string(), templates)
+                .unwrap_or_else(|| panic!("missing recipe {name}"));
+            assert_eq!(recipe.class.as_deref(), Some(crate::constants::TOOL));
+            assert_eq!(
+                recipe.subclass.as_deref(),
+                Some(crate::constants::FISHING_ROD)
+            );
+            assert_eq!(recipe.tier, Some(tier));
+        }
+    }
+
+    #[test]
+    fn farming_sickles_have_a_dedicated_material_progression() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for (name, image, rating, durability, tier) in [
+            ("Sickle", "sickle", 2.0, 60, 0),
+            ("Copper Sickle", "coppersickle", 3.0, 90, 1),
+            ("Iron Sickle", "ironsickle", 4.0, 140, 2),
+            ("Mithril Sickle", "mithrilsickle", 4.0, 210, 3),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::TOOL);
+            assert_eq!(template.subclass, "Sickle");
+            assert_eq!(template.image, image);
+            assert_eq!(template.durability, Some(durability));
+            assert!(matches!(
+                template.convert_attrs().get(&crate::item::AttrKey::Farming),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+
+            let recipe = RecipeTemplate::get_by_name(name.to_string(), templates)
+                .unwrap_or_else(|| panic!("missing recipe {name}"));
+            assert_eq!(recipe.class.as_deref(), Some(crate::constants::TOOL));
+            assert_eq!(recipe.subclass.as_deref(), Some("Sickle"));
+            assert_eq!(recipe.tier, Some(tier));
+        }
+    }
+
+    #[test]
+    fn spears_and_bows_form_the_hunting_tool_progression() {
+        let app = production_test_app();
+        let templates = app.world().resource::<Templates>();
+
+        for name in ["Improvised Sling", "Stone Knife", "Bone Dagger"] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::WEAPON);
+            assert!(!template
+                .convert_attrs()
+                .contains_key(&crate::item::AttrKey::Hunting));
+        }
+
+        for (name, subclass, rating, durability) in [
+            ("Sharpened Stick", "Spear", 1.0, 25),
+            ("Stone-Tipped Spear", "Spear", 2.0, 45),
+            ("Throwing Spear", "Throwing", 2.0, 40),
+            ("Copper Spear", "Spear", 3.0, 75),
+            ("Iron Spear", "Spear", 4.0, 120),
+            ("Mithril Glaive", "Spear", 4.0, 180),
+            ("Training Bow", "Bow", 2.0, 60),
+            ("Hunting Bow", "Bow", 3.0, 70),
+            ("Iron-Limbed Longbow", "Bow", 4.0, 90),
+            ("Mithril Warbow", "Bow", 4.0, 120),
+        ] {
+            let template = templates
+                .item_templates
+                .iter()
+                .find(|template| template.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(template.class, crate::constants::WEAPON);
+            assert_eq!(template.subclass, subclass);
+            assert_eq!(template.durability, Some(durability));
+            assert!(matches!(
+                template.convert_attrs().get(&crate::item::AttrKey::Hunting),
+                Some(crate::item::AttrVal::Num(value)) if *value == rating
+            ));
+        }
+    }
+
+    #[test]
+    fn early_equipment_stations_connect_tanning_and_specialization() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let crafting_tent = templates.obj_templates.get("Crafting Tent".to_string());
+        let tannery = templates.obj_templates.get("Tannery".to_string());
+
+        assert!(crafting_tent
+            .refine
+            .as_ref()
+            .is_some_and(|types| types.iter().any(|item_type| item_type == "Hide")));
+        assert!(crafting_tent
+            .upgrade_to
+            .as_ref()
+            .is_some_and(|upgrades| upgrades.iter().any(|upgrade| upgrade == "Blacksmith")));
+        assert!(crafting_tent
+            .upgrade_to
+            .as_ref()
+            .is_some_and(|upgrades| upgrades.iter().any(|upgrade| upgrade == "Workshop")));
+        assert!(crafting_tent
+            .upgrade_to
+            .as_ref()
+            .is_some_and(|upgrades| upgrades.iter().any(|upgrade| upgrade == "Tannery")));
+        assert!(tannery
+            .refine
+            .as_ref()
+            .is_some_and(|types| types.iter().any(|item_type| item_type == "Hide")));
+        assert!(tannery.upgrade_req.is_some());
+
+        for (recipe_name, tier) in [
+            ("Stone-Tipped Spear", 0),
+            ("Copper Spear", 1),
+            ("Iron Spear", 2),
+            ("Mithril Glaive", 3),
+            ("Training Bow", 0),
+            ("Hunting Bow", 1),
+            ("Iron-Limbed Longbow", 2),
+            ("Mithril Warbow", 3),
+            ("Hide Wraps", 0),
+            ("Studded Leather Vest", 1),
+            ("Iron Chainmail", 2),
+            ("Mithril Plate", 3),
+        ] {
+            let recipe = RecipeTemplate::get_by_name(recipe_name.to_string(), templates)
+                .unwrap_or_else(|| panic!("missing progression recipe {recipe_name}"));
+            assert_eq!(recipe.tier, Some(tier), "wrong tier for {recipe_name}");
+        }
+    }
+
+    #[test]
+    fn cloth_and_hunted_hide_reach_primitive_armor() {
+        let mut app = production_test_app();
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let (twine_recipe, hide_cap_recipe) = {
+                    let mut recipes = world.resource_mut::<Recipes>();
+                    assert!(recipes.create(1, "Twine".to_string(), &templates));
+                    assert!(recipes.create(1, "Hide Cap".to_string(), &templates));
+                    (
+                        recipes
+                            .get_for_owner_by_name(1, "Twine")
+                            .expect("Twine recipe"),
+                        recipes
+                            .get_for_owner_by_name(1, "Hide Cap")
+                            .expect("Hide Cap recipe"),
+                    )
+                };
+
+                let mut inventory = Inventory {
+                    owner: 1,
+                    items: Vec::new(),
+                };
+                let mut ids = Ids::default();
+                inventory.new(
+                    ids.new_item_id(),
+                    "Honeybell Cloth".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                inventory.new(
+                    ids.new_item_id(),
+                    "Bristleback Raw Hide".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+
+                inventory
+                    .try_craft(
+                        ids.new_item_id(),
+                        1,
+                        "Twine".to_string(),
+                        &twine_recipe,
+                        None,
+                        None,
+                        100,
+                    )
+                    .expect("Twine craft");
+                inventory
+                    .try_craft(
+                        ids.new_item_id(),
+                        1,
+                        "Hide Cap".to_string(),
+                        &hide_cap_recipe,
+                        None,
+                        None,
+                        100,
+                    )
+                    .expect("Hide Cap craft");
+
+                let hide_cap = inventory
+                    .items
+                    .iter()
+                    .find(|item| item.name == "Hide Cap")
+                    .expect("crafted Hide Cap");
+                assert!(matches!(
+                    hide_cap.attrs.get(&crate::item::AttrKey::Defense),
+                    Some(crate::item::AttrVal::Num(value)) if *value == 1.0
+                ));
+                assert!(!inventory
+                    .items
+                    .iter()
+                    .any(|item| item.name == "Honeybell Cloth" || item.subclass == "Raw Hide"));
             });
     }
 

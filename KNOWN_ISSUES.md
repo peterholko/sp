@@ -12,7 +12,7 @@ Already fixed from that analysis:
   resurrect), nightly-wave pursuit, and needs/crisis pacing — commit
   `Survival fixes: needs warnings, death economy, wave pursuit, pacing`.
 - The three run-poisoning bugs: stale-session login dead-end (`sp_axum` now
-  rotates sessions older than 20h in `/auth` and `/fingerprint-auth`), dirty
+  rotates restored sessions and applies one idle-expiration policy), dirty
   start-location recycling (True Death now removes the player's objects, the
   run's spawns tracked in `RunSpawnedObjs` — setup POIs, nightly waves,
   legendary hideout/boss/followers — plus NPC hostiles within

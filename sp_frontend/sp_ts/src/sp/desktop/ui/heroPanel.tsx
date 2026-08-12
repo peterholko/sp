@@ -7,9 +7,11 @@ import { Global } from "../../core/global";
 import { Network } from "../../core/network";
 import SmallButton from "./smallButton";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 interface HeroPanelProps {
   heroData,
+  activity,
 }
 
 export default class HeroPanel extends React.Component<HeroPanelProps, any> {
@@ -37,16 +39,29 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
   }
 
   render() {
-    let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
-    let imagePath = '/static/art/' + imageName + '_single.png';
+    const heroState = Global.objectStates[Global.heroId];
+    const imagePath = characterImageUrl(
+      this.props.heroData.portrait ?? heroState?.portrait,
+      this.props.heroData.image ?? heroState?.image ?? '',
+    );
 
     const attrsY = getHalfPanelOffsetMarginTop(80);
     const skillsY = getHalfPanelOffsetMarginTop(130);
     const advanceY = getHalfPanelOffsetMarginTop(180);
+    const activity = this.props.activity?.[this.props.heroData.id]
+      ?? this.props.heroData.activity
+      ?? 'None';
 
     const heroStyle = {
       transform: 'translate(-195px, 25px)',
-      position: 'fixed'
+      position: 'fixed',
+      width: '72px',
+      height: '72px',
+      boxSizing: 'border-box',
+      border: '2px solid rgba(201, 170, 113, 0.82)',
+      borderRadius: '5px',
+      objectFit: 'cover',
+      boxShadow: '0 1px 5px rgba(0, 0, 0, 0.7)'
     } as React.CSSProperties
 
 
@@ -180,6 +195,10 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
             <tr>
               <td>State: </td>
               <td>{this.props.heroData.state}</td>
+            </tr>
+            <tr>
+              <td>Activity: </td>
+              <td>{activity}</td>
             </tr>
             <tr>
               <td>Damage: </td>

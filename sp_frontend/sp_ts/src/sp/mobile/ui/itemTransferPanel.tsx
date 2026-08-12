@@ -8,7 +8,10 @@ import { STRUCTURE, FOUNDED, PLANNING_UPGRADE } from "../../core/config";
 import { Util } from "../../core/util";
 import MobilePanelScreen from "./mobilePanelScreen";
 import MobileInventoryGrid from "./mobileInventoryGrid";
-import { canLootAllEnemyCorpse, lootAllItemIds } from "../../core/lootAllPolicy";
+import { canLootAllTarget } from "../../core/lootAllPolicy";
+import DroppedBagExpiry from "../../core/droppedBagExpiry";
+import { NetworkEvent } from "../../core/networkEvent";
+import { resourceImageForName } from "./mobilePanelLayout";
 
 interface ITPProps {
   leftInventoryData,
@@ -30,6 +33,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       selectedItemName: '',
       leftPage: 0,
       rightPage: 0,
+      currentObjectiveId: Global.currentObjectiveId,
     };
 
     this.handleSelect = this.handleSelect.bind(this);
@@ -37,6 +41,19 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     this.handleLootAllClick = this.handleLootAllClick.bind(this);
     this.handleBuildClick = this.handleBuildClick.bind(this);
     this.handleUpgradeClick = this.handleUpgradeClick.bind(this);
+    this.handleObjectiveState = this.handleObjectiveState.bind(this);
+  }
+
+  componentDidMount() {
+    Global.gameEmitter.on(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
+  }
+
+  componentWillUnmount() {
+    Global.gameEmitter.off(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
+  }
+
+  handleObjectiveState(message) {
+    this.setState({ currentObjectiveId: message.current_id || '' });
   }
 
   handleSelect(eventData) {
@@ -90,9 +107,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     const sourceId = this.props.rightInventoryData.id;
     const targetId = this.props.leftInventoryData.id;
 
-    lootAllItemIds(this.props.rightInventoryData.items).forEach(itemId => {
-      Global.network.sendItemTransfer(itemId, sourceId, targetId);
-    });
+    Global.network.sendLootAll(sourceId, targetId);
 
     Global.selectedItemId = -1;
     Global.selectedItemOwnerId = -1;
@@ -105,9 +120,9 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
   }
 
   renderLootAllButton() {
-    const corpseState = Global.objectStates[this.props.rightInventoryData.id];
-    if (!canLootAllEnemyCorpse(
-      corpseState,
+    const targetState = Global.objectStates[this.props.rightInventoryData.id];
+    if (!canLootAllTarget(
+      targetState,
       Global.playerId,
       this.props.rightInventoryData.items,
     )) {
@@ -140,6 +155,20 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     );
   }
 
+  renderBagExpiry() {
+    const expiresIn = this.props.rightInventoryData.expires_in;
+    if (expiresIn == null) return null;
+
+    return (
+      <div style={{ marginTop: '8px' }}>
+        <DroppedBagExpiry
+          key={this.props.rightInventoryData.id}
+          expiresIn={expiresIn}
+        />
+      </div>
+    );
+  }
+
   handleBuildClick() {
     Global.network.sendBuild(Global.heroId, this.props.rightInventoryData.id);
     Global.gameEmitter.emit(GameEvent.START_BUILD_CLICK, {});
@@ -156,9 +185,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       return { name: 'Inventory', imageName: '' };
     }
 
-    const imageName = Util.isSprite(objState.image)
-      ? objState.image + '_single.png'
-      : objState.image + '.png';
+    const imageName = Util.getImagePreviewName(objState.image) || '';
 
     return { name: objState.name, imageName };
   }
@@ -300,7 +327,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
         <div style={titleStyle}>{isPlanningUpgrade ? 'Upgrade Requirements' : 'Build Requirements'}</div>
         <div style={reqGridStyle}>
           {reqs.map((req, index) => {
-            const resourceImage = req.type.toLowerCase().replace(/\s/g, '');
+            const resourceImage = resourceImageForName(req.type);
             return (
               <div key={index} style={reqStyle} title={req.type}>
                 <img src={'/static/art/items/' + resourceImage + '.png'} style={{ width: '48px', height: '48px', objectFit: 'contain', imageRendering: 'pixelated' }} />
@@ -406,6 +433,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
           disabledItems={disabledItems}
           onSelect={this.handleSelect}
           compact={true}
+          currentObjectiveId={side == 'right' ? this.state.currentObjectiveId : ''}
         />
         {afterGrid}
         {this.renderPager(side, pageData.page, pageData.totalPages)}
@@ -475,7 +503,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
             this.state.rightSelectedItemId,
             'right',
             (isFounded || isPlanningUpgrade) ? this.renderRequirements(Boolean(isPlanningUpgrade)) : null,
-            this.renderLootAllButton(),
+            <>{this.renderBagExpiry()}{this.renderLootAllButton()}</>,
           )}
         </div>
       </MobilePanelScreen>

@@ -10,7 +10,9 @@ import FoundedInventoryPanel from "./foundedInventoryPanel";
 import SmallButton from "./smallButton";
 import UpgradeInventoryPanel from "./upgradeInventoryPanel";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
-import { canLootAllEnemyCorpse, lootAllItemIds } from "../../core/lootAllPolicy";
+import { canLootAllTarget } from "../../core/lootAllPolicy";
+import DroppedBagExpiry from "../../core/droppedBagExpiry";
+import { NetworkEvent } from "../../core/networkEvent";
 
 interface ITPProps {
   leftInventoryData,
@@ -29,12 +31,26 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
       hideLeftSelect: true,
       hideRightSelect: true,
       leftSelectedItemId: -1,
-      rightSelectedItemId: -1
+      rightSelectedItemId: -1,
+      currentObjectiveId: Global.currentObjectiveId,
     };
 
     this.handleSelect = this.handleSelect.bind(this);
     this.handleItemTransferClick = this.handleItemTransferClick.bind(this);
     this.handleLootAllClick = this.handleLootAllClick.bind(this);
+    this.handleObjectiveState = this.handleObjectiveState.bind(this);
+  }
+
+  componentDidMount() {
+    Global.gameEmitter.on(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
+  }
+
+  componentWillUnmount() {
+    Global.gameEmitter.off(NetworkEvent.OBJECTIVE_STATE, this.handleObjectiveState, this);
+  }
+
+  handleObjectiveState(message) {
+    this.setState({ currentObjectiveId: message.current_id || '' });
   }
 
   handleSelect(eventData) {
@@ -87,9 +103,7 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     const sourceId = this.props.rightInventoryData.id;
     const targetId = this.props.leftInventoryData.id;
 
-    lootAllItemIds(this.props.rightInventoryData.items).forEach(itemId => {
-      Global.network.sendItemTransfer(itemId, sourceId, targetId);
-    });
+    Global.network.sendLootAll(sourceId, targetId);
 
     Global.selectedItemId = -1;
     Global.selectedItemOwnerId = -1;
@@ -103,9 +117,9 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
   }
 
   renderLootAllButton() {
-    const corpseState = Global.objectStates[this.props.rightInventoryData.id];
-    if (!canLootAllEnemyCorpse(
-      corpseState,
+    const targetState = Global.objectStates[this.props.rightInventoryData.id];
+    if (!canLootAllTarget(
+      targetState,
       Global.playerId,
       this.props.rightInventoryData.items,
     )) {
@@ -140,6 +154,28 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
         <button type="button" style={buttonStyle} onClick={this.handleLootAllClick}>
           Loot All
         </button>
+      </div>
+    );
+  }
+
+  renderBagExpiry() {
+    const expiresIn = this.props.rightInventoryData.expires_in;
+    if (expiresIn == null) return null;
+
+    const wrapStyle: React.CSSProperties = {
+      position: 'absolute',
+      left: 0,
+      top: '260px',
+      width: '323px',
+      zIndex: Global.zIndexManager.getTop() + 2,
+    };
+
+    return (
+      <div style={wrapStyle}>
+        <DroppedBagExpiry
+          key={this.props.rightInventoryData.id}
+          expiresIn={expiresIn}
+        />
       </div>
     );
   }
@@ -222,7 +258,8 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
             showEquipped={true}
             handleSelect={this.handleSelect}
             selectedItemId={this.state.rightSelectedItemId}
-            footer={this.renderLootAllButton()} />}
+            currentObjectiveId={this.state.currentObjectiveId}
+            footer={<>{this.renderBagExpiry()}{this.renderLootAllButton()}</>} />}
 
         {isFounded &&
           <FoundedInventoryPanel id={this.props.rightInventoryData.id}

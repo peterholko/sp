@@ -4,6 +4,17 @@ import selectboxborder from "ui_comp/selectboxborder.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 import { DEAD } from "../../core/config";
+import {
+  SELECTED_PORTRAIT_ACTIVITY_BADGE_BORDER,
+  SELECTED_PORTRAIT_ACTIVITY_BADGE_SIZE,
+  SELECTED_PORTRAIT_ACTIVITY_ICON_SIZE,
+  SelectedPortraitActivityBadge,
+  selectedPortraitActivityBadge,
+} from "./selectedPortraitActivity";
+import {
+  droppedBagTargetImageStyle,
+  isDroppedBagObject,
+} from "../../core/droppedBagPresentation";
 
 interface SelectedKey {
   type: string,
@@ -15,11 +26,12 @@ interface SelectedKey {
 interface SelectBoxProps {
   pos: integer,
   selectedKey: SelectedKey,
-  imageName: string,
+  imageName: string | null,
   style: React.CSSProperties,
   imageStyle?: React.CSSProperties,
   showBorder: boolean,
-  showGravestone: boolean
+  showGravestone: boolean,
+  activity?: string,
 }
 
 interface SpriteFrame {
@@ -117,6 +129,56 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
     };
   }
 
+  getPreviewImageStyle(): React.CSSProperties {
+    const imageStyle = this.props.imageStyle || {
+      ...this.props.style,
+      width: '72px',
+      height: '72px',
+      objectFit: 'contain'
+    };
+
+    const objectState = this.props.selectedKey.id === undefined
+      ? null
+      : Global.objectStates[this.props.selectedKey.id];
+
+    return isDroppedBagObject(objectState)
+      ? droppedBagTargetImageStyle(imageStyle)
+      : imageStyle;
+  }
+
+  getActivityBadge(): SelectedPortraitActivityBadge | null {
+    if (!this.props.showBorder || this.props.selectedKey.id === undefined) {
+      return null;
+    }
+
+    return selectedPortraitActivityBadge(
+      Global.objectStates[this.props.selectedKey.id],
+      this.props.activity,
+    );
+  }
+
+  getActivityBadgeStyle(): React.CSSProperties {
+    const portraitTop = Number.parseFloat(String(this.props.style.top || 0));
+    const portraitRight = Number.parseFloat(String(this.props.style.right || 0));
+
+    return {
+      position: 'fixed',
+      top: (portraitTop + 42) + 'px',
+      right: (portraitRight + 1) + 'px',
+      width: SELECTED_PORTRAIT_ACTIVITY_BADGE_SIZE + 'px',
+      height: SELECTED_PORTRAIT_ACTIVITY_BADGE_SIZE + 'px',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      boxSizing: 'border-box',
+      border: SELECTED_PORTRAIT_ACTIVITY_BADGE_BORDER + 'px solid rgba(229, 201, 125, 0.9)',
+      borderRadius: '4px',
+      background: 'rgba(13, 18, 21, 0.92)',
+      boxShadow: '0 1px 4px rgba(0, 0, 0, 0.82)',
+      zIndex: 8,
+    };
+  }
+
   drawFallbackGravestone(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, requestId: number) {
     const gravestone = new Image();
 
@@ -192,12 +254,13 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
 
   render() {
     const deadFrame = this.getDeadSpriteFrame();
+    const activityBadge = this.getActivityBadge();
 
     return (
       <div onClick={this.handleClick}>
         <img src={selectbox} style={this.props.style} />
-        {!this.props.showGravestone &&
-          <img src={'/static/art/' + this.props.imageName} style={this.props.imageStyle || this.props.style} /> }
+        {!this.props.showGravestone && this.props.imageName &&
+          <img src={'/static/art/' + this.props.imageName} style={this.getPreviewImageStyle()} /> }
         {this.props.showGravestone && deadFrame &&
           <canvas ref={this.canvasRef} style={this.getCanvasStyle(deadFrame)} />}
         {this.props.showGravestone &&
@@ -205,6 +268,25 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
           <img src={'/static/art/gravestone.png'} style={this.props.style} />}
         {this.props.showBorder &&
           <img src={selectboxborder} style={this.props.style} />}
+        {activityBadge &&
+          <span
+            style={this.getActivityBadgeStyle()}
+            title={activityBadge.label}
+            aria-label={activityBadge.label}
+          >
+            <img
+              src={'/static/art/ui/activity/' + activityBadge.icon + '.png'}
+              style={{
+                width: SELECTED_PORTRAIT_ACTIVITY_ICON_SIZE + 'px',
+                height: SELECTED_PORTRAIT_ACTIVITY_ICON_SIZE + 'px',
+                display: 'block',
+                objectFit: 'contain',
+                imageRendering: 'pixelated',
+                pointerEvents: 'none',
+              }}
+              alt=""
+            />
+          </span>}
       </div>
     );
   }

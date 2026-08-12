@@ -1,24 +1,42 @@
 {
     "frames": {
-        "width": 72,
-        "height": 72
+        "width": 144,
+        "height": 144
     },
     "animations": {
         "harvesting": {
-            "frames": [11,1,0,1],
+            "frames": [
+                11,
+                1,
+                0,
+                1
+            ],
             "repeat": -1,
             "speed": 2000
         },
         "crafting": {
-            "frames": [11,1,0,1],
+            "frames": [
+                11,
+                1,
+                0,
+                1
+            ],
             "repeat": -1,
             "speed": 2000
         },
-        "none": [11],
+        "none": [
+            11
+        ],
         "moving": {
-            "frames": [11,1,0,1],
+            "frames": [
+                11,
+                1,
+                0,
+                1
+            ],
             "repeat": -1,
             "speed": 1000
         }
-    }
+    },
+    "map_scale": 1
 }

@@ -4,6 +4,7 @@ import { Global } from "../../core/global";
 import WorkQueueEntry from "./workQueueEntry";
 import { Util } from "../../core/util";
 import { GameEvent } from "../../core/gameEvent";
+import { operateWorkPresentation } from "../../core/workQueuePresentation";
 
 interface WorkQueuePanelProps {
   structureData,
@@ -38,14 +39,14 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
     let structureName;
 
     if (Global.objectStates[this.props.structureData.id]) {
-      if (Util.isSprite(Global.objectStates[this.props.structureData.id].image)) {
-        structureImageName = Global.objectStates[this.props.structureData.id].image + '_single.png';
-      } else {
-        structureImageName = Global.objectStates[this.props.structureData.id].image + '.png';
-      }
+      structureImageName = Util.getImagePreviewName(
+        Global.objectStates[this.props.structureData.id].image
+      );
 
       structureName = Global.objectStates[this.props.structureData.id].name;
     }
+
+    const operatePresentation = operateWorkPresentation(structureName);
 
     for (var i = 0; i < this.props.workQueue.length; i++) {
 
@@ -94,8 +95,8 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
           index={i}
           workType={workType}
           villagerId={this.props.workQueue[i].villager_id}
-          name={'valleyruncopperore'}
-          imageName={'valleyruncopperore.png'}
+          name={operatePresentation.name}
+          imageName={operatePresentation.imageName}
           xPos={xPos}
           yPos={yPos}
           maxProgress={this.props.workQueue[i].work_time}
@@ -133,7 +134,8 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
         <HalfPanel left={true}
           panelType={'workqueue'}
           hideExitButton={false}>
-          <img src={'/static/art/' + structureImageName} style={structureSpriteStyle} />
+          {structureImageName &&
+            <img src={'/static/art/' + structureImageName} style={structureSpriteStyle} />}
           <span style={spanNameStyle}>
             {structureName} Queue
           </span>
@@ -145,7 +147,5 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       );
     }
   }
-
-
 
 

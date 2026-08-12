@@ -80,8 +80,11 @@ fn validate_balance_comparison_config(
     config: &GoblinCrisisBalanceConfigSnapshot,
 ) -> Result<(), String> {
     let (expected_preparing, expected_ready) = match side {
-        BalanceComparisonSide::Control => (70, 90),
-        BalanceComparisonSide::Candidate => (45, 49),
+        BalanceComparisonSide::Control => (70, Some(90)),
+        // Current candidate separates readiness from threat: AssaultReady has
+        // no pressure threshold and follows the fixed online preparation
+        // window instead.
+        BalanceComparisonSide::Candidate => (45, None),
     };
     if config.preparing_threshold == expected_preparing
         && config.assault_ready_threshold == expected_ready
@@ -90,7 +93,7 @@ fn validate_balance_comparison_config(
     }
 
     Err(format!(
-        "refusing to label this binary '{}' because its Preparing/AssaultReady thresholds are {}/{}; expected {}/{}",
+        "refusing to label this binary '{}' because its Preparing/AssaultReady thresholds are {}/{:?}; expected {}/{:?}",
         side.label(),
         config.preparing_threshold,
         config.assault_ready_threshold,
@@ -787,7 +790,7 @@ const BALANCE_CSV_FIELDS: &[&str] = &[
     "crisis_pressure_structures",
     "crisis_pressure_villagers",
     "crisis_pressure_explore_poi",
-    "crisis_pressure_choose_expansion",
+    "crisis_pressure_stockades",
     "crisis_pressure_stored_gold",
     "crisis_pressure_sanctuary",
     "crisis_pressure_online_time",
@@ -982,7 +985,7 @@ fn balance_csv_row(m: &RunMetrics) -> Vec<String> {
         pressure.structures.to_string(),
         pressure.villagers.to_string(),
         pressure.explore_poi.to_string(),
-        pressure.choose_expansion.to_string(),
+        pressure.stockades.to_string(),
         pressure.stored_gold.to_string(),
         pressure.sanctuary.to_string(),
         pressure.online_time.to_string(),
@@ -1264,7 +1267,7 @@ struct PressureContributorSummary {
     structures: NumericSummary,
     villagers: NumericSummary,
     explore_poi: NumericSummary,
-    choose_expansion: NumericSummary,
+    stockades: NumericSummary,
     stored_gold: NumericSummary,
     sanctuary: NumericSummary,
     online_time: NumericSummary,
@@ -1394,7 +1397,7 @@ fn pressure_summary(runs: &[&RunMetrics]) -> PressureContributorSummary {
         structures: contributor(|value| value.structures),
         villagers: contributor(|value| value.villagers),
         explore_poi: contributor(|value| value.explore_poi),
-        choose_expansion: contributor(|value| value.choose_expansion),
+        stockades: contributor(|value| value.stockades),
         stored_gold: contributor(|value| value.stored_gold),
         sanctuary: contributor(|value| value.sanctuary),
         online_time: contributor(|value| value.online_time),
@@ -1853,7 +1856,7 @@ fn build_balance_report(results: &[RunMetrics]) -> GoblinCrisisBalanceReport {
             "The prepared policies can return home, equip an available non-hunting weapon, build existing walls, and upgrade the sanctuary, but the bot has no explicit armor-selection or structure-repair driver.".to_string(),
             "The Safe Logout setup helper repositions the hero and every currently alive, visible-target NPC and rebases headless recent-combat/damage observations beyond the unchanged production cooldown. Later spawns or new damage can still reject or cancel, and their typed telemetry remains in the ordinary run row. Comparison with prepared-solo is therefore a lifecycle probe rather than a perfectly paired balance experiment.".to_string(),
             "Ordinary crisis attackers currently damage owner units and walls; ordinary non-wall structures are not normal attack targets, limiting structure-damage observations.".to_string(),
-            "The run-associated Shipwreck's Health Potion is overridden to Healing 10 even though the item template declares 50; fresh heroes begin with equipped Tattered Shirt and Tattered Pants only, and must recover the potion manually.".to_string(),
+            "The run-associated Shipwreck uses the canonical 50-HP Health Potion; fresh heroes begin with equipped Tattered Shirt and Tattered Pants only, and must recover the potion manually.".to_string(),
             "A passive run has at most 25 pressure from danger unlock and online time, so it can enter Signs but cannot naturally reach Pressure under the current formula.".to_string(),
             "Warning timestamps represent the first successfully sent crisis status packet for the phase, not client rendering acknowledgement.".to_string(),
             "Control and candidate reports must use identical scenario order, repetitions, and tick caps. Production thread_rng still makes them independent repeated samples rather than paired deterministic seeds.".to_string(),
@@ -2051,9 +2054,9 @@ fn render_balance_markdown(report: &GoblinCrisisBalanceReport) -> String {
     output.push_str(&config_json);
     output.push_str("\n```\n\n");
 
-    output.push_str("The snapshot covers the crisis-owned constants. The following architecture-audited runtime values are also part of the current baseline and are intentionally unchanged. The personal wave overrides both attackers' viewsheds to 14.\n\n| Assault unit | Count | HP | Stamina | Damage / span | Defence | Speed | Template vision | Personal-wave vision | Kill XP |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| Wolf Rider | 2 | 75 | 250 | 6 / 5 | 5 | 6 | 4 | 14 | 300 |\n| Goblin Pillager | 1 | 55 | 200 | 5 / 4 | 4 | 5 | 3 | 14 | 250 |\n\nHuman Villagers have 500 HP, 10,000 stamina, zero base damage/span, zero defence, zero speed, vision 2, and base work 25. They count as combat-capable only when current base damage is positive or a weapon is equipped.\n\n| Existing defence | HP | Defence | Current role |\n|---|---:|---:|---|\n| Stockade | 20 | 0 | blocking level-0 wall |\n| Palisade | 200 | 0 | blocking level-1 wall |\n| Fieldstone Walls | 400 | 0 | blocking level-2 wall |\n| Watchtower | 50 | 0 | vision/light support; not a wall |\n\nThe sanctuary maximum is level 5; upgrade costs are 3, 6, 9, 12, and 15 Soulshards; full and weak radii are `3 + level` and `5 + level`; each level contributes 0.25 to the existing defence amplifier. Full audit context, including anchor priority, target eligibility, equipment, and the runtime Health Potion/template discrepancy, is recorded in `docs/goblin_crisis_balance_milestone.md`.\n\n");
+    output.push_str("The snapshot covers the crisis-owned constants. The following architecture-audited runtime values are also part of the current baseline and are intentionally unchanged. The personal wave overrides both attackers' viewsheds to 14.\n\n| Assault unit | Count | HP | Stamina | Damage / span | Defence | Speed | Template vision | Personal-wave vision | Kill XP |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| Wolf Rider | 2 | 75 | 250 | 6 / 5 | 5 | 6 | 4 | 14 | 300 |\n| Goblin Pillager | 1 | 55 | 200 | 5 / 4 | 4 | 5 | 3 | 14 | 250 |\n\nHuman Villagers have 500 HP, 10,000 stamina, zero base damage/span, zero defence, zero speed, vision 2, and base work 25. They count as combat-capable only when current base damage is positive or a weapon is equipped.\n\n| Existing defence | HP | Defence | Current role |\n|---|---:|---:|---:|\n| Stockade | 20 | 0 | blocking level-0 wall |\n| Palisade | 200 | 0 | blocking level-1 wall |\n| Fieldstone Walls | 400 | 0 | blocking level-2 wall |\n| Watchtower | 50 | 0 | vision/light support; not a wall |\n\nThe sanctuary maximum is level 5; upgrade costs are 3, 6, 9, 12, and 15 Soulshards; the single sanctuary radius is `5 + level`; each level contributes 0.25 to the existing defence amplifier. Full audit context, including anchor priority, target eligibility, equipment, and the runtime Health Potion/template discrepancy, is recorded in `docs/goblin_crisis_balance_milestone.md`.\n\n");
 
-    output.push_str("## Hero-class starting baseline\n\nThese are architecture-confirmed values from the current hero templates and revised setup path. Every fresh hero begins with only equipped Tattered Shirt and Tattered Pants. The run-associated Shipwreck holds the shared Sharpened Stick, a Crude Hatchet with the same Damage 1 and Speed 5 plus Logging 1, one custom 10-point Health Potion, the other common supplies, and the class salvage below; the bot recovers them through ordinary investigation and item-transfer events.\n\n| Class | HP | Stamina | Mana | Base damage / span | Defence | Speed | Vision | Hero inventory at spawn | Shipwreck class salvage |\n|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n| Warrior | 110 | 110 | 0 | 2 / 2 | 4 | 5 | 3 | Tattered Shirt and Tattered Pants | Copper Helm (+3 defence), plus the shared stick and hatchet |\n| Ranger | 80 | 120 | 0 | 1 / 3 | 1 | 7 | 5 | Tattered Shirt and Tattered Pants | Training Bow (8 damage, range 2, 85 accuracy), plus the shared stick and hatchet |\n| Mage | 60 | 100 | 100 | 1 / 2 | 0 | 5 | 4 | Tattered Shirt and Tattered Pants | 5 Mana items, plus the shared stick and hatchet |\n\n");
+    output.push_str("## Hero-class starting baseline\n\nThese are architecture-confirmed values from the current hero templates and revised setup path. Every fresh hero begins with an unequipped Sharpened Stick plus equipped Tattered Shirt and Tattered Pants. The run-associated Shipwreck holds a Crude Hatchet with the same Damage 1 and Speed 5 plus Logging 1, one canonical 50-point Health Potion, the other common supplies, and the class salvage below; the bot recovers them through ordinary investigation and item-transfer events.\n\n| Class | HP | Stamina | Mana | Base damage / span | Defence | Speed | Vision | Hero inventory at spawn | Shipwreck class salvage |\n|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n| Warrior | 110 | 110 | 0 | 2 / 2 | 4 | 5 | 3 | Sharpened Stick, Tattered Shirt, and Tattered Pants | Copper Helm (+3 defence), plus the shared hatchet |\n| Ranger | 80 | 120 | 0 | 1 / 3 | 1 | 7 | 5 | Sharpened Stick, Tattered Shirt, and Tattered Pants | Training Bow (8 damage, range 2, 85 accuracy), plus the shared hatchet |\n| Mage | 60 | 100 | 100 | 1 / 2 | 0 | 5 | 4 | Sharpened Stick, Tattered Shirt, and Tattered Pants | 5 Mana items, plus the shared hatchet |\n\n");
 
     output.push_str("## Aggregate results\n\n");
     output.push_str("Natural-progression rows observe the existing starting economy and bot path. `staged_attainable_facts` rows are separate assault probes: their headless-only fixture supplies attainable existing facts and resources, then leaves authoritative pressure, phase gates, launch, spawning, and combat unchanged. Staged rows are not evidence of the natural launch rate or of an organic preparation path.\n\n");
@@ -2971,7 +2974,7 @@ mod tests {
 
         let mut control = candidate;
         control.preparing_threshold = 70;
-        control.assault_ready_threshold = 90;
+        control.assault_ready_threshold = Some(90);
         assert!(
             validate_balance_comparison_config(BalanceComparisonSide::Control, &control).is_ok()
         );

@@ -120,6 +120,24 @@ assert.deepEqual(
 );
 assert.equal(preparedView?.preparationOptions[0].id, 'defences');
 assert.equal(preparedView?.preparationOptions[0].actionHint, 'Repair walls before the raid begins.');
+for (const phase of ['signs', 'pressure', 'preparing', 'assault_ready']) {
+  assert.equal(
+    crisisStatusView(status({
+      phase,
+      preparation_options: [preparationOption()],
+    }))?.preparationOptions.length,
+    1,
+    `${phase} exposes early preparation guidance`,
+  );
+}
+assert.deepEqual(
+  crisisStatusView(status({
+    phase: 'dormant',
+    preparation_options: preparationRows,
+  }))?.preparationOptions,
+  [],
+  'Dormant hides stale preparation guidance',
+);
 
 assert.deepEqual(
   crisisPreparationOptionsView('preparing', [

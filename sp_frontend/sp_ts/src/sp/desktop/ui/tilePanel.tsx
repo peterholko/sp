@@ -117,6 +117,7 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
     //The default Grass was "above" forest, solved it via sort
     var tileId = tiles.sort().reverse()[0];
     var imageName = Global.tileset[tileId].image;
+    const isForestTile = imageName.indexOf('tileset/forest/') !== -1;
 
     var passable = (this.props.tileData.passable ? 'Yes' : 'No');
     var movementCost = String(this.props.tileData.mc * 100);
@@ -141,10 +142,12 @@ export default class TilePanel extends React.Component<TilePanelProps, any> {
     }
 
     //Manual size adjustments
-    if(tileId == 19) {
+    if(isForestTile) {
       tileStyle = {
         transform: 'translate(-205px, 10px)',
         width: '110px',
+        height: '110px',
+        objectFit: 'contain',
         position: 'fixed'
       } as React.CSSProperties
     } else if (tileId == 32) {

@@ -1,4 +1,9 @@
 import * as React from "react";
+import {
+  isCampfireStation,
+  isShelterStructure,
+  isUnlitCampfireStation,
+} from '../../core/structureCapabilities';
 import HalfPanel from "./halfPanel";
 import { Global } from "../../core/global";
 import rightarrow from "ui_comp/rightarrow.png";
@@ -235,10 +240,8 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
 
     const isFarm = this.props.structureData.subclass == 'farm';
     const isResource = this.props.structureData.subclass == 'resource';
-    const isShelter = this.props.structureData.subclass == 'shelter';
-
-    const isTent = this.props.structureData.template == 'Tent';
-    const isCampfire = this.props.structureData.template == 'Campfire';
+    const isShelter = isShelterStructure(this.props.structureData);
+    const isCampfire = isCampfireStation(this.props.structureData);
 
     const showQueueButton = (this.props.structureData.state == NONE &&
       (this.props.structureData.subclass == CRAFT ||
@@ -247,7 +250,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     const showOperateButton = (this.props.structureData.state == NONE && isResource);
 
     const showCraftButton = (this.props.structureData.state == NONE &&
-      this.props.structureData.subclass == CRAFT);
+      (this.props.structureData.subclass == CRAFT || isCampfire));
 
     const showRefineButton = (this.props.structureData.state == NONE &&
       this.props.structureData.subclass == CRAFT);
@@ -274,8 +277,9 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     const showTendButton = (this.props.structureData.state == NONE && isFarm);
     const showHarvestButton = (this.props.structureData.state == NONE && isFarm);
 
-    const showCampfireButton = (this.props.structureData.state == NONE && (isTent || isCampfire));
-    const showSleepButton = (this.props.structureData.state == NONE && isTent);
+    const showCampfireButton = (this.props.structureData.state == NONE &&
+      isUnlitCampfireStation(this.props.structureData));
+    const showSleepButton = (this.props.structureData.state == NONE && isShelter);
 
     const isFinished = this.props.structureData.state == NONE;
 
@@ -694,6 +698,5 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     );
   }
 }
-
 
 

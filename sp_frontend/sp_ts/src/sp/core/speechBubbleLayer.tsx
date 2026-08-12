@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Global } from "./global";
 import { Util } from "./util";
 import { NetworkEvent } from "./networkEvent";
+import { MAP_HEX_HALF } from "./mapGeometry";
 
 // Renders NPC/villager speech as HTML elements in an overlay above the Phaser
 // canvas. Because the bubbles live in the DOM rather than in world space, they
@@ -21,7 +22,6 @@ interface State {
   bubbles: Bubble[];
 }
 
-const SPRITE_HALF = 36; // sprites are 72px with a top-left origin
 const ANCHOR_GAP = 6; // px above the sprite top where the bubble sits
 
 export default class SpeechBubbleLayer extends React.Component<{}, State> {
@@ -144,7 +144,7 @@ export default class SpeechBubbleLayer extends React.Component<{}, State> {
           worldY = p.y;
         }
 
-        const page = Util.worldToPage(scene, worldX + SPRITE_HALF, worldY - ANCHOR_GAP);
+        const page = Util.worldToPage(scene, worldX + MAP_HEX_HALF, worldY - ANCHOR_GAP);
         el.style.display = "";
         el.style.transform = `translate(${page.x}px, ${page.y}px) translate(-50%, -100%)`;
       });

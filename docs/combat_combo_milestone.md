@@ -17,10 +17,10 @@ stamina costs, per-target ownership, or adjacent finisher requirement.
 - Combo histories time out after 150 ticks and recover to their longest live
   suffix after a dead end. Finisher input performs the same timeout check
   directly, so a stale tracker cannot execute during a system-order gap.
-- Strict combo prefixes use the 50/40/30/25-tick basic-attack cooldown ladder.
+- Strict combo prefixes use the 30/25/20/15-tick basic-attack cooldown ladder.
   Exact completed recipes stay live for finisher hints but reset basic attacks
-  to 50 ticks; suffix recovery cannot turn repeated completed inputs into a
-  tempo exploit. With the current four-attack maximum, the 25-tick rung is
+  to 30 ticks; suffix recovery cannot turn repeated completed inputs into a
+  tempo exploit. With the current four-attack maximum, the 15-tick rung is
   reserved for a future five-or-more-attack recipe.
 - Stunned, Fear, Concussed, and Hamstrung use per-target, per-effect
   100%/50%/25%/immune diminishing returns, resetting 150 ticks after the last

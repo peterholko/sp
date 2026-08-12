@@ -30,7 +30,7 @@
   image: broadaxe
   tier: 1
   slot: Main Hand
-  damage: 30
+  damage: 16
   speed: 4.5
   weight: 10
   structure_req:
@@ -51,7 +51,7 @@
   image: heavyaxe
   tier: 1
   slot: Main Hand
-  damage: 35
+  damage: 18
   speed: 4.5
   weight: 10
   structure_req:
@@ -110,22 +110,446 @@
 ##### TOOLS #####
 ##################
 
-- name: Training Pick Axe
-  class: Gathering
-  subclass: Pick Axe
-  image: pickaxe
+- name: Sickle
+  class: Tool
+  subclass: Sickle
+  image: sickle
+  tier: 0
   slot: Main Hand
   weight: 5
-  structure_req: 
+  durability: 60
+  structure_req:
     - Crafting Tent
     - Blacksmith
-  req: 
+    - Workshop
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  attrs:
+    - name: Farming
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+  req:
+    - type: Ingot
+      quantity: 1
+    - type: Log
+      quantity: 1
+
+- name: Copper Sickle
+  class: Tool
+  subclass: Sickle
+  image: coppersickle
+  tier: 1
+  slot: Main Hand
+  weight: 6
+  durability: 90
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  crafting_time: 70
+  stamina_req: 8
+  skill_req: 0
+  attrs:
+    - name: Farming
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Maple Timber
+      quantity: 1
+
+- name: Iron Sickle
+  class: Tool
+  subclass: Sickle
+  image: ironsickle
+  tier: 2
+  slot: Main Hand
+  weight: 7
+  durability: 140
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 90
+  stamina_req: 10
+  skill_req: 30
+  attrs:
+    - name: Farming
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+  req:
+    - type: Iron Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Sickle
+  class: Tool
+  subclass: Sickle
+  image: mithrilsickle
+  tier: 3
+  slot: Main Hand
+  weight: 8
+  durability: 210
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 120
+  stamina_req: 12
+  skill_req: 65
+  attrs:
+    - name: Farming
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+  req:
+    - type: Mithril Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 1
+
+- name: Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  image: fishingrod
+  tier: 0
+  slot: Main Hand
+  weight: 1
+  durability: 40
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  attrs:
+    - name: Fishing
+      value: 1
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+  structure_req:
+    - Crafting Tent
+  req:
+    - type: Stick
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Copper Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  image: copperfishingrod
+  tier: 1
+  slot: Main Hand
+  weight: 2
+  durability: 75
+  structure_req:
+    - Crafting Tent
+    - Workshop
+  crafting_time: 70
+  stamina_req: 8
+  skill_req: 0
+  attrs:
+    - name: Fishing
+      value: 2
+    - name: Damage
+      value: 2
+    - name: Speed
+      value: 9
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Maple Timber
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Iron Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  image: ironfishingrod
+  tier: 2
+  slot: Main Hand
+  weight: 3
+  durability: 120
+  structure_req:
+    - Workshop
+  crafting_time: 90
+  stamina_req: 10
+  skill_req: 30
+  attrs:
+    - name: Fishing
+      value: 3
+    - name: Damage
+      value: 4
+    - name: Speed
+      value: 8
+  req:
+    - type: Iron Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Mithril Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  image: mithrilfishingrod
+  tier: 3
+  slot: Main Hand
+  weight: 4
+  durability: 180
+  structure_req:
+    - Workshop
+  crafting_time: 120
+  stamina_req: 12
+  skill_req: 65
+  attrs:
+    - name: Fishing
+      value: 4
+    - name: Damage
+      value: 6
+    - name: Speed
+      value: 7
+  req:
+    - type: Mithril Ingot
+      quantity: 1
+    - type: Timber
+      quantity: 2
+    - type: Twine
+      quantity: 1
+
+- name: Training Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  image: pickaxe
+  tier: 0
+  slot: Main Hand
+  weight: 5
+  durability: 60
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  attrs:
+    - name: Mining
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+  req:
     - type: Ingot
       quantity: 2
     - type: Log
       quantity: 2
 
+- name: Copper Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  image: copperpickaxe
+  tier: 1
+  slot: Main Hand
+  weight: 7
+  durability: 90
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  crafting_time: 70
+  stamina_req: 8
+  skill_req: 0
+  attrs:
+    - name: Mining
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+  req:
+    - type: Copper Ingot
+      quantity: 2
+    - type: Maple Timber
+      quantity: 1
 
+- name: Iron Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  image: ironpickaxe
+  tier: 2
+  slot: Main Hand
+  weight: 8
+  durability: 140
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 90
+  stamina_req: 10
+  skill_req: 30
+  attrs:
+    - name: Mining
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  image: mithrilpickaxe
+  tier: 3
+  slot: Main Hand
+  weight: 9
+  durability: 210
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 120
+  stamina_req: 12
+  skill_req: 65
+  attrs:
+    - name: Mining
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
+
+- name: Training Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  image: trainingstonecutterhammer
+  tier: 0
+  slot: Main Hand
+  weight: 5
+  durability: 60
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  crafting_time: 50
+  stamina_req: 6
+  skill_req: 0
+  attrs:
+    - name: Stonecutting
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+  req:
+    - type: Ingot
+      quantity: 2
+    - type: Log
+      quantity: 2
+
+- name: Copper Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  image: copperstonecutterhammer
+  tier: 1
+  slot: Main Hand
+  weight: 7
+  durability: 90
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  crafting_time: 70
+  stamina_req: 8
+  skill_req: 0
+  attrs:
+    - name: Stonecutting
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+  req:
+    - type: Copper Ingot
+      quantity: 2
+    - type: Maple Timber
+      quantity: 1
+
+- name: Iron Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  image: ironstonecutterhammer
+  tier: 2
+  slot: Main Hand
+  weight: 8
+  durability: 140
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 90
+  stamina_req: 10
+  skill_req: 30
+  attrs:
+    - name: Stonecutting
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Mithril Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  image: mithrilstonecutterhammer
+  tier: 3
+  slot: Main Hand
+  weight: 9
+  durability: 210
+  structure_req:
+    - Blacksmith
+    - Workshop
+  crafting_time: 120
+  stamina_req: 12
+  skill_req: 65
+  attrs:
+    - name: Stonecutting
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
 
 ##################
 ##### BOWS #####
@@ -135,6 +559,7 @@
   class: Weapon
   subclass: Bow
   image: bow
+  tier: 0
   slot: Main Hand
   weight: 10
   attrs:
@@ -196,7 +621,7 @@
       quantity: 1
 
 ##################
-### HAND CRAFT ###
+### HANDCRAFT ###
 ##################
 
 - name: Sharpened Stick
@@ -232,8 +657,8 @@
   weight: 1
   crafting_time: 25
   req:
-    - type: Cloth
-      quantity: 1
+    - type: Plant Fibers
+      quantity: 2
 
 - name: Hand Campfire
   class: Structure Kit
@@ -269,12 +694,12 @@
       value: 1
     - name: Speed
       value: 10
-    - name: Hunting
-      value: 1
     - name: Attack Range
       value: 2
     - name: Accuracy
       value: 75
+  structure_req:
+    - Crafting Tent
   req:
     - type: Twine
       quantity: 1
@@ -288,6 +713,8 @@
   slot: Main Hand
   weight: 2
   crafting_time: 50
+  structure_req:
+    - Crafting Tent
   req:
     - type: Flint Shard
       quantity: 1
@@ -325,7 +752,7 @@
     - Crafting Tent
   attrs:
     - name: Healing
-      value: 5
+      value: 20
   req:
     - type: Berries
       quantity: 1
@@ -336,6 +763,7 @@
   class: Armor
   subclass: Chest
   image: hidewraps
+  tier: 0
   slot: Chest
   weight: 2
   crafting_time: 75
@@ -495,11 +923,14 @@
   class: Weapon
   subclass: Dagger
   image: bonedagger
+  tier: 0
   slot: Main Hand
   weight: 2
   crafting_time: 40
   stamina_req: 6
   skill_req: 0
+  structure_req:
+    - Crafting Tent
   req:
     - type: bones
       quantity: 1
@@ -507,14 +938,23 @@
       quantity: 1
 
 - name: Flint Hatchet
-  class: Weapon
-  subclass: Axe
+  class: Tool
+  subclass: Hatchet
   image: flinthatchet
+  tier: 0
   slot: Main Hand
   weight: 5
+  durability: 45
   crafting_time: 50
   stamina_req: 6
   skill_req: 0
+  attrs:
+    - name: Damage
+      value: 3
+    - name: Speed
+      value: 6
+    - name: Logging
+      value: 2
   req:
     - type: Flint Shard
       quantity: 1
@@ -523,15 +963,45 @@
     - type: Twine
       quantity: 1
 
+- name: Copper Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  image: copperfellingaxe
+  tier: 1
+  slot: Main Hand
+  weight: 7
+  durability: 75
+  structure_req:
+    - Crafting Tent
+    - Blacksmith
+    - Workshop
+  stamina_req: 8
+  skill_req: 0
+  attrs:
+    - name: Damage
+      value: 6
+    - name: Speed
+      value: 5
+    - name: Logging
+      value: 3
+  req:
+    - type: Copper Ingot
+      quantity: 1
+    - type: Maple Timber
+      quantity: 1
+
 - name: Stone-Tipped Spear
   class: Weapon
   subclass: Spear
   image: sharpenedstick
+  tier: 0
   slot: Main Hand
   weight: 5
   crafting_time: 50
   stamina_req: 6
   skill_req: 0
+  structure_req:
+    - Crafting Tent
   req:
     - type: Stick
       quantity: 1
@@ -544,11 +1014,14 @@
   class: Weapon
   subclass: Hammer
   image: club
+  tier: 0
   slot: Main Hand
   weight: 6
   crafting_time: 50
   stamina_req: 6
   skill_req: 0
+  structure_req:
+    - Crafting Tent
   req:
     - type: bones
       quantity: 1
@@ -561,11 +1034,14 @@
   class: Weapon
   subclass: Throwing
   image: throwingspear
+  tier: 0
   slot: Main Hand
   weight: 3
   crafting_time: 40
   stamina_req: 6
   skill_req: 0
+  structure_req:
+    - Crafting Tent
   req:
     - type: Stick
       quantity: 1
@@ -576,6 +1052,7 @@
   class: Armor
   subclass: Helm
   image: hidecap
+  tier: 0
   slot: Helm
   weight: 1
   crafting_time: 60
@@ -593,6 +1070,7 @@
   class: Armor
   subclass: Pants
   image: hideleggings
+  tier: 0
   slot: Pants
   weight: 2
   crafting_time: 70
@@ -610,6 +1088,7 @@
   class: Armor
   subclass: Boots
   image: hideboots
+  tier: 0
   slot: Boots
   weight: 1
   crafting_time: 60
@@ -627,6 +1106,7 @@
   class: Armor
   subclass: Shoulder
   image: hidemantle
+  tier: 0
   slot: Shoulder
   weight: 1
   crafting_time: 60
@@ -829,6 +1309,32 @@
     - Blacksmith
   stamina_req: 13
   skill_req: 30
+  req:
+    - type: Iron Ingot
+      quantity: 2
+    - type: Timber
+      quantity: 1
+
+- name: Iron Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  image: ironfellingaxe
+  tier: 2
+  slot: Main Hand
+  weight: 8
+  durability: 120
+  structure_req:
+    - Blacksmith
+    - Workshop
+  stamina_req: 10
+  skill_req: 30
+  attrs:
+    - name: Damage
+      value: 10
+    - name: Speed
+      value: 4.5
+    - name: Logging
+      value: 4
   req:
     - type: Iron Ingot
       quantity: 2
@@ -1060,6 +1566,32 @@
     - type: Timber
       quantity: 1
 
+- name: Mithril Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  image: mithrilfellingaxe
+  tier: 3
+  slot: Main Hand
+  weight: 9
+  durability: 180
+  structure_req:
+    - Blacksmith
+    - Workshop
+  stamina_req: 12
+  skill_req: 65
+  attrs:
+    - name: Damage
+      value: 14
+    - name: Speed
+      value: 4
+    - name: Logging
+      value: 4
+  req:
+    - type: Mithril Ingot
+      quantity: 3
+    - type: Timber
+      quantity: 1
+
 - name: Mithril Maul
   class: Weapon
   subclass: Hammer
@@ -1238,6 +1770,7 @@
   class: Weapon
   subclass: Bow
   image: bow
+  tier: 1
   slot: Main Hand
   weight: 8
   structure_req:
@@ -1254,6 +1787,7 @@
   class: Weapon
   subclass: Bow
   image: longbow
+  tier: 2
   slot: Main Hand
   weight: 9
   structure_req:
@@ -1308,6 +1842,7 @@
   class: Weapon
   subclass: Bow
   image: warbow
+  tier: 3
   slot: Main Hand
   weight: 9
   structure_req:
@@ -1330,6 +1865,7 @@
   class: Armor
   subclass: Chest
   image: studdedleathervest
+  tier: 1
   slot: Chest
   weight: 6
   crafting_time: 90
@@ -1349,6 +1885,7 @@
   class: Armor
   subclass: Helm
   image: studdedleathercap
+  tier: 1
   slot: Helm
   weight: 2
   crafting_time: 80
@@ -1366,6 +1903,7 @@
   class: Armor
   subclass: Boots
   image: reinforcedleatherboots
+  tier: 1
   slot: Boots
   weight: 3
   crafting_time: 80

@@ -15,6 +15,7 @@ import {
   SanctuaryZoneBorderPresentation,
   sanctuaryZoneBorderPresentation,
 } from './sanctuaryZoneBorderPresentation';
+import { MAP_HEX_HALF } from '../../core/mapGeometry';
 
 interface SanctuaryWardVisual {
   perimeter: Phaser.GameObjects.Graphics;
@@ -75,6 +76,7 @@ export class DesktopObjectScene extends ObjectScene {
     }
     for (const event of [
       NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
       NetworkEvent.PROTECTED_SETTLEMENTS,
       NetworkEvent.PERCEPTION,
       NetworkEvent.NEW_PERCEPTION,
@@ -111,6 +113,7 @@ export class DesktopObjectScene extends ObjectScene {
     }
     for (const event of [
       NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
       NetworkEvent.PROTECTED_SETTLEMENTS,
       NetworkEvent.PERCEPTION,
       NetworkEvent.NEW_PERCEPTION,
@@ -186,6 +189,7 @@ export class DesktopObjectScene extends ObjectScene {
         objectState,
         Global.sanctuaryZones,
         Global.protectedSettlements,
+        Global.sanctuaryBorderVisible,
       );
       if (!presentation) {
         continue;
@@ -229,7 +233,7 @@ export class DesktopObjectScene extends ObjectScene {
 
     const marker = this.createWardMarker(
       presentation.center.x,
-      presentation.center.y - 42,
+      presentation.center.y - MAP_HEX_HALF - 6,
     );
     marker.setDepth(WARD_MARKER_DEPTH);
 

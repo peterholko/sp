@@ -1020,17 +1020,17 @@ remain outside this checkpoint and are not implied by Checkpoint 4.
   `Monolith` and is keyed by monolith object ID. That sync does not itself
   filter death markers, so safe logout separately verifies live state. Each
   `SanctuaryZone` contains the current position and level and exposes
-  `full_radius()` and `weak_radius()`.
-* `SanctuaryZones::in_full_zone` accepts *any* sanctuary, and `nearest()` may
+  `radius()`.
+* `SanctuaryZones::contains` accepts *any* sanctuary, and `nearest()` may
   select another player's zone. Neither is suitable for safe logout.
 * Checkpoint 1 looks up the exact `BoundMonolith.id`, requires its matching zone,
   resolves that same ID through `EntityObjMap`, verifies a live monolith and
   requires the cached binding position, live position, and zone position to
   agree, requires live `Monolith.sanctuary_level` to match the zone level, then
-  applies the existing strict full-zone boundary:
-  `Map::distance(hero, zone.pos) < zone.full_radius()`.
-* The full sanctuary is selected because it is the existing complete encounter-
-  suppression and defensive zone. The weak outer ring does not qualify.
+  applies the strict sanctuary boundary:
+  `Map::distance(hero, zone.pos) < zone.radius()`.
+* The one sanctuary zone provides complete encounter suppression and the full
+  defensive effect throughout the former weak outer ring.
   Missing binding, missing zone, missing entity, stale ID, dead monolith, or
   inconsistent position fails closed. Another player's sanctuary never serves
   as a fallback.
@@ -1081,8 +1081,9 @@ remain outside this checkpoint and are not implied by Checkpoint 4.
   inert and absent from every perception path until reveal, so they are not an
   immediate threat; once revealed, the next eligibility/countdown pass blocks
   or cancels as normal. This distinction also prevents the deliberately hidden
-  future intro Necromancer, pre-spawned inside every starting sanctuary's
-  eight-tile radius, from making Safe Logout impossible from run creation.
+  future intro Necromancer, pre-spawned outside every starting sanctuary but
+  still hidden until its authored reveal, from making Safe Logout impossible
+  from run creation.
   Missing aggression metadata is treated as threatening rather than safe.
   Because the query runs in
   `PostUpdate`, deferred Update despawns have already been applied; a still-live
@@ -1168,7 +1169,7 @@ semantic change:
 | Socket paths remove `Client` UUIDs but emit no ECS disconnect event. | A dedicated disconnect command cannot be assumed. | Reconcile authoritative `Clients` once per running update. Do not change the protocol. |
 | Hero entities survive socket closure. | ECS hero existence cannot mean `Online`. | Derive connection state only from `Clients::is_player_online`. |
 | One player may briefly have multiple client records. | Removing one connection must not disconnect the player if another is valid. | Treat any valid open record as online; transitions are state-idempotent. |
-| `SanctuaryZones::in_full_zone` accepts any sanctuary. | Standing in another player's sanctuary would qualify. | Resolve only the exact `BoundMonolith.id`; fail closed. |
+| `SanctuaryZones::contains` accepts any sanctuary. | Standing in another player's sanctuary would qualify. | Resolve only the exact `BoundMonolith.id`; fail closed. |
 | The repository has no centralized universal hostility predicate. | A broad `SubclassNPC` query would count merchants, corpses, or passive wildlife. | Use the existing live monster/target/aggression signals and personal-assault ownership rule. |
 | `LastCombatTick` is per entity. | A player can command an owned combatant other than the hero. | Retain `LastCombatTick` and add a minimal successful-command player aggregate. |
 | Damage was written by several combat and world systems. | A single request check could miss a same-update damage source. | Add `LastDamageTick` at actual damage sites and retain HP-delta observation as a fail-safe. |
@@ -1271,7 +1272,7 @@ server evaluation point:
 4. The hero is alive, has positive HP, and has neither `StateDead` nor
    `TrueDeath`.
 5. The player's exact bound monolith and exact live `SanctuaryZones` entry are
-   valid, and the hero is inside that zone's full radius.
+   valid, and the hero is inside that zone's radius.
 6. The personal crisis is not `AssaultActive`.
 7. Neither successful outgoing combat nor incoming damage is within the
    15-second game-tick cooldown.
@@ -1324,7 +1325,7 @@ A pending countdown cancels when:
   request tick;
 * actual incoming damage occurs at or after the request tick;
 * a qualifying hostile enters the safety radius;
-* the hero leaves the exact full sanctuary;
+* the hero leaves the exact sanctuary;
 * the bound monolith, zone, entity mapping, or ownership relationship becomes
   invalid;
 * the personal crisis enters `AssaultActive`;
@@ -1912,7 +1913,7 @@ receives their own entry. Snapshots include the reconnect synchronization
 barrier, are deduplicated per authoritative connection, retry a failed enqueue,
 and send an empty list when protection clears.
 
-The desktop client traces the exact `distance < full_radius` hex perimeter
+The desktop client traces the exact `distance < radius` hex perimeter
 beneath the shroud and places a shield-and-moon status marker above the visible
 monolith. Selecting an owner-attributed asset or the bound monolith keeps
 inspection available while hiding mutating controls and labels the asset as

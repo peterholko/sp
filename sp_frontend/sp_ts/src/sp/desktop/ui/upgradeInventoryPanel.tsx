@@ -102,11 +102,7 @@ export default class UpgradeInventoryPanel extends React.Component<UpgradeInvent
     } as React.CSSProperties
 
 
-    if (Util.isSprite(Global.objectStates[objId].image)) {
-      var imageName = Global.objectStates[objId].image + '_single.png';
-    } else {
-      var imageName = Global.objectStates[objId].image + '.png';
-    }
+    const imageName = Util.getImagePreviewName(Global.objectStates[objId].image);
 
     for (var i = 0; i < this.props.reqs.length; i++) {
       var xPos = 25 + ((i % 5) * 53);
@@ -169,7 +165,7 @@ export default class UpgradeInventoryPanel extends React.Component<UpgradeInvent
       <HalfPanel left={false}
         panelType={this.props.panelType}
         hideExitButton={this.props.hideExitButton}>
-        <img src={'/static/art/' + imageName} style={spriteStyle} />
+        {imageName && <img src={'/static/art/' + imageName} style={spriteStyle} />}
         <span style={reqStyle}>Requirements:</span>
         {reqs}
         <span style={materialStyle}>Materials:</span>
@@ -186,4 +182,3 @@ export default class UpgradeInventoryPanel extends React.Component<UpgradeInvent
     );
   }
 }
-

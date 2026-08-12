@@ -5,6 +5,7 @@ import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface AccountSetupProps {
   errorMessage: string;
+  submitting: boolean;
 }
 
 interface AccountSetupState {
@@ -58,6 +59,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
   }
 
   handleSubmit() {
+    if (this.props.submitting) return;
     const { accountName, email, password, confirmPassword } = this.state;
 
     if (accountName.length < 3 || accountName.length > 20) {
@@ -70,8 +72,8 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       return;
     }
 
-    if (password.length < 6) {
-      this.setState({ validationError: 'Password must be at least 6 characters' });
+    if (password.length < 8) {
+      this.setState({ validationError: 'Password must be at least 8 characters' });
       return;
     }
 
@@ -91,6 +93,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
 
   handleSkip(event?) {
     if (event) event.preventDefault();
+    if (this.props.submitting) return;
     Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SKIP, {});
   }
 
@@ -170,7 +173,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
           <p style={descStyle}>Choose an account name and password to secure your progress.</p>
 
           <div id="login">
-            <form onSubmit={this.handleFormSubmit}>
+            <form onSubmit={this.handleFormSubmit} aria-busy={this.props.submitting}>
               <p><span className="fontawesome-user"></span>
                 <input
                   style={inputStyle}
@@ -180,6 +183,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
                   placeholder="Account Name"
                   autoCapitalize="none"
                   autoCorrect="off"
+                  autoComplete="username"
                 />
               </p>
               <p><span className="fontawesome-envelope"></span>
@@ -188,9 +192,10 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
                   type="email"
                   value={this.state.email}
                   onChange={this.handleEmailChange}
-                  placeholder="Email (optional)"
+                  placeholder="Email for recovery (optional)"
                   autoCapitalize="none"
                   autoCorrect="off"
+                  autoComplete="email"
                 />
               </p>
               <p><span className="fontawesome-lock"></span>
@@ -200,6 +205,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
                   value={this.state.password}
                   onChange={this.handlePasswordChange}
                   placeholder="Password"
+                  autoComplete="new-password"
                 />
               </p>
               <p><span className="fontawesome-lock"></span>
@@ -209,14 +215,15 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
                   value={this.state.confirmPassword}
                   onChange={this.handleConfirmPasswordChange}
                   placeholder="Confirm Password"
+                  autoComplete="new-password"
                 />
               </p>
 
               {errorMessage && <p style={errorStyle}>{errorMessage}</p>}
 
-              <p><input type="submit" className="form-button" value="Secure Account" /></p>
+              <p><input type="submit" className="form-button" value={this.props.submitting ? "Securing..." : "Secure Account"} disabled={this.props.submitting} /></p>
             </form>
-            <p><a href="#" onClick={this.handleSkip}>Skip for now</a></p>
+            <p><button type="button" className="leaderboard-button" onClick={this.handleSkip} disabled={this.props.submitting}>Skip for now</button></p>
           </div>
         </div>
       </div>

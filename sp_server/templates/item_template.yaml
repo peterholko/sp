@@ -292,7 +292,7 @@
   subclass: Maple Log
   image: maplelog
   weight: 10
-  refine_skill: Woodcutting
+  refine_skill: Timberworking
   refine_skill_req: 0
   refine_time: 30
   produces: 
@@ -305,7 +305,7 @@
   subclass: Maple Log
   image: maplelog
   weight: 10
-  refine_skill: Woodcutting
+  refine_skill: Timberworking
   refine_skill_req: 0
   refine_time: 30
   produces: 
@@ -317,7 +317,7 @@
   subclass: Maple Log
   image: maplelog
   weight: 10
-  refine_skill: Woodcutting
+  refine_skill: Timberworking
   refine_skill_req: 0
   refine_time: 30
   produces: 
@@ -329,7 +329,7 @@
   subclass: Birch Log
   image: maplelog
   weight: 10
-  refine_skill: Woodcutting
+  refine_skill: Timberworking
   refine_skill_req: 25
   refine_time: 30
   produces:
@@ -918,7 +918,7 @@
   class: Weapon
   subclass: Axe
   slot: Main Hand
-  image: flinthatchet
+  image: crudehatchet
   weight: 5
   durability: 30
   attrs:
@@ -941,8 +941,6 @@
       value: 1
     - name: Speed
       value: 10
-    - name: Hunting
-      value: 1
     - name: Attack Range
       value: 2
     - name: Accuracy
@@ -960,8 +958,6 @@
       value: 1
     - name: Speed
       value: 10
-    - name: Hunting
-      value: 1
 
 - name: Copper Training Axe
   class: Weapon
@@ -971,12 +967,10 @@
   weight: 10
   durability: 60
   attrs:
-    - name: Logging
-      value: 2
     - name: Damage
-      value: 1
-    - name: Speed
       value: 10
+    - name: Speed
+      value: 5
 
 - name: Copper Heavy Axe
   class: Weapon
@@ -986,10 +980,8 @@
   weight: 10
   durability: 60
   attrs:
-    - name: Logging
-      value: 2
     - name: Damage
-      value: 35
+      value: 18
     - name: Speed
       value: 4.5
 
@@ -1038,16 +1030,14 @@
   class: Weapon
   subclass: Axe
   slot: Main Hand
-  image: heavyaxe
+  image: broadaxe
   weight: 10 
   durability: 60
   attrs:
-    - name: Logging
-      value: 2
     - name: Damage
-      value: 1
+      value: 16
     - name: Speed
-      value: 10
+      value: 4.5
 
 ##################
 ##### ARMOR ######
@@ -1108,7 +1098,7 @@
   weight: 1
   attrs:
     - name: Healing
-      value: 5
+      value: 20
 
 # Healing attr is what the use-item handler applies — without it a potion
 # cures sickness but restores zero hp.
@@ -1399,6 +1389,12 @@
   image: bedroll
   weight: 1
 
+- name: Human Corpse
+  class: Corpse
+  subclass: Human Corpse
+  image: humancorpse
+  weight: 75
+
 ##################
 ###### TOOLS #####
 ##################
@@ -1418,6 +1414,51 @@
     - name: Speed
       value: 10
 
+- name: Copper Sickle
+  class: Tool
+  subclass: Sickle
+  slot: Main Hand
+  image: coppersickle
+  weight: 6
+  durability: 90
+  attrs:
+    - name: Farming
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+
+- name: Iron Sickle
+  class: Tool
+  subclass: Sickle
+  slot: Main Hand
+  image: ironsickle
+  weight: 7
+  durability: 140
+  attrs:
+    - name: Farming
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+
+- name: Mithril Sickle
+  class: Tool
+  subclass: Sickle
+  slot: Main Hand
+  image: mithrilsickle
+  weight: 8
+  durability: 210
+  attrs:
+    - name: Farming
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+
 - name: Training Pick Axe
   class: Tool
   subclass: Pick Axe
@@ -1433,6 +1474,156 @@
     - name: Speed
       value: 10
 
+- name: Copper Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  slot: Main Hand
+  image: copperpickaxe
+  weight: 7
+  durability: 90
+  attrs:
+    - name: Mining
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+
+- name: Iron Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  slot: Main Hand
+  image: ironpickaxe
+  weight: 8
+  durability: 140
+  attrs:
+    - name: Mining
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+
+- name: Mithril Pick Axe
+  class: Tool
+  subclass: Pick Axe
+  slot: Main Hand
+  image: mithrilpickaxe
+  weight: 9
+  durability: 210
+  attrs:
+    - name: Mining
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+
+- name: Training Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  slot: Main Hand
+  image: trainingstonecutterhammer
+  weight: 5
+  durability: 60
+  attrs:
+    - name: Stonecutting
+      value: 2
+    - name: Damage
+      value: 1
+    - name: Speed
+      value: 10
+
+- name: Copper Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  slot: Main Hand
+  image: copperstonecutterhammer
+  weight: 7
+  durability: 90
+  attrs:
+    - name: Stonecutting
+      value: 3
+    - name: Damage
+      value: 5
+    - name: Speed
+      value: 6
+
+- name: Iron Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  slot: Main Hand
+  image: ironstonecutterhammer
+  weight: 8
+  durability: 140
+  attrs:
+    - name: Stonecutting
+      value: 4
+    - name: Damage
+      value: 8
+    - name: Speed
+      value: 5
+
+- name: Mithril Stonecutter Hammer
+  class: Tool
+  subclass: Stonecutter Hammer
+  slot: Main Hand
+  image: mithrilstonecutterhammer
+  weight: 9
+  durability: 210
+  attrs:
+    - name: Stonecutting
+      value: 4
+    - name: Damage
+      value: 12
+    - name: Speed
+      value: 4.5
+
+- name: Copper Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  slot: Main Hand
+  image: copperfellingaxe
+  weight: 7
+  durability: 75
+  attrs:
+    - name: Logging
+      value: 3
+    - name: Damage
+      value: 6
+    - name: Speed
+      value: 5
+
+- name: Iron Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  slot: Main Hand
+  image: ironfellingaxe
+  weight: 8
+  durability: 120
+  attrs:
+    - name: Logging
+      value: 4
+    - name: Damage
+      value: 10
+    - name: Speed
+      value: 4.5
+
+- name: Mithril Felling Axe
+  class: Tool
+  subclass: Felling Axe
+  slot: Main Hand
+  image: mithrilfellingaxe
+  weight: 9
+  durability: 180
+  attrs:
+    - name: Logging
+      value: 4
+    - name: Damage
+      value: 14
+    - name: Speed
+      value: 4
+
 - name: Bucket
   class: Container
   subclass: Bucket
@@ -1440,7 +1631,7 @@
   weight: 5
 
 - name: Fishing Rod
-  class: Fishing Rod
+  class: Tool
   subclass: Fishing Rod
   slot: Main Hand
   image: fishingrod
@@ -1453,6 +1644,51 @@
       value: 1
     - name: Speed
       value: 10
+
+- name: Copper Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  slot: Main Hand
+  image: copperfishingrod
+  weight: 2
+  durability: 75
+  attrs:
+    - name: Fishing
+      value: 2
+    - name: Damage
+      value: 2
+    - name: Speed
+      value: 9
+
+- name: Iron Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  slot: Main Hand
+  image: ironfishingrod
+  weight: 3
+  durability: 120
+  attrs:
+    - name: Fishing
+      value: 3
+    - name: Damage
+      value: 4
+    - name: Speed
+      value: 8
+
+- name: Mithril Fishing Rod
+  class: Tool
+  subclass: Fishing Rod
+  slot: Main Hand
+  image: mithrilfishingrod
+  weight: 4
+  durability: 180
+  attrs:
+    - name: Fishing
+      value: 4
+    - name: Damage
+      value: 6
+    - name: Speed
+      value: 7
 
 ##################
 ### CONTAINERS ###
@@ -1628,25 +1864,23 @@
       value: 6
     - name: Speed
       value: 10
-    - name: Hunting
-      value: 1
     - name: Bleed Chance
       value: 0.05
 
 - name: Flint Hatchet
-  class: Weapon
-  subclass: Axe
+  class: Tool
+  subclass: Hatchet
   slot: Main Hand
   image: flinthatchet
   weight: 5
   durability: 45
   attrs:
     - name: Damage
-      value: 8
+      value: 3
     - name: Speed
       value: 6
     - name: Logging
-      value: 1
+      value: 2
 
 - name: Stone-Tipped Spear
   class: Weapon
@@ -1661,7 +1895,7 @@
     - name: Speed
       value: 5
     - name: Hunting
-      value: 1
+      value: 2
 
 - name: Bone War Club
   class: Weapon
@@ -1690,7 +1924,7 @@
     - name: Speed
       value: 8
     - name: Hunting
-      value: 1
+      value: 2
     - name: Attack Range
       value: 2
     - name: Accuracy
@@ -1760,11 +1994,14 @@
   slot: Main Hand
   image: copperspear
   weight: 8
+  durability: 75
   attrs:
     - name: Damage
       value: 16
     - name: Speed
       value: 5
+    - name: Hunting
+      value: 3
 
 - name: Copper Mace
   class: Weapon
@@ -1874,8 +2111,6 @@
       value: 38
     - name: Speed
       value: 4
-    - name: Logging
-      value: 2
     - name: Deep Wound Chance
       value: 0.08
 
@@ -1913,11 +2148,14 @@
   slot: Main Hand
   image: ironspear
   weight: 9
+  durability: 120
   attrs:
     - name: Damage
       value: 28
     - name: Speed
       value: 5
+    - name: Hunting
+      value: 4
 
 - name: Iron Halberd
   class: Weapon
@@ -2089,11 +2327,14 @@
   slot: Main Hand
   image: mithrilglaive
   weight: 11
+  durability: 180
   attrs:
     - name: Damage
       value: 50
     - name: Speed
       value: 4.5
+    - name: Hunting
+      value: 4
 
 - name: Mithril Helm
   class: Armor
@@ -2187,7 +2428,7 @@
     - name: Damage
       value: 26
     - name: Hunting
-      value: 2
+      value: 4
     - name: Attack Range
       value: 2
     - name: Accuracy
@@ -2231,7 +2472,7 @@
     - name: Damage
       value: 40
     - name: Hunting
-      value: 2
+      value: 4
     - name: Attack Range
       value: 3
     - name: Accuracy

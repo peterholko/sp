@@ -11,7 +11,7 @@ assert.equal(sanctuaryWardSegments(0, 0, 1).length, 6);
 assert.equal(
   sanctuaryWardSegments(0, 0, 3).length,
   30,
-  'base full radius 3 encloses exactly the distance < 3 cells',
+  'radius 3 encloses exactly the distance < 3 cells',
 );
 assert.equal(sanctuaryWardSegments(0, 0, 8).length, 90);
 assert.equal(
@@ -21,7 +21,7 @@ assert.equal(
 );
 
 const settlements: ProtectedSettlementLookup = {
-  '12': { player_id: 12, monolith_id: 200, sanctuary_radius: 3 },
+  '12': { player_id: 12, monolith_id: 200, sanctuary_radius: 5 },
 };
 const visibleMonolith = {
   id: '200',
@@ -35,7 +35,12 @@ const visibleMonolith = {
 const presentation = sanctuaryWardPresentation(visibleMonolith, settlements);
 assert.ok(presentation);
 assert.equal(presentation?.settlement.player_id, 12);
-assert.equal(presentation?.segments.length, 30);
+assert.equal(presentation?.segments.length, 54);
+assert.deepEqual(
+  presentation?.center,
+  { x: 504, y: 936 },
+  'ward marker is centred in the 144px monolith hex',
+);
 
 assert.equal(
   sanctuaryWardPresentation({ ...visibleMonolith, op: 'deleted' }, settlements),

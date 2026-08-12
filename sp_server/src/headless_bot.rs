@@ -25,7 +25,7 @@
 use crate::constants::{ATTACK_COOLDOWN_TICKS, WATERSKIN_EMPTY, WATERSKIN_FILLED};
 use crate::crisis_balance::CrisisBalanceScenario;
 use crate::game::{
-    sanctuary_upgrade_cost, sanctuary_weak_radius, CrisisPhase, SANCTUARY_MAX_LEVEL,
+    sanctuary_radius, sanctuary_upgrade_cost, CrisisPhase, SANCTUARY_MAX_LEVEL, STOCKADE_LOG_COST,
 };
 use crate::headless::{HeroView, ItemView, StructureView, UnitView, WorldView};
 use crate::map::{Map, TileType};
@@ -44,7 +44,7 @@ const DISENGAGE_STAMINA_COST: i32 = 8;
 const ARCANE_BOLT_MANA_COST: i32 = 20;
 const WARD_MANA_COST: i32 = 15;
 const CLASS_ABILITY_RANGE: u32 = 3;
-// Defensive abilities share the production five-second attack cooldown. Two
+// Defensive abilities share the production three-second attack cooldown. Two
 // damaging commands between defensive casts keeps each class attacking instead
 // of falling into a no-damage Disengage/Ward loop.
 const OFFENSIVE_COMMANDS_PER_DEFENSIVE_ABILITY: u8 = 2;
@@ -85,11 +85,11 @@ const TARGET_VILLAGERS: usize = 3; // Prosperity victory wants 3 villagers
 
 // Structure recipes the bot builds (req type -> quantity), matching the
 // obj_template.yaml `req` fields. The revised opening builds a Burrow from five
-// recovered Logs; later emergency Campfires use the recovered Stick+Resin, and
-// Stockade walls use Logs.
-const BURROW_REQS: &[(&str, i32)] = &[("Log", 5)];
+// recovered Logs or Timber; later emergency Campfires use the recovered
+// Stick+Resin, and Stockade walls remain strict Logs.
+const BURROW_REQS: &[(&str, i32)] = &[("Logs or Timber", 5)];
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
-const STOCKADE_REQS: &[(&str, i32)] = &[("Log", 10)];
+const STOCKADE_REQS: &[(&str, i32)] = &[("Log", STOCKADE_LOG_COST)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
 const PLANT_RES: &str = "Plant";
 
@@ -588,11 +588,9 @@ impl Bot {
         //     Meat (Feed 100) is many days of food, so completing the cook outranks
         //     routine chores. Yield only to a close threat.
         if !threat && !pursuing_assault {
-            let has_meat = view
-                .inventory
-                .iter()
-                .any(|i| i.class == "Game Animal" || i.subclass == "Raw Meat")
-                || campfire_meat_pending(view) > 0;
+            let has_meat = view.inventory.iter().any(|i| {
+                i.class == "Game Animal" || i.class == "Carcass" || i.subclass == "Raw Meat"
+            }) || campfire_meat_pending(view) > 0;
             if has_meat {
                 if let Some(action) = self.food_action(&hero, view, map) {
                     return Some(action);
@@ -824,6 +822,24 @@ impl Bot {
         view: &WorldView,
         map: &Map,
     ) -> Option<PlayerEvent> {
+        // Mirror the first tutorial step before investigating the wreck. This
+        // also ensures the opening rat wave cannot catch the bot bare-handed.
+        if !self.shipwreck_search_issued {
+            if let Some(stick_id) = view
+                .inventory
+                .iter()
+                .find(|item| item.name == "Sharpened Stick" && !item.equipped)
+                .map(|item| item.id)
+            {
+                return Some(PlayerEvent::Equip {
+                    player_id: self.player_id,
+                    obj_id: hero.id,
+                    item_id: stick_id,
+                    status: true,
+                });
+            }
+        }
+
         let (shipwreck_id, shipwreck_pos, salvage_item_id) = view
             .pois
             .iter()
@@ -991,7 +1007,7 @@ impl Bot {
 
         // Campfire first (also a survival objective). Skip if one already exists.
         if self.balance_policy.build_campfire
-            && !view.structures.iter().any(|s| s.subclass == "campfire")
+            && !view.structures.iter().any(|s| s.is_campfire_station())
         {
             let site = self.anchor.unwrap_or(hero.pos);
             // Only start if we can actually supply it (recovered Stick+Resin).
@@ -1318,7 +1334,7 @@ impl Bot {
     }
 
     // Empower the nearby Monolith when the hero can afford the next level. Walks
-    // into the sanctuary's outer ring, then issues UpgradeSanctuary.
+    // into the sanctuary, then issues UpgradeSanctuary.
     fn upgrade_sanctuary_action(
         &self,
         hero: &HeroView,
@@ -1332,7 +1348,7 @@ impl Bot {
         if hero_soulshards(&view.inventory) < sanctuary_upgrade_cost(mono.level) {
             return None;
         }
-        if hex_dist(hero.pos, mono.pos) < sanctuary_weak_radius(mono.level) {
+        if hex_dist(hero.pos, mono.pos) < sanctuary_radius(mono.level) {
             return Some(PlayerEvent::UpgradeSanctuary {
                 player_id: self.player_id,
                 monolith_id: mono.id,
@@ -1457,8 +1473,13 @@ impl Bot {
     // (raw meat) or pull from the Burrow / forage. Raw & cooked meat are both
     // `Food`, auto-eaten by the game when the hero is idle and hungry.
     fn food_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
-        // 1. Butcher a carcass (a "Felled X", class "Game Animal") into raw meat.
-        if let Some(carcass) = view.inventory.iter().find(|i| i.class == "Game Animal") {
+        // 1. Butcher either legacy Game Animal items or the current Carcass
+        // resource output into raw meat and Hide.
+        if let Some(carcass) = view
+            .inventory
+            .iter()
+            .find(|i| i.class == "Game Animal" || i.class == "Carcass")
+        {
             return Some(PlayerEvent::Refine {
                 player_id: self.player_id,
                 item_id: carcass.id,
@@ -1536,7 +1557,7 @@ impl Bot {
             + view
                 .inventory
                 .iter()
-                .filter(|i| i.class == "Game Animal")
+                .filter(|i| i.class == "Game Animal" || i.class == "Carcass")
                 .map(|i| i.quantity)
                 .sum::<i32>()
                 * 4 // conservative meat per carcass (boar 6, hare 3)
@@ -1592,7 +1613,7 @@ impl Bot {
         let campfire_fuel = view
             .structures
             .iter()
-            .filter(|s| s.subclass == "campfire" && s.built)
+            .filter(|s| s.is_campfire_station() && s.built)
             .flat_map(|s| &s.inventory)
             .any(|i| i.name == "Firewood" && i.quantity > 0);
         let has_fuel = campfire_fuel
@@ -1622,13 +1643,12 @@ impl Bot {
             return Some(PlayerEvent::Craft {
                 player_id: self.player_id,
                 recipe_name: "Firewood".to_string(),
+                signature_item_id: None,
             });
         }
-        // Fetch an ACTUAL Log (class "Log") from storage. Do not use the generic
-        // req-matching here: matches_req conflates Timber with "Log" (fine for
-        // build reqs), which made this fetch grab the Burrow's Timber stack — the
-        // Firewood recipe can't use Timber, and the conflated "already have a Log"
-        // count then stalled the fuel chain permanently.
+        // Fetch an ACTUAL Log (class "Log") from storage. Keep recipe
+        // ingredients strict: the Firewood recipe cannot use Timber, even though
+        // flexible structure requirements can accept either material.
         let (spos, sid, item_id) = storage_log(view)?;
         if std::env::var("FOOD_DEBUG").is_ok() {
             eprintln!("[fuel] t={} fetching Log from storage", view.game_tick);
@@ -1644,9 +1664,9 @@ impl Bot {
         self.step_adjacent_to(hero.pos, spos, view, map)
     }
 
-    // Hunt a Game Animal: equip the recovered Hunting weapon (Sharpened Stick),
-    // then gather a revealed game tile (prospect to reveal one — game spawns under
-    // grassland/plains hexes near the base). Yields a carcass to butcher in (1).
+    // Hunt a Game Animal: equip the carried Hunting weapon (Sharpened Stick),
+    // then gather a revealed game tile (prospect a forest tile to reveal one).
+    // Yields a carcass to butcher in (1).
     fn hunt_action(&mut self, hero: &HeroView, view: &WorldView, map: &Map) -> Option<PlayerEvent> {
         let equipped_hunting = view.inventory.iter().any(|i| i.equipped && i.is_hunting);
         if !equipped_hunting {
@@ -1696,7 +1716,7 @@ impl Bot {
         let campfire = view
             .structures
             .iter()
-            .find(|s| s.subclass == "campfire" && s.built)?;
+            .find(|s| s.is_campfire_station() && s.built)?;
 
         // Retrieve a finished Cooked Meat from the campfire.
         if let Some(cooked) = campfire
@@ -1724,6 +1744,7 @@ impl Bot {
                 player_id: self.player_id,
                 structure_id: campfire.id,
                 recipe_name: "Cooked Meat".to_string(),
+                signature_item_id: None,
             });
         }
 
@@ -2319,9 +2340,16 @@ fn matches_req_exactly(item: &ItemView, req_type: &str) -> bool {
     req_type == item.name || req_type == item.class || req_type == item.subclass
 }
 
-// Construction permits Timber as a Log substitute, but the opening should
-// consume its five actual Logs first and preserve the single valuable Timber.
+// Flexible construction requirements accept Logs or Timber, but the opening
+// should consume its five actual Logs first and preserve the valuable Timber.
 fn preferred_item_for_req<'a>(items: &'a [ItemView], req_type: &str) -> Option<&'a ItemView> {
+    if req_type == "Logs or Timber" {
+        return items
+            .iter()
+            .find(|item| item.class == "Log")
+            .or_else(|| items.iter().find(|item| item.class == "Timber"));
+    }
+
     items
         .iter()
         .find(|item| matches_req_exactly(item, req_type))
@@ -2449,7 +2477,7 @@ fn stored_good_food(view: &WorldView) -> i32 {
 fn campfire_meat_pending(view: &WorldView) -> i32 {
     view.structures
         .iter()
-        .filter(|s| s.subclass == "campfire" && s.built)
+        .filter(|s| s.is_campfire_station() && s.built)
         .flat_map(|s| &s.inventory)
         .filter(|i| i.subclass == "Raw Meat" || i.subclass == "Cooked Meat")
         .map(|i| i.quantity)
@@ -2534,14 +2562,16 @@ mod tests {
         let mut game = HeadlessGame::new(1_000);
         let player_id = game.spawn_hero("Warrior", "OwnedShipwreckSearchBot");
         let foreign_player_id = game.spawn_connected_scenario_helper("ForeignShipwreckSearchBot");
-        let view = game.observe_for_player(player_id);
+        let mut view = game.observe_for_player(player_id);
         let hero = view.hero.expect("opening hero");
         let shipwreck = view
             .pois
             .iter()
             .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
             .expect("run-associated Shipwreck");
-        assert!(Map::is_adjacent_including_source(hero.pos, shipwreck.pos));
+        let shipwreck_id = shipwreck.id;
+        let shipwreck_pos = shipwreck.pos;
+        assert!(Map::is_adjacent_including_source(hero.pos, shipwreck_pos));
         let foreign_shipwreck = view
             .pois
             .iter()
@@ -2551,12 +2581,32 @@ mod tests {
         assert_ne!(foreign_player_id, player_id);
 
         let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
+        let stick_id = view
+            .inventory
+            .iter()
+            .find(|item| item.name == "Sharpened Stick")
+            .expect("carried starter stick")
+            .id;
+        let equip = bot.step(&view, game.map()).expect("starter equip action");
+        assert!(matches!(
+            &equip,
+            PlayerEvent::Equip {
+                player_id: event_player_id,
+                obj_id,
+                item_id,
+                status: true,
+            } if *event_player_id == player_id && *obj_id == hero.id && *item_id == stick_id
+        ));
+        game.inject(equip);
+        game.tick(3);
+        view = game.observe_for_player(player_id);
+
         assert!(matches!(
             bot.step(&view, game.map()),
             Some(PlayerEvent::InvestigatePOI {
                 player_id: event_player_id,
                 target_id,
-            }) if event_player_id == player_id && target_id == shipwreck.id
+            }) if event_player_id == player_id && target_id == shipwreck_id
         ));
         assert!(bot.shipwreck_search_issued);
     }
@@ -2605,7 +2655,7 @@ mod tests {
         assert!(salvage.iter().any(|item| item.class == "Timber"));
         salvage.sort_by_key(|item| i32::from(item.class != "Timber"));
 
-        let selected = preferred_item_for_req(&salvage, "Log").expect("build material");
+        let selected = preferred_item_for_req(&salvage, "Logs or Timber").expect("build material");
         assert_eq!(selected.class, "Log");
     }
 

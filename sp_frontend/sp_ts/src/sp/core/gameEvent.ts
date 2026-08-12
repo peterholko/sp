@@ -1,5 +1,6 @@
 export namespace GameEvent {
     export const LOADING_FINISHED : string = 'LOADING_FINISHED';
+    export const IMAGE_DEFINITION_READY : string = 'IMAGE_DEFINITION_READY';
     export const TILE_CLICK : string = 'TILE_CLICK';
     export const SELECTBOX_CLICK : string = 'SELECTBOX_CLICK';
     export const SELECT_PANEL_CLICK : string = 'SELECT_PANEL_CLICK';

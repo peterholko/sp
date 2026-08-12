@@ -76,7 +76,7 @@ export default class TileResourceDetailPanel extends React.Component<TileResourc
     }
 
     if (!zeroResources) {
-      imageName = this.state.resource.name.replace(/\s/g, '').toLowerCase();
+      imageName = (this.state.resource.image || this.state.resource.name).replace(/\s/g, '').toLowerCase();
       resourceTitle = this.state.resource.name;
     } else {
       resourceTitle = 'No resources found.'

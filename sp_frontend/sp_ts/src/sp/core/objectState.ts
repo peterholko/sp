@@ -1,3 +1,5 @@
+export type MapObjectPresence = 'perceived' | 'remembered' | 'destroyed';
+
 export interface ObjectState {
     id : string;
     player : string;
@@ -6,6 +8,7 @@ export interface ObjectState {
     subclass : string;
     template : string;
     state : string;
+    activity? : string;
     prevstate : string;
     groups : Array<string>;
     x : integer;
@@ -14,6 +17,7 @@ export interface ObjectState {
     prevY? : integer;
     vision : integer | null;
     image : string;
+    portrait? : string | null;
     hsl? : number[];
     work_done?: number;
     total_work?: number;
@@ -22,6 +26,7 @@ export interface ObjectState {
     action_duration_ms?: number;
     action_elapsed_ms?: number;
     perceptionObserver?: boolean;
+    presence?: MapObjectPresence;
     op? : string;
     updateAttr?: string;
     eventType? : string;

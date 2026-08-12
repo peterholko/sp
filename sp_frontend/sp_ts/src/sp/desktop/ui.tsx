@@ -27,6 +27,12 @@ import { NetworkEvent } from '../core/networkEvent';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
 import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
+  SANCTUARY_EXIT_WARNING,
+  shouldConfirmSanctuaryExit,
+} from '../core/sanctuaryExitWarning';
+import { showSanctuaryBorderForMonolithSelection } from '../core/sanctuaryBorderVisibility';
+import { chooseCombatAutoTarget } from '../core/combatAutoTarget';
+import {
   TRIGGER_INVENTORY,
   QUICK,
   PRECISE,
@@ -205,6 +211,7 @@ export default class UI extends React.Component<any, UIState> {
   private compassRef = React.createRef<HTMLImageElement>();
   private heroDeathOverlayTimer: any = null;
   private nextNotificationId: number = 1;
+  private sanctuaryExitConfirmedHeroId: string | null = null;
   // BB-A: per-attacker expiry timers, keyed by attacker_id. An entry is dropped
   // only when its attacker stops telegraphing (died/fled/disengaged).
   private telegraphTimers: { [id: number]: any } = {};
@@ -382,6 +389,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CANCEL_STRUCTURE_REFINE_CLICK, this.handleCancelStructureRefine, this);
     Global.gameEmitter.on(GameEvent.CANCEL_REFINE_CLICK, this.handleCancelRefineClick, this);
     Global.gameEmitter.on(GameEvent.REFINE_OK_CLICK, this.handleRefineOkClick, this);
+    Global.gameEmitter.on(GameEvent.IMAGE_DEFINITION_READY, this.handleImageDefinitionReady, this);
 
     //Global.gameEmitter.on(NetworkEvent.SERVER_OFFLINE, this.handleServerOffline, this);
     //Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleNetworkError, this);
@@ -456,6 +464,10 @@ export default class UI extends React.Component<any, UIState> {
     }));
   }
 
+  handleImageDefinitionReady() {
+    this.forceUpdate();
+  }
+
   handleMoveClick(event: React.MouseEvent) {
     this.setState({ showMoveCompassClick: true });
     setTimeout(this.hideMoveCompassClick, 100);
@@ -472,35 +484,101 @@ export default class UI extends React.Component<any, UIState> {
     console.log(Global.heroId);
     var heroObj = Global.objectStates[Global.heroId] as ObjectState;
 
-    if (angleDegrees < 30 || angleDegrees >= 330) {
-      console.log('N');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'N');
-      Global.network.sendMove(nextPos.q, nextPos.r);
-    } else if (angleDegrees < 90 && angleDegrees >= 30) {
-      console.log('NW');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'NW');
-      Global.network.sendMove(nextPos.q, nextPos.r);
-    } else if (angleDegrees < 150 && angleDegrees >= 90) {
-      console.log('SW');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'SW');
-      Global.network.sendMove(nextPos.q, nextPos.r);
-    } else if (angleDegrees < 210 && angleDegrees >= 150) {
-      console.log('S');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'S');
-      Global.network.sendMove(nextPos.q, nextPos.r);
-    } else if (angleDegrees < 270 && angleDegrees >= 210) {
-      console.log('SE');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'SE');
-      Global.network.sendMove(nextPos.q, nextPos.r);
-    } else if (angleDegrees < 330 && angleDegrees >= 270) {
-      console.log('NE');
-      var nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, 'NE');
-      Global.network.sendMove(nextPos.q, nextPos.r);
+    if (!heroObj) {
+      return;
     }
+
+    var direction;
+    if (angleDegrees < 30 || angleDegrees >= 330) {
+      direction = 'N';
+    } else if (angleDegrees < 90 && angleDegrees >= 30) {
+      direction = 'NW';
+    } else if (angleDegrees < 150 && angleDegrees >= 90) {
+      direction = 'SW';
+    } else if (angleDegrees < 210 && angleDegrees >= 150) {
+      direction = 'S';
+    } else if (angleDegrees < 270 && angleDegrees >= 210) {
+      direction = 'SE';
+    } else if (angleDegrees < 330 && angleDegrees >= 270) {
+      direction = 'NE';
+    }
+
+    if (!direction) {
+      return;
+    }
+
+    console.log(direction);
+    const nextPos = Util.nextPosByDirection(heroObj.x, heroObj.y, direction);
+    this.requestHeroMove(heroObj, nextPos.q, nextPos.r);
   }
+
+  requestHeroMove(heroObj: ObjectState, q: number, r: number) {
+    const heroId = String(Global.heroId);
+    const alreadyConfirmed = this.sanctuaryExitConfirmedHeroId === heroId;
+    if (shouldConfirmSanctuaryExit(
+      { q: heroObj.x, r: heroObj.y },
+      { q, r },
+      Global.sanctuaryZones,
+      Global.objectStates,
+      alreadyConfirmed,
+    )) {
+      this.setState({
+        hideConfirmPanel: false,
+        confirmMsg: SANCTUARY_EXIT_WARNING,
+        confirmData: {
+          type: 'leave_sanctuary',
+          heroId,
+          fromQ: heroObj.x,
+          fromR: heroObj.y,
+          q,
+          r,
+        },
+      });
+      return;
+    }
+
+    Global.network.sendMove(q, r);
+  }
+
+  handleSanctuaryExitConfirm = () => {
+    const pending = this.state.confirmData;
+    const heroId = String(Global.heroId);
+    const heroObj = Global.objectStates[Global.heroId] as ObjectState;
+
+    this.setState({ hideConfirmPanel: true, confirmData: {} });
+
+    if (!pending
+      || pending.type !== 'leave_sanctuary'
+      || pending.heroId !== heroId
+      || !heroObj
+      || heroObj.x !== pending.fromQ
+      || heroObj.y !== pending.fromR) {
+      return;
+    }
+
+    this.sanctuaryExitConfirmedHeroId = heroId;
+    Global.network.sendMove(pending.q, pending.r);
+  };
+
+  handleSanctuaryExitCancel = () => {
+    this.setState({ hideConfirmPanel: true, confirmData: {} });
+  };
 
   handleLoadingFinished() {
     this.setState({ hideLoadingPanel: true });
+  }
+
+  showSanctuaryBorderForSelection(selectedKey) {
+    showSanctuaryBorderForMonolithSelection(
+      Global,
+      selectedKey,
+      Global.objectStates,
+      Global.sanctuaryZones,
+      (visible) => Global.gameEmitter.emit(
+        NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
+        visible,
+      ),
+    );
   }
 
   handleTileClick(gameObject) {
@@ -532,6 +610,7 @@ export default class UI extends React.Component<any, UIState> {
       }
 
       Global.selectedKey = selectedKey;
+      this.showSanctuaryBorderForSelection(selectedKey);
 
       this.setState({
         selectedTile: gameObject,
@@ -557,6 +636,7 @@ export default class UI extends React.Component<any, UIState> {
     console.log('SelectBoxClick');
 
     Global.selectedKey = eventData.selectedKey;
+    this.showSanctuaryBorderForSelection(eventData.selectedKey);
 
     this.setState({
       hideTargetActionPanel: false,
@@ -832,6 +912,39 @@ export default class UI extends React.Component<any, UIState> {
     Global.network.sendAbility(abilityId, Global.heroId, targetId);
   }
 
+  autoTargetAfterKill(message) {
+    const nextTargetId = chooseCombatAutoTarget(
+      message,
+      Global.heroId,
+      Global.playerId,
+      Global.selectedKey,
+      Global.objectStates,
+    );
+
+    if (nextTargetId === null) {
+      return;
+    }
+
+    const defeatedTarget = Global.objectStates[message.target_id];
+    const objIdsOnTile = Obj.getObjsAt(defeatedTarget.x, defeatedTarget.y);
+    const selectedKey = { type: OBJ, id: nextTargetId };
+    const selectedBoxPos = objIdsOnTile.findIndex((id) => Number(id) === nextTargetId) + 1;
+
+    Global.selectedKey = selectedKey;
+    Global.attacks.length = 0;
+    Global.combatState = null;
+
+    this.setState({
+      objIdsOnTile,
+      hideSelectPanel: false,
+      hideTargetActionPanel: false,
+      hideAttacksPanel: true,
+      selectedBoxPos,
+      selectedKey,
+      combatState: null,
+    });
+  }
+
   handleDamage(message) {
     var hideAttacks = Global.attacks.length == 0;
     this.setState({ hideAttacksPanel: hideAttacks });
@@ -846,6 +959,8 @@ export default class UI extends React.Component<any, UIState> {
       Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
       this.setState({ inCombatZoom: true });
     }
+
+    this.autoTargetAfterKill(message);
   }
 
   handleCombatState(message) {
@@ -1264,6 +1379,29 @@ export default class UI extends React.Component<any, UIState> {
   handleObjUpdate(objId) {
     console.log('Obj Update: ' + objId);
 
+    if (objId == Global.heroId) {
+      const activityData = { ...(this.state.activityData || {}) };
+      activityData[objId] = Global.objectStates[objId].activity;
+
+      if (this.state.hideHeroPanel == false && objId == this.state.heroDetailedData.id) {
+        const newHeroData = { ...this.state.heroDetailedData };
+        newHeroData.state = Global.objectStates[objId].state;
+        newHeroData.activity = Global.objectStates[objId].activity;
+        this.setState({ heroDetailedData: newHeroData, activityData });
+      } else {
+        this.setState({ activityData });
+      }
+    } else if (
+      this.state.selectedKey.type == OBJ
+      && objId == this.state.selectedKey.id
+    ) {
+      // Keep the selected portrait's activity badge synchronized with state
+      // transitions delivered through the general object-update path.
+      const activityData = { ...(this.state.activityData || {}) };
+      activityData[objId] = Global.objectStates[objId].activity;
+      this.setState({ activityData });
+    }
+
     if (this.state.hideStructurePanel == false && objId == this.state.structureData.id) {
       let newStructureData = this.state.structureData;
       newStructureData.state = Global.objectStates[objId].state;
@@ -1296,7 +1434,11 @@ export default class UI extends React.Component<any, UIState> {
       Global.heroClass = message.hero_class || Global.heroClass;
       Global.heroMana = message.mana !== undefined ? message.mana : Global.heroMana;
       Global.heroMaxMana = message.base_mana !== undefined ? message.base_mana : Global.heroMaxMana;
-      this.setState({ hideHeroPanel: false, heroDetailedData: message });
+      const activityData = { ...(this.state.activityData || {}) };
+      if (message.activity != null) {
+        activityData[message.id] = message.activity;
+      }
+      this.setState({ hideHeroPanel: false, heroDetailedData: message, activityData });
     }
   }
 
@@ -1374,11 +1516,21 @@ export default class UI extends React.Component<any, UIState> {
     }
 
     if (message.id == this.state.leftInventoryData.id) {
-      this.setState({ leftInventoryData: message });
+      this.setState({
+        leftInventoryData: {
+          ...message,
+          expires_in: this.state.leftInventoryData.expires_in,
+        },
+      });
     }
 
     if (message.id == this.state.rightInventoryData.id) {
-      this.setState({ rightInventoryData: message });
+      this.setState({
+        rightInventoryData: {
+          ...message,
+          expires_in: this.state.rightInventoryData.expires_in,
+        },
+      });
     }
 
     if (message.id == this.state.structureInventoryData.id) {
@@ -1399,12 +1551,20 @@ export default class UI extends React.Component<any, UIState> {
     console.log('rightInventoryData.id: ' + message.targetitems.id);
 
     if (Global.infoItemTransferAction == 'transfer') {
+      const sourceitems = {
+        ...message.sourceitems,
+        expires_in: message.source_expires_in,
+      };
+      const targetitems = {
+        ...message.targetitems,
+        expires_in: message.target_expires_in,
+      };
       this.setState({
         hideItemTransferPanel: false,
         leftInventoryId: message.source_id,
-        leftInventoryData: message.sourceitems,
+        leftInventoryData: sourceitems,
         rightInventoryId: message.target_id,
-        rightInventoryData: message.targetitems,
+        rightInventoryData: targetitems,
         inventoryReqs: message.reqitems
       });
     }
@@ -1656,15 +1816,27 @@ export default class UI extends React.Component<any, UIState> {
     var rightInventoryData;
 
     if (this.state.leftInventoryId == message.source_id) {
-      leftInventoryData = message.sourceitems;
+      leftInventoryData = {
+        ...message.sourceitems,
+        expires_in: this.state.leftInventoryData.expires_in,
+      };
     } else if (this.state.leftInventoryId == message.target_id) {
-      leftInventoryData = message.targetitems;
+      leftInventoryData = {
+        ...message.targetitems,
+        expires_in: this.state.leftInventoryData.expires_in,
+      };
     }
 
     if (this.state.rightInventoryId == message.source_id) {
-      rightInventoryData = message.sourceitems;
+      rightInventoryData = {
+        ...message.sourceitems,
+        expires_in: this.state.rightInventoryData.expires_in,
+      };
     } else if (this.state.rightInventoryId == message.target_id) {
-      rightInventoryData = message.targetitems;
+      rightInventoryData = {
+        ...message.targetitems,
+        expires_in: this.state.rightInventoryData.expires_in,
+      };
     }
 
     this.setState({
@@ -1927,7 +2099,7 @@ export default class UI extends React.Component<any, UIState> {
         <SmallButtonClassName handler={this.handleHeroCraftClick}
           imageName="craftbutton"
           className={styles.herocraftbutton}
-          title="Craft — craft items from recipes" />
+          title="Handcraft — make basic survival items" />
 
         <SmallButtonClassName handler={this.handleComboClick}
           imageName="combobutton"
@@ -2016,7 +2188,8 @@ export default class UI extends React.Component<any, UIState> {
         {!this.state.hideSelectPanel &&
           <SelectPanel selectedTile={this.state.selectedTile}
             objIdsOnTile={this.state.objIdsOnTile}
-            selectedKey={this.state.selectedKey} />}
+            selectedKey={this.state.selectedKey}
+            activityData={this.state.activityData} />}
 
         {!this.state.hideTargetActionPanel &&
           <TargetActionPanel selectedBoxPos={this.state.selectedBoxPos}
@@ -2069,7 +2242,7 @@ export default class UI extends React.Component<any, UIState> {
             producedItemData={this.state.producedItemData} />}
 
         {!this.state.hideHeroPanel &&
-          <HeroPanel heroData={this.state.heroDetailedData} />}
+          <HeroPanel heroData={this.state.heroDetailedData} activity={this.state.activityData} />}
 
         {!this.state.hideVillagerPanel &&
           <VillagerPanel villagerData={this.state.villagerData} activity={this.state.activityData} needsData={this.state.needsData} />}
@@ -2149,7 +2322,15 @@ export default class UI extends React.Component<any, UIState> {
           <ErrorPanel errmsg={this.state.errmsg} />}
 
         {!this.state.hideConfirmPanel &&
-          <ConfirmPanel msg={this.state.confirmMsg} />}
+          <ConfirmPanel
+            msg={this.state.confirmMsg}
+            onConfirm={this.state.confirmData?.type === 'leave_sanctuary'
+              ? this.handleSanctuaryExitConfirm
+              : undefined}
+            onCancel={this.state.confirmData?.type === 'leave_sanctuary'
+              ? this.handleSanctuaryExitCancel
+              : undefined}
+          />}
 
         <HeroDeathOverlay data={this.state.heroDeathData} />
 

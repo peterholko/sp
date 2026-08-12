@@ -40,7 +40,7 @@
   class: Refining
   xp: [100, 200, 400, 600, 1000, 1600, 2600] 
 
-- name: Woodcutting
+- name: Timberworking
   class: Refining
   xp: [100, 200, 400, 600, 1000, 1600, 2600]  
 
@@ -95,7 +95,6 @@
 - name: Dagger
   class: Combat
   xp: [200, 400, 800, 1200, 2000, 3200, 5200, 200000]
-
 
 
 

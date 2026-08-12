@@ -12,9 +12,10 @@ contract in the sections above them takes precedence.
 
 The opening-session follow-up removes the completed starter Burrow and moves
 all survival supplies into the run's existing Shipwreck. Fresh heroes keep
-their class, statistics, abilities, recipes, and four basic plans, but their
-inventory contains only equipped Tattered Shirt and Tattered Pants. The lit
-starter Campfire remains and contains 20 ordinary Firewood.
+their class, statistics, abilities, recipes, and five basic plans; their
+inventory contains an unequipped Sharpened Stick plus equipped Tattered Shirt
+and Tattered Pants. The lit starter Campfire remains and contains 20 ordinary
+Firewood.
 
 A lit standalone Campfire provides a one-hex visibility bubble centered on the
 Campfire only while a living player hero is standing on it or an adjacent hex.
@@ -46,15 +47,15 @@ identity, idle state, range, fuel, an Ignition Tool, duplicate activation, and
 Safe Logout protection. Mobile has the shared light/perception behavior but no
 new lighting affordance or lit-Campfire overlay in this follow-up.
 
-The owner Shipwreck manifest is exact: Sharpened Stick x1, Crude Hatchet x1,
-Crude Torch x3, Bedroll x1, Waterskin (Filled) x3, Salted Meat Strip x3,
+The owner Shipwreck manifest is exact: Crude Hatchet x1, Crude Torch x3,
+Bedroll x1, Waterskin (Filled) x3, Salted Meat Strip x3,
 Honeybell Berries x3, Health Potion x1, Flint Shard x1, Cragroot Maple Resin
-x1, Cragroot Maple Stick x1, Springbranch Maple Log x5, Cragroot Maple Timber
+x1, Cragroot Maple Stick x1, Honeybell Cloth x5, Springbranch Maple Log x5, Cragroot Maple Timber
 x1, Valleyrun Copper Ingot x3, Gold Coins x10, and Fishing Rod x1. Warrior adds Copper Helm x1,
 Ranger adds Training Bow x1, and Mage adds Mana x5. The previous per-instance
-Copper Helm Defense 3, Training Bow attributes, and starter Health Potion
-Healing 10 are preserved instead of silently replacing them with current
-template defaults. No Yurt Deed or Mine Deed is present in the hero,
+Copper Helm Defense 3 and Training Bow attributes remain instance-specific.
+The starter Health Potion now intentionally uses its canonical template value
+of 50 HP. No Yurt Deed or Mine Deed is present in the hero,
 Shipwreck, or Campfire; the existing later POI rewards remain unchanged.
 The neutral offshore merchant also keeps its established trade stock. Neither
 the merchant nor the later POIs is free player-owned starter storage.
@@ -279,7 +280,7 @@ encounter-history and objective fixes remain current.
   corpses, hidden introductory Necromancer and Mausoleum, offshore merchant,
   and fresh runtime introduction state. At that checkpoint it preallocated two
   opening-enemy IDs. The Shipwreck includes ten existing Logs and ten Hides;
-  the existing Stockade (ten Logs, 30 work) and Crafting Tent (five Logs,
+  the existing Stockade (fifteen Logs, 30 work) and Crafting Tent (five Logs,
   five Hides, 100 work) rules remain the early construction path.
 * The historical `InitialEncounterState` schedule used Cave Bats at 900 and
   1,200 ticks, a survivor call at 1,100 ticks and rescue eligibility at 1,110
@@ -297,10 +298,12 @@ encounter-history and objective fixes remain current.
   owned by the player with zero base damage and a Crude Torch, shares the
   existing Watchtower plan, and schedules the merchant after 1,800 ticks and
   introductory Necromancer after 3,000 ticks.
-* `objectives_system` observes live structures and villagers every 50 ticks and
-  emits the existing `objectives` and `objective_state` packets. The desktop
-  Survival Thread selects the one `active` row while continuing to display the
-  remaining rows.
+* `objectives_system` observes the hero inventory, live structures, villagers,
+  and persistent villager orders every 50 ticks. Completed Prospect, Gather,
+  and Refine events record the post-rescue forest-production history. The
+  system emits the existing `objectives` and `objective_state` packets. The
+  desktop Survival Thread selects the one `active` row while continuing to
+  display the remaining rows.
 * True Death removes only that player's introduction resources, objectives,
   run objects, and start assignment. A successful fresh run
   initializes new state. Ordinary reconnect retains state; Offline Protection
@@ -323,20 +326,24 @@ encounter-history and objective fixes remain current.
 2. **Authoritative early recommendation.** The packet currently recommends
    Campfire before opening combat even though a fresh run already owns a lit
    Campfire, and its static copy cannot describe a waiting encounter. The
-   existing objective facts drive the opening recommendation: inspect the
-   Shipwreck, recover supplies and build the Burrow, temporarily prioritize the
-   opening fight whenever its rats are active, then return to unfinished
+   existing objective facts drive the opening recommendation: equip the carried
+   Sharpened Stick, inspect the Shipwreck, recover supplies and build the Burrow,
+   temporarily prioritize the opening fight whenever its rats are active, then return to unfinished
    construction. Only after both the completed Burrow and defeated wave does
-   guidance advance to meeting the survivor, putting the settler to work,
-   completing a basic settlement, and choosing an expansion. Guidance does not
-   automate combat, construction, rescue, or assignment.
+   guidance advance to meeting the survivor, prospecting a forest, assigning
+   the settler to persistent Logging, and having the hero hunt and butcher a
+   carcass for Hide. The Shelter Tent upgrade follows that material lesson,
+   before completing a basic settlement and choosing an expansion. Guidance
+   does not automate combat, construction, rescue, gathering, or assignment.
 3. **First-villager purpose.** The rescued villager is already player-owned, so
    `recruit_villager` completes as soon as the entity appears and gives no
    actionable work step. The existing objective resource will record a
-   one-time `assign_first_villager` fact only after a real assignment exists.
-   Guidance will point to the existing structure Assign action, describe an
-   unarmed villager as a worker rather than a defender, and never assign or
-   transfer anything automatically.
+   one-time `prospect_forest` fact only after the rescued survivor exists and a
+   forest Prospect completes. The internal `assign_first_villager` fact now
+   requires an actual persistent `Order::Gather { Log }`; a generic structure
+   assignment no longer completes it. Guidance then hands hunting and carcass
+   refining back to the hero and never assigns, gathers, refines, or transfers
+   anything automatically.
 4. **Completed-structure dead end.** `objectives_system` currently counts every
    `ClassStructure`, including Founded/Building/Stalled foundations, toward
    `build_3_structures`. That can remove settlement guidance before three

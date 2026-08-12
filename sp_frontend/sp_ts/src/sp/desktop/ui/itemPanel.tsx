@@ -16,6 +16,7 @@ import { GameEvent } from "../../core/gameEvent";
 import { Global } from "../../core/global";
 import { TRIGGER_PLAYER_SELLING_ITEM, TRIGGER_INVENTORY, TRIGGER_PLAYER_BUYING_ITEM, FALSE, TRIGGER_EQUIP, TRIGGER_REFINING_ITEM, TRIGGER_STRUCTURE_REFINING_ITEM } from "../../core/config";
 import { Network } from "../../core/network";
+import { itemRarity, rarityColor, rarityDisplayName } from "../../core/itemRarity";
 
 interface ItemPanelProps {
   triggerAction,
@@ -115,7 +116,8 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
   }
 
   render() {
-    const itemName = this.props.itemData.name;
+    const itemName = rarityDisplayName(this.props.itemData);
+    const rarity = itemRarity(this.props.itemData);
     const imageName = this.props.itemData.image + '.png'
     const effects = [];
     const produces = [];
@@ -176,6 +178,18 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
       for (var attrKey in this.props.itemData.attrs) {
         var attrValue = this.props.itemData.attrs[attrKey];
 
+        if (attrKey == 'Rarity') {
+          continue;
+        }
+
+        if (attrKey == 'Affixes') {
+          attrs.push(<tr key={attrKey}>
+            <td>Affixes:</td>
+            <td>{String(attrValue)}</td>
+          </tr>);
+          continue;
+        }
+
         if (typeof attrValue === "number") {
           if (attrValue < 0) {
             attrValue = '-' + String(attrValue);
@@ -224,8 +238,12 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
 
 
       for (var i = 0; i < this.props.itemData.produces.length; i++) {
+        const producedItem = this.props.itemData.produces[i];
+        const producedLabel = producedItem.quantity > 1
+          ? producedItem.name + ' x' + producedItem.quantity
+          : producedItem.name;
         produces.push(<tr key={i}>
-          <td>{this.props.itemData.produces[i]}</td>
+          <td>{producedLabel}</td>
         </tr>)
       }
     }
@@ -252,7 +270,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
       transform: 'translate(-323px, 85px)',
       position: 'fixed',
       textAlign: 'center',
-      color: 'white',
+      color: rarityColor(rarity),
       fontFamily: 'Verdana',
       fontSize: '12px',
       width: '323px'
@@ -335,6 +353,10 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
                 <td>{String(this.props.itemData.equipped)}</td>
               </tr>
             }
+            <tr>
+              <td>Rarity: </td>
+              <td style={{ color: rarityColor(rarity) }}>{rarity}</td>
+            </tr>
             <tr>
               <td>Class: </td>
               <td>{this.props.itemData.subclass} ({this.props.itemData.class})</td>
@@ -423,4 +445,3 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     );
   }
 }
-

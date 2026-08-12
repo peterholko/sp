@@ -1,4 +1,5 @@
 import { Global } from './global';
+import { isPresentMapObject } from './mapObjectPresence';
 
 export class Obj {
 
@@ -13,7 +14,7 @@ export class Obj {
         var objectState = {...Global.objectStates[objId]};
 
         if(objectState.x == hexX && objectState.y == hexY &&
-           objectState.op != 'deleted') {
+           isPresentMapObject(objectState)) {
           objsAt.push(objId);
         }
     }

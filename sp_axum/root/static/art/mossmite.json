@@ -1,7 +1,7 @@
 {
     "frames": {
-        "width": 72,
-        "height": 72
+        "width": 144,
+        "height": 144
     },
     "animations": {
         "combat": [
@@ -13,5 +13,6 @@
         "moving": [
             0
         ]
-    }
+    },
+    "map_scale": 1
 }

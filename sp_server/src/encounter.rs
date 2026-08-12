@@ -29,7 +29,8 @@ use crate::npc::{
     VisibleTargetScorer, WolfBlockedHideScorer,
 };
 use crate::obj::{
-    ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, SubclassVillager,
+    ActiveShelter, ActiveTask, BaseAttrs, NewObj, Obj, Order, Personality, Portrait,
+    SubclassVillager, VILLAGER_PORTRAITS,
 };
 use crate::obj::{
     Class, Id, LastCombatTick, Misc, Name, PlayerId, Position, State, StateAboard, Stats, Subclass,
@@ -75,6 +76,11 @@ pub struct EncounterProbability(pub HashMap<i32, Vec<(i32, f32)>>);
 #[derive(Debug, Clone)]
 pub struct Encounter;
 
+/// Marks the pre-spawned introductory Necromancer while only its later
+/// scripted event is allowed to reveal and activate it.
+#[derive(Debug, Clone, Copy, Component)]
+pub struct DormantIntroNecromancer;
+
 #[derive(Debug, Clone)]
 pub struct EncounterMapObj {
     pub player_id: i32,
@@ -86,7 +92,7 @@ pub struct EncounterMapObj {
     pub template: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Loot {
     item_name: String,
     drop_rate: f32,
@@ -212,7 +218,13 @@ impl Encounter {
             last_combat_tick: LastCombatTick::default(),
         };
 
-        Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
+        Encounter::generate_loot(
+            npc_id,
+            &npc_template.template,
+            ids,
+            &mut npc.inventory,
+            templates,
+        );
 
         let chase_and_attack = Steps::build()
             .label("Chase and Attack")
@@ -263,7 +275,30 @@ impl Encounter {
         templates: &Res<Templates>,
     ) -> (Entity, Id, PlayerId, Position) {
         Self::spawn_necromancer_internal(
-            player_id, pos, home_pos, None, commands, ids, entity_map, templates,
+            None, player_id, pos, home_pos, None, commands, ids, entity_map, templates,
+        )
+    }
+
+    pub fn spawn_necromancer_with_id(
+        necromancer_id: i32,
+        player_id: i32,
+        pos: Position,
+        home_pos: Position,
+        commands: &mut Commands,
+        ids: &mut ResMut<Ids>,
+        entity_map: &mut ResMut<EntityObjMap>,
+        templates: &Res<Templates>,
+    ) -> (Entity, Id, PlayerId, Position) {
+        Self::spawn_necromancer_internal(
+            Some(necromancer_id),
+            player_id,
+            pos,
+            home_pos,
+            None,
+            commands,
+            ids,
+            entity_map,
+            templates,
         )
     }
 
@@ -278,6 +313,7 @@ impl Encounter {
         templates: &Res<Templates>,
     ) -> (Entity, Id, PlayerId, Position) {
         Self::spawn_necromancer_internal(
+            None,
             player_id,
             pos,
             home_pos,
@@ -314,7 +350,13 @@ impl Encounter {
         );
 
         let template = templates.obj_templates.get("Necromancer".to_string());
-        Encounter::generate_loot(necro_id, ids, &mut necro_obj.inventory, templates);
+        Encounter::generate_loot(
+            necro_id,
+            &template.template,
+            ids,
+            &mut necro_obj.inventory,
+            templates,
+        );
 
         let necro_entity = commands
             .spawn((
@@ -331,6 +373,7 @@ impl Encounter {
                     event_type: "".to_string(),
                     state: EventExecutingState::None,
                 },
+                DormantIntroNecromancer,
             ))
             .id();
 
@@ -374,29 +417,33 @@ impl Encounter {
                 duration: MAX,
             });
 
-        commands.entity(entity).insert((
-            Home { pos: home_pos },
-            VisibleTarget::new(NO_TARGET),
-            TaskTarget::new(NO_TARGET),
-            EventExecuting {
-                event_type: "".to_string(),
-                state: EventExecutingState::None,
-            },
-            ScriptedCorpseHunt {
-                corpse_anchor,
-                search_radius: 5,
-            },
-            Thinker::build()
-                .label("Necromancer")
-                .picker(Highest)
-                .when(ScriptedCorpseHuntScorer, scripted_raise_dead)
-                .when(VisibleTargetScorer, cast_spell_target)
-                .when(VisibleCorpseScorer, raise_dead)
-                .when(FleeScorer, flee_and_hide),
-        ));
+        commands
+            .entity(entity)
+            .remove::<DormantIntroNecromancer>()
+            .insert((
+                Home { pos: home_pos },
+                VisibleTarget::new(NO_TARGET),
+                TaskTarget::new(NO_TARGET),
+                EventExecuting {
+                    event_type: "".to_string(),
+                    state: EventExecutingState::None,
+                },
+                ScriptedCorpseHunt {
+                    corpse_anchor,
+                    search_radius: 5,
+                },
+                Thinker::build()
+                    .label("Necromancer")
+                    .picker(Highest)
+                    .when(ScriptedCorpseHuntScorer, scripted_raise_dead)
+                    .when(VisibleTargetScorer, cast_spell_target)
+                    .when(VisibleCorpseScorer, raise_dead)
+                    .when(FleeScorer, flee_and_hide),
+            ));
     }
 
     fn spawn_necromancer_internal(
+        forced_necromancer_id: Option<i32>,
         player_id: i32,
         pos: Position,
         home_pos: Position,
@@ -406,7 +453,7 @@ impl Encounter {
         entity_map: &mut ResMut<EntityObjMap>,
         templates: &Res<Templates>,
     ) -> (Entity, Id, PlayerId, Position) {
-        let necro_id = ids.new_obj_id();
+        let necro_id = forced_necromancer_id.unwrap_or_else(|| ids.new_obj_id());
 
         let mut necro_obj = Obj::create_nospawn(
             necro_id,
@@ -424,7 +471,13 @@ impl Encounter {
 
         let template = templates.obj_templates.get("Necromancer".to_string());
 
-        Encounter::generate_loot(necro_id, ids, &mut necro_obj.inventory, templates);
+        Encounter::generate_loot(
+            necro_id,
+            &template.template,
+            ids,
+            &mut necro_obj.inventory,
+            templates,
+        );
 
         let cast_spell_target = Steps::build()
             .label("Cast Spell Target")
@@ -626,6 +679,10 @@ impl Encounter {
         let villager_entity = commands
             .spawn((
                 villager,
+                Portrait(
+                    VILLAGER_PORTRAITS[rand::thread_rng().gen_range(0..VILLAGER_PORTRAITS.len())]
+                        .to_string(),
+                ),
                 Viewshed {
                     range: Obj::set_viewshed_range(
                         villager_id,
@@ -1045,7 +1102,13 @@ impl Encounter {
             last_combat_tick: LastCombatTick::default(),
         };
 
-        Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
+        Encounter::generate_loot(
+            npc_id,
+            &npc_template.template,
+            ids,
+            &mut npc.inventory,
+            templates,
+        );
 
         let spoil_target = Steps::build()
             .label("Spoil Target")
@@ -1142,7 +1205,13 @@ impl Encounter {
             last_combat_tick: LastCombatTick::default(),
         };
 
-        Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
+        Encounter::generate_loot(
+            npc_id,
+            &npc_template.template,
+            ids,
+            &mut npc.inventory,
+            templates,
+        );
 
         let steal_target = Steps::build()
             .label("Steal Target")
@@ -1233,7 +1302,13 @@ impl Encounter {
             last_combat_tick: LastCombatTick::default(),
         };
 
-        Encounter::generate_loot(npc_id, ids, &mut npc.inventory, templates);
+        Encounter::generate_loot(
+            npc_id,
+            &npc_template.template,
+            ids,
+            &mut npc.inventory,
+            templates,
+        );
 
         let torch_target = Steps::build()
             .label("Torch Target")
@@ -1274,25 +1349,40 @@ impl Encounter {
 
     pub fn generate_loot(
         npc_id: i32,
+        npc_template_name: &str,
         ids: &mut ResMut<Ids>,
         inventory: &mut Inventory,
         templates: &Res<Templates>,
     ) {
         let mut rng = rand::thread_rng();
-
-        let loot_list = Self::loot_list();
+        let npc_template = templates.obj_templates.get(npc_template_name.to_string());
+        let loot_list = Self::loot_list(&npc_template);
+        let danger_score = npc_template.kill_xp.unwrap_or(0);
 
         for loot in loot_list.iter() {
             let random_num = rng.gen::<f32>();
 
             if loot.drop_rate > random_num {
                 let item_quantity = rng.gen_range(loot.min..loot.max);
+                let attrs = if npc_template.template == "Giant Rat" {
+                    // Opening rats share this template with ambient rats. Keep
+                    // all rat loot Common so the tutorial cannot accidentally
+                    // introduce signature-component decisions.
+                    HashMap::new()
+                } else {
+                    item::Item::find_template(loot.item_name.clone(), &templates.item_templates)
+                        .map(|item_template| {
+                            item::roll_loot_component_attrs(item_template, danger_score, &mut rng)
+                        })
+                        .unwrap_or_default()
+                };
 
-                inventory.create(
+                inventory.new_with_attrs(
                     ids.new_item_id(),
                     npc_id,
                     loot.item_name.clone(),
                     item_quantity,
+                    attrs,
                     &templates.item_templates,
                 );
             }
@@ -1302,8 +1392,12 @@ impl Encounter {
     pub fn npc_list(tile_type: TileType) -> Vec<&'static str> {
         match tile_type {
             TileType::DeciduousForest => {
-                return vec![
+                vec![
+                    "Giant Rat",
+                    "Cave Bat",
+                    "Thorn Beetle",
                     "Spider",
+                    "Wild Boar",
                     "Wose",
                     "Skeleton",
                     "Windstride Stag",
@@ -1317,8 +1411,14 @@ impl Encounter {
             | TileType::Jungle
             | TileType::PineForest
             | TileType::PalmForest => {
-                return vec![
+                vec![
+                    "Giant Rat",
+                    "Cave Bat",
+                    "Thorn Beetle",
+                    "Ash Viper",
+                    "Moss Mite",
                     "Spider",
+                    "Wild Boar",
                     "Wose",
                     "Windstride Stag",
                     "Swiftstep Hare",
@@ -1333,7 +1433,11 @@ impl Encounter {
             | TileType::Plains
             | TileType::HillsPlains
             | TileType::Savanna => {
-                return vec![
+                vec![
+                    "Giant Rat",
+                    "Ash Viper",
+                    "Moss Mite",
+                    "Wild Boar",
                     "Wolf",
                     "Swiftstep Hare",
                     "Windstride Stag",
@@ -1342,10 +1446,13 @@ impl Encounter {
                     "Terror Bird",
                 ]
             }
-            TileType::Snow => return vec!["Wolf", "Yeti", "Frostmane Elk", "Saberfang Cat"],
-            TileType::HillsSnow => return vec!["Wolf", "Yeti", "Frostmane Elk", "Saberfang Cat"],
+            TileType::Snow | TileType::HillsSnow => {
+                vec!["Cave Bat", "Wolf", "Frostmane Elk", "Saberfang Cat", "Yeti"]
+            }
             TileType::FrozenForest => {
-                return vec![
+                vec![
+                    "Cave Bat",
+                    "Moss Mite",
                     "Wose",
                     "Yeti",
                     "Spider",
@@ -1355,81 +1462,109 @@ impl Encounter {
                     "Saberfang Cat",
                 ]
             }
-            TileType::Mountain => {
-                return vec![
-                    "Wolf",
-                    "Mountain Lion",
-                    "Black Bear",
-                    "Cave Bear",
-                    "Saberfang Cat",
-                ]
+            TileType::Mountain => vec![
+                "Cave Bat",
+                "Wolf",
+                "Mountain Lion",
+                "Black Bear",
+                "Cave Bear",
+                "Saberfang Cat",
+            ],
+            TileType::Desert | TileType::HillsDesert => {
+                vec!["Ash Viper", "Scorpion", "Giant Rat", "Skeleton"]
             }
-            TileType::Desert => return vec!["Scorpion", "Giant Rat", "Skeleton"],
-            TileType::HillsDesert => return vec!["Scorpion", "Giant Rat", "Skeleton"],
-            //_ => return vec!["Giant Rat", "Wolf", "Skeleton"],
-            _ => return vec!["Wolf"],
+            TileType::Swamp => vec![
+                "Moss Mite",
+                "Mudcrawler",
+                "Ash Viper",
+                "Giant Rat",
+                "Spider",
+            ],
+            TileType::Oasis => vec!["Giant Rat", "Ash Viper", "Scorpion", "Swiftstep Hare"],
+            TileType::Ocean | TileType::River => vec!["Reef Skitter", "Giant Crab"],
+            TileType::Volcano => vec!["Ash Viper", "Scorpion", "Skeleton"],
+            TileType::Unknown => vec!["Giant Rat", "Cave Bat", "Wolf"],
         }
     }
 
-    fn loot_list() -> Vec<Loot> {
-        let copper_dust = Loot {
-            item_name: "Valleyrun Copper Dust".to_string(),
-            drop_rate: 0.2,
-            min: 1,
-            max: 5,
+    fn loot(item_name: &str, drop_rate: f32, min: i32, max: i32) -> Loot {
+        Loot {
+            item_name: item_name.to_string(),
+            drop_rate,
+            min,
+            max,
+        }
+    }
+
+    fn animal_loot_list(template_name: &str) -> Vec<Loot> {
+        let carcass = match template_name {
+            "Wild Boar" => Some("Felled Bristleback Boar"),
+            "Swiftstep Hare" => Some("Felled Swiftstep Hare"),
+            "Windstride Stag" => Some("Windstride Deer Carcass"),
+            "Frostmane Elk" => Some("Felled Frostmane Elk"),
+            _ => None,
+        };
+        if let Some(carcass) = carcass {
+            return vec![Self::loot(carcass, 1.0, 1, 2)];
+        }
+
+        match template_name {
+            "Giant Rat" | "Cave Bat" | "Bog Leech" | "Moss Mite" | "Spider" => vec![
+                Self::loot("Honeybell Berries", 0.40, 1, 4),
+                Self::loot("Amitanian Grape", 0.15, 1, 3),
+                Self::loot("Gold Coins", 0.10, 1, 4),
+                Self::loot("bones", 0.20, 1, 2),
+            ],
+            "Wose" => vec![
+                Self::loot("Firewood", 0.90, 2, 6),
+                Self::loot("Cragroot Maple Stick", 0.50, 1, 3),
+            ],
+            "Giant Crab" | "Reef Skitter" => vec![
+                Self::loot("Gold Coins", 0.15, 1, 4),
+                Self::loot("Amitanian Grape", 0.10, 1, 3),
+            ],
+            _ => vec![
+                Self::loot("bones", 0.55, 1, 3),
+                Self::loot("Honeybell Berries", 0.10, 1, 3),
+            ],
+        }
+    }
+
+    fn loot_list(template: &ObjTemplate) -> Vec<Loot> {
+        let mut loot = match template.family.as_deref() {
+            Some("Animal") => Self::animal_loot_list(&template.template),
+            Some("Undead") => vec![
+                Self::loot("Mana", 0.65, 1, 4),
+                Self::loot("Valleyrun Copper Dust", 0.35, 1, 5),
+                Self::loot("Gold Coins", 0.45, 1, 7),
+                Self::loot("Crude Bandage", 0.08, 1, 2),
+                Self::loot("Copper Training Axe", 0.02, 1, 2),
+            ],
+            Some("Goblin") => vec![
+                Self::loot("Gold Coins", 0.90, 3, 13),
+                Self::loot("Crude Bandage", 0.30, 1, 3),
+                Self::loot("Resin Torch", 0.25, 1, 2),
+                Self::loot("Firewood", 0.25, 1, 4),
+                Self::loot("Copper Training Axe", 0.06, 1, 2),
+            ],
+            Some("Creature") => vec![
+                Self::loot("bones", 0.65, 1, 4),
+                Self::loot("Frostmane Raw Hide", 0.30, 1, 3),
+                Self::loot("Mana", 0.20, 1, 3),
+            ],
+            _ => vec![
+                Self::loot("Gold Coins", 0.25, 1, 5),
+                Self::loot("Crude Bandage", 0.10, 1, 2),
+            ],
         };
 
-        let grape = Loot {
-            item_name: "Amitanian Grape".to_string(),
-            drop_rate: 0.5,
-            min: 1,
-            max: 3,
-        };
+        // Hostile encounters remain the source of Sanctuary-upgrade currency,
+        // while passive wildlife now yields only its physical carcass/materials.
+        if template.aggression.as_deref() != Some("passive") {
+            loot.push(Self::loot("Soulshard", 0.90, 1, 2));
+        }
 
-        let training_axe = Loot {
-            item_name: "Copper Training Axe".to_string(),
-            drop_rate: 0.02,
-            min: 1,
-            max: 2,
-        };
-
-        let berries = Loot {
-            item_name: "Honeybell Berries".to_string(),
-            drop_rate: 0.99,
-            min: 5,
-            max: 10,
-        };
-
-        let mana = Loot {
-            item_name: "Mana".to_string(),
-            drop_rate: 0.75,
-            min: 1,
-            max: 3,
-        };
-
-        let coins = Loot {
-            item_name: "Gold Coins".to_string(),
-            drop_rate: 0.99,
-            min: 1,
-            max: 10,
-        };
-
-        let soulshard = Loot {
-            item_name: "Soulshard".to_string(),
-            drop_rate: 0.99,
-            min: 1,
-            max: 2,
-        };
-
-        return vec![
-            copper_dust,
-            grape,
-            training_axe,
-            berries,
-            mana,
-            coins,
-            soulshard,
-        ];
+        loot
     }
 
     fn find_valid_pos(
@@ -1494,6 +1629,23 @@ impl Encounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::templates::ItemTemplate;
+    use std::collections::HashSet;
+    use std::fs::File;
+
+    fn load_obj_templates() -> Vec<ObjTemplate> {
+        serde_yaml::from_reader(
+            File::open("templates/obj_template.yaml").expect("object template catalog"),
+        )
+        .expect("valid object template catalog")
+    }
+
+    fn loot_names(template: &ObjTemplate) -> HashSet<String> {
+        Encounter::loot_list(template)
+            .into_iter()
+            .map(|loot| loot.item_name)
+            .collect()
+    }
 
     #[test]
     fn villager_work_behavior_fetches_a_tool_before_returning_to_the_job_site() {
@@ -1542,5 +1694,67 @@ mod tests {
 
         assert_eq!(thirst.num_to_string(), THIRSTY);
         assert_eq!(hunger.num_to_string(), HUNGRY);
+    }
+
+    #[test]
+    fn creature_families_have_distinct_contextual_loot() {
+        let templates = load_obj_templates();
+        let find = |name: &str| {
+            templates
+                .iter()
+                .find(|template| template.template == name)
+                .expect("creature template")
+        };
+
+        let rat = loot_names(find("Giant Rat"));
+        assert!(rat.contains("Honeybell Berries"));
+        assert!(rat.contains("Soulshard"));
+        assert!(!rat.contains("Mana"));
+
+        let stag = loot_names(find("Windstride Stag"));
+        assert_eq!(stag, HashSet::from(["Windstride Deer Carcass".to_string()]));
+
+        let skeleton = loot_names(find("Skeleton"));
+        assert!(skeleton.contains("Mana"));
+        assert!(skeleton.contains("Valleyrun Copper Dust"));
+        assert!(skeleton.contains("Soulshard"));
+        assert!(!skeleton.contains("Honeybell Berries"));
+
+        let goblin = loot_names(find("Goblin Pillager"));
+        assert!(goblin.contains("Gold Coins"));
+        assert!(goblin.contains("Resin Torch"));
+        assert!(goblin.contains("Copper Training Axe"));
+        assert!(goblin.contains("Soulshard"));
+        assert!(!goblin.contains("Mana"));
+    }
+
+    #[test]
+    fn contextual_loot_tables_only_reference_valid_items_and_ranges() {
+        let obj_templates = load_obj_templates();
+        let item_templates: Vec<ItemTemplate> = serde_yaml::from_reader(
+            File::open("templates/item_template.yaml").expect("item template catalog"),
+        )
+        .expect("valid item template catalog");
+        let item_names = item_templates
+            .iter()
+            .map(|item| item.name.clone())
+            .collect::<HashSet<_>>();
+
+        for template in obj_templates
+            .iter()
+            .filter(|template| template.class == "unit" && template.subclass == "npc")
+        {
+            for loot in Encounter::loot_list(template) {
+                assert!(
+                    item_names.contains(&loot.item_name),
+                    "{} references missing loot item {}",
+                    template.template,
+                    loot.item_name
+                );
+                assert!((0.0..=1.0).contains(&loot.drop_rate));
+                assert!(loot.min >= 1);
+                assert!(loot.min < loot.max);
+            }
+        }
     }
 }

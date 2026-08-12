@@ -41,6 +41,21 @@ the run-owned Shipwreck and removed the completed starter Burrow. Historical
 balance rows and fixture descriptions below retain the loadout they measured;
 the current runtime loadout is described in the revised “heroes” section.
 
+Recovery-economy note: a later focused balance change removed that Shipwreck
+potion override, so new runs now receive the canonical 50-HP Health Potion.
+Crude Bandages cost 2 renewable Plant Fibers and take 2 interruptible seconds
+to apply, Herbal Poultices heal 20 HP, and fully tired sleep can restore up to
+35% of maximum HP. Recovery guidance now measures effective carried healing
+against a 40%-of-max-HP target. Historical Checkpoint 1–4 results below retain
+the recovery values they actually measured.
+
+Post-baseline tuning note: the current authoritative pressure model now awards
+the 20-point settlement-growth contribution at five completed owned structures
+instead of three. The former 15-point `choose_expansion`/Lumber Camp contribution
+has been replaced by a world fact requiring at least one completed owned
+Stockade. Historical Checkpoint 1–4 tables and reports below retain the pressure
+model they measured.
+
 ## Milestone goal and checkpoint plan
 
 The milestone will turn measurements of the current crisis into a deliberate
@@ -163,7 +178,7 @@ The settlement anchor priority remains:
 4. the live hero position only when the run has a real `SpawnPositions` entry.
 
 With a bound sanctuary, spawn candidates use offsets one through three outside
-that sanctuary's weak radius. The weak radius is `5 + sanctuary level`, so the
+that sanctuary's single radius. The radius is `5 + sanctuary level`, so the
 effective candidate radii are `6 + level` through `8 + level`. Other anchors
 use radii six through eight. Candidate selection is bounded to 96 shuffled
 positions and rejects out-of-map, impassable, occupied, duplicate, unpathable,
@@ -232,12 +247,12 @@ New runs use the following novice hero templates:
 
 | Class | HP | Stamina | Mana | Base damage | Damage span | Defence | Speed | Vision | Combat equipment recovered from the run-owned Shipwreck |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| Warrior | 110 | 110 | 0 | 2 | 2 | 4 | 5 | 3 | Sharpened Stick; Copper Helm with defence 3 |
-| Ranger | 80 | 120 | 0 | 1 | 3 | 1 | 7 | 5 | Sharpened Stick; Training Bow with damage 8, attack range 2, accuracy 85, hunting 2 |
-| Mage | 60 | 100 | 100 | 1 | 2 | 0 | 5 | 4 | Sharpened Stick and 5 Mana |
+| Warrior | 110 | 110 | 0 | 2 | 2 | 4 | 5 | 3 | Copper Helm with defence 3 |
+| Ranger | 80 | 120 | 0 | 1 | 3 | 1 | 7 | 5 | Training Bow with damage 8, attack range 2, accuracy 85, hunting 2 |
+| Mage | 60 | 100 | 100 | 1 | 2 | 0 | 5 | 4 | 5 Mana |
 
-All three start with only equipped Tattered Shirt and Tattered Pants. The
-Crude Torch, class equipment, Mana, and one runtime-created Health Potion with
+All three start with an unequipped Sharpened Stick plus equipped Tattered Shirt
+and Tattered Pants. The Crude Torch, class equipment, Mana, and one runtime-created Health Potion with
 healing 10 are recovered manually from the Shipwreck. That potion value
 intentionally differs from the generic item-template healing value of 50. The
 older balance artifacts retain their then-current “starting item” terminology.
@@ -256,7 +271,7 @@ attacker.
 | Watchtower | 50 | 0 | Vision 5 / light support; not a wall |
 
 The sanctuary maximum remains level five. Upgrade costs are 3, 6, 9, 12, and
-15 Soulshards (45 total). Full and weak radii are `3 + level` and `5 + level`.
+15 Soulshards (45 total). The single sanctuary radius is `5 + level`.
 Each level contributes 0.25 to the existing sanctuary defence amplifier. These
 rules are observed, not changed or exposed as a runtime balance interface.
 

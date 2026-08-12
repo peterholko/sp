@@ -20,6 +20,10 @@ export function isLandscapeMobile() {
 }
 
 export function resourceImageForName(name: string) {
+  if (name === 'Logs or Timber') {
+    return 'timber';
+  }
+
   return name.toLowerCase().replace(/\s/g, '');
 }
 

@@ -17,6 +17,7 @@ pub const STORAGE: &str = "storage";
 pub const MINE: &str = "Mine";
 pub const LUMBERCAMP: &str = "Lumbercamp";
 pub const QUARRY: &str = "Quarry";
+pub const TRAPPER: &str = "Trapper";
 
 pub const WALL: &str = "Wall";
 
@@ -49,6 +50,12 @@ impl Plans {
         };
 
         self.push(plan);
+    }
+
+    pub fn contains(&self, player_id: i32, structure: &str) -> bool {
+        let structure = canonical_obj_template_name(structure);
+        self.iter()
+            .any(|plan| plan.player_id == player_id && plan.structure == structure)
     }
 }
 
@@ -114,8 +121,8 @@ impl Structure {
         structure_items: Vec<Item>,
         mut req_items: Vec<ResReq>,
     ) -> Vec<ResReq> {
-        // Check current required quantity from structure items.
-        // Build context: refined materials (Timber) may substitute for raw (Log).
+        // Check current required quantity from structure items. Build context
+        // understands explicit flexible requirements such as Logs or Timber.
         for req_item in req_items.iter_mut() {
             let mut req_quantity = req_item.quantity;
 
@@ -226,6 +233,7 @@ impl Structure {
             MINE => ORE.to_string(),
             LUMBERCAMP => LOG.to_string(),
             QUARRY => STONE.to_string(),
+            TRAPPER => GAME_ANIMAL.to_string(),
             _ => "unknown".to_string(),
         };
 
@@ -276,6 +284,8 @@ mod tests {
 
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].structure, "Shelter Tent");
+        assert!(plans.contains(7, "Small Tent"));
+        assert!(plans.contains(7, "Shelter Tent"));
     }
 }
 

@@ -9,6 +9,7 @@ import { Global } from "../../core/global";
 import { NetworkEvent } from "../../core/networkEvent";
 import { getNeedStatusIcon, NeedKind } from "./needStatus";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 interface VillagerPanelProps {
   villagerData,
@@ -56,8 +57,10 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     const attrsY = getHalfPanelOffsetMarginTop(80);
     const skillsY = getHalfPanelOffsetMarginTop(130);
 
-    var imageName = this.props.villagerData.image;
-    imageName = imageName.replace(/ /g, '') + '_single.png';
+    const imagePath = characterImageUrl(
+      this.props.villagerData.portrait,
+      this.props.villagerData.image,
+    );
 
     
     var effects = this.props.villagerData.effects.join();
@@ -84,7 +87,14 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
 
     const heroStyle = {
       transform: 'translate(-197px, 25px)',
-      position: 'fixed'
+      position: 'fixed',
+      width: '72px',
+      height: '72px',
+      boxSizing: 'border-box',
+      border: '2px solid rgba(201, 170, 113, 0.82)',
+      borderRadius: '5px',
+      objectFit: 'cover',
+      boxShadow: '0 1px 5px rgba(0, 0, 0, 0.7)'
     } as React.CSSProperties
 
     const spanNameStyle = {
@@ -136,7 +146,7 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
       <HalfPanel left={true} 
                  panelType={'villager'} 
                  hideExitButton={false}>
-        <img src={'/static/art/' + imageName} style={heroStyle} />
+        <img src={imagePath} style={heroStyle} />
         <span style={spanNameStyle}>{this.props.villagerData.name} (Villager)</span>
         <table style={tableStyle}>
           <tbody>

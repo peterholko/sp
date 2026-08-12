@@ -521,13 +521,13 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   legacyObjectives(): ObjectiveProgress[] {
     return [
       {
-        id: 'build_campfire',
-        title: 'Use the campfire',
+        id: 'upgrade_campfire_to_shelter_tent',
+        title: 'Upgrade the Campfire to a Shelter Tent',
         state: this.state.build_campfire ? 'complete' : 'active',
         category: 'Settlement',
-        action_hint: 'Use the lit campfire beside your start.',
-        lesson: 'Fire makes night danger easier to read.',
-        reward: 'Warmth and vision.',
+        action_hint: 'Select the Campfire, choose Upgrade, and complete its Shelter Tent upgrade.',
+        lesson: 'A Shelter Tent turns the starting fire into a protected place for a resident.',
+        reward: 'Shelter for one resident with a built-in campfire.',
       },
       {
         id: 'explore_poi',
@@ -752,7 +752,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
         {crisis.preparationLabel &&
           <div style={statusRowStyle}>
-            <span>Minimum warning</span>
+            <span>{crisis.phase === 'preparing' ? 'Preparation window' : 'Minimum warning'}</span>
             <span>{crisis.preparationLabel}</span>
           </div>}
 

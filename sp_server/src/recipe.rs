@@ -3,7 +3,10 @@ use bevy::prelude::*;
 use crate::item::{Inventory, Item};
 use crate::skill::{SkillData, Skills};
 use crate::skill_defs::Skill;
-use crate::templates::{ItemAttr, ItemTemplate, RecipeTemplate, ResReq, Templates};
+use crate::templates::{
+    structure_supports_recipe_requirement, ItemAttr, ItemTemplate, RecipeTemplate, ResReq,
+    Templates,
+};
 use crate::{item, network};
 
 /// Pick the first known recipe whose station and ingredient requirements are
@@ -21,7 +24,9 @@ pub fn pick_available_recipe_at(
 ) -> Option<Recipe> {
     for recipe in recipes.get_by_owner(owner) {
         if recipe.supports_structure(structure_name)
-            && inventory.find_by_reqs(recipe.req.clone()).is_some()
+            && inventory
+                .find_by_craft_reqs(recipe.req.clone(), None)
+                .is_some()
             && recipe.skill_requirement_met(skills, templates)
         {
             return Some(recipe);
@@ -60,9 +65,11 @@ impl Recipe {
     }
 
     pub fn supports_structure(&self, structure: &str) -> bool {
-        self.structure_req
-            .as_ref()
-            .is_some_and(|requirements| requirements.iter().any(|name| name == structure))
+        self.structure_req.as_ref().is_some_and(|requirements| {
+            requirements
+                .iter()
+                .any(|requirement| structure_supports_recipe_requirement(structure, requirement))
+        })
     }
 
     pub fn crafting_skill(&self) -> Option<Skill> {
@@ -272,8 +279,8 @@ impl Recipes {
                 structure.clone()
             );
 
-            if let Some(recipe_structure_req) = &recipe.structure_req {
-                if recipe.owner == owner && recipe_structure_req.contains(&structure) {
+            if recipe.structure_req.is_some() {
+                if recipe.owner == owner && recipe.supports_structure(&structure) {
                     let recipe_packet = network::Recipe {
                         name: recipe.name.clone(),
                         image: recipe.image.clone(),
@@ -369,6 +376,27 @@ mod tests {
         assert!(
             test_recipe("Cooked Meat", Some(vec!["Crafting Tent".to_string()]))
                 .requires_structure()
+        );
+    }
+
+    #[test]
+    fn shelter_tent_inherits_every_campfire_recipe() {
+        let cooked_meat = test_recipe(
+            "Cooked Meat",
+            Some(vec!["Campfire".to_string(), "Crafting Tent".to_string()]),
+        );
+        assert!(cooked_meat.supports_structure("Campfire"));
+        assert!(cooked_meat.supports_structure("Shelter Tent"));
+        assert!(!cooked_meat.supports_structure("Burrow"));
+
+        let recipes = Recipes::from_recipes(vec![cooked_meat]);
+        assert_eq!(
+            recipes
+                .get_by_structure_packet(1, "Shelter Tent".to_string())
+                .into_iter()
+                .map(|recipe| recipe.name)
+                .collect::<Vec<_>>(),
+            vec!["Cooked Meat"]
         );
     }
 

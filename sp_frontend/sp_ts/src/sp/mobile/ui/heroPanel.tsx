@@ -4,9 +4,11 @@ import skillsbutton from "ui_comp/skillsbutton.png";
 import upgradebutton from "ui_comp/upgradebutton.png";
 import { Global } from "../../core/global";
 import MobilePanelScreen from "./mobilePanelScreen";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 interface HeroPanelProps {
   heroData,
+  activity,
 }
 
 export default class HeroPanel extends React.Component<HeroPanelProps, any> {
@@ -48,8 +50,14 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
   }
 
   render() {
-    const imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
-    const imagePath = '/static/art/' + imageName + '_single.png';
+    const heroState = Global.objectStates[Global.heroId];
+    const imagePath = characterImageUrl(
+      this.props.heroData.portrait ?? heroState?.portrait,
+      this.props.heroData.image ?? heroState?.image ?? '',
+    );
+    const activity = this.props.activity?.[this.props.heroData.id]
+      ?? this.props.heroData.activity
+      ?? 'None';
     const formatEffectValue = (effectValue) => {
       if (typeof effectValue === "number") {
         return effectValue > 0 ? '+' + String(effectValue) : String(effectValue);
@@ -106,8 +114,11 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
     const heroStyle: React.CSSProperties = {
       width: '58px',
       height: '58px',
-      objectFit: 'contain',
-      imageRendering: 'pixelated',
+      boxSizing: 'border-box',
+      border: '2px solid rgba(201, 170, 113, 0.82)',
+      objectFit: 'cover',
+      borderRadius: '5px',
+      boxShadow: '0 1px 5px rgba(0, 0, 0, 0.7)',
     };
 
     const nameStyle: React.CSSProperties = {
@@ -157,6 +168,7 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
             <tr><td>Hunger:</td><td>{this.props.heroData.hunger}</td></tr>
             <tr><td>Fatigue:</td><td>{this.props.heroData.tiredness}</td></tr>
             <tr><td>State:</td><td>{this.props.heroData.state}</td></tr>
+            <tr><td>Activity:</td><td>{activity}</td></tr>
             <tr><td>Damage:</td><td>{this.props.heroData.total_dmg}</td></tr>
             <tr><td>Defense:</td><td>{this.props.heroData.total_def}</td></tr>
             <tr><td>Vision:</td><td>{this.props.heroData.vision}</td></tr>

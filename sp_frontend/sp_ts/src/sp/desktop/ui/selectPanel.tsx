@@ -15,7 +15,8 @@ const MAX_SELECT_BOXES = (window.innerWidth < LARGE_SCREEN_WIDTH ? 3 : 6);
 interface SelectPanelProps {
   selectedTile: Tile,
   objIdsOnTile: any,
-  selectedKey: any
+  selectedKey: any,
+  activityData?: Record<string, string>,
 }
 
 export default class SelectPanel extends React.Component<SelectPanelProps, any> {
@@ -168,12 +169,8 @@ export default class SelectPanel extends React.Component<SelectPanelProps, any> 
       console.log(Global.objectStates[objId]);
 
       if (objId in Global.objectStates) {
-
-        if (Util.isSprite(Global.objectStates[objId].image)) {
-          var imageName = Global.objectStates[objId].image + '_single.png';
-        } else {
-          var imageName = Global.objectStates[objId].image + '.png';
-        }
+        const objectState = Global.objectStates[objId];
+        const imageName = Util.getImagePreviewName(objectState.image);
 
         var rightPos = i % MAX_SELECT_BOXES;
 
@@ -203,6 +200,7 @@ export default class SelectPanel extends React.Component<SelectPanelProps, any> 
           style={style}
           showBorder={showBorder}
           showGravestone={isDead}
+          activity={this.props.activityData?.[objId]}
           />);
 
         selectBoxPos++;
@@ -240,4 +238,3 @@ export default class SelectPanel extends React.Component<SelectPanelProps, any> 
     );
   }
 }
-

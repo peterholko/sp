@@ -4,6 +4,10 @@ import selectboxborder from "ui_comp/selectboxborder.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 import { DEAD } from "../../core/config";
+import {
+  droppedBagTargetImageStyle,
+  isDroppedBagObject,
+} from "../../core/droppedBagPresentation";
 
 interface SelectedKey {
   type: string,
@@ -15,7 +19,7 @@ interface SelectedKey {
 interface SelectBoxProps {
   pos: integer,
   selectedKey: SelectedKey,
-  imageName: string,
+  imageName: string | null,
   style: React.CSSProperties,
   imageStyle?: React.CSSProperties,
   showBorder: boolean,
@@ -117,6 +121,23 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
     };
   }
 
+  getPreviewImageStyle(): React.CSSProperties {
+    const imageStyle = this.props.imageStyle || {
+      ...this.props.style,
+      width: '72px',
+      height: '72px',
+      objectFit: 'contain'
+    };
+
+    const objectState = this.props.selectedKey.id === undefined
+      ? null
+      : Global.objectStates[this.props.selectedKey.id];
+
+    return isDroppedBagObject(objectState)
+      ? droppedBagTargetImageStyle(imageStyle)
+      : imageStyle;
+  }
+
   drawFallbackGravestone(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, requestId: number) {
     const gravestone = new Image();
 
@@ -196,8 +217,8 @@ export default class SelectBox extends React.Component<SelectBoxProps, any> {
     return (
       <div onClick={this.handleClick}>
         <img src={selectbox} style={this.props.style} />
-        {!this.props.showGravestone &&
-          <img src={'/static/art/' + this.props.imageName} style={this.props.imageStyle || this.props.style} /> }
+        {!this.props.showGravestone && this.props.imageName &&
+          <img src={'/static/art/' + this.props.imageName} style={this.getPreviewImageStyle()} /> }
         {this.props.showGravestone && deadFrame &&
           <canvas ref={this.canvasRef} style={this.getCanvasStyle(deadFrame)} />}
         {this.props.showGravestone &&
