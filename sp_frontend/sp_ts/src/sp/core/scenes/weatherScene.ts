@@ -3,11 +3,6 @@ import { NetworkEvent } from "../networkEvent";
 import { GameEvent } from "../gameEvent";
 import { Util } from "../util";
 import { desktopCameraZoom } from "../config";
-import {
-    LEGACY_MAP_TEXTURE_SCALE,
-    MAP_HEX_HALF,
-    MAP_HEX_SIZE,
-} from "../mapGeometry";
 
 export class WeatherScene extends Phaser.Scene {
 
@@ -96,7 +91,7 @@ export class WeatherScene extends Phaser.Scene {
             rain.setMask(mask);  */       
 
             var snow = this.add.particles(pixel.x, pixel.y, 'snow', {
-                x: { min: 0, max: MAP_HEX_SIZE },
+                x: { min: 0, max: 72 },
                 y: 0,
                 lifespan: { min: 500, max: 1500 },
                 speedY: 50,
@@ -106,14 +101,7 @@ export class WeatherScene extends Phaser.Scene {
 
             snow.setDepth(50);
 
-            const maskImage = this.make.image({
-                x: pixel.x + MAP_HEX_HALF,
-                y: pixel.y + MAP_HEX_HALF,
-                key: 'alphamask',
-                add: false,
-            });
-            maskImage.setScale(LEGACY_MAP_TEXTURE_SCALE);
-            const mask1 = maskImage.createBitmapMask();
+            const mask1 = this.add.bitmapMask(null, pixel.x + 36, pixel.y + 36, 'alphamask');
             snow.setMask(mask1);   
 
         }

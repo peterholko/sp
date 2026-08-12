@@ -19,8 +19,8 @@ use crate::crisis_balance::{
 };
 use crate::encounter::Encounter;
 use crate::event::{
-    EventCompleted, GameEvent, GameEventType, GameEvents, LoginConnectionId, MapEvents, Spell,
-    VisibleEvent, VisibleEvents,
+    EventCompleted, GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent,
+    VisibleEvents,
 };
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
@@ -1801,7 +1801,7 @@ fn new_player_system(
                             player_id: *player_id,
                             connection_id: clients
                                 .current_connection_id(*player_id)
-                                .map(LoginConnectionId::from)
+                                .map(|connection_id| connection_id.as_u128())
                                 .unwrap_or_default(),
                         };
                         let event_id = ids.new_map_event_id();
@@ -1903,7 +1903,7 @@ fn login_system(
 
                 let event_type = GameEventType::Login {
                     player_id: *player_id,
-                    connection_id: LoginConnectionId::from(*connection_id),
+                    connection_id: connection_id.as_u128(),
                 };
                 let event_id = ids.new_map_event_id();
 
@@ -15119,8 +15119,7 @@ mod tests {
             GameEventType::Login {
                 player_id: event_player,
                 connection_id: event_connection,
-            } if *event_player == player_id
-                && *event_connection == LoginConnectionId::from(connection_id)
+            } if *event_player == player_id && *event_connection == connection_id.as_u128()
         )));
 
         app.world_mut().resource_mut::<PlayerEvents>().insert(
@@ -15191,8 +15190,7 @@ mod tests {
             GameEventType::Login {
                 player_id: event_player,
                 connection_id: event_connection,
-            } if *event_player == player_id
-                && *event_connection == LoginConnectionId::from(connection_id)
+            } if *event_player == player_id && *event_connection == connection_id.as_u128()
         )));
     }
 

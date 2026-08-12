@@ -15668,7 +15668,7 @@ fn game_event_system(
                     connection_id,
                 } => {
                     debug!("Processing Login: {:?}", player_id);
-                    let connection_id = Uuid::from(*connection_id);
+                    let connection_id = Uuid::from_u128(*connection_id);
                     if !clients.is_current_connection(*player_id, connection_id) {
                         events_to_remove.push(*event_id);
                         extras
@@ -24282,16 +24282,7 @@ fn snapshot_system(world: &mut World) {
 
         // Scenes can be serialized like this:
         //let type_registry = type_registry.read();
-        let serialized_scene = match scene.serialize(&registry) {
-            Ok(serialized_scene) => serialized_scene,
-            Err(error) => {
-                error!(
-                    "snapshot_serialization_failed game_tick={} error={}",
-                    game_tick.0, error
-                );
-                return;
-            }
-        };
+        let serialized_scene = scene.serialize(&registry).unwrap();
 
         // Showing the scene in the console
         trace!("Scene length: {}", serialized_scene.len());

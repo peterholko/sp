@@ -1,5 +1,3 @@
-import { MAP_HEX_HALF } from './mapGeometry';
-
 export type FireAnimationKind = 'burning-object' | 'lit-campfire';
 
 export const FIRE_ANIMATION_FRAME_COUNT = 15;
@@ -22,8 +20,8 @@ export interface FireAnimationPresentation {
 
 const BURNING_OBJECT_PRESENTATION: FireAnimationPresentation = {
   kind: 'burning-object',
-  offsetX: MAP_HEX_HALF,
-  offsetY: MAP_HEX_HALF,
+  offsetX: 36,
+  offsetY: 36,
   depth: 10,
   scale: 1,
   alpha: 1,
@@ -32,8 +30,8 @@ const BURNING_OBJECT_PRESENTATION: FireAnimationPresentation = {
 
 const LIT_CAMPFIRE_PRESENTATION: FireAnimationPresentation = {
   kind: 'lit-campfire',
-  offsetX: MAP_HEX_HALF,
-  offsetY: 58,
+  offsetX: 36,
+  offsetY: 29,
   // Structures render at depth 1 and units at depth 3 or higher. Keep the
   // flame above the campfire stones without drawing it over a hero on the tile.
   depth: 2.5,

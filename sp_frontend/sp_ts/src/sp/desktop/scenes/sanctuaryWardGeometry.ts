@@ -8,12 +8,6 @@ import {
   protectedSettlementForObject,
 } from '../../core/protectedSettlements';
 import { Util } from '../../core/util';
-import {
-  MAP_HEX_HALF,
-  MAP_HEX_QUARTER,
-  MAP_HEX_SIZE,
-  MAP_HEX_THREE_QUARTERS,
-} from '../../core/mapGeometry';
 
 export interface WardPoint {
   x: number;
@@ -32,12 +26,12 @@ export interface SanctuaryWardPresentation {
 }
 
 const HEX_VERTICES: WardPoint[] = [
-  { x: MAP_HEX_QUARTER, y: 0 },
-  { x: MAP_HEX_THREE_QUARTERS, y: 0 },
-  { x: MAP_HEX_SIZE, y: MAP_HEX_HALF },
-  { x: MAP_HEX_THREE_QUARTERS, y: MAP_HEX_SIZE },
-  { x: MAP_HEX_QUARTER, y: MAP_HEX_SIZE },
-  { x: 0, y: MAP_HEX_HALF },
+  { x: 18, y: 0 },
+  { x: 54, y: 0 },
+  { x: 72, y: 36 },
+  { x: 54, y: 72 },
+  { x: 18, y: 72 },
+  { x: 0, y: 36 },
 ];
 
 function pointKey(point: WardPoint): string {
@@ -108,7 +102,7 @@ export function sanctuaryWardPresentation(
   const origin = Util.hex_to_pixel(Number(objectState.x), Number(objectState.y));
   return {
     settlement,
-    center: { x: origin.x + MAP_HEX_HALF, y: origin.y + MAP_HEX_HALF },
+    center: { x: origin.x + 36, y: origin.y + 36 },
     segments: sanctuaryWardSegments(
       Number(objectState.x),
       Number(objectState.y),

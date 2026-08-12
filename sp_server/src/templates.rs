@@ -1107,19 +1107,6 @@ mod tests {
         assert_eq!(template.template, "Shelter Tent");
     }
 
-    #[test]
-    fn static_sailor_test_unit_template_is_registered() {
-        let mut app = App::new();
-        app.add_plugins(TemplatesPlugin);
-
-        let templates = app.world().resource::<Templates>();
-        let template = templates.obj_templates.get("Sailor".to_string());
-
-        assert_eq!(template.class, "unit");
-        assert_eq!(template.subclass, "npc");
-        assert_eq!(template.image, "sailor");
-    }
-
     fn production_test_app() -> App {
         let mut app = App::new();
         app.add_plugins((TemplatesPlugin, RecipePlugin));

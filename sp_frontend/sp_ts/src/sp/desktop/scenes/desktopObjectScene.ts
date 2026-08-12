@@ -15,7 +15,6 @@ import {
   SanctuaryZoneBorderPresentation,
   sanctuaryZoneBorderPresentation,
 } from './sanctuaryZoneBorderPresentation';
-import { MAP_HEX_HALF } from '../../core/mapGeometry';
 
 interface SanctuaryWardVisual {
   perimeter: Phaser.GameObjects.Graphics;
@@ -233,7 +232,7 @@ export class DesktopObjectScene extends ObjectScene {
 
     const marker = this.createWardMarker(
       presentation.center.x,
-      presentation.center.y - MAP_HEX_HALF - 6,
+      presentation.center.y - 42,
     );
     marker.setDepth(WARD_MARKER_DEPTH);
 

@@ -63,8 +63,6 @@ for art_file in \
   washedashore.json \
   novicewarrior.png \
   novicewarrior.json \
-  sailor.png \
-  sailor.json \
   droppedbag.png \
   droppedbag.json
 do

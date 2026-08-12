@@ -168,7 +168,6 @@ pub fn register_all_types(app: &mut App) {
         .register_type::<event::GameEvent>()
         .register_type::<event::GameEventType>()
         .register_type::<event::GameEvents>()
-        .register_type::<event::LoginConnectionId>()
         .register_type::<event::MapEvent>()
         .register_type::<event::MapEvents>()
         .register_type::<event::Spell>()

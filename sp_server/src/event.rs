@@ -453,37 +453,13 @@ pub struct GameEvent {
     pub event_type: GameEventType,
 }
 
-/// Snapshot-safe representation of the UUID attached to a delayed login event.
-///
-/// Bevy's reflected scene serializer does not support `u128`, so retain all 128
-/// UUID bits as two supported `u64` values while this event is waiting to run.
-#[derive(Clone, Copy, Default, Eq, PartialEq, Reflect, Debug)]
-pub struct LoginConnectionId {
-    high: u64,
-    low: u64,
-}
-
-impl From<Uuid> for LoginConnectionId {
-    fn from(connection_id: Uuid) -> Self {
-        let value = connection_id.as_u128();
-        Self {
-            high: (value >> 64) as u64,
-            low: value as u64,
-        }
-    }
-}
-
-impl From<LoginConnectionId> for Uuid {
-    fn from(connection_id: LoginConnectionId) -> Self {
-        Self::from_u128(((connection_id.high as u128) << 64) | connection_id.low as u128)
-    }
-}
-
 #[derive(Clone, Reflect, Debug)]
 pub enum GameEventType {
     Login {
         player_id: i32,
-        connection_id: LoginConnectionId,
+        /// Stored as u128 because this reflected event participates in Bevy's
+        /// runtime metadata while the network registry uses `Uuid`.
+        connection_id: u128,
     },
     PlayerNotice {
         player_id: i32,

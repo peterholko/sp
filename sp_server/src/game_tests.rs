@@ -12,38 +12,6 @@ use big_brain::prelude::ActionState;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 
-#[test]
-fn snapshot_serializes_pending_login_connection_id() {
-    let mut app = App::new();
-    crate::register_all_types(&mut app);
-
-    let connection_id = Uuid::from_u128(u128::MAX - 42);
-    app.insert_resource(GameEvents(HashMap::from([(
-        1,
-        GameEvent {
-            event_id: 1,
-            start_tick: 100,
-            run_tick: 104,
-            event_type: GameEventType::Login {
-                player_id: 250,
-                connection_id: crate::event::LoginConnectionId::from(connection_id),
-            },
-        },
-    )])));
-
-    let scene = DynamicScene::from_world(app.world());
-    let registry = app.world().resource::<AppTypeRegistry>().read();
-    let serialized = scene
-        .serialize(&registry)
-        .expect("pending login events must be snapshot-safe");
-
-    assert!(serialized.contains("Login"));
-    assert_eq!(
-        Uuid::from(crate::event::LoginConnectionId::from(connection_id)),
-        connection_id
-    );
-}
-
 fn load_obj_templates() -> Vec<ObjTemplate> {
     let obj_template_file =
         File::open("templates/obj_template.yaml").expect("Could not open obj templates");

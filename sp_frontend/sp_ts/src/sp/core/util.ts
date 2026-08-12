@@ -1,10 +1,9 @@
 import { Global } from './global';
 import { SPRITE, CONTAINER, IMAGE } from './config';
-import { MAP_HEX_SIZE } from './mapGeometry';
 
 export class Util {
 
-  static hexSize : integer = MAP_HEX_SIZE;
+  static hexSize : integer = 72;
 
   constructor() {}
 

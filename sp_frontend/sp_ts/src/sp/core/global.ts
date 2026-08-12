@@ -6,7 +6,6 @@ import { ZIndexManager } from './zIndexManager';
 import { ProtectedSettlementLookup } from './protectedSettlements';
 import { SanctuaryZoneLookup } from './sanctuaryState';
 import { SANCTUARY_BORDER_VISIBLE_BY_DEFAULT } from './sanctuaryBorderVisibility';
-import { MAP_HEX_SIZE } from './mapGeometry';
 
 
 
@@ -27,8 +26,8 @@ export class Global {
 
     public static tick = 0;
 
-    public static tileWidth = MAP_HEX_SIZE;
-    public static tileHeight = MAP_HEX_SIZE;
+    public static tileWidth = 72;
+    public static tileHeight = 72;
 
     public static playerId = '-1';
     public static heroId = '-1';

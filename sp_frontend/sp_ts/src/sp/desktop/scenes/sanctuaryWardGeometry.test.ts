@@ -38,8 +38,8 @@ assert.equal(presentation?.settlement.player_id, 12);
 assert.equal(presentation?.segments.length, 54);
 assert.deepEqual(
   presentation?.center,
-  { x: 504, y: 936 },
-  'ward marker is centred in the 144px monolith hex',
+  { x: 252, y: 468 },
+  'ward marker is centred in the 72px monolith hex',
 );
 
 assert.equal(

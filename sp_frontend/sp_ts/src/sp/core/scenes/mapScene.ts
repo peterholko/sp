@@ -14,8 +14,6 @@ import { ObjectState } from '../objectState';
 import { TileState } from '../tileState';
 import { desktopCameraZoom } from '../config';
 import { MAP_RENDER_EVENTS } from '../mapRenderEvents';
-import { LEGACY_MAP_ART_SCALE, mapArtScale } from '../mapArtScale';
-import { MAP_RESOURCE_ICON_INSET } from '../mapGeometry';
 
 export class MapScene extends Phaser.Scene {
 
@@ -35,15 +33,6 @@ export class MapScene extends Phaser.Scene {
 
   public centerOn(x, y) : void {
     this.cameras.main.centerOn(x, y);
-  }
-
-  private mapScaleForTileKey(tileKey: string): number {
-    if (!tileKey.startsWith('tileset')) {
-      return LEGACY_MAP_ART_SCALE;
-    }
-
-    const tileTypeId = Number(tileKey.slice('tileset'.length));
-    return mapArtScale(Global.tileset[tileTypeId]);
   }
 
   constructor() {
@@ -178,7 +167,6 @@ export class MapScene extends Phaser.Scene {
 
     this.selectHex = new Phaser.GameObjects.Image(this, 0, 0, 'selecthex');
     this.selectHex.setOrigin(0);
-    this.selectHex.setScale(LEGACY_MAP_ART_SCALE);
     this.select.add(this.selectHex);
 
     var _this = this;
@@ -269,14 +257,14 @@ export class MapScene extends Phaser.Scene {
 
       var resource = new Resource({
         scene: this,
-        x: pixel.x + MAP_RESOURCE_ICON_INSET,
-        y: pixel.y + MAP_RESOURCE_ICON_INSET,
+        x: pixel.x + 12,
+        y: pixel.y + 12,
         imageName: imageName,            
         hexX: resourceData.x,
         hexY: resourceData.y
       });     
       
-      resource.setScale(0.90 * LEGACY_MAP_ART_SCALE);
+      resource.setScale(0.90);
 
       if(resourceData.color === 4) {
         resource.postFX.addGlow(0x0070dd, 2, 0, false);
@@ -501,7 +489,6 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
-    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     mapTile.setInteractive();
 
     this.base.add(mapTile);  
@@ -519,7 +506,6 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
-    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.trans.add(mapTile);  
   
   }
@@ -535,7 +521,6 @@ export class MapScene extends Phaser.Scene {
           hexY: tileState.hexY
         });
 
-    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.extra.add(mapTile);  
   
   }
@@ -557,7 +542,6 @@ export class MapScene extends Phaser.Scene {
           hexY: hexY
         });
 
-    mapTile.setScale(this.mapScaleForTileKey(tileKey));
     this.void.add(mapTile);
   }
 }

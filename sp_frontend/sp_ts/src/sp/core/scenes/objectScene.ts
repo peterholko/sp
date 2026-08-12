@@ -44,13 +44,6 @@ import {
   isDroppedBagObject,
 } from '../droppedBagPresentation';
 import { usesFoundationGraphic } from '../structureConstructionPresentation';
-import {
-  mapArtDefinitionForImage,
-  mapArtPresentation,
-  mapArtScale,
-} from '../mapArtScale';
-import { ownedHeroCameraTracking } from '../heroCameraTracking';
-import { LEGACY_MAP_TEXTURE_SCALE, MAP_HEX_HALF } from '../mapGeometry';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -390,28 +383,15 @@ export class ObjectScene extends Phaser.Scene {
     return isPresentMapObject(objectState);
   }
 
-  private mapScaleForImage(imageName: string): number {
-    return mapArtScale(mapArtDefinitionForImage(
-      imageName,
-      Global.imageDefList[imageName],
-    ));
-  }
-
   private applyImagePresentation(
     image: GameImage,
-    imageName: string,
+    _imageName: string,
     presentationScale = 1,
   ): { insetX: number; insetY: number } {
-    const presentation = mapArtPresentation(
-      mapArtDefinitionForImage(imageName, Global.imageDefList[imageName]),
-      image.width,
-      image.height,
-      presentationScale,
-    );
-    image.setScale(presentation.scale);
+    image.setScale(presentationScale);
     return {
-      insetX: presentation.insetX,
-      insetY: presentation.insetY,
+      insetX: image.width * (1 - presentationScale) / 2,
+      insetY: image.height * (1 - presentationScale) / 2,
     };
   }
 
@@ -566,40 +546,8 @@ export class ObjectScene extends Phaser.Scene {
       this.updateContainer(objectState);
     }
 
-    this.syncOwnedHeroCamera(objectState, renderObject);
     this.syncActionProgressBar(objectState, renderObject);
     this.syncVillagerActivityBadge(objectState, renderObject);
-  }
-
-  private syncOwnedHeroCamera(
-    objectState: ObjectState,
-    renderObject: RenderObject,
-  ): void {
-    const tracking = ownedHeroCameraTracking(objectState, Global.playerId);
-    if (!tracking) {
-      return;
-    }
-
-    const mapScene = this.scene.get('MapScene') as MapScene;
-    const weatherScene = this.scene.get('WeatherScene') as WeatherScene;
-    const cameras = [
-      mapScene.cameras.main,
-      weatherScene.cameras.main,
-      this.cameras.main,
-    ];
-
-    for (const camera of cameras) {
-      camera.startFollow(
-        renderObject,
-        true,
-        1,
-        1,
-        tracking.followOffset,
-        tracking.followOffset,
-      );
-    }
-
-    renderObject.setDepth(5);
   }
 
   private destroyVillagerActivityBadge(objectId: string): void {
@@ -682,7 +630,7 @@ export class ObjectScene extends Phaser.Scene {
           VILLAGER_ACTIVITY_PROGRESS_GAP,
         )
       : VILLAGER_ACTIVITY_Y_OFFSET;
-    const x = renderObject.x + MAP_HEX_HALF;
+    const x = renderObject.x + 36;
     const y = renderObject.y + yOffset;
     badge.icon.setPosition(x, y);
     badge.outline.setPosition(x, y);
@@ -874,7 +822,7 @@ export class ObjectScene extends Phaser.Scene {
 
   private drawActionProgressBar(progressBar: ActionProgressBar, objectState: ObjectState, renderObject: RenderObject, time: number): void {
     var elapsed = Math.max(0, time - progressBar.startTime);
-    var left = renderObject.x + MAP_HEX_HALF - ACTION_PROGRESS_WIDTH / 2;
+    var left = renderObject.x + 36 - ACTION_PROGRESS_WIDTH / 2;
     var top = renderObject.y + ACTION_PROGRESS_Y_OFFSET - ACTION_PROGRESS_HEIGHT / 2;
 
     progressBar.graphics.clear();
@@ -1126,8 +1074,6 @@ export class ObjectScene extends Phaser.Scene {
           id: 'shroud' + pixel.x + pixel.y,
           imageName: 'shroud'
         });
-        shroud.setScale(LEGACY_MAP_TEXTURE_SCALE);
-
         this.add.existing(shroud);
         this.shroudTiles.push(shroud);
       }
@@ -1210,8 +1156,6 @@ export class ObjectScene extends Phaser.Scene {
               id: 'shroud' + pixel.x + pixel.y,
               imageName: filename
             });
-            shroud.setScale(LEGACY_MAP_TEXTURE_SCALE);
-
             this.add.existing(shroud);
             this.shroudTiles.push(shroud);
 
@@ -1249,8 +1193,6 @@ export class ObjectScene extends Phaser.Scene {
           y: pixel.y,
           imageName: 'shroud-one-tile'
         });
-        shroud.setScale(LEGACY_MAP_TEXTURE_SCALE);
-
         this.add.existing(shroud);
         this.shroudTiles.push(shroud);
       }
@@ -1326,10 +1268,6 @@ export class ObjectScene extends Phaser.Scene {
     // Guard against destroyed sprites still present in objectList (scene is undefined after destroy)
     const spriteReady = sprite != null && sprite.scene != null;
 
-    if (spriteReady && objectState.state != DEAD) {
-      sprite.setScale(this.mapScaleForImage(objectState.image));
-    }
-
     if (spriteReady && objectState.state != DEAD && (sprite as any).__spDeadRenderLocked) {
       delete (sprite as any).__spDeadRenderLocked;
     }
@@ -1396,7 +1334,6 @@ export class ObjectScene extends Phaser.Scene {
         console.log('Animation ' + anim + ' does not exist');
         if (objectState.state == DEAD && spriteReady) {
           sprite.setTexture('gravestone');
-          sprite.setScale(this.mapScaleForImage('gravestone'));
           sprite.setDepth(2);
         }
         else if (spriteReady && !(objectState.id in this.stateTimerList)) {
@@ -1410,6 +1347,23 @@ export class ObjectScene extends Phaser.Scene {
 
           this.stateTimerList[objectState.id] = timer;
         }
+      }
+
+      //Only follow if Hero
+      if (objectState.subclass == HERO && objectState.player == Global.playerId) {
+        var mapScene = this.scene.get('MapScene') as MapScene;
+        mapScene.cameras.main.startFollow(sprite, true);
+        mapScene.cameras.main.followOffset.x = -36;
+        mapScene.cameras.main.followOffset.y = -36;
+
+        var weatherScene = this.scene.get('WeatherScene') as WeatherScene;
+        weatherScene.cameras.main.startFollow(sprite, true);
+        weatherScene.cameras.main.followOffset.x = -36;
+        weatherScene.cameras.main.followOffset.y = -36;
+
+        this.cameras.main.startFollow(sprite, true);
+        this.cameras.main.followOffset.x = -36;
+        this.cameras.main.followOffset.y = -36;
       }
 
       if (spriteReady) {
@@ -1431,11 +1385,6 @@ export class ObjectScene extends Phaser.Scene {
     var pixel = Util.hex_to_pixel(objectState.x, objectState.y);
     container.x = pixel.x;
     container.y = pixel.y;
-    container.setScale(
-      usesFoundationGraphic(objectState)
-        ? this.mapScaleForImage('foundation')
-        : this.mapScaleForImage(objectState.image),
-    );
 
     if (objectState.class == 'structure') {
       container.setDepth(1);
@@ -1501,7 +1450,6 @@ export class ObjectScene extends Phaser.Scene {
       imageName: imageName
     });
 
-    sprite.setScale(this.mapScaleForImage(imageName));
     sprite.setDepth(3);
 
     this.add.existing(sprite);
@@ -1513,7 +1461,6 @@ export class ObjectScene extends Phaser.Scene {
     } else {
       if (objectState.state == DEAD) {
         sprite.setTexture('gravestone');
-        sprite.setScale(this.mapScaleForImage('gravestone'));
         sprite.setDepth(2);
       }
 
@@ -1524,6 +1471,14 @@ export class ObjectScene extends Phaser.Scene {
     delete this.wallList[objectState.id];
 
     if (objectState.subclass == 'hero') {
+      var mapScene = this.scene.get('MapScene') as MapScene;
+      mapScene.cameras.main.centerOn(sprite.x + 36, sprite.y + 36);
+
+      var weatherScene = this.scene.get('WeatherScene') as WeatherScene;
+      weatherScene.cameras.main.centerOn(sprite.x + 36, sprite.y + 36);
+
+      this.cameras.main.centerOn(sprite.x + 36, sprite.y + 36);
+
       sprite.setDepth(5);
     }
   }
@@ -1631,12 +1586,6 @@ export class ObjectScene extends Phaser.Scene {
       containerName: objectState.image
     });
 
-    container.setScale(
-      usesFoundationGraphic(objectState)
-        ? this.mapScaleForImage('foundation')
-        : this.mapScaleForImage(objectState.image),
-    );
-
     if (objectState.class == 'structure') {
       container.setDepth(1);
     } else if (objectState.class == 'unit') {
@@ -1736,18 +1685,15 @@ export class ObjectScene extends Phaser.Scene {
           target.anims.chain();
           target.anims.stop();
           target.setTexture('gravestone');
-          target.setScale(this.mapScaleForImage('gravestone'));
           target.setDepth(2);
         }
       } else if (target instanceof GameImage) {
         target.setTexture('gravestone');
         target.imageName = 'gravestone';
-        target.setScale(this.mapScaleForImage('gravestone'));
       }
     } else if (targetState.class == STRUCTURE) {
       if (target instanceof GameContainer) {
         target.removeAll(true);
-        target.setScale(this.mapScaleForImage('foundation'));
 
         var image = new GameImage({
           scene: this,
@@ -1761,7 +1707,6 @@ export class ObjectScene extends Phaser.Scene {
       } else if (target instanceof GameImage) {
         target.setTexture('foundation');
         target.imageName = 'foundation';
-        target.setScale(this.mapScaleForImage('foundation'));
       }
     }
   }
@@ -1869,18 +1814,17 @@ export class ObjectScene extends Phaser.Scene {
           this.playSpriteAction(source, 'cast');
 
           var shadowBolt = this.add.sprite(
-            source.x + MAP_HEX_HALF,
-            source.y + MAP_HEX_HALF,
+            source.x + 36,
+            source.y + 36,
             'shadowbolt',
           );
-          shadowBolt.setScale(LEGACY_MAP_TEXTURE_SCALE);
           shadowBolt.anims.play('shadowboltanim');
 
           var diffX = (target.x - source.x) * 0.5;
           var diffY = (target.y - source.y) * 0.5;
 
-          var destX = target.x + MAP_HEX_HALF;
-          var destY = target.y + MAP_HEX_HALF;
+          var destX = target.x + 36;
+          var destY = target.y + 36;
 
           var tween = this.tweens.add({
             targets: shadowBolt,
@@ -1926,7 +1870,7 @@ export class ObjectScene extends Phaser.Scene {
         if (isFinisher) {
           this.shakeForFinisher();
         }
-        var dmgText = this.add.text(target.x + MAP_HEX_HALF, target.y - 5, dmgMsg, {
+        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
           fontFamily: 'Verdana',
           fontSize: isFinisher ? 30 : 22,
           fontStyle: isFinisher ? 'bold' : 'normal',
@@ -1967,18 +1911,17 @@ export class ObjectScene extends Phaser.Scene {
 
       // Add unknown unit sprite, not sure why it is offset by 36 compared to the target, must be origin 
       var unknownUnit = this.add.sprite(
-        randomNeighbourPixel.x + MAP_HEX_HALF,
-        randomNeighbourPixel.y + MAP_HEX_HALF,
+        randomNeighbourPixel.x + 36,
+        randomNeighbourPixel.y + 36,
         'unknownunit',
       );
-      unknownUnit.setScale(LEGACY_MAP_TEXTURE_SCALE);
       unknownUnit.setDepth(10);
 
       /*var diffX = (target.x - unknownUnit.x) * 0.5;
       var diffY = (target.y - unknownUnit.y) * 0.5;
 
-      var destX = target.x + MAP_HEX_HALF;
-      var destY = target.y + MAP_HEX_HALF;*/
+      var destX = target.x + 36;
+      var destY = target.y + 36;*/
 
       if (message.state == DEAD) {
         this.updateDeadRenderState(message.target_id, target);
@@ -1986,8 +1929,8 @@ export class ObjectScene extends Phaser.Scene {
 
       var tween = this.tweens.add({
         targets: unknownUnit,
-        x: target.x + MAP_HEX_HALF,
-        y: target.y + MAP_HEX_HALF,
+        x: target.x + 36,
+        y: target.y + 36,
         ease: 'Power2',
         duration: 750,
         onComplete: this.onJumpCompleteUnknownUnit
@@ -2006,7 +1949,7 @@ export class ObjectScene extends Phaser.Scene {
       if (isFinisher) {
         this.shakeForFinisher();
       }
-      var dmgText = this.add.text(target.x + MAP_HEX_HALF, target.y - 5, dmgMsg, {
+      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
         fontFamily: 'Verdana',
         fontSize: isFinisher ? 28 : 20,
         fontStyle: isFinisher ? 'bold' : 'normal',
@@ -2141,7 +2084,7 @@ export class ObjectScene extends Phaser.Scene {
 
     var dmgMsg = message.itemquantity + ' food';
 
-    var dmgText = this.add.text(target.x + MAP_HEX_HALF, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFA500', stroke: '#000000', strokeThickness: 4 });
+    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFA500', stroke: '#000000', strokeThickness: 4 });
     dmgText.setDepth(10);
     dmgText.setOrigin(0.5, 0.5);
 
@@ -2198,7 +2141,7 @@ export class ObjectScene extends Phaser.Scene {
 
     var dmgMsg = 'Steal';
 
-    var dmgText = this.add.text(target.x + MAP_HEX_HALF, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFCC33', stroke: '#000000', strokeThickness: 4 });
+    var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, { fontFamily: 'Verdana', fontSize: 22, color: '#FFCC33', stroke: '#000000', strokeThickness: 4 });
     dmgText.setDepth(10);
     dmgText.setOrigin(0.5, 0.5);
 
@@ -2255,7 +2198,7 @@ export class ObjectScene extends Phaser.Scene {
 
     var torchMsg = 'Torch';
 
-    var torchText = this.add.text(target.x + MAP_HEX_HALF, target.y - 5, torchMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FFCC33' });
+    var torchText = this.add.text(target.x + 36, target.y - 5, torchMsg, { fontFamily: 'Verdana', fontSize: 20, color: '#FFCC33' });
     torchText.setDepth(10);
     torchText.setOrigin(0.5, 0.5);
 
@@ -2279,7 +2222,7 @@ export class ObjectScene extends Phaser.Scene {
   showAlertFloater(sourceId, color: string) {
     var npcSprite = this.objectList[sourceId];
     if (!npcSprite) return;
-    var alertText = this.add.text(npcSprite.x + MAP_HEX_HALF, npcSprite.y - 5, '!', {
+    var alertText = this.add.text(npcSprite.x + 36, npcSprite.y - 5, '!', {
       fontFamily: 'Verdana',
       fontSize: 21,
       fontStyle: 'bold',
@@ -2349,7 +2292,7 @@ export class ObjectScene extends Phaser.Scene {
     var source = Util.hex_to_pixel(message.x, message.y);
     var graphics = this.add.graphics()
     var container = this.add.container(
-      source.x + MAP_HEX_HALF - 60,
+      source.x + 36 - 60,
       source.y - 20,
     );
 
@@ -2460,7 +2403,7 @@ export class ObjectScene extends Phaser.Scene {
     for (var i = 0; i < message.xp_list.length; i++) {
       var value = '+' + message.xp_list[i].xp + ' ' + message.xp_list[i].skill + ' XP';
 
-      var xpText = this.add.text(source.x + MAP_HEX_HALF, source.y - 5 - (i * 15), value, { fontFamily: 'Verdana', fontSize: 14, color: '#FFFFFF' });
+      var xpText = this.add.text(source.x + 36, source.y - 5 - (i * 15), value, { fontFamily: 'Verdana', fontSize: 14, color: '#FFFFFF' });
       xpText.setDepth(10);
       xpText.setOrigin(0.5, 0.5);
 
@@ -2494,7 +2437,7 @@ export class ObjectScene extends Phaser.Scene {
     this.time.addEvent({
       delay: effectTextDelay,
       callback: () => {
-        var effectText = this.add.text(source.x + MAP_HEX_HALF, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#00ff00', stroke: '#000', strokeThickness: 2 });
+        var effectText = this.add.text(source.x + 36, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#00ff00', stroke: '#000', strokeThickness: 2 });
         effectText.setDepth(10);
         effectText.setOrigin(0.5, 0.5);
 
@@ -2523,7 +2466,7 @@ export class ObjectScene extends Phaser.Scene {
     this.time.addEvent({
       delay: 500,
       callback: () => {
-        var effectText = this.add.text(source.x + MAP_HEX_HALF, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#FF0000', stroke: '#000', strokeThickness: 2 });
+        var effectText = this.add.text(source.x + 36, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#FF0000', stroke: '#000', strokeThickness: 2 });
         effectText.setDepth(10);
         effectText.setOrigin(0.5, 0.5);
 
@@ -2552,7 +2495,7 @@ export class ObjectScene extends Phaser.Scene {
     this.time.addEvent({
       delay: 500,
       callback: () => {
-        var effectText = this.add.text(source.x + MAP_HEX_HALF, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#FF0000', stroke: '#000', strokeThickness: 2 });
+        var effectText = this.add.text(source.x + 36, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#FF0000', stroke: '#000', strokeThickness: 2 });
         effectText.setDepth(10);
         effectText.setOrigin(0.5, 0.5);
 
@@ -2581,7 +2524,7 @@ export class ObjectScene extends Phaser.Scene {
     this.time.addEvent({
       delay: 500,
       callback: () => {
-        var effectText = this.add.text(source.x + MAP_HEX_HALF, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#00ff00', stroke: '#000', strokeThickness: 2 });
+        var effectText = this.add.text(source.x + 36, source.y - 5 + Global.effectTextOffsetY, textValue, { fontFamily: 'Verdana', fontSize: 14, color: '#00ff00', stroke: '#000', strokeThickness: 2 });
         effectText.setDepth(10);
         effectText.setOrigin(0.5, 0.5);
 
@@ -2621,7 +2564,7 @@ export class ObjectScene extends Phaser.Scene {
       value = '* ' + state + ' *';
     }
 
-    var stateText = this.add.text(sprite.x + MAP_HEX_HALF, sprite.y - 5, value, { fontFamily: 'Verdana', fontSize: 14, color: '#00d2ff' });
+    var stateText = this.add.text(sprite.x + 36, sprite.y - 5, value, { fontFamily: 'Verdana', fontSize: 14, color: '#00d2ff' });
     stateText.setDepth(10);
     stateText.setOrigin(0.5, 0.5);
 
@@ -2698,7 +2641,7 @@ export class ObjectScene extends Phaser.Scene {
         origin.y + presentation.offsetY,
       );
       burningSprite.setDepth(presentation.depth);
-      burningSprite.setScale(presentation.scale * LEGACY_MAP_TEXTURE_SCALE);
+      burningSprite.setScale(presentation.scale);
       burningSprite.setAlpha(presentation.alpha);
       burningSprite.setBlendMode(
         presentation.additiveBlend ? Phaser.BlendModes.ADD : Phaser.BlendModes.NORMAL,

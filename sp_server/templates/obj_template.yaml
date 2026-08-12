@@ -586,23 +586,6 @@
 ##### EMPIRE #####
 ##################
 
-- name: Sailor
-  class: unit
-  subclass: npc
-  template: Sailor
-  image: sailor
-  family: Human
-  base_hp: 60
-  base_stamina: 180
-  base_dmg: 2
-  dmg_range: 3
-  base_def: 1
-  base_speed: 4
-  base_vision: 4
-  int: cunning
-  aggression: strategic
-  kill_xp: 50
-
 - name: Meager Merchant
   class: unit
   subclass: merchant
