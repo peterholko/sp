@@ -75,6 +75,10 @@ treated as a bug. Prior milestone text calls the runtime override intentional,
 and the completed evidence does not isolate its effect. Checkpoint 3 therefore
 does not normalize it without a separately declared and successful experiment.
 
+This is a historical Checkpoint 3 decision. A later recovery-economy checkpoint
+supersedes it in current production: the Shipwreck now uses the canonical 50-HP
+potion and Recovery readiness is based on effective healing HP, not item count.
+
 ### Predeclared acceptance bands
 
 These bands are grounded in the Checkpoint 2 staged resolution rate (31.7%),
@@ -252,12 +256,12 @@ before scenario execution is:
 | Existing action | Intrinsic server time | Required existing prerequisites | Travel / feasibility assessment |
 |---|---:|---|---|
 | Repair one damaged defence | 50 ticks (5 s) after arrival | Living owned villager and damaged owned structure; the current implementation has no material charge and restores full HP | Villager movement schedules 48 ticks/tile: about 9.8 s at one tile, 29 s at five, or 53 s at ten including repair. Fits unless the villager is remote; no further cost/rate relaxation is justified. |
-| Build one Stockade | 30 work; hero fallback work 5 gives about 60 ticks (6 s) active build | Existing Stockade plan and 10 Log-compatible units deposited into the foundation | Hero movement is about 12 ticks/tile. Placement and a local build fit when the lumber has already been gathered; gathering missing Logs is not assumed to fit. Guidance checks current carried facts rather than assuming materials remain. |
+| Build one Stockade | 30 work; hero fallback work 5 gives about 60 ticks (6 s) active build | Existing Stockade plan and 15 Log-compatible units deposited into the foundation | Hero movement is about 12 ticks/tile. Placement and a local build fit when the lumber has already been gathered; gathering missing Logs is not assumed to fit. Guidance checks current carried facts rather than assuming materials remain. |
 | Equip carried weapon | Immediate event processing | Live idle owner and unequipped carried equippable weapon | Fits without travel. A storage item requires normal adjacent transfer first. |
 | Equip carried armor | Immediate event processing | Live idle owner and unequipped carried armor | Fits without travel. Crafting Hide Wraps takes 75 ticks (7.5 s) but also needs a Crafting Tent, 2 Hide, and 1 Twine, so guidance does not promise the full chain. |
-| Prepare one existing healing option | Crude Bandage craft 25 ticks (2.5 s); Herbal Poultice craft 50 ticks (5 s); use follows the normal queued item event | Bandage: 1 Cloth. Poultice: Crafting Tent, 1 Berries, 1 Cloth. A carried item needs no acquisition travel. | A carried Bandage or positive-healing Health potion fits. A stored item is actionable only when normal transfer is currently available. Missing station/resources are not assumed obtainable in time. |
+| Prepare one existing healing option | Crude Bandage craft 25 ticks (2.5 s) and use 20 ticks (2 s, interruptible); Herbal Poultice craft 50 ticks (5 s) | Bandage: 2 Plant Fibers. Poultice: Crafting Tent, 1 Berries, 1 Cloth. A carried item needs no acquisition travel. | Carried healing counts by effective HP toward a 40%-of-max-HP target. A stored item is actionable only when normal transfer is currently available. Missing station/resources are not assumed obtainable in time. |
 | Prepare one existing villager | Equip is immediate once the villager is live, idle, and already holds the weapon | Living owned villager and existing weapon. Intro rescue is encounter-driven; merchant hire costs 25 Gold and requires the docked/adjacent merchant flow. | Equipping a held weapon fits. Recruitment/hiring is not presented as an on-demand action when its encounter/location prerequisites are absent. |
-| Upgrade sanctuary | Immediate event processing | Bound sanctuary, location within weak radius, and 3/6/9/12/15 Soulshards for the next level | Fits when shards and location already qualify. It also adds the existing +2 pressure per level; it is measured but omitted from the four guidance rows because Checkpoint 2 does not establish typical actionable access. |
+| Upgrade sanctuary | Immediate event processing | Bound sanctuary, location within its radius, and 3/6/9/12/15 Soulshards for the next level | Fits when shards and location already qualify. It also adds the existing +2 pressure per level; it is measured but omitted from the four guidance rows because Checkpoint 2 does not establish typical actionable access. |
 
 With a hard 210-second floor and observed typical 259–300-second budget, the
 server timings support at least two immediate/short actions when their
@@ -281,7 +285,7 @@ state. The four rows are fixed-order `defences`, `defenders`, `equipment`, and
 
 - Defences is ready for complete healthy walls, needs attention for a damaged
   wall with a living repair villager, or for an idle live hero with the actual
-  Stockade plan and ten carried Log-compatible units. Other cases name the
+  Stockade plan and fifteen carried Log-compatible units. Other cases name the
   precise blocker.
 - Defenders is ready only for a combat-capable villager. It recommends equipping
   only when an idle unarmed villager already holds an unequipped weapon; a

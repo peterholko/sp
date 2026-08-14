@@ -75,6 +75,7 @@ export class DesktopObjectScene extends ObjectScene {
     }
     for (const event of [
       NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
       NetworkEvent.PROTECTED_SETTLEMENTS,
       NetworkEvent.PERCEPTION,
       NetworkEvent.NEW_PERCEPTION,
@@ -111,6 +112,7 @@ export class DesktopObjectScene extends ObjectScene {
     }
     for (const event of [
       NetworkEvent.SANCTUARY_STATE,
+      NetworkEvent.SANCTUARY_BORDER_VISIBILITY,
       NetworkEvent.PROTECTED_SETTLEMENTS,
       NetworkEvent.PERCEPTION,
       NetworkEvent.NEW_PERCEPTION,
@@ -186,6 +188,7 @@ export class DesktopObjectScene extends ObjectScene {
         objectState,
         Global.sanctuaryZones,
         Global.protectedSettlements,
+        Global.sanctuaryBorderVisible,
       );
       if (!presentation) {
         continue;

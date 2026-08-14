@@ -18,6 +18,7 @@ import ResourceItem from "./resourceItem";
 import BaseInventoryPanel from "./baseInventoryPanel";
 import SmallButton from "./smallButton";
 import { NetworkEvent } from "../../core/networkEvent";
+import { canBeSignatureForRecipe, itemRarity, rarityColor } from "../../core/itemRarity";
 
 interface CraftPanelProps {
   crafterId,
@@ -47,6 +48,7 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
       index: 0,
       maxProgress: maxProgress,
       progress: progress,
+      signatureItemId: null,
     };
 
 
@@ -90,7 +92,8 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
       const newIndex = this.state.index - 1;
       this.setState({
         recipe: this.props.recipesData[newIndex],
-        index: newIndex
+        index: newIndex,
+        signatureItemId: null,
       })
     }
   }
@@ -100,13 +103,21 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
       const newIndex = this.state.index + 1;
       this.setState({
         recipe: this.props.recipesData[newIndex],
-        index: newIndex
+        index: newIndex,
+        signatureItemId: null,
       })
     }
   }
 
   handleSelect(eventData) {
     console.log('handleSelect ' + JSON.stringify(eventData));
+    const item = (this.props.items || []).find((candidate) => candidate.id == eventData.itemId);
+    if (item && canBeSignatureForRecipe(item, this.state.recipe)) {
+      this.setState({
+        signatureItemId: this.state.signatureItemId == item.id ? null : item.id,
+      });
+      return;
+    }
     Global.infoItemAction = 'craft';
     Global.network.sendInfoItem(eventData.itemId, "None");
   }
@@ -116,7 +127,7 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
   }
 
   handleCraftClick() {
-    Global.network.sendCraft(this.state.recipe.name);
+    Global.network.sendCraft(this.state.recipe.name, this.state.signatureItemId ?? undefined);
     //Global.gameEmitter.emit(GameEvent.CRAFT_CLICK, {});
   }
 
@@ -206,6 +217,8 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
     var showCraftingItemPanel = this.state.progress > -1;
 
     const reqs = [];
+    const signatureItem = inventoryItems.find((item) => item.id == this.state.signatureItemId);
+    const signatureRarity = signatureItem ? itemRarity(signatureItem) : 'Common';
 
     for (var i = 0; i < this.state.recipe.req.length; i++) {
       var req = this.state.recipe.req[i];
@@ -358,6 +371,7 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
           panelType={'craft'}
           hideExitButton={true}
           hideSelect={false}
+          selectedItemId={this.state.signatureItemId}
           handleSelect={this.handleSelect} />
 
         <HalfPanel left={false}
@@ -425,6 +439,17 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
                 <tr>
                   <td>Requirements:</td>
                   <td></td>
+                </tr>
+                <tr>
+                  <td>Signature:</td>
+                  <td style={{ color: rarityColor(signatureRarity) }}>
+                    {signatureItem
+                      ? `${signatureRarity} ${signatureItem.name}`
+                      : 'Common materials only'}
+                  </td>
+                </tr>
+                <tr>
+                  <td colSpan={2}>Click a colored matching component to select it.</td>
                 </tr>
                 <tr>
                   <td colSpan={2}>

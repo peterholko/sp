@@ -41,11 +41,6 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
         position: 'fixed',
         width: '15px',
         height: '15px',
-        padding: '1px',
-        border: '1px solid #f4c95d',
-        borderRadius: '50%',
-        background: 'rgba(76, 43, 12, 0.9)',
-        boxShadow: '0 0 6px rgba(255, 196, 75, 0.85)',
       } as React.CSSProperties
 
       attacks.push(<img key={i} src={'/static/art/ui/small_' + attackHistory[i] + '.png'}
@@ -142,11 +137,6 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
     const nextPipStyle = {
       width: '20px',
       height: '20px',
-      padding: '2px',
-      border: '1px solid #84d8ff',
-      borderRadius: '50%',
-      background: 'rgba(16, 49, 67, 0.95)',
-      boxShadow: '0 0 7px rgba(85, 196, 255, 0.75)',
     } as React.CSSProperties
 
     const debuffsStyle = {

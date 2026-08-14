@@ -33,6 +33,7 @@ pub const GOUGE: &str = "Gouge";
 pub const COMBO_CHAIN_TIMEOUT_TICKS: i32 = 150;
 pub const CONTROL_EFFECT_DR_RESET_TICKS: i32 = 150;
 pub const MAX_EFFECT_STACKS: i32 = 5;
+pub const FORTIFICATION_REACH_WEAPON_SUBCLASS: &str = "Spear";
 
 #[derive(Event, Debug, Clone, Copy)]
 pub struct CombatEffectsChanged {
@@ -313,7 +314,7 @@ impl Combat {
         attacker_fortified: Option<&Fortified>,
         target_effects: &Effects,
         target_fortified: Option<&Fortified>,
-        ranged_attack: bool,
+        can_attack_outbound: bool,
     ) -> Option<String> {
         if !attacker_effects.has(Effect::Fortified) {
             return None;
@@ -329,38 +330,49 @@ impl Combat {
             }
         }
 
-        if !ranged_attack {
-            return Some("Only ranged attacks can be used from behind a wall.".to_string());
+        if !can_attack_outbound {
+            return Some(
+                "Only ranged attacks or attacks with an equipped Spear can be used from behind a wall."
+                    .to_string(),
+            );
         }
 
         None
     }
 
+    pub fn equipped_weapon_has_fortification_reach(inventory: &Inventory) -> bool {
+        inventory.get_equipped_main_hand().is_some_and(|weapon| {
+            weapon.quantity > 0
+                && weapon.class == item::WEAPON
+                && weapon.subclass == FORTIFICATION_REACH_WEAPON_SUBCLASS
+        })
+    }
+
     pub fn fortified_outbound_attack_error_from_combat(
         attacker: &CombatQueryItem,
         target: &CombatQueryItem,
-        ranged_attack: bool,
+        can_attack_outbound: bool,
     ) -> Option<String> {
         Self::fortified_outbound_attack_error(
             &attacker.effects,
             attacker.fortified,
             &target.effects,
             target.fortified,
-            ranged_attack,
+            can_attack_outbound,
         )
     }
 
     pub fn fortified_outbound_attack_error_from_spell(
         attacker: &CombatSpellQueryItem,
         target: &CombatSpellQueryItem,
-        ranged_attack: bool,
+        can_attack_outbound: bool,
     ) -> Option<String> {
         Self::fortified_outbound_attack_error(
             &attacker.effects,
             attacker.fortified,
             &target.effects,
             target.fortified,
-            ranged_attack,
+            can_attack_outbound,
         )
     }
 
@@ -1336,7 +1348,7 @@ impl Combat {
 
     fn get_defense_effects(target: &mut CombatQueryItem, templates: &Res<Templates>) -> f32 {
         for (effect, (_duration, amplifier, _stacks)) in target.effects.0.iter() {
-            if matches!(effect, Effect::Sanctuary | Effect::WeakSanctuary) {
+            if *effect == Effect::Sanctuary {
                 continue;
             }
 
@@ -1360,18 +1372,16 @@ impl Combat {
     }
 
     fn get_sanctuary_defense_from_effects(effects: &Effects, templates: &Templates) -> f32 {
-        for effect in [Effect::Sanctuary, Effect::WeakSanctuary] {
-            if let Some((_duration, amplifier, _stacks)) = effects.0.get(&effect) {
-                let effect_template = templates
-                    .effect_templates
-                    .get(&effect.clone().to_str())
-                    .expect("Missing sanctuary template effect");
+        if let Some((_duration, amplifier, _stacks)) = effects.0.get(&Effect::Sanctuary) {
+            let effect_template = templates
+                .effect_templates
+                .get(&Effect::Sanctuary.to_str())
+                .expect("Missing sanctuary template effect");
 
-                return effect_template
-                    .defense
-                    .expect("Missing defense on sanctuary template effect")
-                    * amplifier;
-            }
+            return effect_template
+                .defense
+                .expect("Missing defense on sanctuary template effect")
+                * amplifier;
         }
 
         1.0
@@ -1672,10 +1682,9 @@ mod tests {
 
     fn combat_templates() -> Templates {
         let mut templates = Templates::from_obj_templates(Vec::new());
-        templates.effect_templates.load(vec![
-            effect_template(&Effect::Sanctuary.to_str(), 5.0),
-            effect_template(&Effect::WeakSanctuary.to_str(), 2.0),
-        ]);
+        templates
+            .effect_templates
+            .load(vec![effect_template(&Effect::Sanctuary.to_str(), 5.0)]);
         templates
     }
 
@@ -1724,23 +1733,18 @@ mod tests {
     }
 
     #[test]
-    fn sanctuary_defense_uses_full_and_weak_templates() {
+    fn sanctuary_defense_uses_single_template() {
         let templates = combat_templates();
         let none = effects(Vec::new());
-        let full = effects(vec![Effect::Sanctuary]);
-        let weak = effects(vec![Effect::WeakSanctuary]);
+        let sanctuary = effects(vec![Effect::Sanctuary]);
 
         assert_eq!(
             Combat::get_sanctuary_defense_from_effects(&none, &templates),
             1.0
         );
         assert_eq!(
-            Combat::get_sanctuary_defense_from_effects(&full, &templates),
+            Combat::get_sanctuary_defense_from_effects(&sanctuary, &templates),
             5.0
-        );
-        assert_eq!(
-            Combat::get_sanctuary_defense_from_effects(&weak, &templates),
-            2.0
         );
     }
 
@@ -2025,7 +2029,7 @@ mod tests {
     }
 
     #[test]
-    fn fortified_outbound_attacks_require_range_not_watchtower() {
+    fn fortified_outbound_attacks_require_range_or_reach_not_watchtower() {
         let none = effects(Vec::new());
         let fortified = effects(vec![Effect::Fortified]);
         let tower = effects(vec![Effect::Fortified, Effect::WatchtowerLight]);
@@ -2043,7 +2047,10 @@ mod tests {
                 None,
                 false,
             ),
-            Some("Only ranged attacks can be used from behind a wall.".to_string())
+            Some(
+                "Only ranged attacks or attacks with an equipped Spear can be used from behind a wall."
+                    .to_string()
+            )
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(
@@ -2063,7 +2070,10 @@ mod tests {
                 None,
                 false,
             ),
-            Some("Only ranged attacks can be used from behind a wall.".to_string())
+            Some(
+                "Only ranged attacks or attacks with an equipped Spear can be used from behind a wall."
+                    .to_string()
+            )
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(

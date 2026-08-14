@@ -508,4 +508,155 @@ mod tests {
                 .is_none());
             });
     }
+
+    #[test]
+    fn primitive_spear_is_a_valid_copper_recipe_root() {
+        let mut app = App::new();
+        app.add_plugins((TemplatesPlugin, RecipePlugin));
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe_templates = templates.recipe_templates.to_vec();
+                world
+                    .resource_mut::<Recipes>()
+                    .set_templates(recipe_templates);
+
+                let mut ids = Ids::default();
+                let mut inventory = Inventory {
+                    owner: 10,
+                    items: Vec::new(),
+                };
+                let source = inventory.new(
+                    ids.new_item_id(),
+                    "Stone-Tipped Spear".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let copper = inventory.new(
+                    ids.new_item_id(),
+                    "Valleyrun Copper Ingot".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let timber = inventory.new(
+                    ids.new_item_id(),
+                    "Cragroot Maple Timber".to_string(),
+                    2,
+                    &templates.item_templates,
+                );
+                inventory.set_experiment_source(source.id);
+                inventory.set_experiment_reagent(copper.id);
+                inventory.set_experiment_reagent(timber.id);
+
+                let result = Experiment::find_recipe(
+                    1,
+                    10,
+                    "Blacksmith".to_string(),
+                    &inventory,
+                    &world.resource::<Recipes>(),
+                    &templates,
+                )
+                .expect("primitive spear should lead to the copper spear");
+                assert_eq!(result.name, "Copper Spear");
+                assert_eq!(result.tier, Some(1));
+            });
+    }
+
+    #[test]
+    fn bow_experimentation_advances_one_material_tier_at_a_time() {
+        let mut app = App::new();
+        app.add_plugins((TemplatesPlugin, RecipePlugin));
+
+        app.world_mut()
+            .resource_scope(|world, templates: Mut<Templates>| {
+                let recipe_templates = templates.recipe_templates.to_vec();
+                world
+                    .resource_mut::<Recipes>()
+                    .set_templates(recipe_templates);
+
+                let mut ids = Ids::default();
+                let mut primitive_inventory = Inventory {
+                    owner: 10,
+                    items: Vec::new(),
+                };
+                let training_bow = primitive_inventory.new(
+                    ids.new_item_id(),
+                    "Training Bow".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let timber = primitive_inventory.new(
+                    ids.new_item_id(),
+                    "Cragroot Maple Timber".to_string(),
+                    3,
+                    &templates.item_templates,
+                );
+                let twine = primitive_inventory.new(
+                    ids.new_item_id(),
+                    "Twine".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                primitive_inventory.set_experiment_source(training_bow.id);
+                primitive_inventory.set_experiment_reagent(timber.id);
+                primitive_inventory.set_experiment_reagent(twine.id);
+
+                let hunting_bow = Experiment::find_recipe(
+                    1,
+                    10,
+                    "Workshop".to_string(),
+                    &primitive_inventory,
+                    &world.resource::<Recipes>(),
+                    &templates,
+                )
+                .expect("training bow should lead to hunting bow");
+                assert_eq!(hunting_bow.name, "Hunting Bow");
+                assert_eq!(hunting_bow.tier, Some(1));
+
+                let mut iron_inventory = Inventory {
+                    owner: 11,
+                    items: Vec::new(),
+                };
+                let hunting_bow = iron_inventory.new(
+                    ids.new_item_id(),
+                    "Hunting Bow".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let timber = iron_inventory.new(
+                    ids.new_item_id(),
+                    "Cragroot Maple Timber".to_string(),
+                    3,
+                    &templates.item_templates,
+                );
+                let iron = iron_inventory.new(
+                    ids.new_item_id(),
+                    "Quickforge Iron Ingot".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                let twine = iron_inventory.new(
+                    ids.new_item_id(),
+                    "Twine".to_string(),
+                    1,
+                    &templates.item_templates,
+                );
+                iron_inventory.set_experiment_source(hunting_bow.id);
+                iron_inventory.set_experiment_reagent(timber.id);
+                iron_inventory.set_experiment_reagent(iron.id);
+                iron_inventory.set_experiment_reagent(twine.id);
+
+                let iron_bow = Experiment::find_recipe(
+                    1,
+                    11,
+                    "Workshop".to_string(),
+                    &iron_inventory,
+                    &world.resource::<Recipes>(),
+                    &templates,
+                )
+                .expect("hunting bow should lead to iron-limbed longbow");
+                assert_eq!(iron_bow.name, "Iron-Limbed Longbow");
+                assert_eq!(iron_bow.tier, Some(2));
+            });
+    }
 }

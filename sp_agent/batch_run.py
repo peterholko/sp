@@ -3,7 +3,7 @@ batch_run.py — Run the scripted needs/forage bot across N games, pipelined at
 `--concurrency` wide (the server has only 5 start locations, recycled on True
 Death), and record each run's outcome.
 
-Each game is a fresh fingerprint account that plays needs_run.py --forage until
+Each game is a fresh guest account that plays needs_run.py --forage until
 True Death (then a short grace) or a hard time cap. True Death writes the run to
 the postgres `scores` table — the authoritative results sink — so the heavy
 aggregation is done from there afterwards. This driver additionally captures
@@ -27,12 +27,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 async def run_one(idx, args, sem, results, lock):
-    fp = f"b50{args.tag}{idx:03d}"          # alphanumeric, >=8 chars
     hero = f"B50{args.tag}{idx:03d}"
     log = os.path.join(args.outdir, f"bot_{idx:03d}.jsonl")
     cmd = [
         sys.executable, "-u", os.path.join(HERE, "needs_run.py"),
-        "--fingerprint", fp, "--hero-name", hero,
+        "--hero-name", hero,
         "--grace", str(args.grace),
         "--duration", str(args.cap), "--log", log,
         "--auth-base", args.auth_base, "--ws-url", args.ws_url,
@@ -56,7 +55,7 @@ async def run_one(idx, args, sem, results, lock):
     m = re.search(r"player_id=(\d+)", text)
     pid = int(m.group(1)) if m else None
     rec = {
-        "idx": idx, "hero": hero, "fp": fp, "player_id": pid, "dur": round(dur, 1),
+        "idx": idx, "hero": hero, "player_id": pid, "dur": round(dur, 1),
         "true_death": true_death, "spawned": spawned,
         "no_slot_retries": retries, "name_retries": name_retries,
         "rc": proc.returncode,

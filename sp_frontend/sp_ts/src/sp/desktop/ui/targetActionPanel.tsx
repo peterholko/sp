@@ -19,6 +19,7 @@ import { VILLAGER, DEAD, OBJ, TILE, FOUNDED, BUTTON_WIDTH } from "../../core/con
 import { GameEvent } from "../../core/gameEvent";
 import { isSafeLogoutProtectedObject } from "../../core/protectedSettlements";
 import { canLightCampfireTarget } from "./campfireActionPolicy";
+import { canOfferItemTransfer } from "../../core/shipwreckTransferPolicy";
 import SmallButton from "./smallButton";
 
 interface TAProps {
@@ -143,6 +144,7 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
     var hideLightCampfireButton = !canLightCampfireTarget(
       selectedObjectState,
       safeLogoutProtected,
+      Global.playerId,
     );
     var exploreActionLabel = "Prospect";
 
@@ -194,11 +196,15 @@ export default class TargetActionPanel extends React.Component<TAProps, any> {
           exploreActionLabel = "Investigate";
           numButtons = 2;
         } else if (Util.isSubclass(this.props.selectedKey.id, "poi")) {
-          hideTranferButton = false;
+          const isDroppedBag = selectedObjectState?.template === "Dropped Bag";
+          hideTranferButton = !canOfferItemTransfer(
+            selectedObjectState,
+            Global.shipwreckSearched,
+          );
           hideInfoButton = false;
-          hideExploreButton = false;
+          hideExploreButton = isDroppedBag;
           exploreActionLabel = "Investigate";
-          numButtons = 2;
+          numButtons = hideTranferButton ? 1 : 2;
         }
         else if (Util.isSubclass(this.props.selectedKey.id, "merchant")) {
           hideMerchantButton = false;

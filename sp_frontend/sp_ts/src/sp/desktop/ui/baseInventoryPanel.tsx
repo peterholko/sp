@@ -10,6 +10,7 @@ import rightbutton from "ui_comp/rightbutton.png";
 import { Util } from "../../core/util";
 import ResourceItem from "./resourceItem";
 import { STRUCTURE, FOUNDED } from "../../core/config";
+import { shouldHighlightBurrowLogs } from "../../core/tutorialInventoryHighlight";
 
 interface BaseInventoryProps {
   left: boolean,
@@ -26,6 +27,7 @@ interface BaseInventoryProps {
   selectedItemId?: integer,
   disabledItems?: any,
   footer?: React.ReactNode,
+  currentObjectiveId?: string,
 }
 
 export default class BaseInventoryPanel extends React.Component<BaseInventoryProps, any> {
@@ -104,11 +106,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     }
 
     if (ownerState) {
-      if (Util.isSprite(ownerState.image)) {
-        imageName = ownerState.image + '_single.png';
-      } else {
-        imageName = ownerState.image + '.png';
-      }
+      imageName = Util.getImagePreviewName(ownerState.image) || '';
 
       name = ownerState.name;
     }
@@ -156,6 +154,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
       var itemName = itemsData[itemIndex].name;
       var image = itemsData[itemIndex].image;
       var quantity = itemsData[itemIndex].quantity;
+      var attrs = itemsData[itemIndex].attrs;
 
       var xPos = 31 + ((itemPageIndex % 5) * 53);
       var yPos = -286 + (Math.floor(itemPageIndex / 5) * 53);
@@ -176,11 +175,17 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
         itemName={itemName}
         image={image}
         quantity={quantity}
+        attrs={attrs}
         index={itemPageIndex}
         xPos={xPos}
         yPos={yPos}
         handleSelect={this.handleSelect}
-        disabled={disabled} />);
+        disabled={disabled}
+        highlighted={shouldHighlightBurrowLogs(
+          this.props.currentObjectiveId || '',
+          ownerState,
+          itemsData[itemIndex],
+        )} />);
 
       if (selectedItemId == itemId) {
         var xPos = -293 + ((itemPageIndex % 5) * 53);
@@ -248,7 +253,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
       <HalfPanel left={this.props.left}
         panelType={this.props.panelType}
         hideExitButton={this.props.hideExitButton}>
-        <img src={'/static/art/' + imageName} style={spriteStyle} />
+        {imageName && <img src={'/static/art/' + imageName} style={spriteStyle} />}
         <span style={spanNameStyle}>
           {name}
         </span>

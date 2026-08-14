@@ -117,10 +117,12 @@ impl CrisisBalanceScenario {
 pub struct GoblinCrisisBalanceConfigSnapshot {
     pub pressure_max: i32,
     pub danger_unlocked_pressure: i32,
-    pub three_structures_pressure: i32,
+    pub completed_structures_threshold: usize,
+    pub completed_structures_pressure: i32,
     pub villager_pressure: i32,
     pub explore_poi_pressure: i32,
-    pub choose_expansion_pressure: i32,
+    pub completed_stockades_threshold: usize,
+    pub completed_stockades_pressure: i32,
     pub gold_tier_thresholds: Vec<i32>,
     pub gold_pressure_per_tier: i32,
     pub sanctuary_pressure_per_level: i32,
@@ -130,7 +132,9 @@ pub struct GoblinCrisisBalanceConfigSnapshot {
     pub signs_threshold: i32,
     pub pressure_threshold: i32,
     pub preparing_threshold: i32,
-    pub assault_ready_threshold: i32,
+    /// `None` means AssaultReady is reached by the fixed online preparation
+    /// window rather than by another pressure threshold.
+    pub assault_ready_threshold: Option<i32>,
     pub signs_min_online_ticks: i32,
     pub pressure_min_online_ticks: i32,
     pub preparing_min_online_ticks: i32,
@@ -144,8 +148,8 @@ pub struct GoblinCrisisBalanceConfigSnapshot {
     pub assault_vision: u32,
     pub fallback_spawn_min_distance: i32,
     pub fallback_spawn_max_distance: i32,
-    pub sanctuary_spawn_min_offset_from_weak_radius: i32,
-    pub sanctuary_spawn_max_offset_from_weak_radius: i32,
+    pub sanctuary_spawn_min_offset_from_radius: i32,
+    pub sanctuary_spawn_max_offset_from_radius: i32,
     pub neighbouring_structure_exclusion_distance: u32,
     pub spawn_candidate_limit: usize,
 }
@@ -156,7 +160,7 @@ pub struct CrisisPressureBreakdown {
     pub structures: i32,
     pub villagers: i32,
     pub explore_poi: i32,
-    pub choose_expansion: i32,
+    pub stockades: i32,
     pub stored_gold: i32,
     pub sanctuary: i32,
     pub online_time: i32,
@@ -170,7 +174,7 @@ impl CrisisPressureBreakdown {
             .saturating_add(self.structures)
             .saturating_add(self.villagers)
             .saturating_add(self.explore_poi)
-            .saturating_add(self.choose_expansion)
+            .saturating_add(self.stockades)
             .saturating_add(self.stored_gold)
             .saturating_add(self.sanctuary)
             .saturating_add(self.online_time)
@@ -182,7 +186,7 @@ impl CrisisPressureBreakdown {
             ("structures", self.structures),
             ("villagers", self.villagers),
             ("explore_poi", self.explore_poi),
-            ("choose_expansion", self.choose_expansion),
+            ("stockades", self.stockades),
             ("stored_gold", self.stored_gold),
             ("sanctuary", self.sanctuary),
             ("online_time", self.online_time),
@@ -2165,16 +2169,16 @@ mod tests {
 
     fn full_pressure_breakdown() -> CrisisPressureBreakdown {
         CrisisPressureBreakdown {
-            danger_unlocked: 10,
+            danger_unlocked: 0,
             structures: 20,
-            villagers: 15,
+            villagers: 0,
             explore_poi: 10,
-            choose_expansion: 15,
+            stockades: 0,
             stored_gold: 15,
-            sanctuary: 10,
+            sanctuary: 0,
             online_time: 15,
-            raw_total: 110,
-            clamped_total: 100,
+            raw_total: 60,
+            clamped_total: 60,
         }
     }
 
@@ -2182,18 +2186,20 @@ mod tests {
     fn pressure_breakdown_matches_the_read_only_configuration_and_clamps() {
         let config = goblin_crisis_balance_config_snapshot();
         assert_eq!(config.pressure_max, 100);
-        assert_eq!(config.danger_unlocked_pressure, 10);
-        assert_eq!(config.three_structures_pressure, 20);
-        assert_eq!(config.villager_pressure, 15);
+        assert_eq!(config.danger_unlocked_pressure, 0);
+        assert_eq!(config.completed_structures_threshold, 5);
+        assert_eq!(config.completed_structures_pressure, 20);
+        assert_eq!(config.villager_pressure, 0);
         assert_eq!(config.explore_poi_pressure, 10);
-        assert_eq!(config.choose_expansion_pressure, 15);
+        assert_eq!(config.completed_stockades_threshold, 1);
+        assert_eq!(config.completed_stockades_pressure, 0);
         assert_eq!(config.gold_pressure_per_tier, 5);
-        assert_eq!(config.sanctuary_pressure_per_level, 2);
-        assert_eq!(config.sanctuary_pressure_max, 10);
+        assert_eq!(config.sanctuary_pressure_per_level, 0);
+        assert_eq!(config.sanctuary_pressure_max, 0);
         assert_eq!(config.online_pressure_per_tier, 5);
 
         let breakdown = full_pressure_breakdown();
-        assert_eq!(breakdown.contributor_sum(), 110);
+        assert_eq!(breakdown.contributor_sum(), 60);
         assert_eq!(breakdown.raw_total, breakdown.contributor_sum());
         assert_eq!(
             breakdown.clamped_total,

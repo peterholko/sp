@@ -6,6 +6,7 @@ import { GameEvent } from "../../core/gameEvent";
 
 interface AccountSetupProps {
   errorMessage: string;
+  submitting: boolean;
 }
 
 interface AccountSetupState {
@@ -52,7 +53,9 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
     this.setState({ confirmPassword: event.target.value, validationError: '' });
   }
 
-  handleSubmit() {
+  handleSubmit(event?) {
+    if (event) event.preventDefault();
+    if (this.props.submitting) return;
     const { accountName, email, password, confirmPassword } = this.state;
 
     if (accountName.length < 3 || accountName.length > 20) {
@@ -65,8 +68,8 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       return;
     }
 
-    if (password.length < 6) {
-      this.setState({ validationError: 'Password must be at least 6 characters' });
+    if (password.length < 8) {
+      this.setState({ validationError: 'Password must be at least 8 characters' });
       return;
     }
 
@@ -85,6 +88,7 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
   }
 
   handleSkip() {
+    if (this.props.submitting) return;
     Global.gameEmitter.emit(GameEvent.ACCOUNT_SETUP_SKIP, {});
   }
 
@@ -177,6 +181,9 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
       transform: 'translate(308px, 288px)',
       position: 'fixed',
       cursor: 'pointer',
+      border: 'none',
+      padding: 0,
+      background: 'transparent',
     } as React.CSSProperties;
 
     const skipStyle = {
@@ -192,28 +199,30 @@ export default class AccountSetupPanel extends React.Component<AccountSetupProps
     } as React.CSSProperties;
 
     return (
-      <div style={panelStyle}>
+      <form style={panelStyle} onSubmit={this.handleSubmit} aria-busy={this.props.submitting}>
         <img src={widepanel} style={bgStyle} />
         <span style={titleStyle}>Secure Your Account</span>
         <span style={descStyle}>Choose an account name and password to secure your progress.</span>
 
         <span style={nameLabel}>Account Name:</span>
-        <input style={nameInput} type="text" value={this.state.accountName} onChange={this.handleAccountNameChange} />
+        <input style={nameInput} type="text" value={this.state.accountName} onChange={this.handleAccountNameChange} autoComplete="username" />
 
         <span style={emailLabel}>Email (optional):</span>
-        <input style={emailInput} type="email" value={this.state.email} onChange={this.handleEmailChange} placeholder="for password recovery" />
+        <input style={emailInput} type="email" value={this.state.email} onChange={this.handleEmailChange} autoComplete="email" />
 
         <span style={passLabel}>Password:</span>
-        <input style={passInput} type="password" value={this.state.password} onChange={this.handlePasswordChange} />
+        <input style={passInput} type="password" value={this.state.password} onChange={this.handlePasswordChange} autoComplete="new-password" />
 
         <span style={confirmLabel}>Confirm Password:</span>
-        <input style={confirmInput} type="password" value={this.state.confirmPassword} onChange={this.handleConfirmPasswordChange} />
+        <input style={confirmInput} type="password" value={this.state.confirmPassword} onChange={this.handleConfirmPasswordChange} autoComplete="new-password" />
 
         {errorMessage && <span style={errorStyle}>{errorMessage}</span>}
 
-        <img src={okbutton} style={submitStyle} onClick={this.handleSubmit} />
-        <span style={skipStyle} onClick={this.handleSkip}>Skip for now</span>
-      </div>
+        <button type="submit" style={submitStyle} disabled={this.props.submitting} aria-label="Secure account">
+          <img src={okbutton} alt="" />
+        </button>
+        <button type="button" style={{ ...skipStyle, border: 'none', background: 'transparent' }} onClick={this.handleSkip} disabled={this.props.submitting}>Skip for now</button>
+      </form>
     );
   }
 }

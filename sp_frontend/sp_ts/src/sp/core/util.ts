@@ -157,7 +157,7 @@ export class Util {
     }
   }
 
-  static getImageType(imageName: string) : string { 
+  static getImageType(imageName: string) : string | undefined {
     if(imageName in Global.imageDefList) {
       if('animations' in Global.imageDefList[imageName]) {
         return SPRITE;
@@ -167,14 +167,28 @@ export class Util {
         return IMAGE;
       }
     }
+
+    return undefined;
   }
 
-  static isSprite(imageName) : Boolean {
+  static isSprite(imageName: string) : boolean | undefined {
     if(imageName in Global.imageDefList) {
       return 'animations' in Global.imageDefList[imageName];
-    } else {
-      return false;
     }
+
+    return undefined;
+  }
+
+  static getImagePreviewName(imageName: string) : string | null {
+    const imageType = Util.getImageType(imageName);
+
+    if (imageType === undefined) {
+      return null;
+    }
+
+    return imageType == SPRITE
+      ? imageName + '_single.png'
+      : imageName + '.png';
   }
 
   static isImage(imageName) : Boolean {
@@ -261,4 +275,3 @@ export class Util {
   static sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 }
-

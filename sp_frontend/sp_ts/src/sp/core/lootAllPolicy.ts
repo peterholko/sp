@@ -18,3 +18,20 @@ export function canLootAllEnemyCorpse(
       && lootAllItemIds(items).length > 0
   );
 }
+
+export function canLootAllDroppedBag(objectState: any, items: any[]): boolean {
+  return Boolean(
+    objectState
+      && objectState.template === "Dropped Bag"
+      && lootAllItemIds(items).length > 0
+  );
+}
+
+export function canLootAllTarget(
+  objectState: any,
+  currentPlayerId: string | number,
+  items: any[],
+): boolean {
+  return canLootAllEnemyCorpse(objectState, currentPlayerId, items)
+    || canLootAllDroppedBag(objectState, items);
+}

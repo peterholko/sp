@@ -1,6 +1,7 @@
 
 import * as React from "react";
 import styles from "./../ui.module.css";
+import { itemRarity, rarityBorderColor, rarityTooltip } from "../../core/itemRarity";
 
 interface InvItemProps {
   ownerId,
@@ -8,11 +9,13 @@ interface InvItemProps {
   itemId,
   image,
   quantity,
+  attrs?,
   xPos,
   yPos,
   index?,
   handleSelect?,
-  disabled?
+  disabled?,
+  highlighted?
 }
 
 export default class InventoryItem extends React.Component<InvItemProps, any> {
@@ -57,14 +60,30 @@ export default class InventoryItem extends React.Component<InvItemProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
+    const rarity = itemRarity({ attrs: this.props.attrs });
+    const borderColor = rarityBorderColor(rarity);
+    const rarityFrameStyle = {
+      width: '50px',
+      height: '50px',
+      position: 'relative',
+      boxSizing: 'border-box',
+      boxShadow: borderColor ? `inset 0 0 0 2px ${borderColor}` : 'none',
+      cursor: (this.props.handleSelect != null && !this.props.disabled) ? 'pointer' : 'default',
+    } as React.CSSProperties;
+
 
     return (
       <div style={divStyle}
+        title={rarityTooltip({ name: this.props.itemName, attrs: this.props.attrs })}
         onClick={(this.props.handleSelect != null && !this.props.disabled) ? this.handleClick : null}>
-        <img src={'/static/art/items/' + this.props.image + '.png'}
-            style={itemStyle}/>
-        <span id="itemquantity" className={styles.itemquantity}>{quantityStr}</span>
-        {this.props.disabled && <img src={'/static/art/ui/itemdisabled.png'} style={itemStyle} />}
+        <div style={rarityFrameStyle}>
+          <img src={'/static/art/items/' + this.props.image + '.png'}
+              style={itemStyle}/>
+          <span id="itemquantity" className={styles.itemquantity}>{quantityStr}</span>
+          {this.props.disabled && <img src={'/static/art/ui/itemdisabled.png'} style={itemStyle} />}
+          {this.props.highlighted &&
+            <span className={styles.tutorialItemHighlight} aria-hidden="true" />}
+        </div>
       </div>
     );
   }

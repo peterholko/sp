@@ -209,7 +209,10 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
 
 
       for (var i = 0; i < this.props.itemData.produces.length; i++) {
-        produces.push(this.props.itemData.produces[i]);
+        const producedItem = this.props.itemData.produces[i];
+        produces.push(producedItem.quantity > 1
+          ? producedItem.name + ' x' + producedItem.quantity
+          : producedItem.name);
       }
     }
 

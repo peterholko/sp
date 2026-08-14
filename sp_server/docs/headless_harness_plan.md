@@ -85,7 +85,7 @@ The bot prioritizes survival and immediate threats, then:
 
 1. investigates the run-owned Shipwreck;
 2. manually transfers its salvage through the production item-transfer path;
-3. equips recovered class gear and the Sharpened Stick, with the Crude Hatchet
+3. equips recovered class gear and the carried Sharpened Stick, with the Crude Hatchet
    available for lumberjacking;
 4. builds a normal Burrow from the five recovered Logs;
 5. uses or replaces a Campfire when the selected policy requires one;

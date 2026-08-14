@@ -32,12 +32,17 @@ import {
   mergedIncrementalVision,
   resetVisibilitySourceForInit,
 } from './visibilitySourcePolicy';
+import {
+  markMapObjectDestroyed,
+  markMapObjectOutsidePerception,
+  markMapObjectPerceived,
+} from './mapObjectPresence';
 
 export type { CrisisStatusPacket } from './crisisStatus';
 export type { SafeLogoutStatusPacket } from './safeLogoutStatus';
 
 export type NetworkPacket =
-  | { cmd: 'select_class'; class_name: string; hero_name: string }
+  | { cmd: 'select_class'; class_name: string; hero_name: string; portrait: string }
   | { cmd: 'recreate_hero' }
   | { cmd: 'get_stats'; id: number }
   | { cmd: 'image_def'; name: string }
@@ -62,6 +67,7 @@ export type NetworkPacket =
   | { cmd: 'info_merchant'; source_id: number; merchant_id: number }
   | { cmd: 'info_hire'; source_id: number }
   | { cmd: 'item_transfer'; item: number; source_id: number; target_id: number }
+  | { cmd: 'loot_all'; source_id: number; target_id: number }
   | { cmd: 'item_split'; owner_id: number; item: number; quantity: number }
   | { cmd: 'gather' }
   | { cmd: 'operate'; structure_id: number }
@@ -70,8 +76,8 @@ export type NetworkPacket =
   | { cmd: 'harvest'; structure_id: number }
   | { cmd: 'refine'; item_id: number }
   | { cmd: 'structure_refine'; structure_id: number; item_id: number }
-  | { cmd: 'craft'; recipe: string }
-  | { cmd: 'structure_craft'; structure_id: number; recipe: string }
+  | { cmd: 'craft'; recipe: string; signature_item_id?: number }
+  | { cmd: 'structure_craft'; structure_id: number; recipe: string; signature_item_id?: number }
   | { cmd: 'sleep'; structure_id: number }
   | { cmd: 'order_follow'; source_id: number }
   | { cmd: 'order_gather'; source_id: number; res_type: string }
@@ -151,7 +157,7 @@ export type ResponsePacket =
   | InfoStructurePacket
   | { packet: 'info_npc'; id: number; name: string; class: string; subclass: string; template: string; state: string; image: string; hsl: number[]; items?: Item[]; effects: string[] }
   | { packet: 'info_monolith'; id: number; name: string; class: string; subclass: string; template: string; image: string; soulshards: number }
-  | { packet: 'info_poi'; id: number; name: string; class: string; subclass: string; template: string; image: string; items?: Item[] }
+  | { packet: 'info_poi'; id: number; name: string; class: string; subclass: string; template: string; image: string; items?: Item[]; expires_in?: number }
   | { packet: 'info_obj'; id: number; name: string; class: string; subclass: string; template: string; image: string }
   | { packet: 'info_skills'; id: number; skills: Record<string, Skill> }
   | { packet: 'info_attrs'; id: number; attrs: Record<string, number> }
@@ -162,8 +168,8 @@ export type ResponsePacket =
   | { packet: 'info_inventory'; id: number; cap: number; tw: number; items: Item[] }
   | { packet: 'info_inventory_snapshot'; id: number; cap: number; tw: number; items: Item[] }
   | { packet: 'info_equip'; name: string; template: string; id: number; cap: number; tw: number; items: Item[] }
-  | { packet: 'info_item'; action?: string; id: number; owner: number; name: string; quantity: number; durability?: number; class: string; subclass: string; image: string; weight: number; equipped: boolean; price?: number; attrs?: Record<string, AttrVal>; produces?: string[] }
-  | { packet: 'info_item_transfer'; source_id: number; sourceitems: Inventory; target_id: number; targetitems: Inventory; reqitems: ResReq[] }
+  | { packet: 'info_item'; action?: string; id: number; owner: number; name: string; quantity: number; durability?: number; class: string; subclass: string; image: string; weight: number; equipped: boolean; price?: number; attrs?: Record<string, AttrVal>; produces?: ProducedItem[] }
+  | { packet: 'info_item_transfer'; source_id: number; sourceitems: Inventory; source_expires_in?: number; target_id: number; targetitems: Inventory; target_expires_in?: number; reqitems: ResReq[] }
   | { packet: 'info_items_update'; id: number; items_updated: Item[]; items_removed: number[] }
   | { packet: 'info_state_update'; id: number; state: string }
   | { packet: 'info_activity_update'; id: number; activity: string }
@@ -220,6 +226,7 @@ export type ResponsePacket =
   | { packet: 'debug_obj'; obj_id: number; enabled: boolean }
   | { packet: 'log_level_set'; target: string; level: string; success: boolean }
   | { packet: 'log_levels'; overrides: Array<[string, string]> }
+  | { packet: 'objectives'; build_campfire: boolean; build_3_structures: boolean; recruit_villager: boolean; explore_poi: boolean; survive_5_nights: boolean; scavenge_shipwreck: boolean }
   | { packet: 'objective_state'; version: number; current_id: string; objectives: ObjectiveProgress[] }
   | { packet: 'threat_state'; version: number; day: number; phase: string; pressure_level: string; next_night_warning: string; known_risks: ThreatRisk[]; legendary_threats: LegendaryThreat[] }
   | CrisisStatusPacket
@@ -338,6 +345,7 @@ export interface MapObj {
   subclass: string;
   template: string;
   image: string;
+  portrait?: string | null;
   x: number;
   y: number;
   state: string;
@@ -369,6 +377,7 @@ export interface Inventory {
   cap: number;
   tw: number;
   items: Item[];
+  expires_in?: number;
 }
 
 export interface Item {
@@ -414,6 +423,7 @@ export interface ProducedItem {
   image: string;
   class: string;
   subclass: string;
+  quantity: number;
 }
 
 export interface Structure {
@@ -501,6 +511,7 @@ export interface TileTerrainFeature {
 
 export interface TileResourceWithPos {
   name: string;
+  image: string;
   color: number;
   yield_label: string;
   quantity_label: string;
@@ -527,6 +538,7 @@ export interface HireData {
 export interface UpgradeTemplate {
   name: string;
   template: string;
+  image: string;
   req: ResReq[];
   build_time: number;
 }
@@ -558,7 +570,9 @@ export interface InfoHeroPacket {
   subclass: string;
   template: string;
   state: string;
+  activity?: string;
   image: string;
+  portrait?: string | null;
   hsl: number[];
   items?: Item[];
   skills?: Record<string, number>;
@@ -593,6 +607,7 @@ export interface InfoVillagerPacket {
   template: string;
   state: string;
   image: string;
+  portrait?: string | null;
   hsl: number[];
   items?: Item[];
   skills?: Record<string, number>;
@@ -833,11 +848,12 @@ export class Network {
     Global.socket.sendMessage(JSON.stringify(m));
   }*/
 
-  public sendSelectedClass(className: string, heroName: string) {
+  public sendSelectedClass(className: string, heroName: string, portrait: string) {
     var m = {
       cmd: "select_class",
       class_name: className,
-      hero_name: heroName
+      hero_name: heroName,
+      portrait
     };
 
     this.sendMessage(JSON.stringify(m));
@@ -874,6 +890,16 @@ export class Network {
     var m = {
       cmd: "item_transfer",
       item: item,
+      source_id: sourceId,
+      target_id: targetId,
+    };
+
+    this.sendMessage(JSON.stringify(m));
+  }
+
+  public sendLootAll(sourceId: number, targetId: number) {
+    const m: NetworkPacket = {
+      cmd: 'loot_all',
       source_id: sourceId,
       target_id: targetId,
     };
@@ -1269,20 +1295,22 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
-  public sendCraft(recipe) {
+  public sendCraft(recipe, signatureItemId?) {
     var m = {
       cmd: "craft",
-      recipe: recipe
+      recipe: recipe,
+      signature_item_id: signatureItemId
     }
 
     this.sendMessage(JSON.stringify(m));
   }
 
-  public sendStructureCraft(structureid, recipe) {
+  public sendStructureCraft(structureid, recipe, signatureItemId?) {
     var m = {
       cmd: "structure_craft",
       structure_id: structureid,
-      recipe: recipe
+      recipe: recipe,
+      signature_item_id: signatureItemId
     }
 
     this.sendMessage(JSON.stringify(m));
@@ -1861,12 +1889,13 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.COMBAT_TELEGRAPH, jsonData);
       } else if (jsonData.packet == "select_class") {
         this.clearLatestSafeLogoutStatus();
+        Global.shipwreckSearched = false;
         Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
         Global.playerId = jsonData.player;
         if (Global.pendingClassSelection) {
-          const { className, heroName } = Global.pendingClassSelection;
+          const { className, heroName, portrait } = Global.pendingClassSelection;
           Global.pendingClassSelection = null;
-          this.sendSelectedClass(className, heroName);
+          this.sendSelectedClass(className, heroName, portrait);
         } else {
           Global.gameEmitter.emit(NetworkEvent.SELECT_CLASS, {});
         }
@@ -2008,6 +2037,7 @@ export class Network {
       } else if (jsonData.packet == "info_true_death") {
         this.clearLatestSafeLogoutStatus();
         this.clearSanctuaryZones();
+        Global.shipwreckSearched = false;
         Global.gameEmitter.emit(NetworkEvent.SAFE_LOGOUT_RESET);
         Global.gameEmitter.emit(NetworkEvent.INFO_TRUE_DEATH, jsonData);
       } else if (jsonData.packet == "nearby_resources") {
@@ -2105,8 +2135,10 @@ export class Network {
           });
         }
       } else if (jsonData.packet == 'objectives') {
+        Global.shipwreckSearched = jsonData.scavenge_shipwreck === true;
         Global.gameEmitter.emit(NetworkEvent.OBJECTIVES, jsonData);
       } else if (jsonData.packet == 'objective_state') {
+        Global.currentObjectiveId = jsonData.current_id || '';
         Global.gameEmitter.emit(NetworkEvent.OBJECTIVE_STATE, jsonData);
       } else if (jsonData.packet == 'threat_state') {
         Global.gameEmitter.emit(NetworkEvent.THREAT_STATE, jsonData);
@@ -2162,11 +2194,13 @@ export class Network {
         template: obj.template,
         groups: obj.groups,
         state: obj.state,
+        activity: obj.activity,
         prevstate: obj.state,
         x: obj.x,
         y: obj.y,
         vision: obj.vision,
         image: obj.image,
+        portrait: obj.portrait,
         hsl: obj.hsl,
         work_done: obj.work_done,
         total_work: obj.total_work,
@@ -2175,6 +2209,7 @@ export class Network {
         action_duration_ms: obj.action_duration_ms,
         action_elapsed_ms: obj.action_elapsed_ms,
         perceptionObserver,
+        presence: 'perceived',
         op: 'added'
       };
 
@@ -2215,6 +2250,7 @@ export class Network {
       var observer = observers[index];
 
       if (observer.id in Global.objectStates) {
+        markMapObjectPerceived(Global.objectStates[observer.id]);
         // Update all the object state attributes
         Global.objectStates[observer.id].vision = observer.vision;
         Global.objectStates[observer.id].player = observer.player;
@@ -2224,10 +2260,12 @@ export class Network {
         Global.objectStates[observer.id].template = observer.template;
         Global.objectStates[observer.id].groups = observer.groups;
         Global.objectStates[observer.id].state = observer.state;
+        Global.objectStates[observer.id].activity = observer.activity;
         Global.objectStates[observer.id].prevstate = observer.state;
         Global.objectStates[observer.id].x = observer.x;
         Global.objectStates[observer.id].y = observer.y;
         Global.objectStates[observer.id].image = observer.image;
+        Global.objectStates[observer.id].portrait = observer.portrait;
         Global.objectStates[observer.id].hsl = observer.hsl;
         Global.objectStates[observer.id].work_done = observer.work_done;
         Global.objectStates[observer.id].total_work = observer.total_work;
@@ -2250,11 +2288,13 @@ export class Network {
           template: observer.template,
           groups: observer.groups,
           state: observer.state,
+          activity: observer.activity,
           prevstate: observer.state,
           x: observer.x,
           y: observer.y,
           vision: observer.vision,
           image: observer.image,
+          portrait: observer.portrait,
           hsl: observer.hsl,
           work_done: observer.work_done,
           total_work: observer.total_work,
@@ -2263,6 +2303,7 @@ export class Network {
           action_duration_ms: observer.action_duration_ms,
           action_elapsed_ms: observer.action_elapsed_ms,
           perceptionObserver: true,
+          presence: 'perceived',
           op: 'added',
           eventType: undefined
         };
@@ -2275,14 +2316,14 @@ export class Network {
     // Mark all for deleted first
     for (var objectId in Global.objectStates) {
       var objectState = Global.objectStates[objectId];
-      objectState.op = 'deleted';
-      objectState.eventType = 'perception';
+      markMapObjectOutsidePerception(objectState);
     }
 
     for (var index in visibleObjs) {
       var visibleObj = visibleObjs[index];
 
       if (visibleObj.id in Global.objectStates) {
+        markMapObjectPerceived(Global.objectStates[visibleObj.id]);
         // Update all the object state attributes
         Global.objectStates[visibleObj.id].vision = visibleObj.vision;
         Global.objectStates[visibleObj.id].player = visibleObj.player;
@@ -2292,10 +2333,12 @@ export class Network {
         Global.objectStates[visibleObj.id].template = visibleObj.template;
         Global.objectStates[visibleObj.id].groups = visibleObj.groups;
         Global.objectStates[visibleObj.id].state = visibleObj.state;
+        Global.objectStates[visibleObj.id].activity = visibleObj.activity;
         Global.objectStates[visibleObj.id].prevstate = visibleObj.state;
         Global.objectStates[visibleObj.id].x = visibleObj.x;
         Global.objectStates[visibleObj.id].y = visibleObj.y;
         Global.objectStates[visibleObj.id].image = visibleObj.image;
+        Global.objectStates[visibleObj.id].portrait = visibleObj.portrait;
         Global.objectStates[visibleObj.id].hsl = visibleObj.hsl;
         Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
         Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
@@ -2318,11 +2361,13 @@ export class Network {
           template: visibleObj.template,
           groups: visibleObj.groups,
           state: visibleObj.state,
+          activity: visibleObj.activity,
           prevstate: visibleObj.state,
           x: visibleObj.x,
           y: visibleObj.y,
           vision: visibleObj.vision,
           image: visibleObj.image,
+          portrait: visibleObj.portrait,
           hsl: visibleObj.hsl,
           work_done: visibleObj.work_done,
           total_work: visibleObj.total_work,
@@ -2331,6 +2376,7 @@ export class Network {
           action_duration_ms: visibleObj.action_duration_ms,
           action_elapsed_ms: visibleObj.action_elapsed_ms,
           perceptionObserver: false,
+          presence: 'perceived',
           op: 'added',
           eventType: undefined
         };
@@ -2347,10 +2393,12 @@ export class Network {
       if (!objectExists) {
         Global.objectStates[obj.id] = obj;
         Global.objectStates[obj.id].prevstate = obj.state;
+        Global.objectStates[obj.id].presence = 'perceived';
         Global.objectStates[obj.id].op = 'added';
 
         Global.gameEmitter.emit(GameEvent.OBJ_CREATED, obj.id);
       } else {
+        markMapObjectPerceived(Global.objectStates[obj.id]);
         Global.objectStates[obj.id].vision = mergedIncrementalVision(
           Global.objectStates[obj.id],
           obj.vision,
@@ -2362,10 +2410,12 @@ export class Network {
         Global.objectStates[obj.id].template = obj.template;
         Global.objectStates[obj.id].groups = obj.groups;
         Global.objectStates[obj.id].state = obj.state;
+        Global.objectStates[obj.id].activity = obj.activity;
         Global.objectStates[obj.id].prevstate = obj.state;
         Global.objectStates[obj.id].x = obj.x;
         Global.objectStates[obj.id].y = obj.y;
         Global.objectStates[obj.id].image = obj.image;
+        Global.objectStates[obj.id].portrait = obj.portrait;
         Global.objectStates[obj.id].work_done = obj.work_done;
         Global.objectStates[obj.id].total_work = obj.total_work;
         Global.objectStates[obj.id].work_per_sec = obj.work_per_sec;
@@ -2411,6 +2461,7 @@ export class Network {
 
         Global.objectStates[obj.id] = obj;
         Global.objectStates[obj.id].prevstate = obj.state;
+        Global.objectStates[obj.id].presence = 'perceived';
         Global.objectStates[obj.id].op = 'added';
         Global.objectStates[obj.id].updateAttr = undefined;
         Global.objectStates[obj.id].eventType = 'obj_create';
@@ -2425,6 +2476,8 @@ export class Network {
           console.warn("Ignoring obj_update for unknown object: " + obj_id);
           continue;
         }
+
+        markMapObjectPerceived(Global.objectStates[obj_id]);
 
         for (const objAttr of attrs) {
 
@@ -2472,6 +2525,9 @@ export class Network {
           } else if (attr == 'action_elapsed_ms') {
             Global.objectStates[obj_id].action_elapsed_ms = parseInt(value);
             Global.objectStates[obj_id].updateAttr = 'action_progress';
+          } else if (attr == 'activity') {
+            Global.objectStates[obj_id].activity = value;
+            Global.objectStates[obj_id].updateAttr = 'activity';
           }
 
           Global.objectStates[obj_id].op = 'updated';
@@ -2486,8 +2542,10 @@ export class Network {
         var src_y = events[i].src_y;
 
         if (obj.id in Global.objectStates) {
+          markMapObjectPerceived(Global.objectStates[obj.id]);
           Global.objectStates[obj.id].prevstate = Global.objectStates[obj.id].state;
           Global.objectStates[obj.id].state = obj.state;
+          Global.objectStates[obj.id].activity = obj.activity;
           Global.objectStates[obj.id].prevX = Global.objectStates[obj.id].x;
           Global.objectStates[obj.id].prevY = Global.objectStates[obj.id].y;
           Global.objectStates[obj.id].x = obj.x;
@@ -2501,6 +2559,7 @@ export class Network {
         } else {
           Global.objectStates[obj.id] = obj;
           Global.objectStates[obj.id].prevstate = obj.state;
+          Global.objectStates[obj.id].presence = 'perceived';
           Global.objectStates[obj.id].eventType = 'obj_move';
           Global.objectStates[obj.id].prevX = src_x;
           Global.objectStates[obj.id].prevY = src_y;
@@ -2516,9 +2575,7 @@ export class Network {
           continue;
         }
 
-        Global.objectStates[obj_id].op = 'deleted';
-        Global.objectStates[obj_id].updateAttr = undefined;
-        Global.objectStates[obj_id].eventType = 'obj_delete';
+        markMapObjectDestroyed(Global.objectStates[obj_id]);
         Global.gameEmitter.emit(GameEvent.OBJ_DELETED, obj_id);
       }
     }

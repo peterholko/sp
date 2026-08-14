@@ -786,7 +786,7 @@ fn visible_event_target(event: &VisibleEvent) -> Option<i32> {
         | VisibleEvent::ExperimentEvent { structure_id }
         | VisibleEvent::PlantEvent { structure_id }
         | VisibleEvent::TendEvent { structure_id }
-        | VisibleEvent::HarvestEvent { structure_id }
+        | VisibleEvent::HarvestEvent { structure_id, .. }
         | VisibleEvent::RepairEvent { structure_id } => Some(*structure_id),
         VisibleEvent::UseItemEvent { item_owner_id, .. } => Some(*item_owner_id),
         VisibleEvent::DrinkEvent { obj_id, .. }
@@ -795,9 +795,9 @@ fn visible_event_target(event: &VisibleEvent) -> Option<i32> {
         | VisibleEvent::FindFoodEvent { obj_id }
         | VisibleEvent::FindShelterEvent { obj_id }
         | VisibleEvent::SleepEvent { obj_id }
-        | VisibleEvent::FishingEvent { obj_id } => Some(*obj_id),
+        | VisibleEvent::FishingEvent { obj_id, .. } => Some(*obj_id),
         VisibleEvent::InvestigateEvent { target_id } => Some(*target_id),
-        VisibleEvent::SpellRaiseDeadEvent { corpse_id } => Some(*corpse_id),
+        VisibleEvent::SpellRaiseDeadEvent { corpse_id, .. } => Some(*corpse_id),
         _ => None,
     }
 }
@@ -1874,7 +1874,7 @@ fn own_sanctuary_status(
     {
         return OwnSanctuaryStatus::Invalid;
     }
-    if Map::distance((hero.pos.x, hero.pos.y), (zone.pos.x, zone.pos.y)) < zone.full_radius() {
+    if Map::distance((hero.pos.x, hero.pos.y), (zone.pos.x, zone.pos.y)) < zone.radius() {
         OwnSanctuaryStatus::Inside
     } else {
         OwnSanctuaryStatus::Outside
@@ -3093,7 +3093,7 @@ fn build_protected_settlements_snapshot(
             Some(ProtectedSettlementSnapshot {
                 player_id: *player_id,
                 monolith_id: run_key.bound_monolith_id,
-                sanctuary_radius: zone.full_radius(),
+                sanctuary_radius: zone.radius(),
             })
         })
         .collect::<Vec<_>>();
@@ -3430,7 +3430,7 @@ mod tests {
 
     #[test]
     fn protected_settlements_snapshot_is_canonical_sorted_and_uses_live_radius() {
-        use crate::game::{sanctuary_full_radius, SanctuaryZone};
+        use crate::game::{sanctuary_radius, SanctuaryZone};
 
         let mut presence = PlayerWorldPresenceState::default();
         presence.players.insert(
@@ -3487,17 +3487,17 @@ mod tests {
                 ProtectedSettlementSnapshot {
                     player_id: 5,
                     monolith_id: 501,
-                    sanctuary_radius: sanctuary_full_radius(2),
+                    sanctuary_radius: sanctuary_radius(2),
                 },
                 ProtectedSettlementSnapshot {
                     player_id: 9,
                     monolith_id: 901,
-                    sanctuary_radius: sanctuary_full_radius(1),
+                    sanctuary_radius: sanctuary_radius(1),
                 },
                 ProtectedSettlementSnapshot {
                     player_id: 20,
                     monolith_id: 2001,
-                    sanctuary_radius: sanctuary_full_radius(0),
+                    sanctuary_radius: sanctuary_radius(0),
                 },
             ]
         );
@@ -3506,7 +3506,7 @@ mod tests {
         assert_eq!(
             build_protected_settlements_snapshot(5, &presence, &zones, &explored_map)[0]
                 .sanctuary_radius,
-            sanctuary_full_radius(4)
+            sanctuary_radius(4)
         );
     }
 

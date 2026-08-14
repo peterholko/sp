@@ -60,11 +60,7 @@ export default class FoundedInventoryPanel extends React.Component<FoundedInvent
     const showBuildButton = reqs.every(req => req.cquantity == 0);
     const landscape = isLandscapeMobile();
 
-    if (Util.isSprite(Global.objectStates[objId].image)) {
-      var imageName = Global.objectStates[objId].image + '_single.png';
-    } else {
-      var imageName = Global.objectStates[objId].image + '.png';
-    }
+    const imageName = Util.getImagePreviewName(Global.objectStates[objId].image);
 
     const actions = showBuildButton
       ? [{ key: 'build', label: 'Build', icon: buildbutton, onClick: this.handleBuildClick }]
@@ -80,7 +76,7 @@ export default class FoundedInventoryPanel extends React.Component<FoundedInvent
           left={
             <>
               <MobileSummaryCard
-                imageSrc={'/static/art/' + imageName}
+                imageSrc={imageName ? '/static/art/' + imageName : undefined}
                 title={Global.objectStates[objId].name}
                 subtitle="Foundation"
                 imageSize={landscape ? 58 : 82} />

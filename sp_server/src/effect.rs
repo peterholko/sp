@@ -17,7 +17,7 @@ pub const HAMSTRUNG: &str = "Hamstrung";
 pub const FEAR: &str = "Fear";
 pub const STUNNED: &str = "Stunned";
 pub const SANCTUARY: &str = "Sanctuary";
-pub const WEAK_SANCTUARY: &str = "Weak Sanctuary";
+const LEGACY_WEAK_SANCTUARY: &str = "Weak Sanctuary";
 pub const FORTIFIED: &str = "Fortified";
 pub const BURNING: &str = "Burning";
 pub const CAMPFIRE_LIGHT: &str = "Campfire Light";
@@ -75,8 +75,8 @@ pub enum Effect {
     Hamstrung,
     Fear,
     Stunned,
+    #[serde(alias = "WeakSanctuary")]
     Sanctuary,
-    WeakSanctuary,
     Fortified,
     Burning,
     CampfireLight,
@@ -105,7 +105,6 @@ impl Effect {
             Effect::Fear => FEAR.to_string(),
             Effect::Stunned => STUNNED.to_string(),
             Effect::Sanctuary => SANCTUARY.to_string(),
-            Effect::WeakSanctuary => WEAK_SANCTUARY.to_string(),
             Effect::Fortified => FORTIFIED.to_string(),
             Effect::Burning => BURNING.to_string(),
             Effect::CampfireLight => CAMPFIRE_LIGHT.to_string(),
@@ -134,7 +133,8 @@ impl Effect {
             FEAR => Effect::Fear,
             STUNNED => Effect::Stunned,
             SANCTUARY => Effect::Sanctuary,
-            WEAK_SANCTUARY => Effect::WeakSanctuary,
+            // Old saved/template data is promoted to the one remaining tier.
+            LEGACY_WEAK_SANCTUARY => Effect::Sanctuary,
             FORTIFIED => Effect::Fortified,
             BURNING => Effect::Burning,
             CAMPFIRE_LIGHT => Effect::CampfireLight,
@@ -292,5 +292,20 @@ impl Effects {
         }
 
         return 1.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_weak_sanctuary_deserializes_as_sanctuary() {
+        let serialized: Effect = serde_json::from_str("\"WeakSanctuary\"").unwrap();
+        assert_eq!(serialized, Effect::Sanctuary);
+        assert_eq!(
+            Effect::from_string(&"Weak Sanctuary".to_string()),
+            Effect::Sanctuary
+        );
     }
 }

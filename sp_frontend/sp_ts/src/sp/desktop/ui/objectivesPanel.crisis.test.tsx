@@ -73,6 +73,18 @@ const renderedText = textContent(rendered);
 
 assert.equal(rendered.props['aria-label'], 'Personal goblin crisis status');
 assert.match(renderedText, /Minimum warning\s+complete/);
+
+const preparing = crisisStatusView({
+  ...status,
+  phase: 'preparing',
+  assault_ready: false,
+  preparation_seconds_remaining: 180,
+});
+assert.ok(preparing);
+assert.match(
+  textContent(panel.renderCrisisCard(preparing, {}, {})),
+  /Preparation window\s+3m 00s/,
+);
 assert.doesNotMatch(renderedText, /Preparation time|\b0s\b/);
 assert.match(renderedText, /Prepare your settlement/);
 assert.match(renderedText, /Defences\s+Needs attention/);

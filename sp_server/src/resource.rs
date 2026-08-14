@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
+use rand::seq::SliceRandom;
 use rand::Rng;
 
 use crate::constants::*;
@@ -328,6 +329,7 @@ impl Resource {
                     if Resource::is_visible_to(resource, player_id, discoveries) {
                         let tile_resource = network::TileResourceWithPos {
                             name: resource_type.to_string(),
+                            image: resource.image.clone(),
                             color: (resource.yield_level + resource.quantity_level) / 2,
                             yield_label: Resource::yield_level_to_label(resource.yield_level),
                             quantity_label: Resource::quantity_level_to_label(
@@ -344,6 +346,19 @@ impl Resource {
         }
 
         return tile_resources;
+    }
+
+    /// Resolve one successful gather into concrete item templates. Ordinary
+    /// resource recipes keep all declared outputs, while a hunting ground
+    /// selects one animal carcass per hunt from its encounter pool.
+    pub fn gather_output_names<R: Rng + ?Sized>(resource: &Resource, rng: &mut R) -> Vec<String> {
+        match resource.produces.as_ref() {
+            Some(outputs) if resource.res_type == GAME_ANIMAL => {
+                outputs.choose(rng).cloned().into_iter().collect::<Vec<_>>()
+            }
+            Some(outputs) if !outputs.is_empty() => outputs.clone(),
+            _ => vec![resource.name.clone()],
+        }
     }
 
     pub fn resource_color(yield_level: i32, quantity_level: i32) -> String {
@@ -1194,6 +1209,7 @@ impl Plugin for ResourcePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     fn test_resource(reveal: bool) -> Resource {
         Resource {
@@ -1233,11 +1249,59 @@ mod tests {
     }
 
     #[test]
+    fn nearby_resource_packet_preserves_the_template_image_key() {
+        let resource = test_resource(true);
+        let position = resource.pos;
+        let mut resources_on_tile = HashMap::new();
+        resources_on_tile.insert(resource.name.clone(), resource);
+        let resources = Resources(HashMap::from([(position, resources_on_tile)]));
+
+        let nearby = Resource::get_nearby_resources(
+            position,
+            &resources,
+            &ResourceDiscoveries::default(),
+            7,
+        );
+
+        assert_eq!(nearby.len(), 1);
+        assert_eq!(nearby[0].name, "Test Maple");
+        assert_eq!(nearby[0].image, "maple");
+    }
+
+    #[test]
     fn gather_chance_has_smooth_tiers_and_caps() {
         assert_eq!(Resource::gather_chance(0, 0), 0.85);
         assert_eq!(Resource::gather_chance(1, 25), 0.0);
         assert_eq!(Resource::gather_chance(2, 25), 0.60);
         assert_eq!(Resource::gather_chance(4, 50), 0.35);
         assert_eq!(Resource::gather_chance(99, 0), 0.95);
+    }
+
+    #[test]
+    fn hunting_ground_selects_one_carcass_while_other_resources_keep_all_outputs() {
+        let mut hunting_ground = test_resource(false);
+        hunting_ground.name = "Fruitful Hunting Grounds".to_string();
+        hunting_ground.res_type = GAME_ANIMAL.to_string();
+        hunting_ground.produces = Some(vec![
+            "Windstride Deer Carcass".to_string(),
+            "Felled Bristleback Boar".to_string(),
+            "Felled Swiftstep Hare".to_string(),
+        ]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let hunted = Resource::gather_output_names(&hunting_ground, &mut rng);
+        assert_eq!(hunted.len(), 1);
+        assert!(hunting_ground
+            .produces
+            .as_ref()
+            .unwrap()
+            .contains(&hunted[0]));
+
+        let mut ordinary = test_resource(false);
+        ordinary.produces = Some(vec!["Log".to_string(), "Bark".to_string()]);
+        assert_eq!(
+            Resource::gather_output_names(&ordinary, &mut rng),
+            vec!["Log".to_string(), "Bark".to_string()]
+        );
     }
 }

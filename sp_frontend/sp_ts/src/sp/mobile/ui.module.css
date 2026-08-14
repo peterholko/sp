@@ -308,3 +308,25 @@ progress::-moz-progress-bar {
   transition: 3s;
   margin-left: 50% !important;
 }
+
+.tutorialItemHighlightCell {
+  animation: tutorialItemGoldPulse 1.15s ease-in-out infinite;
+}
+
+@keyframes tutorialItemGoldPulse {
+  0%, 100% {
+    border-color: #e8ad2f;
+    box-shadow: 0 0 3px rgba(232, 173, 47, 0.65), inset 0 0 3px rgba(232, 173, 47, 0.35);
+  }
+  50% {
+    border-color: #ffe37a;
+    box-shadow: 0 0 10px rgba(255, 211, 79, 1), inset 0 0 6px rgba(255, 227, 122, 0.65);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tutorialItemHighlightCell {
+    animation: none;
+    border-color: #ffd45a !important;
+  }
+}

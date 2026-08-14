@@ -5,6 +5,7 @@ import { WeatherState } from './weatherState';
 import { ZIndexManager } from './zIndexManager';
 import { ProtectedSettlementLookup } from './protectedSettlements';
 import { SanctuaryZoneLookup } from './sanctuaryState';
+import { SANCTUARY_BORDER_VISIBLE_BY_DEFAULT } from './sanctuaryBorderVisibility';
 
 
 
@@ -42,8 +43,11 @@ export class Global {
     public static effectTextOffsetY = 0;
 
     public static objectStates : Record<string, ObjectState> = {};
+    public static shipwreckSearched = false;
+    public static currentObjectiveId = '';
     public static protectedSettlements: ProtectedSettlementLookup = {};
     public static sanctuaryZones: SanctuaryZoneLookup = {};
+    public static sanctuaryBorderVisible = SANCTUARY_BORDER_VISIBLE_BY_DEFAULT;
     public static tileStates : Record<string, TileState> = {};
     public static weatherStates : Record<string, WeatherState> = {};
 
@@ -84,7 +88,7 @@ export class Global {
     public static accountSetupCompleted = false;
     public static accountName = '';
 
-    public static pendingClassSelection: { className: string; heroName: string } | null = null;
+    public static pendingClassSelection: { className: string; heroName: string; portrait: string } | null = null;
 
     public static zIndexManager: ZIndexManager = new ZIndexManager();
 }

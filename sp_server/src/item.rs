@@ -16,6 +16,8 @@ use crate::constants::CONTAINER;
 
 #[derive(Debug, Reflect, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttrKey {
+    Rarity,
+    Affixes,
     Damage,
     Defense,
     Speed,
@@ -60,7 +62,7 @@ pub enum AttrKey {
     Farming,
     Hunting,
     Fishing,
-    Woodcutting,
+    Timberworking,
     Stonecutting,
     Refining,
     Crafting,
@@ -99,6 +101,8 @@ impl AttrKey {
 
     pub fn str_to_key(val: String) -> AttrKey {
         match val.as_str() {
+            "Rarity" => AttrKey::Rarity,
+            "Affixes" => AttrKey::Affixes,
             "Damage" => AttrKey::Damage,
             "Defense" => AttrKey::Defense,
             "Speed" => AttrKey::Speed,
@@ -143,7 +147,7 @@ impl AttrKey {
             "Farming" => AttrKey::Farming,
             "Hunting" => AttrKey::Hunting,
             "Fishing" => AttrKey::Fishing,
-            "Woodcutting" => AttrKey::Woodcutting,
+            "Timberworking" => AttrKey::Timberworking,
             "Stonecutting" => AttrKey::Stonecutting,
             "Refining" => AttrKey::Refining,
             "Crafting" => AttrKey::Crafting,
@@ -167,6 +171,194 @@ pub enum AttrVal {
     Num(f32),
     Bool(bool),
     Str(String),
+}
+
+#[derive(Debug, Reflect, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemRarity {
+    Common,
+    Uncommon,
+    Magic,
+    Rare,
+}
+
+impl ItemRarity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Common => "Common",
+            Self::Uncommon => "Uncommon",
+            Self::Magic => "Magic",
+            Self::Rare => "Rare",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Common => 0,
+            Self::Uncommon => 1,
+            Self::Magic => 2,
+            Self::Rare => 3,
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "Uncommon" => Self::Uncommon,
+            "Magic" => Self::Magic,
+            "Rare" => Self::Rare,
+            _ => Self::Common,
+        }
+    }
+
+    /// Roll a bounded component rarity from a 0..1000 roll. Stronger enemies
+    /// improve the odds, but Common remains the most likely result at every
+    /// currently supported danger tier.
+    pub fn from_loot_roll(danger_score: i32, roll: u16) -> Self {
+        let (uncommon_start, magic_start, rare_start) = if danger_score <= 55 {
+            (850, 985, 999)
+        } else if danger_score <= 160 {
+            (780, 960, 995)
+        } else {
+            (600, 880, 980)
+        };
+
+        if roll >= rare_start {
+            Self::Rare
+        } else if roll >= magic_start {
+            Self::Magic
+        } else if roll >= uncommon_start {
+            Self::Uncommon
+        } else {
+            Self::Common
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ComponentAffix {
+    name: &'static str,
+    key: AttrKey,
+}
+
+fn component_affix_pool(item_template: &ItemTemplate) -> Vec<ComponentAffix> {
+    let affixes = match item_template.class.as_str() {
+        "Hide" | "Leather" | "Game Animal" => vec![
+            ComponentAffix {
+                name: "Stout",
+                key: AttrKey::Defense,
+            },
+            ComponentAffix {
+                name: "Tracker's",
+                key: AttrKey::Hunting,
+            },
+            ComponentAffix {
+                name: "Fanged",
+                key: AttrKey::Damage,
+            },
+        ],
+        "Log" | "Timber" | "Stick" => vec![
+            ComponentAffix {
+                name: "Keen",
+                key: AttrKey::Damage,
+            },
+            ComponentAffix {
+                name: "Woodsman's",
+                key: AttrKey::Logging,
+            },
+            ComponentAffix {
+                name: "Hunter's",
+                key: AttrKey::Hunting,
+            },
+        ],
+        "Ore" | "Ingot" | "Dust" | "Stone" | "Block" | "Raw" => vec![
+            ComponentAffix {
+                name: "Keen",
+                key: AttrKey::Damage,
+            },
+            ComponentAffix {
+                name: "Stout",
+                key: AttrKey::Defense,
+            },
+            ComponentAffix {
+                name: "Miner's",
+                key: AttrKey::Mining,
+            },
+        ],
+        _ => Vec::new(),
+    };
+
+    affixes
+}
+
+fn affix_value_range(key: AttrKey, rarity: ItemRarity) -> (i32, i32) {
+    match key {
+        AttrKey::Damage | AttrKey::Defense => match rarity {
+            ItemRarity::Uncommon => (1, 1),
+            ItemRarity::Magic => (1, 2),
+            ItemRarity::Rare => (2, 3),
+            ItemRarity::Common => (0, 0),
+        },
+        _ => match rarity {
+            ItemRarity::Uncommon => (1, 2),
+            ItemRarity::Magic => (2, 3),
+            ItemRarity::Rare => (3, 5),
+            ItemRarity::Common => (0, 0),
+        },
+    }
+}
+
+/// Generate rarity and affix metadata for a component dropped by an enemy.
+/// Non-component loot and Common drops return no metadata, so they remain
+/// stack-compatible with the existing economy.
+pub fn roll_loot_component_attrs<R: Rng + ?Sized>(
+    item_template: &ItemTemplate,
+    danger_score: i32,
+    rng: &mut R,
+) -> HashMap<AttrKey, AttrVal> {
+    let mut attrs = HashMap::new();
+    let mut pool = component_affix_pool(item_template);
+    if pool.is_empty() {
+        return attrs;
+    }
+
+    let rarity = ItemRarity::from_loot_roll(danger_score, rng.gen_range(0..1000));
+    if rarity == ItemRarity::Common {
+        return attrs;
+    }
+
+    let affix_count = rarity.rank() as usize;
+    let mut names = Vec::with_capacity(affix_count);
+    for _ in 0..affix_count.min(pool.len()) {
+        let index = rng.gen_range(0..pool.len());
+        let affix = pool.swap_remove(index);
+        let (min, max) = affix_value_range(affix.key, rarity);
+        attrs.insert(affix.key, AttrVal::Num(rng.gen_range(min..=max) as f32));
+        names.push(affix.name);
+    }
+
+    attrs.insert(AttrKey::Rarity, AttrVal::Str(rarity.as_str().to_string()));
+    attrs.insert(AttrKey::Affixes, AttrVal::Str(names.join(", ")));
+    attrs
+}
+
+fn is_component_affix_attr(key: &AttrKey) -> bool {
+    matches!(
+        key,
+        AttrKey::Rarity
+            | AttrKey::Affixes
+            | AttrKey::Damage
+            | AttrKey::Defense
+            | AttrKey::Logging
+            | AttrKey::Hunting
+            | AttrKey::Mining
+    )
+}
+
+fn without_component_affixes(attrs: &HashMap<AttrKey, AttrVal>) -> HashMap<AttrKey, AttrVal> {
+    attrs
+        .iter()
+        .filter(|(key, _)| !is_component_affix_attr(key))
+        .map(|(key, value)| (*key, value.clone()))
+        .collect()
 }
 
 pub const FILTER_ALL: &str = "all";
@@ -195,15 +387,16 @@ pub const CHARCOAL: &str = "Charcoal";
 pub const INGOT: &str = "Ingot";
 pub const DUST: &str = "Dust";
 pub const TIMBER: &str = "Timber";
+pub const LOGS_OR_TIMBER: &str = "Logs or Timber";
 
 pub fn req_matches(req_type: &str, item_name: &str, item_class: &str, item_subclass: &str) -> bool {
     req_type == item_name || req_type == item_class || req_type == item_subclass
 }
 
 /// Returns true if an item (described by name/class/subclass) satisfies a
-/// structure requirement of the given type. Matches by name, class, or
-/// subclass, and additionally allows substitution of refined materials for
-/// raw materials at 1:1 — currently Timber may satisfy a Log requirement.
+/// structure requirement of the given type. Ordinary requirements match by
+/// name, class, or subclass. The explicit `Logs or Timber` construction
+/// requirement accepts either wood material at 1:1.
 ///
 /// Used only for structure build/upgrade/upkeep checks. Recipe ingredient
 /// matching uses strict equality (no substitution) to preserve recipe intent.
@@ -213,13 +406,12 @@ pub fn req_matches_build(
     item_class: &str,
     item_subclass: &str,
 ) -> bool {
-    if req_matches(req_type, item_name, item_class, item_subclass) {
-        return true;
+    if req_type == LOGS_OR_TIMBER {
+        return req_matches(LOG, item_name, item_class, item_subclass)
+            || req_matches(TIMBER, item_name, item_class, item_subclass);
     }
-    if req_type == LOG && item_class == TIMBER {
-        return true;
-    }
-    false
+
+    req_matches(req_type, item_name, item_class, item_subclass)
 }
 
 pub fn required_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
@@ -287,6 +479,7 @@ pub fn tool_attr_label(attr: &AttrKey) -> &'static str {
 
 pub const WEAPON: &str = "Weapon";
 pub const ARMOR: &str = "Armor";
+pub const CORPSE_ITEM: &str = "Corpse";
 pub const ITEM_FOOD: &str = "Food";
 
 pub const GATHERING: &str = "Gathering";
@@ -344,6 +537,12 @@ pub enum ItemLocation {
 pub enum ItemAction {
     Updated,
     Removed,
+}
+
+#[derive(Debug, Clone)]
+pub enum DurabilityUseOutcome {
+    Updated(Item),
+    Removed { id: i32, name: String },
 }
 
 #[derive(Debug, Reflect, Clone, PartialEq)]
@@ -431,6 +630,31 @@ pub enum RefineError {
     InventoryFull,
 }
 
+pub fn produced_item_packets(
+    outputs: &[String],
+    item_templates: &Vec<ItemTemplate>,
+) -> Vec<network::ProducedItem> {
+    let mut produced: Vec<network::ProducedItem> = Vec::new();
+
+    for output in outputs {
+        if let Some(existing) = produced.iter_mut().find(|item| item.name == *output) {
+            existing.quantity += 1;
+            continue;
+        }
+
+        let template = Item::get_template(output.clone(), item_templates);
+        produced.push(network::ProducedItem {
+            name: template.name.clone(),
+            image: template.image.clone(),
+            class: template.class.clone(),
+            subclass: template.subclass.clone(),
+            quantity: 1,
+        });
+    }
+
+    produced
+}
+
 impl Inventory {
     pub fn transfer(
         item_id: i32,
@@ -448,7 +672,7 @@ impl Inventory {
                 if let Some(merged_index) = target_inventory
                     .items
                     .iter()
-                    .position(|item| item.name == item_to_transfer.name)
+                    .position(|item| item.stack_identity_matches(&item_to_transfer))
                 {
                     let merged_item = &mut target_inventory.items[merged_index];
                     merged_item.quantity += item_to_transfer.quantity;
@@ -710,6 +934,7 @@ impl Inventory {
             constants::WEAPON => false,
             constants::ARMOR => false,
             constants::CONTAINER => false,
+            CORPSE_ITEM => false,
             _ => true,
         }
     }
@@ -960,6 +1185,27 @@ impl Inventory {
         custom_name: Option<String>,  //override
         custom_image: Option<String>, //override
     ) -> Item {
+        self.craft_with_signature(
+            item_id,
+            owner,
+            recipe_name,
+            recipe,
+            custom_name,
+            custom_image,
+            None,
+        )
+    }
+
+    fn craft_with_signature(
+        &mut self,
+        item_id: i32,
+        owner: i32,
+        recipe_name: String,
+        recipe: &Recipe,
+        custom_name: Option<String>,
+        custom_image: Option<String>,
+        signature_item_id: Option<i32>,
+    ) -> Item {
         // By default the recipe name is the item name
         let mut name: String = recipe_name.clone();
 
@@ -984,12 +1230,17 @@ impl Inventory {
 
         // Get consumed items and their attrs
         let consumed_items = self
-            .try_consume_reqs(&recipe.req)
+            .try_consume_craft_reqs(&recipe.req, signature_item_id)
             .expect("craft called without sufficient recipe inputs");
         let mut item_attrs = HashMap::new();
 
         for consumed_item in consumed_items.iter() {
-            item_attrs.extend(consumed_item.attrs.clone());
+            for (key, value) in consumed_item.attrs.iter() {
+                if Some(consumed_item.id) == signature_item_id && is_component_affix_attr(key) {
+                    continue;
+                }
+                item_attrs.insert(*key, value.clone());
+            }
         }
 
         // Preparing food (cooking, smoking, salting, stewing) neutralizes raw-meat
@@ -1006,6 +1257,34 @@ impl Inventory {
                     AttrKey::str_to_key(attr.name.clone()),
                     AttrVal::Num(attr.value.parse::<f32>().unwrap_or(0.0)),
                 );
+            }
+        }
+
+        // Exactly one explicitly selected component controls crafted rarity.
+        // Its numeric affixes are bonuses, so they add to a recipe's base
+        // attribute rather than replacing it (for example +2 Damage augments
+        // a 9-damage spear instead of turning it into a 2-damage spear).
+        if let Some(signature_id) = signature_item_id {
+            if let Some(signature_item) = consumed_items.iter().find(|item| item.id == signature_id)
+            {
+                for (key, value) in signature_item.attrs.iter() {
+                    if !is_component_affix_attr(key) {
+                        continue;
+                    }
+                    match (key, value) {
+                        (AttrKey::Rarity | AttrKey::Affixes, _) => {
+                            item_attrs.insert(*key, value.clone());
+                        }
+                        (_, AttrVal::Num(bonus)) => {
+                            let base = match item_attrs.get(key) {
+                                Some(AttrVal::Num(value)) => *value,
+                                _ => 0.0,
+                            };
+                            item_attrs.insert(*key, AttrVal::Num(base + bonus));
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -1053,18 +1332,42 @@ impl Inventory {
         custom_image: Option<String>,
         capacity: i32,
     ) -> Result<Item, CraftError> {
-        if !self.has_reqs(recipe.req.clone()) {
-            return Err(CraftError::InsufficientResources);
-        }
-
-        let mut candidate = self.clone();
-        let new_item = candidate.craft(
+        self.try_craft_with_signature(
             item_id,
             owner,
             recipe_name,
             recipe,
             custom_name,
             custom_image,
+            None,
+            capacity,
+        )
+    }
+
+    pub fn try_craft_with_signature(
+        &mut self,
+        item_id: i32,
+        owner: i32,
+        recipe_name: String,
+        recipe: &Recipe,
+        custom_name: Option<String>,
+        custom_image: Option<String>,
+        signature_item_id: Option<i32>,
+        capacity: i32,
+    ) -> Result<Item, CraftError> {
+        if !self.has_craft_reqs(recipe.req.clone(), signature_item_id) {
+            return Err(CraftError::InsufficientResources);
+        }
+
+        let mut candidate = self.clone();
+        let new_item = candidate.craft_with_signature(
+            item_id,
+            owner,
+            recipe_name,
+            recipe,
+            custom_name,
+            custom_image,
+            signature_item_id,
         );
 
         if candidate.get_total_weight() > capacity {
@@ -1093,14 +1396,21 @@ impl Inventory {
             .ok_or(RefineError::ItemNotRefineable)?;
         let yield_multiplier = yield_multiplier.max(1);
 
-        let mut output_templates = Vec::new();
+        let mut output_templates: Vec<(ItemTemplate, i32)> = Vec::new();
         let mut output_weight = 0.0;
         for output in outputs.iter() {
             let template = Item::find_template(output.clone(), item_templates)
                 .ok_or_else(|| RefineError::MissingItemTemplate(output.clone()))?
                 .clone();
             output_weight += template.weight * yield_multiplier as f32;
-            output_templates.push(template);
+            if let Some((_, quantity)) = output_templates
+                .iter_mut()
+                .find(|(existing, _)| existing.name == template.name)
+            {
+                *quantity += 1;
+            } else {
+                output_templates.push((template, 1));
+            }
         }
 
         let final_weight = self.get_total_weight() as f32 - source.weight + output_weight;
@@ -1109,16 +1419,25 @@ impl Inventory {
         }
 
         let mut produced = Vec::new();
-        for template in output_templates {
+        for (template, output_quantity) in output_templates {
+            let inherited_attrs = if source.class == GAME_ANIMAL && template.class != HIDE {
+                // A quality carcass represents useful hide quality. Do not
+                // duplicate the same signature affixes onto every parallel
+                // food output produced by butchery.
+                without_component_affixes(&source.attrs)
+            } else {
+                source.attrs.clone()
+            };
+            let produced_quantity = output_quantity * yield_multiplier;
             let (item, _) = self.new_with_attrs(
                 ids.new_item_id(),
                 self.owner,
                 template.name,
-                yield_multiplier,
-                source.attrs.clone(),
+                produced_quantity,
+                inherited_attrs,
                 item_templates,
             );
-            produced.push((item, yield_multiplier));
+            produced.push((item, produced_quantity));
         }
 
         let remaining_source = self.remove_quantity(source.id, 1);
@@ -1557,11 +1876,61 @@ impl Inventory {
         return None;
     }
 
-    pub fn update_durability(&mut self, item_id: i32, durability: i32) {
+    pub fn set_durability(&mut self, item_id: i32, durability: i32) {
         if let Some(update_index) = self.items.iter().position(|item| item.id == item_id) {
             let updated_item = &mut self.items[update_index];
             updated_item.durability = Some(durability);
         }
+    }
+
+    pub fn get_usable_by_class(&self, class: &str) -> Option<Item> {
+        self.items
+            .iter()
+            .find(|item| {
+                item.class == class
+                    && item.quantity > 0
+                    && item.durability.is_none_or(|durability| durability > 0)
+            })
+            .cloned()
+    }
+
+    /// Consume durability from one item. Durable stacks model each unit as
+    /// having the template maximum: when one unit is exhausted, advance to the
+    /// next unit in the stack at full durability. The final exhausted unit is
+    /// removed from the inventory.
+    pub fn consume_durability_use(
+        &mut self,
+        item_id: i32,
+        amount: i32,
+        maximum_durability: i32,
+    ) -> Option<DurabilityUseOutcome> {
+        let index = self.items.iter().position(|item| item.id == item_id)?;
+        let maximum_durability = maximum_durability.max(1);
+        let item = &mut self.items[index];
+
+        if item.quantity <= 0 || item.durability.is_some_and(|durability| durability <= 0) {
+            return None;
+        }
+
+        let current_durability = item.durability.unwrap_or(maximum_durability);
+        let remaining_durability = current_durability.saturating_sub(amount.max(0));
+
+        if remaining_durability > 0 {
+            item.durability = Some(remaining_durability);
+            return Some(DurabilityUseOutcome::Updated(item.clone()));
+        }
+
+        if item.quantity > 1 {
+            item.quantity -= 1;
+            item.durability = Some(maximum_durability);
+            return Some(DurabilityUseOutcome::Updated(item.clone()));
+        }
+
+        let removed = self.items.remove(index);
+        Some(DurabilityUseOutcome::Removed {
+            id: removed.id,
+            name: removed.name,
+        })
     }
 
     pub fn find_expired_items(&self, game_tick: i32) -> Vec<Item> {
@@ -1622,6 +1991,102 @@ impl Inventory {
         Some(plan)
     }
 
+    /// Crafting uses Common inputs unless the player explicitly names one
+    /// signature component. This keeps valuable drops out of villager work
+    /// queues and prevents a generic recipe from silently eating a rare stack.
+    fn craft_requirement_consumption_plan(
+        &self,
+        req_items: &[ResReq],
+        signature_item_id: Option<i32>,
+    ) -> Option<Vec<(usize, i32)>> {
+        let signature_index = match signature_item_id {
+            Some(item_id) => Some(
+                self.items
+                    .iter()
+                    .position(|item| item.id == item_id && item.quantity > 0)?,
+            ),
+            None => None,
+        };
+        let mut signature_used = false;
+        let mut available = self
+            .items
+            .iter()
+            .map(|item| item.quantity)
+            .collect::<Vec<_>>();
+        let mut plan = Vec::new();
+
+        for requirement in req_items {
+            if requirement.quantity < 0 {
+                return None;
+            }
+
+            let mut remaining = requirement.quantity;
+            if let Some(index) = signature_index {
+                let item = &self.items[index];
+                if !signature_used
+                    && remaining > 0
+                    && req_matches(
+                        &requirement.req_type,
+                        &item.name,
+                        &item.class,
+                        &item.subclass,
+                    )
+                {
+                    available[index] -= 1;
+                    remaining -= 1;
+                    signature_used = true;
+                    plan.push((index, 1));
+                }
+            }
+
+            let mut candidates = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(index, item)| {
+                    available[*index] > 0
+                        && req_matches(
+                            &requirement.req_type,
+                            &item.name,
+                            &item.class,
+                            &item.subclass,
+                        )
+                        && (item.rarity() == ItemRarity::Common || Some(*index) == signature_index)
+                })
+                .map(|(index, item)| (index, item.rarity().rank()))
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(index, rarity)| (*rarity, *index));
+
+            for (index, _) in candidates {
+                if remaining == 0 {
+                    break;
+                }
+                // A non-Common signature contributes exactly one unit. The
+                // rest of a recipe must be satisfied by ordinary materials.
+                if Some(index) == signature_index
+                    && self.items[index].rarity() != ItemRarity::Common
+                {
+                    continue;
+                }
+                let take = remaining.min(available[index]);
+                if take > 0 {
+                    available[index] -= take;
+                    remaining -= take;
+                    plan.push((index, take));
+                }
+            }
+
+            if remaining != 0 {
+                return None;
+            }
+        }
+
+        if signature_item_id.is_some() && !signature_used {
+            return None;
+        }
+        Some(plan)
+    }
+
     pub fn try_consume_reqs(&mut self, req_items: &[ResReq]) -> Option<Vec<Item>> {
         let plan = self.requirement_consumption_plan(req_items)?;
         let mut consumed_items = Vec::new();
@@ -1642,12 +2107,35 @@ impl Inventory {
         Some(consumed_items)
     }
 
+    fn try_consume_craft_reqs(
+        &mut self,
+        req_items: &[ResReq],
+        signature_item_id: Option<i32>,
+    ) -> Option<Vec<Item>> {
+        let plan = self.craft_requirement_consumption_plan(req_items, signature_item_id)?;
+        let mut consumed_items = Vec::new();
+        let removals = plan
+            .iter()
+            .map(|(index, quantity)| {
+                let mut consumed = self.items[*index].clone();
+                consumed.quantity = *quantity;
+                consumed_items.push(consumed);
+                (self.items[*index].id, *quantity)
+            })
+            .collect::<Vec<_>>();
+
+        for (item_id, quantity) in removals {
+            self.remove_quantity(item_id, quantity);
+        }
+        Some(consumed_items)
+    }
+
     pub fn consume_reqs(&mut self, req_items: Vec<ResReq>) -> Vec<Item> {
         self.try_consume_reqs(&req_items).unwrap_or_default()
     }
 
-    /// Like `consume_reqs`, but accepts refined materials as substitutes for raw
-    /// materials (Timber for Log). Use only for structure build/upgrade.
+    /// Like `consume_reqs`, but understands explicit flexible construction
+    /// requirements such as `Logs or Timber`.
     pub fn consume_reqs_for_build(&mut self, req_items: Vec<ResReq>) -> Vec<Item> {
         let mut consumed_items = Vec::new();
         let mut items_to_remove = Vec::new();
@@ -1703,8 +2191,8 @@ impl Inventory {
         return req_items;
     }
 
-    /// Like `process_req_items`, but allows refined materials to substitute for
-    /// raw materials (Timber for Log). Use only for structure build/upgrade.
+    /// Like `process_req_items`, but understands explicit flexible construction
+    /// requirements such as `Logs or Timber`.
     pub fn process_req_items_for_build(&self, mut req_items: Vec<ResReq>) -> Vec<ResReq> {
         for req_item in req_items.iter_mut() {
             let mut req_quantity = req_item.quantity;
@@ -1995,13 +2483,39 @@ impl Inventory {
             })
     }
 
+    pub fn find_by_craft_reqs(
+        &self,
+        source_req_items: Vec<ResReq>,
+        signature_item_id: Option<i32>,
+    ) -> Option<Vec<Item>> {
+        self.craft_requirement_consumption_plan(&source_req_items, signature_item_id)
+            .map(|plan| {
+                plan.into_iter()
+                    .map(|(index, quantity)| {
+                        let mut item = self.items[index].clone();
+                        item.quantity = quantity;
+                        item
+                    })
+                    .collect()
+            })
+    }
+
+    pub fn has_craft_reqs(
+        &self,
+        source_req_items: Vec<ResReq>,
+        signature_item_id: Option<i32>,
+    ) -> bool {
+        self.craft_requirement_consumption_plan(&source_req_items, signature_item_id)
+            .is_some()
+    }
+
     pub fn has_reqs(&self, source_req_items: Vec<ResReq>) -> bool {
         self.requirement_consumption_plan(&source_req_items)
             .is_some()
     }
 
-    /// Like `has_reqs`, but accepts refined materials as substitutes for raw
-    /// materials (Timber for Log). Use only for structure build/upgrade.
+    /// Like `has_reqs`, but understands explicit flexible construction
+    /// requirements such as `Logs or Timber`.
     pub fn has_reqs_for_build(&self, source_req_items: Vec<ResReq>) -> bool {
         let mut req_items = source_req_items.clone();
 
@@ -2824,6 +3338,20 @@ impl Items {
 }
 
 impl Item {
+    pub fn rarity(&self) -> ItemRarity {
+        match self.attrs.get(&AttrKey::Rarity) {
+            Some(AttrVal::Str(value)) => ItemRarity::from_str(value),
+            _ => ItemRarity::Common,
+        }
+    }
+
+    pub fn stack_identity_matches(&self, other: &Item) -> bool {
+        self.name == other.name
+            && self.attrs == other.attrs
+            && self.durability == other.durability
+            && self.experiment == other.experiment
+    }
+
     pub fn attr_num(&self, attr: &AttrKey) -> f32 {
         match self.attrs.get(attr) {
             Some(AttrVal::Num(value)) => *value,
@@ -2832,7 +3360,10 @@ impl Item {
     }
 
     pub fn is_gather_tool_for_attr(&self, attr: &AttrKey) -> bool {
-        self.class != TORCH && self.slot.is_some() && self.attr_num(attr) > 0.0
+        self.class != TORCH
+            && self.class != ARMOR
+            && self.slot.is_some()
+            && self.attr_num(attr) > 0.0
     }
 
     pub fn is_gather_tool_for_res_type(&self, res_type: &str) -> bool {
@@ -2914,8 +3445,8 @@ impl Item {
         return false;
     }
 
-    /// Like `is_req`, but accepts refined materials as substitutes for raw
-    /// materials (Timber for Log). Use only for structure build/upgrade.
+    /// Like `is_req`, but understands explicit flexible construction
+    /// requirements such as `Logs or Timber`.
     pub fn is_req_for_build(item: Item, reqs: Vec<ResReq>) -> bool {
         for req in reqs.iter() {
             if req_matches_build(&req.req_type, &item.name, &item.class, &item.subclass) {
@@ -2976,6 +3507,7 @@ impl Item {
             WEAPON => false,
             ARMOR => false,
             CONTAINER => false,
+            CORPSE_ITEM => false,
             _ => true,
         }
     }
@@ -3000,6 +3532,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flexible_wood_build_requirement_is_explicit_and_bidirectional() {
+        assert!(req_matches_build(LOGS_OR_TIMBER, "Maple Log", LOG, LOG));
+        assert!(req_matches_build(
+            LOGS_OR_TIMBER,
+            "Maple Timber",
+            TIMBER,
+            TIMBER
+        ));
+        assert!(!req_matches_build(
+            LOGS_OR_TIMBER,
+            "Fieldstone",
+            STONE,
+            STONE
+        ));
+
+        assert!(!req_matches_build(LOG, "Maple Timber", TIMBER, TIMBER));
+        assert!(!req_matches_build(TIMBER, "Maple Log", LOG, LOG));
+    }
+
+    #[test]
+    fn flexible_wood_build_requirement_counts_and_consumes_a_mixed_stack() {
+        let mut logs = test_item(1, LOG, None, false, Vec::new());
+        logs.name = "Maple Log".to_string();
+        logs.quantity = 2;
+        let mut timber = test_item(2, TIMBER, None, false, Vec::new());
+        timber.name = "Maple Timber".to_string();
+        timber.quantity = 3;
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![logs, timber],
+        };
+        let flexible_requirement = vec![ResReq {
+            req_type: LOGS_OR_TIMBER.to_string(),
+            quantity: 5,
+            cquantity: None,
+        }];
+
+        assert_eq!(inventory.count_for_build_req(LOGS_OR_TIMBER), 5);
+        assert!(inventory.has_reqs_for_build(flexible_requirement.clone()));
+        assert!(!inventory.has_reqs_for_build(vec![ResReq {
+            req_type: LOG.to_string(),
+            quantity: 5,
+            cquantity: None,
+        }]));
+
+        inventory.consume_reqs_for_build(flexible_requirement);
+        assert!(inventory.items.is_empty());
+    }
+
+    #[test]
+    fn human_corpse_items_remain_separate_when_transferred() {
+        let mut first = test_item(1, CORPSE_ITEM, None, false, Vec::new());
+        first.name = "Human Corpse".to_string();
+        let mut second = test_item(2, CORPSE_ITEM, None, false, Vec::new());
+        second.name = "Human Corpse".to_string();
+        let mut source = Inventory {
+            owner: 10,
+            items: vec![first, second],
+        };
+        let mut target = Inventory {
+            owner: 20,
+            items: Vec::new(),
+        };
+
+        Inventory::transfer(1, &mut source, &mut target);
+        Inventory::transfer(2, &mut source, &mut target);
+
+        assert!(source.items.is_empty());
+        assert_eq!(target.items.len(), 2);
+        assert!(target.items.iter().all(|item| {
+            item.name == "Human Corpse" && item.quantity == 1 && item.owner == target.owner
+        }));
+        assert_ne!(target.items[0].id, target.items[1].id);
+    }
+
+    #[test]
     fn gathering_tool_rating_reduces_work_time_without_instant_actions() {
         assert_eq!(gather_duration_ticks(30, 1.0), 300);
         assert_eq!(gather_duration_ticks(30, 2.0), 240);
@@ -3012,6 +3620,47 @@ mod tests {
         assert_eq!(harvest_tool_break_chance(6, 30), 0.10);
         assert_eq!(harvest_tool_break_chance(3, 30), 0.25);
         assert_eq!(harvest_tool_break_chance(0, 30), 1.0);
+    }
+
+    #[test]
+    fn durability_use_decrements_then_removes_the_final_item() {
+        let mut flint = test_item(10, IGNITION_TOOL, None, false, Vec::new());
+        flint.name = "Flint Shard".to_string();
+        flint.durability = Some(2);
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![flint],
+        };
+
+        assert!(inventory.get_usable_by_class(IGNITION_TOOL).is_some());
+        assert!(matches!(
+            inventory.consume_durability_use(10, 1, 2),
+            Some(DurabilityUseOutcome::Updated(item)) if item.durability == Some(1)
+        ));
+        assert!(matches!(
+            inventory.consume_durability_use(10, 1, 2),
+            Some(DurabilityUseOutcome::Removed { id: 10, .. })
+        ));
+        assert!(inventory.get_by_id(10).is_none());
+        assert!(inventory.get_usable_by_class(IGNITION_TOOL).is_none());
+    }
+
+    #[test]
+    fn durability_use_advances_a_stack_to_a_fresh_item() {
+        let mut flint = test_item(11, IGNITION_TOOL, None, false, Vec::new());
+        flint.name = "Flint Shard".to_string();
+        flint.quantity = 2;
+        flint.durability = Some(1);
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![flint],
+        };
+
+        assert!(matches!(
+            inventory.consume_durability_use(11, 1, 20),
+            Some(DurabilityUseOutcome::Updated(item))
+                if item.quantity == 1 && item.durability == Some(20)
+        ));
     }
 
     fn test_item(
@@ -3064,6 +3713,18 @@ mod tests {
             required_tool_attr_for_res_type(constants::GAME_ANIMAL),
             Some(AttrKey::Hunting)
         );
+    }
+
+    #[test]
+    fn gathering_affix_on_armor_does_not_turn_it_into_a_tool() {
+        let armor = test_item(
+            12,
+            ARMOR,
+            Some(Slot::Chest),
+            true,
+            vec![(AttrKey::Hunting, 3.0)],
+        );
+        assert!(!armor.is_gather_tool_for_attr(&AttrKey::Hunting));
     }
 
     #[test]
@@ -4494,6 +5155,131 @@ mod tests {
     }
 
     #[test]
+    fn rarity_roll_thresholds_are_bounded_by_danger() {
+        assert_eq!(ItemRarity::from_loot_roll(20, 849), ItemRarity::Common);
+        assert_eq!(ItemRarity::from_loot_roll(20, 850), ItemRarity::Uncommon);
+        assert_eq!(ItemRarity::from_loot_roll(20, 985), ItemRarity::Magic);
+        assert_eq!(ItemRarity::from_loot_roll(20, 999), ItemRarity::Rare);
+
+        assert_eq!(ItemRarity::from_loot_roll(250, 600), ItemRarity::Uncommon);
+        assert_eq!(ItemRarity::from_loot_roll(250, 880), ItemRarity::Magic);
+        assert_eq!(ItemRarity::from_loot_roll(250, 980), ItemRarity::Rare);
+    }
+
+    #[test]
+    fn ordinary_crafting_preserves_special_components() {
+        let mut rare = production_test_item(1, "Wood", "Log", "Wood", 1, 1.0);
+        rare.attrs.insert(
+            AttrKey::Rarity,
+            AttrVal::Str(ItemRarity::Rare.as_str().to_string()),
+        );
+        rare.attrs.insert(AttrKey::Damage, AttrVal::Num(3.0));
+        let common = production_test_item(2, "Wood", "Log", "Wood", 1, 1.0);
+        let mut inventory = Inventory {
+            owner: 1,
+            // Put Rare first to prove inventory ordering cannot consume it.
+            items: vec![rare, common],
+        };
+        let recipe = production_test_recipe(
+            1,
+            1.0,
+            vec![ResReq {
+                req_type: "Wood".to_string(),
+                quantity: 1,
+                cquantity: None,
+            }],
+        );
+
+        inventory
+            .try_craft(10, 1, "Output".to_string(), &recipe, None, None, 20)
+            .expect("Common input should satisfy ordinary crafting");
+
+        assert!(inventory.get_by_id(1).is_some());
+        assert!(inventory.get_by_id(2).is_none());
+        assert_eq!(
+            inventory.get_by_id(10).unwrap().rarity(),
+            ItemRarity::Common
+        );
+    }
+
+    #[test]
+    fn signature_component_sets_rarity_and_adds_affix_to_recipe_base() {
+        let mut rare = production_test_item(1, "Wood", "Log", "Wood", 1, 1.0);
+        rare.attrs.insert(
+            AttrKey::Rarity,
+            AttrVal::Str(ItemRarity::Rare.as_str().to_string()),
+        );
+        rare.attrs.insert(
+            AttrKey::Affixes,
+            AttrVal::Str("Keen, Woodsman's".to_string()),
+        );
+        rare.attrs.insert(AttrKey::Damage, AttrVal::Num(3.0));
+        rare.attrs.insert(AttrKey::Logging, AttrVal::Num(4.0));
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![rare],
+        };
+        let mut recipe = production_test_recipe(
+            1,
+            1.0,
+            vec![ResReq {
+                req_type: "Wood".to_string(),
+                quantity: 1,
+                cquantity: None,
+            }],
+        );
+        recipe.class = WEAPON.to_string();
+        recipe.attrs = Some(vec![crate::templates::ItemAttr {
+            name: "Damage".to_string(),
+            value: "9".to_string(),
+        }]);
+
+        let crafted = inventory
+            .try_craft_with_signature(
+                10,
+                1,
+                "Output".to_string(),
+                &recipe,
+                None,
+                None,
+                Some(1),
+                20,
+            )
+            .expect("selected Rare component should be consumed");
+
+        assert_eq!(crafted.rarity(), ItemRarity::Rare);
+        assert_eq!(crafted.attr_num(&AttrKey::Damage), 12.0);
+        assert_eq!(crafted.attr_num(&AttrKey::Logging), 4.0);
+        assert!(inventory.get_by_id(1).is_none());
+    }
+
+    #[test]
+    fn stack_transfer_does_not_merge_different_rarities() {
+        let common = production_test_item(1, "bones", "Raw", "bones", 1, 1.0);
+        let mut magic = production_test_item(2, "bones", "Raw", "bones", 1, 1.0);
+        magic.attrs.insert(
+            AttrKey::Rarity,
+            AttrVal::Str(ItemRarity::Magic.as_str().to_string()),
+        );
+        let mut source = Inventory {
+            owner: 1,
+            items: vec![magic],
+        };
+        let mut target = Inventory {
+            owner: 2,
+            items: vec![common],
+        };
+
+        Inventory::transfer(2, &mut source, &mut target);
+
+        assert_eq!(target.items.len(), 2);
+        assert_eq!(
+            target.items.iter().map(|item| item.quantity).sum::<i32>(),
+            2
+        );
+    }
+
+    #[test]
     fn craft_amount_is_deterministic_and_weight_is_per_unit() {
         let mut inventory = Inventory {
             owner: 1,
@@ -4561,6 +5347,106 @@ mod tests {
         assert_eq!(inventory.items.len(), 1);
         assert_eq!(inventory.items[0].name, "Ore");
         assert_eq!(inventory.items[0].quantity, 1);
+    }
+
+    #[test]
+    fn butchery_carries_carcass_rarity_to_hide_without_duplicating_it_to_food() {
+        let mut carcass = production_test_item(1, "Carcass", GAME_ANIMAL, "Deer", 1, 1.0);
+        carcass.produces = vec!["Raw Meat".to_string(), "Raw Hide".to_string()];
+        carcass.attrs.insert(
+            AttrKey::Rarity,
+            AttrVal::Str(ItemRarity::Magic.as_str().to_string()),
+        );
+        carcass.attrs.insert(AttrKey::Defense, AttrVal::Num(2.0));
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![carcass],
+        };
+        let templates = vec![
+            production_test_template(
+                "Carcass",
+                GAME_ANIMAL,
+                1.0,
+                Some(vec!["Raw Meat".to_string(), "Raw Hide".to_string()]),
+                None,
+            ),
+            production_test_template("Raw Meat", ITEM_FOOD, 1.0, None, None),
+            production_test_template("Raw Hide", HIDE, 1.0, None, None),
+        ];
+        let mut ids = Ids::default();
+
+        inventory
+            .try_refine(1, 1, 20, &templates, &mut ids)
+            .expect("carcass should butcher");
+
+        let meat = inventory
+            .items
+            .iter()
+            .find(|item| item.name == "Raw Meat")
+            .unwrap();
+        let hide = inventory
+            .items
+            .iter()
+            .find(|item| item.name == "Raw Hide")
+            .unwrap();
+        assert_eq!(meat.rarity(), ItemRarity::Common);
+        assert_eq!(hide.rarity(), ItemRarity::Magic);
+        assert_eq!(hide.attr_num(&AttrKey::Defense), 2.0);
+    }
+
+    #[test]
+    fn repeated_refine_outputs_are_one_stack_with_a_combined_quantity() {
+        let outputs = vec![
+            "Raw Meat".to_string(),
+            "Raw Meat".to_string(),
+            "Raw Meat".to_string(),
+            "Raw Meat".to_string(),
+            "Raw Meat".to_string(),
+            "Raw Meat".to_string(),
+            "Raw Hide".to_string(),
+        ];
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![production_test_item(
+                1,
+                "Carcass",
+                GAME_ANIMAL,
+                "Boar",
+                1,
+                1.0,
+            )],
+        };
+        let templates = vec![
+            production_test_template("Carcass", GAME_ANIMAL, 1.0, Some(outputs.clone()), None),
+            production_test_template("Raw Meat", ITEM_FOOD, 1.0, None, None),
+            production_test_template("Raw Hide", HIDE, 1.0, None, None),
+        ];
+        let mut ids = Ids::default();
+
+        let outcome = inventory
+            .try_refine(1, 1, 20, &templates, &mut ids)
+            .expect("carcass should butcher");
+
+        assert_eq!(outcome.produced.len(), 2);
+        assert!(outcome
+            .produced
+            .iter()
+            .any(|(item, quantity)| item.name == "Raw Meat" && *quantity == 6));
+        assert_eq!(
+            inventory
+                .items
+                .iter()
+                .find(|item| item.name == "Raw Meat")
+                .expect("combined meat stack")
+                .quantity,
+            6
+        );
+
+        let preview = produced_item_packets(&outputs, &templates);
+        assert_eq!(preview.len(), 2);
+        assert!(preview
+            .iter()
+            .any(|item| item.name == "Raw Meat" && item.quantity == 6));
     }
 
     /*#[test]

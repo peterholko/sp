@@ -189,25 +189,6 @@
   skill_req: 25
   level: 1
 
-- name: Windstride Stag
-  type: Game Animal
-  image: stag
-  terrain: 
-    - Deciduous Forest
-    - Rainforest
-    - Jungle
-    - Frozen Forest
-    - Pine Forest
-    - Palm Forest
-  yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
-  quantity: [0, 10, 25, 100, 200, 500, 1000]
-  skill_req: 0
-  level: 1 
-  properties: [Medium Armor]
-  produces: [Windstride Deer Carcass]
-
 - name: Amitanian Grape
   type: Plant
   image: grape
@@ -264,65 +245,59 @@
   skill_req: 0
   level: 1 
 
-- name: Bristleback Boar
+- name: Sparse Hunting Grounds
   type: Game Animal
-  image: boar
-  terrain:
-    - Deciduous Forest
-    - Rainforest
-    - Jungle
-    - Grasslands
-    - Plains
-  yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
-  quantity: [0, 10, 25, 100, 200, 500, 1000]
-  skill_req: 0
-  level: 1
-  properties: [Medium Armor]
-  produces: [Felled Bristleback Boar]
-
-- name: Swiftstep Hare
-  type: Game Animal
-  image: hare
+  image: fruitfulhuntinggroundsclearing
   terrain:
     - Grasslands
     - Grassland Hills
     - Plains
     - Plains Hills
+    - Desert
+    - Desert Hills
   yield_rate: [50, 25, 15, 8, 2]
   yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
   quantity_rate: [25, 25, 20, 15, 8, 5, 2]
   quantity: [0, 10, 25, 100, 200, 500, 1000]
   skill_req: 0
   level: 1
-  properties: []
-  produces: [Felled Swiftstep Hare]
+  produces:
+    - Felled Swiftstep Hare
+    - Windstride Deer Carcass
+    - Felled Dunehorn Antelope
 
-- name: Frostmane Elk
+- name: Fruitful Hunting Grounds
   type: Game Animal
-  image: elk
+  image: fruitfulhuntinggroundswoodland
+  terrain:
+    - Deciduous Forest
+    - Rainforest
+    - Jungle
+    - Frozen Forest
+    - Pine Forest
+    - Palm Forest
+    - Grasslands
+    - Plains
+  yield_rate: [50, 25, 15, 8, 2]
+  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
+  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
+  quantity: [0, 10, 25, 100, 200, 500, 1000]
+  skill_req: 0
+  level: 1
+  produces:
+    - Windstride Deer Carcass
+    - Felled Bristleback Boar
+    - Felled Swiftstep Hare
+
+- name: Bountiful Hunting Grounds
+  type: Game Animal
+  image: fruitfulhuntinggroundswater
   terrain:
     - Frozen Forest
     - Pine Forest
     - Snow Hills
     - Grassland Hills
-  yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
-  quantity: [0, 10, 25, 100, 200, 500, 1000]
-  skill_req: 15
-  level: 2
-  properties: [Medium Armor]
-  produces: [Felled Frostmane Elk]
-
-- name: Dunehorn Antelope
-  type: Game Animal
-  image: antelope
-  terrain:
-    - Desert
     - Desert Hills
-    - Plains
     - Plains Hills
   yield_rate: [50, 25, 15, 8, 2]
   yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
@@ -330,22 +305,8 @@
   quantity: [0, 10, 25, 100, 200, 500, 1000]
   skill_req: 10
   level: 2
-  properties: [Light Armor]
-  produces: [Felled Dunehorn Antelope]
-  
-- name: Stonegrove Ibex
-  type: Game Animal
-  image: ibex
-  terrain:
-    - Plains Hills
-    - Grassland Hills
-    - Snow Hills
-    - Desert Hills
-  yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
-  quantity: [0, 10, 25, 100, 200, 500, 1000]
-  skill_req: 10
-  level: 2
-  properties: [Medium Armor]
-  produces: [Felled Stonegrove Ibex]
+  produces:
+    - Felled Bristleback Boar
+    - Felled Frostmane Elk
+    - Felled Dunehorn Antelope
+    - Felled Stonegrove Ibex

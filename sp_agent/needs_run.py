@@ -10,7 +10,7 @@ survival director / nightly waves / legendary arc.
 Logs every packet to JSONL like passive_run.py.
 
 Usage:
-    python needs_run.py --fingerprint needsbot001 --hero-name NeedsBot \
+    python needs_run.py --hero-name NeedsBot \
         --log runs/needs.jsonl --duration 5400
 """
 
@@ -25,7 +25,7 @@ import requests
 import urllib3
 import websockets
 
-from passive_run import fingerprint_auth
+from passive_run import create_guest_session
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -723,7 +723,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--auth-base", default="https://192.168.1.28:3030")
     ap.add_argument("--ws-url", default="wss://192.168.1.28:8443")
-    ap.add_argument("--fingerprint", required=True)
     ap.add_argument("--hero-name", default="NeedsBot")
     ap.add_argument("--log", required=True)
     ap.add_argument("--duration", type=float, default=5400)
@@ -738,7 +737,7 @@ def main():
                          "stockade, and best-effort hire (implies --forage)")
     args = ap.parse_args()
 
-    session, player_id = fingerprint_auth(args.auth_base, args.fingerprint)
+    session, player_id = create_guest_session(args.auth_base)
     run = NeedsRun(args.ws_url, session, player_id, args.hero_name, args.log)
     run.smart = args.smart
     run.forage = args.forage or args.smart

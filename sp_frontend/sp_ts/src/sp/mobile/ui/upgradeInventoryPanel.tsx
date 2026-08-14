@@ -59,11 +59,7 @@ export default class UpgradeInventoryPanel extends React.Component<UpgradeInvent
     const showUpgradeButton = reqs.every(req => req.cquantity == 0);
     const landscape = isLandscapeMobile();
 
-    if (Util.isSprite(Global.objectStates[objId].image)) {
-      var imageName = Global.objectStates[objId].image + '_single.png';
-    } else {
-      var imageName = Global.objectStates[objId].image + '.png';
-    }
+    const imageName = Util.getImagePreviewName(Global.objectStates[objId].image);
 
     const actions = showUpgradeButton
       ? [{ key: 'upgrade', label: 'Upgrade', icon: upgradebutton, onClick: this.handleUpgradeClick }]
@@ -79,7 +75,7 @@ export default class UpgradeInventoryPanel extends React.Component<UpgradeInvent
           left={
             <>
               <MobileSummaryCard
-                imageSrc={'/static/art/' + imageName}
+                imageSrc={imageName ? '/static/art/' + imageName : undefined}
                 title={Global.objectStates[objId].name}
                 subtitle="Upgrade"
                 imageSize={landscape ? 58 : 82} />

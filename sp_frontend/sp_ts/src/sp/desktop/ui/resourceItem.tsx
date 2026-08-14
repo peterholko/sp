@@ -22,6 +22,10 @@ interface ResItemProps {
   insufficient?
 }
 
+function displayedResourceImage(resourceName, resourceImage) {
+  return resourceName === 'Logs or Timber' ? 'timber' : resourceImage;
+}
+
 export default class ResourceItem extends React.Component<ResItemProps, any> {
   constructor(props) {
     super(props);
@@ -32,7 +36,7 @@ export default class ResourceItem extends React.Component<ResItemProps, any> {
   handleClick = () => {
     const eventData = {
       name: this.props.resourceName,
-      image: this.props.resourceImage,
+      image: displayedResourceImage(this.props.resourceName, this.props.resourceImage),
       yieldLabel: this.props.yieldLabel,
       quantityLabel: this.props.quantityLabel,
       properties: this.props.properties,
@@ -66,6 +70,10 @@ export default class ResourceItem extends React.Component<ResItemProps, any> {
     var yPos = 0;
     var formattedQuantity = this.formatQuantity(this.props.quantity);
     var quantityStr = formattedQuantity;
+    const resourceImage = displayedResourceImage(
+      this.props.resourceName,
+      this.props.resourceImage,
+    );
     let fixedPos = this.props.fixedPos != null ? 'static' : 'fixed';
 
     if(this.props.currentQuantity != null) {
@@ -94,12 +102,37 @@ export default class ResourceItem extends React.Component<ResItemProps, any> {
       position: 'fixed'
     } as React.CSSProperties
 
+    const flexibleWoodLabelStyle = {
+      transform: 'translate(-4px, 2px)',
+      position: 'fixed',
+      zIndex: 1,
+      width: '58px',
+      padding: '1px 0',
+      borderRadius: '2px',
+      background: 'rgba(20, 17, 13, 0.82)',
+      color: '#f0d598',
+      fontFamily: 'Verdana',
+      fontSize: '7px',
+      fontWeight: 'bold',
+      lineHeight: '9px',
+      textAlign: 'center',
+      pointerEvents: 'none',
+      whiteSpace: 'nowrap'
+    } as React.CSSProperties
+
     //const imageName = this.props.resourceName.replace(/\s/g, '').toLowerCase();
 
     return (
-      <div style={divStyle} onClick={this.handleClick}>
-        <img src={'/static/art/items/' + this.props.resourceImage + '.png'}
+      <div
+        style={divStyle}
+        onClick={this.handleClick}
+        title={this.props.resourceName}
+        aria-label={this.props.resourceName}
+      >
+        <img src={'/static/art/items/' + resourceImage + '.png'}
             style={itemStyle} />
+        {this.props.resourceName === 'Logs or Timber' &&
+          <span style={flexibleWoodLabelStyle}>Logs or Timber</span>}
         {this.props.showQuantity &&
           <span id="itemquantity" className={styles.itemquantity}
                 style={this.props.insufficient ? { color: '#ff6b6b' } : undefined}>{quantityStr}</span>}
@@ -107,4 +140,3 @@ export default class ResourceItem extends React.Component<ResItemProps, any> {
     );
   }
 }
-

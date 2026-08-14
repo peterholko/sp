@@ -343,6 +343,7 @@ fn hungry_scorer_returns_emergency_score_when_starving() {
 #[test]
 fn drowsy_scorer_returns_low_score_when_rested() {
     let mut app = setup_test_app!(drowsy_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = DAWN;
 
     let villager = TestVillagerBuilder::new()
         .with_tired(10.0)
@@ -367,6 +368,7 @@ fn drowsy_scorer_returns_low_score_when_rested() {
 #[test]
 fn drowsy_scorer_returns_high_score_when_tired() {
     let mut app = setup_test_app!(drowsy_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = DAWN;
 
     let villager = TestVillagerBuilder::new()
         .with_tired(80.0)
@@ -385,6 +387,64 @@ fn drowsy_scorer_returns_high_score_when_tired() {
         score.get() >= 0.8,
         "Expected high score for tired villager, got {}",
         score.get()
+    );
+}
+
+#[test]
+fn drowsy_scorer_prioritizes_night_rest_even_when_rested() {
+    let mut app = setup_test_app!(drowsy_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager = TestVillagerBuilder::new()
+        .with_tired(0.0)
+        .spawn(app.world_mut());
+
+    let scorer_entity = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&DrowsyScorer, &mut commands, villager)
+    };
+    app.world_mut().flush();
+
+    app.update();
+
+    let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+    assert_eq!(score.get(), NIGHT_REST_SCORE);
+}
+
+#[test]
+fn emergency_thirst_still_outranks_night_rest() {
+    let mut app = setup_test_app!((thirsty_scorer_system, drowsy_scorer_system));
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager = TestVillagerBuilder::new()
+        .with_thirst(DEHYDRATED_SCORE)
+        .with_tired(0.0)
+        .spawn(app.world_mut());
+
+    let thirst_scorer = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&ThirstyScorer, &mut commands, villager)
+    };
+    let drowsy_scorer = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&DrowsyScorer, &mut commands, villager)
+    };
+    app.world_mut().flush();
+
+    app.update();
+
+    assert!(
+        app.world()
+            .entity(thirst_scorer)
+            .get::<Score>()
+            .unwrap()
+            .get()
+            > app
+                .world()
+                .entity(drowsy_scorer)
+                .get::<Score>()
+                .unwrap()
+                .get()
     );
 }
 
@@ -531,6 +591,7 @@ fn heat_scorer_returns_zero_when_logic_disabled() {
 #[test]
 fn good_morale_scores_zero_for_no_order() {
     let mut app = setup_test_app!(morale_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = DAWN;
 
     let villager = TestVillagerBuilder::new()
         .with_morale(60.0)
@@ -555,6 +616,7 @@ fn good_morale_scores_zero_for_no_order() {
 #[test]
 fn good_morale_scores_for_explicit_order() {
     let mut app = setup_test_app!(morale_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = DAWN;
 
     let villager = TestVillagerBuilder::new()
         .with_morale(60.0)
@@ -575,6 +637,28 @@ fn good_morale_scores_for_explicit_order() {
         0.6,
         "GoodMorale should keep routine order pressure for explicit orders"
     );
+}
+
+#[test]
+fn good_morale_does_not_select_assigned_work_at_night() {
+    let mut app = setup_test_app!(morale_scorer_system);
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager = TestVillagerBuilder::new()
+        .with_morale(60.0)
+        .with_order(Order::WorkQueue)
+        .spawn(app.world_mut());
+
+    let scorer_entity = {
+        let mut commands = app.world_mut().commands();
+        spawn_scorer(&GoodMorale, &mut commands, villager)
+    };
+    app.world_mut().flush();
+
+    app.update();
+
+    let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
+    assert_eq!(score.get(), 0.0);
 }
 
 // ==================== Priority Tests ====================
@@ -1117,6 +1201,101 @@ fn create_mining_tool_item(id: i32, owner: i32, equipped: bool, mining: f32) -> 
     }
 }
 
+fn create_stonecutting_tool_item(id: i32, owner: i32, equipped: bool, stonecutting: f32) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(AttrKey::Stonecutting, AttrVal::Num(stonecutting));
+    attrs.insert(AttrKey::Damage, AttrVal::Num(1.0));
+
+    Item {
+        id,
+        owner,
+        name: "Training Stonecutter Hammer".to_string(),
+        quantity: 1,
+        durability: Some(60),
+        class: TOOL.to_string(),
+        subclass: "Stonecutter Hammer".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "trainingstonecutterhammer.png".to_string(),
+        weight: 5.0,
+        equipped,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
+fn create_logging_tool_item(id: i32, owner: i32, equipped: bool, logging: f32) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(AttrKey::Logging, AttrVal::Num(logging));
+    attrs.insert(AttrKey::Damage, AttrVal::Num(3.0));
+
+    Item {
+        id,
+        owner,
+        name: "Flint Hatchet".to_string(),
+        quantity: 1,
+        durability: Some(45),
+        class: TOOL.to_string(),
+        subclass: "Hatchet".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "flinthatchet.png".to_string(),
+        weight: 5.0,
+        equipped,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
+fn create_farming_tool_item(id: i32, owner: i32, equipped: bool, farming: f32) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(AttrKey::Farming, AttrVal::Num(farming));
+    attrs.insert(AttrKey::Damage, AttrVal::Num(1.0));
+
+    Item {
+        id,
+        owner,
+        name: "Sickle".to_string(),
+        quantity: 1,
+        durability: Some(60),
+        class: TOOL.to_string(),
+        subclass: "Sickle".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "sickle.png".to_string(),
+        weight: 5.0,
+        equipped,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
+fn create_hunting_weapon_item(id: i32, owner: i32, equipped: bool, hunting: f32) -> Item {
+    let mut attrs = HashMap::new();
+    attrs.insert(AttrKey::Hunting, AttrVal::Num(hunting));
+
+    Item {
+        id,
+        owner,
+        name: "Hunting Bow".to_string(),
+        quantity: 1,
+        durability: Some(45),
+        class: WEAPON.to_string(),
+        subclass: "Bow".to_string(),
+        slot: Some(Slot::MainHand),
+        image: "bow.png".to_string(),
+        weight: 8.0,
+        equipped,
+        experiment: None,
+        start_time: 0,
+        attrs,
+        produces: Vec::new(),
+    }
+}
+
 /// Macro to create a test app with action system and all required resources
 macro_rules! setup_action_test_app {
     ($system:expr) => {{
@@ -1263,6 +1442,23 @@ fn enemy_distance_scorer_flees_when_unfortified_villager_has_nearby_enemy() {
 }
 
 #[test]
+fn enemy_distance_scorer_ignores_hidden_nearby_enemy() {
+    let mut app = setup_enemy_distance_app();
+    let scorer = spawn_enemy_distance_fixture(&mut app, false, "Necromancer");
+    let enemy = app
+        .world()
+        .resource::<EntityObjMap>()
+        .get_entity(3)
+        .expect("nearby enemy");
+    *app.world_mut().get_mut::<State>(enemy).unwrap() = State::Hiding;
+
+    app.update();
+
+    let score = app.world().entity(scorer).get::<Score>().unwrap();
+    assert_eq!(score.get(), 0.0);
+}
+
+#[test]
 fn enemy_distance_scorer_ignores_caster_near_fortified_villager() {
     let mut app = setup_enemy_distance_app();
     let scorer = spawn_enemy_distance_fixture(&mut app, true, "Necromancer");
@@ -1328,6 +1524,33 @@ fn move_to_missing_event_executing_fails_before_scheduling_movement() {
     register_test_obj(&mut app, 1, 1, villager);
 
     let action = spawn_action_as_requested(&mut app, &MoveTo, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert!(app.world().resource::<GameEvents>().is_empty());
+}
+
+#[test]
+fn process_order_rejects_work_queue_task_at_night_before_claiming_work() {
+    let mut app = setup_action_test_app!(process_order_system);
+    app.world_mut().insert_resource(VisibleEvents(Vec::new()));
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Order::WorkQueue);
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action = spawn_action_as_requested(&mut app, &ProcessOrder, villager);
     app.update();
 
     assert_eq!(
@@ -1427,7 +1650,8 @@ fn gather_order_on_current_tile_schedules_another_gather_event() {
         &event.event_type,
         GameEventType::GatherEvent {
             gatherer_id,
-            res_type
+            res_type,
+            ..
         } if *gatherer_id == 1 && res_type == ORE
     )));
 
@@ -1513,7 +1737,8 @@ fn plant_gather_order_does_not_require_tool() {
         &event.event_type,
         GameEventType::GatherEvent {
             gatherer_id,
-            res_type
+            res_type,
+            ..
         } if *gatherer_id == 1 && res_type == PLANT
     )));
 }
@@ -1634,6 +1859,638 @@ fn gather_order_without_tool_fetches_matching_storage_tool() {
             .pos,
         gather_pos
     );
+}
+
+#[test]
+fn harvest_order_fetches_and_equips_a_farming_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+    app.world_mut().insert_resource(GameEvents(HashMap::new()));
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let farm_pos = Position { x: 7, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::Harvest,
+        Assignment {
+            structure_id: 3,
+            structure_name: "Farm".to_string(),
+            structure_pos: farm_pos,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_farming_tool_item(200, 2, false, 3.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ToolFetchTarget>()
+            .unwrap()
+            .res_type,
+        FOOD
+    );
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        farm_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<Inventory>()
+        .unwrap()
+        .has_equipped_tool_for_attr(&AttrKey::Farming));
+    assert_eq!(
+        app.world().entity(villager).get::<ActiveTask>().unwrap(),
+        &ActiveTask::Harvesting
+    );
+}
+
+#[test]
+fn lumbercamp_work_queue_fetches_and_equips_logging_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let lumbercamp_pos = Position { x: 7, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::WorkQueue,
+        Assignment {
+            structure_id: 3,
+            structure_name: "Lumbercamp".to_string(),
+            structure_pos: lumbercamp_pos,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_logging_tool_item(200, 2, false, 2.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let lumbercamp = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(1),
+            lumbercamp_pos,
+            Name("Lumbercamp".to_string()),
+            Template("Lumbercamp".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Resource,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 3,
+                items: Vec::new(),
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 3, 1, lumbercamp);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ToolFetchTarget>()
+            .unwrap()
+            .res_type,
+        LOG
+    );
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        lumbercamp_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<Inventory>()
+        .unwrap()
+        .has_equipped_tool_for_attr(&AttrKey::Logging));
+}
+
+#[test]
+fn mine_work_queue_fetches_and_equips_mining_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let mine_pos = Position { x: 7, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::WorkQueue,
+        Assignment {
+            structure_id: 3,
+            structure_name: "Mine".to_string(),
+            structure_pos: mine_pos,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_mining_tool_item(200, 2, false, 3.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let mine = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(1),
+            mine_pos,
+            Name("Mine".to_string()),
+            Template("Mine".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Resource,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 3,
+                items: Vec::new(),
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 3, 1, mine);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ToolFetchTarget>()
+            .unwrap()
+            .res_type,
+        ORE
+    );
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        mine_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<Inventory>()
+        .unwrap()
+        .has_equipped_tool_for_attr(&AttrKey::Mining));
+}
+
+#[test]
+fn quarry_work_queue_fetches_and_equips_stonecutting_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let quarry_pos = Position { x: 7, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::WorkQueue,
+        Assignment {
+            structure_id: 3,
+            structure_name: "Quarry".to_string(),
+            structure_pos: quarry_pos,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_stonecutting_tool_item(200, 2, false, 3.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let quarry = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(1),
+            quarry_pos,
+            Name("Quarry".to_string()),
+            Template("Quarry".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Resource,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 3,
+                items: Vec::new(),
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 3, 1, quarry);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ToolFetchTarget>()
+            .unwrap()
+            .res_type,
+        STONE
+    );
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        quarry_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<Inventory>()
+        .unwrap()
+        .has_equipped_tool_for_attr(&AttrKey::Stonecutting));
+}
+
+#[test]
+fn trapper_work_queue_fetches_and_equips_hunting_tool() {
+    let mut app = App::new();
+    app.add_systems(
+        Update,
+        (
+            set_order_destination_system,
+            maybe_transfer_gather_tool_system,
+        ),
+    );
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut()
+        .insert_resource(EntityObjMap(HashMap::new()));
+    app.world_mut().insert_resource(Ids::default());
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let storage_pos = Position { x: 6, y: 5 };
+    let trapper_pos = Position { x: 7, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        Order::WorkQueue,
+        Assignment {
+            structure_id: 3,
+            structure_name: "Trapper".to_string(),
+            structure_pos: trapper_pos,
+        },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let storage = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            storage_pos,
+            Name("Storage".to_string()),
+            Template("Storage".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Storage,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 2,
+                items: vec![create_hunting_weapon_item(200, 2, false, 3.0)],
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 2, 1, storage);
+
+    let trapper = app
+        .world_mut()
+        .spawn((
+            Id(3),
+            PlayerId(1),
+            trapper_pos,
+            Name("Trapper".to_string()),
+            Template("Trapper".to_string()),
+            Class(CLASS_STRUCTURE.to_string()),
+            Subclass::Resource,
+            State::None,
+            ClassStructure,
+            Inventory {
+                owner: 3,
+                items: Vec::new(),
+            },
+        ))
+        .id();
+    register_test_obj(&mut app, 3, 1, trapper);
+
+    let set_destination_action =
+        spawn_action_as_requested(&mut app, &SetOrderDestination, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(set_destination_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        storage_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<ToolFetchTarget>()
+            .unwrap()
+            .res_type,
+        GAME_ANIMAL
+    );
+
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Position>()
+        .unwrap() = storage_pos;
+    let transfer_action = spawn_action_as_requested(&mut app, &MaybeTransferGatherTool, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(transfer_action)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        trapper_pos
+    );
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<Inventory>()
+        .unwrap()
+        .has_equipped_tool_for_attr(&AttrKey::Hunting));
 }
 
 #[test]
@@ -2064,6 +2921,71 @@ fn fight_back_system_does_not_melee_out_from_fortification() {
 
     let action_state = app.world().entity(action).get::<ActionState>().unwrap();
     assert_eq!(*action_state, ActionState::Failure);
+}
+
+#[test]
+fn fight_back_system_can_attack_out_from_fortification_with_spear() {
+    let mut app = setup_action_test_app!(fight_back_system);
+    app.world_mut().insert_resource(open_test_map());
+    app.world_mut().insert_resource(minimal_combat_templates());
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(Position { x: 5, y: 5 })
+        .with_equipped_weapon()
+        .spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Inventory>()
+        .unwrap()
+        .items[0]
+        .subclass = "Spear".to_string();
+
+    let attacker = spawn_base_obj(
+        app.world_mut(),
+        2,
+        1001,
+        Position { x: 6, y: 5 },
+        Subclass::None,
+    );
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Subclass::Villager);
+    insert_combat_components(app.world_mut(), villager, 30, 10);
+    insert_combat_components(app.world_mut(), attacker, 30, 1);
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<Effects>()
+        .unwrap()
+        .0
+        .insert(Effect::Fortified, (0, 0.0, 1));
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(Fortified { id: 99 });
+    app.world_mut().entity_mut(villager).insert(LastAttacker {
+        id: 2,
+        tick: TICKS_PER_SEC,
+    });
+
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, attacker);
+    }
+
+    let action = spawn_action_as_requested(&mut app, &FightBack, villager);
+
+    app.update();
+
+    let attacker_stats = app.world().entity(attacker).get::<Stats>().unwrap();
+    assert!(
+        attacker_stats.hp < 30,
+        "expected spear-armed villager to attack out from fortification"
+    );
+    let action_state = app.world().entity(action).get::<ActionState>().unwrap();
+    assert_eq!(*action_state, ActionState::Executing);
 }
 
 #[test]
@@ -3368,6 +4290,32 @@ fn activity_text_displays_mining_when_tool_equipped_or_gathering() {
 }
 
 #[test]
+fn activity_text_displays_logging_while_gathering_logs() {
+    let order = Order::Gather {
+        res_type: LOG.to_string(),
+        pos: Position { x: 0, y: 0 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+
+    assert_eq!(
+        villager_activity_text(
+            &ActiveTask::Logging,
+            &State::Gathering,
+            Some(&order),
+            &inventory,
+            None,
+            None,
+        ),
+        "Logging"
+    );
+}
+
+#[test]
 fn activity_text_prefers_fleeing_and_fetching_over_tool_fetch() {
     let tool_fetch_target = ToolFetchTarget {
         storage_id: 2,
@@ -3414,6 +4362,8 @@ fn activity_text_prefers_fleeing_and_fetching_over_tool_fetch() {
 fn activity_update_system_emits_when_blocked_work_is_removed() {
     let mut app = App::new();
     app.add_systems(Update, activity_update_system);
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut().insert_resource(VisibleEvents(Vec::new()));
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     let client_id = Uuid::new_v4();
@@ -3457,6 +4407,15 @@ fn activity_update_system_emits_when_blocked_work_is_removed() {
             activity: "Unknown".to_string(),
         }
     );
+
+    let visible_events = app.world().resource::<VisibleEvents>();
+    assert!(visible_events.iter().any(|event| {
+        matches!(
+            &event.event_type,
+            VisibleEvent::UpdateObjEvent { attrs }
+                if attrs == &vec![("activity".to_string(), "Unknown".to_string())]
+        )
+    }));
 }
 
 #[test]
@@ -3821,6 +4780,92 @@ fn exhausted_villager_without_shelter_rests_on_current_tile_and_loses_morale() {
 }
 
 #[test]
+fn villager_without_shelter_rests_at_nearest_owned_lit_campfire_at_night() {
+    let mut app = setup_action_test_app!(find_shelter_system);
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager_pos = Position { x: 8, y: 9 };
+    let campfire_pos = Position { x: 10, y: 9 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(villager_pos)
+        .with_tired(0.0)
+        .with_morale(50.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    app.world_mut().spawn((
+        Id(2),
+        PlayerId(1),
+        campfire_pos,
+        State::None,
+        ClassStructure,
+        Campfire {
+            is_lit: true,
+            lit_at: NIGHT,
+            duration: 0,
+        },
+    ));
+    // An enemy campfire is closer, and an owned unlit campfire is closer too;
+    // neither is a valid night-rest destination.
+    app.world_mut().spawn((
+        Id(3),
+        PlayerId(2),
+        Position { x: 9, y: 9 },
+        State::None,
+        ClassStructure,
+        Campfire {
+            is_lit: true,
+            lit_at: NIGHT,
+            duration: 0,
+        },
+    ));
+    app.world_mut().spawn((
+        Id(4),
+        PlayerId(1),
+        Position { x: 8, y: 8 },
+        State::None,
+        ClassStructure,
+        Campfire {
+            is_lit: false,
+            lit_at: NIGHT,
+            duration: 0,
+        },
+    ));
+
+    let action_entity = spawn_action_as_requested(
+        &mut app,
+        &FindShelter {
+            trigger_event: "Sleep".to_string(),
+        },
+        villager,
+    );
+
+    app.update();
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<EventExecuting>()
+        .unwrap()
+        .state = EventExecutingState::Completed;
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        campfire_pos
+    );
+}
+
+#[test]
 fn exhausted_villager_without_shelter_does_not_rest_while_combat_locked() {
     let mut app = setup_action_test_app!(find_shelter_system);
 
@@ -3985,6 +5030,7 @@ fn executing_sleep_fails_safely_when_event_executing_disappears() {
 #[test]
 fn sleep_action_succeeds_when_event_completes() {
     let mut app = setup_action_test_app!(sleep_action_system);
+    app.world_mut().resource_mut::<GameTick>().0 = DAWN;
 
     let villager = ActionTestVillagerBuilder::new()
         .with_tired(80.0)
@@ -4034,6 +5080,66 @@ fn sleep_action_succeeds_when_event_completes() {
 }
 
 #[test]
+fn completed_sleep_remains_active_at_night_and_ends_at_first_light() {
+    let mut app = setup_action_test_app!(sleep_action_system);
+    app.world_mut().resource_mut::<GameTick>().0 = NIGHT;
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_tired(0.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let action_entity = spawn_action_as_requested(&mut app, &Sleep, villager);
+    app.update();
+
+    app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<EventExecuting>()
+        .unwrap()
+        .state = EventExecutingState::Completed;
+    *app.world_mut()
+        .entity_mut(villager)
+        .get_mut::<State>()
+        .unwrap() = State::None;
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Executing
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::Sleeping
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::None
+    );
+
+    app.world_mut().resource_mut::<GameTick>().0 = FIRST_LIGHT;
+    app.update();
+
+    assert_eq!(
+        *app.world()
+            .entity(action_entity)
+            .get::<ActionState>()
+            .unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None
+    );
+}
+
+#[test]
 fn sleep_action_cancelled_transitions_to_failure() {
     let mut app = setup_action_test_app!(sleep_action_system);
 
@@ -4069,6 +5175,11 @@ fn sleep_action_cancelled_transitions_to_failure() {
         ActionState::Failure,
         "Expected cancelled action to transition to Failure"
     );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None,
+        "Expected cancelling night rest to wake the villager"
+    );
 }
 
 // ==================== Integration Tests: Complete Behavior Cycles ====================
@@ -4088,7 +5199,7 @@ macro_rules! setup_multi_scorer_app {
                 heat_scorer_system,
             ),
         );
-        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(GameTick(DAWN));
         app.world_mut()
             .insert_resource(EntityObjMap(HashMap::new()));
         app.world_mut().insert_resource(minimal_templates());
@@ -4466,7 +5577,7 @@ macro_rules! setup_behavior_test_app {
                 sleep_action_system,
             ),
         );
-        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(GameTick(DAWN));
         app.world_mut()
             .insert_resource(EntityObjMap(HashMap::new()));
         app.world_mut().insert_resource(Ids::default());

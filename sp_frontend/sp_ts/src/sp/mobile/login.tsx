@@ -4,13 +4,8 @@ import UI from "./ui";
 import { Global } from "../core/global";
 import { Network } from "../core/network";
 import { NetworkEvent } from "../core/networkEvent";
-import { getFingerprint } from "../core/fingerprint";
 import "./login.css"
 import logo from "art/perilous_logo.png";
-import warrior from "art/novicewarrior_single.png";
-import ranger from "art/noviceranger_single.png";
-import mage from "art/novicemage_single.png";
-import halfpanel from "ui/halfpanel.png";
 import leftArrowButton from "ui/leftbutton.png";
 import rightArrowButton from "ui/rightbutton.png";
 import IntroPanel from "./ui/introPanel";
@@ -25,10 +20,12 @@ import {
   consumeSafeLogoutCompletion,
   hasSafeLogoutReconnectSuppression,
 } from "../core/safeLogoutStatus";
+import HeroCreationPanel from "../core/heroCreationPanel";
+import { DEFAULT_HERO_PORTRAIT } from "../core/portraitCatalog";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
-  private readonly accountSetupDelay = 10000; // TEMP: 10s for testing (revert to 60000)
+  private readonly accountSetupDelay = 60000;
   private healthIntervalId?: number;
   private accountSetupTimerId?: number;
   private readonly safeLogoutResumeNotice = new SafeLogoutResumeNoticeGuard();
@@ -52,7 +49,9 @@ export default class LoginControl extends React.Component<any, any> {
       leaderboardEntries: [],
       heroName: '',
       selectedClass: '',
+      selectedPortrait: DEFAULT_HERO_PORTRAIT,
       isHeroNameEmpty: false,
+      isClassMissing: false,
       errorMessage: 'Play',
       firstRender: true,
       inappropiateName: false,
@@ -61,6 +60,7 @@ export default class LoginControl extends React.Component<any, any> {
       serverHealthLoading: true,
       serverHealthy: null,
       accountSetupError: '',
+      accountSetupSubmitting: false,
       preConnectionSelect: false,
       showLoginPanel: false,
       loginError: '',
@@ -77,6 +77,8 @@ export default class LoginControl extends React.Component<any, any> {
     };
 
     this.handleHeroNameChange = this.handleHeroNameChange.bind(this);
+    this.handlePortraitSelect = this.handlePortraitSelect.bind(this);
+    this.handleCreateHero = this.handleCreateHero.bind(this);
 
     this.handleLoggedIn = this.handleLoggedIn.bind(this);
 
@@ -85,7 +87,6 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleMageSelect = this.handleMageSelect.bind(this);
 
     this.handleEnterWorld = this.handleEnterWorld.bind(this);
-    this.handleClearFingerprint = this.handleClearFingerprint.bind(this);
     this.handleShowLogin = this.handleShowLogin.bind(this);
     this.handleLoginAccountNameChange = this.handleLoginAccountNameChange.bind(this);
     this.handleLoginPasswordChange = this.handleLoginPasswordChange.bind(this);
@@ -326,30 +327,17 @@ export default class LoginControl extends React.Component<any, any> {
       });
 
       if (!response.ok) {
-        const deviceToken = localStorage.getItem('deviceToken');
-        if (deviceToken) {
-          // This browser has connected before (it holds a device token), so skip
-          // the "Enter World" click and reconnect silently. fingerprintAuth()
-          // handles every outcome: returning player -> connect, secured account
-          // on a new/untrusted device -> prefilled login panel.
-          console.log('Session expired but device token present, reconnecting silently');
-          this.fingerprintAuth();
+          // The trusted-device credential is HttpOnly, so restoration is always
+          // attempted before presenting the landing choices.
+          await this.deviceAuth(false);
         } else {
-          console.log('Session not found, showing enter world button');
-          this.setState({ showEnterWorld: true });
-        }
-      } else {
-        const result = await response.json();
-        console.log('Session found', result);
+          const result = await response.json();
 
-        if (result.device_token) {
-          localStorage.setItem('deviceToken', result.device_token);
-        }
-
-        if (result.account_name) {
-          Global.accountName = result.account_name;
-          Global.accountSetupCompleted = true;
-        }
+          Global.playerId = result.playerId;
+          Global.accountSetupCompleted = result.account_status === 'secured';
+          if (result.account_name) {
+            Global.accountName = result.account_name;
+          }
 
         Global.network = new Network();
         Global.network.connect();
@@ -374,63 +362,51 @@ export default class LoginControl extends React.Component<any, any> {
     }
   }
 
-  async fingerprintAuth() {
+  async deviceAuth(createGuest = false) {
     this.resetNetworkForAuthentication();
     try {
-      const fingerprint = await getFingerprint();
-      const deviceToken = localStorage.getItem('deviceToken');
-      const url = `${window.location.origin}/fingerprint-auth`;
-
-      const body: Record<string, string> = { fingerprint };
-      if (deviceToken) {
-        body.device_token = deviceToken;
-      }
+      const url = `${window.location.origin}/device-auth`;
 
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ create_guest: createGuest }),
       });
 
       if (!response.ok) {
         try {
           const errorResult = await response.json();
-          if (errorResult.error === 'password_required') {
-            // Account is password-protected — show login form pre-filled with account name
+          if (errorResult.error === 'authentication_required') {
             this.setState({
-              hideLandingPage: true,
-              showLoginPanel: true,
-              loginError: '',
-              loginAccountName: errorResult.account_name || '',
-              loginPassword: '',
-              loginButtonPressed: false,
+              hideLandingPage: false,
+              showEnterWorld: true,
+              hideError: true,
             });
             return;
           }
+          this.setState({
+            errorMessage: errorResult.error || "Failed to connect. Please try again.",
+            hideError: false,
+            showEnterWorld: true,
+          });
+          return;
         } catch (e) {
           // Could not parse error response, fall through to generic error
         }
         this.setState({ errorMessage: "Failed to connect. Please try again.", hideError: false });
       } else {
         const result = await response.json();
-        console.log('Fingerprint authentication successful', result);
-
-        if (result.device_token) {
-          localStorage.setItem('deviceToken', result.device_token);
-        }
 
         Global.playerId = result.playerId;
-        if (result.hasAccount) {
-          Global.accountSetupCompleted = true;
-        }
+        Global.accountSetupCompleted = result.accountStatus === 'secured';
 
         if (result.account_name) {
           Global.accountName = result.account_name;
         }
 
-        if (result.newPlayer) {
+        if (result.needsHero || result.newPlayer) {
           // New player: show hero selection before connecting to game server
           this.setState({
             hideLandingPage: true,
@@ -445,7 +421,7 @@ export default class LoginControl extends React.Component<any, any> {
         }
       }
     } catch (error) {
-      console.error('Error during fingerprint authentication:', error);
+      console.error('Error during trusted-device authentication:', error);
       this.setState({ errorMessage: "Failed to connect. Please try again.", hideError: false });
     }
   }
@@ -453,27 +429,7 @@ export default class LoginControl extends React.Component<any, any> {
   handleEnterWorld() {
     this.clearSafeLogoutSuppression();
     this.setState({ showEnterWorld: false, hideLandingPage: true });
-    this.fingerprintAuth();
-  }
-
-  // TEMP test-only: clears this device's fingerprint + tokens so the next
-  // Enter World creates a brand-new player. Remove before production.
-  async handleClearFingerprint() {
-    this.resetNetworkForAuthentication();
-    try {
-      const fingerprint = await getFingerprint();
-      await fetch(`${window.location.origin}/clear-fingerprint`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fingerprint }),
-      });
-      // End the current session too, so reload doesn't auto-reconnect us.
-      await fetch(`${window.location.origin}/logout`, { method: 'POST' });
-    } catch (error) {
-      console.error('Error clearing device fingerprint:', error);
-    }
-    localStorage.removeItem('deviceToken');
-    window.location.reload();
+    this.deviceAuth(true);
   }
 
   handleShowLogin() {
@@ -508,19 +464,14 @@ export default class LoginControl extends React.Component<any, any> {
       }
 
       const result = await response.json();
-      console.log('Password authentication successful', result);
-
-      if (result.device_token) {
-        localStorage.setItem('deviceToken', result.device_token);
-      }
 
       Global.playerId = result.playerId;
       Global.accountSetupCompleted = true;
-      Global.accountName = accountName;
+      Global.accountName = result.account_name || accountName;
 
       this.setState({ showLoginPanel: false, loginError: '', loginButtonPressed: false, loginAccountName: '', loginPassword: '' });
 
-      if (result.newPlayer) {
+      if (result.needs_hero || result.newPlayer) {
         this.setState({
           hideLandingPage: true,
           hideSelectClass: false,
@@ -619,8 +570,8 @@ export default class LoginControl extends React.Component<any, any> {
     if (event) event.preventDefault();
     const { resetToken, resetPassword, resetConfirmPassword } = this.state;
 
-    if (resetPassword.length < 6) {
-      this.setState({ resetInfo: 'Password must be at least 6 characters' });
+    if (resetPassword.length < 8) {
+      this.setState({ resetInfo: 'Password must be at least 8 characters' });
       return;
     }
     if (resetPassword !== resetConfirmPassword) {
@@ -679,6 +630,10 @@ export default class LoginControl extends React.Component<any, any> {
 
   async handleAccountSetupSubmit(data) {
     const { accountName, password, email } = data;
+    if (this.state.accountSetupSubmitting) {
+      return;
+    }
+    this.setState({ accountSetupSubmitting: true, accountSetupError: '' });
     try {
       const url = `${window.location.origin}/register`;
       const response = await fetch(url, {
@@ -688,16 +643,30 @@ export default class LoginControl extends React.Component<any, any> {
       });
 
       if (!response.ok) {
-        const result = await response.json();
-        this.setState({ accountSetupError: result.error || 'Failed to save account. Please try again.' });
+        const result = await response.json().catch(() => ({}));
+        this.setState({
+          accountSetupError: result.error || 'Failed to save account. Please try again.',
+          accountSetupSubmitting: false,
+        });
         return;
       }
 
+      const result = await response.json();
+      if (result.account_name) {
+        Global.accountName = result.account_name;
+      }
       Global.accountSetupCompleted = true;
-      this.setState({ hideAccountSetupPanel: true, accountSetupError: '' });
+      this.setState({
+        hideAccountSetupPanel: true,
+        accountSetupError: '',
+        accountSetupSubmitting: false,
+      });
     } catch (error) {
       console.error('Error during account setup:', error);
-      this.setState({ accountSetupError: 'Network error. Please try again.' });
+      this.setState({
+        accountSetupError: 'Network error. Please try again.',
+        accountSetupSubmitting: false,
+      });
     }
   }
 
@@ -785,23 +754,6 @@ export default class LoginControl extends React.Component<any, any> {
     if (Global.serverOffline) {
       console.log('ErrorOkClick: server offline');
       this.clearSafeLogoutSuppression();
-      try {
-        const url = `${window.location.origin}/logout`;
-
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (!response.ok) {
-          console.error('Failed to logout');
-        }
-      } catch (error) {
-        console.error('Error logging out:', error);
-      }
-
       Global.serverOffline = false;
 
       this.setState({
@@ -825,10 +777,18 @@ export default class LoginControl extends React.Component<any, any> {
 
   handleIntroOkClick() {
     this.setState({ hideIntro: true });
-    Global.network.sendSelectedClass(this.state.selectedClass, this.state.heroName);
+    Global.network.sendSelectedClass(
+      this.state.selectedClass,
+      this.state.heroName,
+      this.state.selectedPortrait,
+    );
   }
 
   handleHeroNameChange(event) {
+    if (this.state.isHeroNameEmpty) {
+      this.setState({ isHeroNameEmpty: false });
+    }
+
     if (this.state.inappropiateName) {
       this.setState({ inappropiateName: false });
     }
@@ -847,6 +807,9 @@ export default class LoginControl extends React.Component<any, any> {
       hideSelectClass: false,
       hideTrueDeathPanel: true,
       hideGame: true,
+      selectedClass: '',
+      selectedPortrait: DEFAULT_HERO_PORTRAIT,
+      isClassMissing: false,
       safeLogoutCompletionMessage: '',
     });
   }
@@ -904,17 +867,43 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleClassSelect(className: string) {
-    if (this.state.heroName == '') {
+    this.setState({ selectedClass: className, isClassMissing: false });
+  }
+
+  handlePortraitSelect(portrait: string) {
+    this.setState({ selectedPortrait: portrait });
+  }
+
+  handleCreateHero() {
+    const heroName = this.state.heroName.trim();
+
+    if (heroName == '') {
       this.setState({ isHeroNameEmpty: true });
-    } else if (this.state.preConnectionSelect) {
+      return;
+    }
+
+    if (this.state.selectedClass == '') {
+      this.setState({ isClassMissing: true });
+      return;
+    }
+
+    if (this.state.preConnectionSelect) {
       // New player: store selection and connect to game server
-      Global.pendingClassSelection = { className, heroName: this.state.heroName };
+      Global.pendingClassSelection = {
+        className: this.state.selectedClass,
+        heroName,
+        portrait: this.state.selectedPortrait,
+      };
       Global.network = new Network();
       Global.network.connect();
       Global.connected = true;
       this.setState({ hideSelectClass: true, preConnectionSelect: false });
     } else {
-      Global.network.sendSelectedClass(className, this.state.heroName);
+      Global.network.sendSelectedClass(
+        this.state.selectedClass,
+        heroName,
+        this.state.selectedPortrait,
+      );
     }
   }
 
@@ -1147,14 +1136,9 @@ export default class LoginControl extends React.Component<any, any> {
                 <button type="button" className="leaderboard-button" onClick={this.handleLeaderboardOpen}>View Leaderboard</button>
               </p>
 
-              {/* TEMP test-only: reset this device to a brand-new player. Remove before production. */}
-              <p style={{ textAlign: 'center', marginTop: '2em' }}>
-                <button
-                  type="button"
-                  onClick={this.handleClearFingerprint}
-                  style={{ background: 'transparent', border: '1px solid #5a4a38', color: '#8a7a68', fontSize: '11px', padding: '4px 10px', cursor: 'pointer', borderRadius: '3px' }}
-                >
-                  Clear Device Fingerprint (test)
+              <p className="existing-account-link">
+                <button type="button" className="leaderboard-button" onClick={this.handleShowLogin}>
+                  Log In to Existing Account
                 </button>
               </p>
             </div>
@@ -1163,31 +1147,20 @@ export default class LoginControl extends React.Component<any, any> {
         }
 
         {!this.state.hideSelectClass && (
-          <>
-            <div style={selectClassStyle}>
-              <img src={halfpanel} style={selectClassBGStyle} />
-              <span style={selectHeroNameText}>Hero's Name: </span>
-              <input style={selectHeroInput} type="text" autoFocus onChange={this.handleHeroNameChange} />
-              <span style={selectHeroClassText}>Hero's Class:</span>
-              <img src={warrior} style={warriorStyle} onClick={this.handleWarriorSelect} title="Warrior: safest adjacent fighter, wins by bracing, stunning, and sustaining pressure." />
-              <span style={warriorText}>Warrior</span>
-              <img src={ranger} style={rangerStyle} onClick={this.handleRangerSelect} title="Ranger: fastest scout and kiter, wins by vision, bow range, and disengaging." />
-              <span style={rangerText}>Ranger</span>
-              <img src={mage} style={mageStyle} onClick={this.handleMageSelect} title="Mage: fragile mana caster, wins by burst damage and temporary magical protection." />
-              <span style={mageText}>Mage</span>
-              {this.state.inappropiateName &&
-                <span style={nameErrorText}>Inappropiate Name</span>
-              }
-
-              {this.state.takenName &&
-                <span style={nameErrorText}>Name Already Taken</span>
-              }
-            </div>
-
-            <p className="existing-account-link--select-class">
-              <span className="existing-account-text-link" onClick={this.handleShowLogin}>Already have an account? Log in</span>
-            </p>
-          </>
+          <HeroCreationPanel
+            heroName={this.state.heroName}
+            selectedClass={this.state.selectedClass}
+            selectedPortrait={this.state.selectedPortrait}
+            isHeroNameEmpty={this.state.isHeroNameEmpty}
+            isClassMissing={this.state.isClassMissing}
+            inappropriateName={this.state.inappropiateName}
+            takenName={this.state.takenName}
+            onHeroNameChange={this.handleHeroNameChange}
+            onClassSelect={this.handleClassSelect.bind(this)}
+            onPortraitSelect={this.handlePortraitSelect}
+            onCreate={this.handleCreateHero}
+            onShowLogin={this.handleShowLogin}
+          />
         )}
 
         {!this.state.hideIntro && (
@@ -1214,13 +1187,15 @@ export default class LoginControl extends React.Component<any, any> {
                     value={this.state.loginAccountName}
                     onChange={this.handleLoginAccountNameChange}
                     placeholder="Account Name"
-                    autoFocus />
+                    autoFocus
+                    autoComplete="username" />
                 </p>
                 <p><span className="fontawesome-lock"></span>
                   <input type="password"
                     value={this.state.loginPassword}
                     onChange={this.handleLoginPasswordChange}
-                    placeholder="Password" />
+                    placeholder="Password"
+                    autoComplete="current-password" />
                 </p>
                 {this.state.loginError && (
                   <p style={{ color: '#ea4c4c', fontSize: '12px', textAlign: 'center' }}>{this.state.loginError}</p>
@@ -1253,13 +1228,15 @@ export default class LoginControl extends React.Component<any, any> {
                     value={this.state.resetPassword}
                     onChange={this.handleResetPasswordChange}
                     placeholder="New Password"
-                    autoFocus />
+                    autoFocus
+                    autoComplete="new-password" />
                 </p>
                 <p><span className="fontawesome-lock"></span>
                   <input type="password"
                     value={this.state.resetConfirmPassword}
                     onChange={this.handleResetConfirmChange}
-                    placeholder="Confirm Password" />
+                    placeholder="Confirm Password"
+                    autoComplete="new-password" />
                 </p>
                 {this.state.resetInfo && (
                   <p style={{ color: '#ea4c4c', fontSize: '12px', textAlign: 'center' }}>{this.state.resetInfo}</p>
@@ -1285,7 +1262,9 @@ export default class LoginControl extends React.Component<any, any> {
         }
 
         {!this.state.hideAccountSetupPanel && !this.state.hideGame && (
-          <AccountSetupPanel errorMessage={this.state.accountSetupError} />
+          <AccountSetupPanel
+            errorMessage={this.state.accountSetupError}
+            submitting={this.state.accountSetupSubmitting} />
         )}
 
         {!this.state.hideTrueDeathPanel &&

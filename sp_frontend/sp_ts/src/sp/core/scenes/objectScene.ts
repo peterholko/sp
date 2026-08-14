@@ -15,7 +15,7 @@ import { ObjectState } from '../objectState';
 import { MultiImage } from '../multiImage';
 import { Network } from '../network';
 import {
-  HERO, DEAD, SPRITE, CONTAINER, IMAGE, FOUNDED, WALL, UNIT, STRUCTURE,
+  HERO, DEAD, SPRITE, CONTAINER, IMAGE, WALL, UNIT, STRUCTURE,
   VILLAGER, HARVESTING, CRAFTING, GATHERING, BUILDING, desktopCameraZoom,
   isDesktop,
 } from '../config';
@@ -30,6 +30,20 @@ import {
   needsZeroVisionShroud,
 } from '../visibilitySourcePolicy';
 import { anchorActionProgress } from '../actionProgress';
+import {
+  VillagerActivityIcon,
+  villagerActivityIcon,
+} from '../villagerResourceActivity';
+import { badgeCenterAboveProgressBar } from '../villagerActivityLayout';
+import {
+  isPerceivedMapObject,
+  isPresentMapObject,
+} from '../mapObjectPresence';
+import {
+  DROPPED_BAG_RENDER_SCALE,
+  isDroppedBagObject,
+} from '../droppedBagPresentation';
+import { usesFoundationGraphic } from '../structureConstructionPresentation';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -58,6 +72,11 @@ interface StructureWorkProgress {
   receivedAt: number;
 }
 
+interface VillagerActivityBadge {
+  icon: Phaser.GameObjects.Image;
+  outline: Phaser.GameObjects.Image;
+}
+
 const ACTION_PROGRESS_WIDTH = 34;
 const ACTION_PROGRESS_HEIGHT = 5;
 const ACTION_PROGRESS_Y_OFFSET = -20;
@@ -71,10 +90,35 @@ const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
   surveying: 2000,
   prospecting: 2000,
   investigating: 2000,
+  refining: 30000,
   eating: 3000,
-  drinking: 3000
+  drinking: 3000,
+  healing: 2000
 };
 const ACTION_PROGRESS_STATES = new Set(Object.keys(ACTION_PROGRESS_DURATIONS_MS));
+const VILLAGER_ACTIVITY_TEXTURE_PREFIX = 'villager-activity-';
+const VILLAGER_ACTIVITY_ICONS: VillagerActivityIcon[] = [
+  'gathering',
+  'logging',
+  'mining',
+  'hunting',
+  'fishing',
+  'building',
+  'eating',
+  'drinking',
+  'sleeping',
+  'following',
+  'fetching-tool',
+  'hauling',
+];
+const VILLAGER_ACTIVITY_SIZE = 24;
+const VILLAGER_ACTIVITY_OUTLINE_SIZE = 28;
+const VILLAGER_ACTIVITY_OUTLINE_COLOR = 0xffd45a;
+const VILLAGER_ACTIVITY_OUTLINE_ALPHA = 0.9;
+const VILLAGER_ACTIVITY_Y_OFFSET = -23;
+const VILLAGER_ACTIVITY_PROGRESS_GAP = 2;
+const VILLAGER_ACTIVITY_OUTLINE_DEPTH = 25;
+const VILLAGER_ACTIVITY_DEPTH = 26;
 
 export class ObjectScene extends Phaser.Scene {
 
@@ -94,6 +138,7 @@ export class ObjectScene extends Phaser.Scene {
   private fireAnimationSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
   private actionProgressBars: Record<string, ActionProgressBar> = {};
+  private villagerActivityBadges: Record<string, VillagerActivityBadge> = {};
   private structureWorkProgress: Record<string, StructureWorkProgress> = {};
 
   private lastVillagerActivity: Record<string, string> = {};
@@ -114,6 +159,12 @@ export class ObjectScene extends Phaser.Scene {
     this.load.image('gravestone', './static/art/gravestone.png');
     this.load.image('rubble', './static/art/rubble.png');
     this.load.image('shroud', './static/art/shroud.png');
+    for (const icon of VILLAGER_ACTIVITY_ICONS) {
+      this.load.image(
+        VILLAGER_ACTIVITY_TEXTURE_PREFIX + icon,
+        './static/art/ui/activity/' + icon + '.png',
+      );
+    }
 
     this.load.image('shroud-n-ne-se', './static/art/shroud-n-ne-se.png');
     this.load.image('shroud-ne-se-s', './static/art/shroud-ne-se-s.png');
@@ -250,6 +301,7 @@ export class ObjectScene extends Phaser.Scene {
       }
 
       Global.imageDefList[message.name] = message.data;
+      Global.gameEmitter.emit(GameEvent.IMAGE_DEFINITION_READY, { imageName: message.name });
     }
   }
 
@@ -281,6 +333,7 @@ export class ObjectScene extends Phaser.Scene {
 
   update(time: number): void {
     this.updateActionProgressBars(time);
+    this.updateVillagerActivityBadges();
   }
 
   setRender(): void {
@@ -326,20 +379,20 @@ export class ObjectScene extends Phaser.Scene {
     return null;
   }
 
-  private isRememberedObject(objectState: ObjectState): boolean {
-    return objectState.class == STRUCTURE || objectState.class == 'poi';
+  private shouldRenderState(objectState: ObjectState): boolean {
+    return isPresentMapObject(objectState);
   }
 
-  private shouldRenderState(objectState: ObjectState): boolean {
-    if (!objectState) {
-      return false;
-    }
-
-    if (objectState.op == 'deleted') {
-      return this.isRememberedObject(objectState) && objectState.eventType != 'obj_delete';
-    }
-
-    return true;
+  private applyImagePresentation(
+    image: GameImage,
+    _imageName: string,
+    presentationScale = 1,
+  ): { insetX: number; insetY: number } {
+    image.setScale(presentationScale);
+    return {
+      insetX: image.width * (1 - presentationScale) / 2,
+      insetY: image.height * (1 - presentationScale) / 2,
+    };
   }
 
   private isImageReady(imageName: string): boolean {
@@ -400,6 +453,7 @@ export class ObjectScene extends Phaser.Scene {
     this.stopMoveTween(objectId);
     this.clearPendingImageTask(objectId);
     this.destroyActionProgressBar(objectId);
+    this.destroyVillagerActivityBadge(objectId);
 
     if (objectId in this.stateTimerList) {
       clearInterval(this.stateTimerList[objectId]);
@@ -493,6 +547,115 @@ export class ObjectScene extends Phaser.Scene {
     }
 
     this.syncActionProgressBar(objectState, renderObject);
+    this.syncVillagerActivityBadge(objectState, renderObject);
+  }
+
+  private destroyVillagerActivityBadge(objectId: string): void {
+    var badge = this.villagerActivityBadges[objectId];
+
+    if (badge?.icon.scene != null) {
+      badge.icon.destroy();
+    }
+    if (badge?.outline.scene != null) {
+      badge.outline.destroy();
+    }
+
+    delete this.villagerActivityBadges[objectId];
+  }
+
+  private syncVillagerActivityBadge(
+    objectState: ObjectState,
+    renderObject: RenderObject,
+  ): void {
+    const icon = villagerActivityIcon(objectState);
+    if (!icon) {
+      this.destroyVillagerActivityBadge(objectState.id);
+      return;
+    }
+
+    const texture = VILLAGER_ACTIVITY_TEXTURE_PREFIX + icon;
+    var badge = this.villagerActivityBadges[objectState.id];
+    if (badge?.icon.scene == null || badge?.outline.scene == null) {
+      if (badge?.icon.scene != null) {
+        badge.icon.destroy();
+      }
+      if (badge?.outline.scene != null) {
+        badge.outline.destroy();
+      }
+      delete this.villagerActivityBadges[objectState.id];
+      badge = null;
+    }
+
+    if (!badge) {
+      const outline = this.add.image(0, 0, texture);
+      outline.setOrigin(0.5, 0.5);
+      outline.setDisplaySize(
+        VILLAGER_ACTIVITY_OUTLINE_SIZE,
+        VILLAGER_ACTIVITY_OUTLINE_SIZE,
+      );
+      outline.setTintFill(VILLAGER_ACTIVITY_OUTLINE_COLOR);
+      outline.setAlpha(VILLAGER_ACTIVITY_OUTLINE_ALPHA);
+      outline.setDepth(VILLAGER_ACTIVITY_OUTLINE_DEPTH);
+
+      const activityIcon = this.add.image(0, 0, texture);
+      activityIcon.setOrigin(0.5, 0.5);
+      activityIcon.setDisplaySize(
+        VILLAGER_ACTIVITY_SIZE,
+        VILLAGER_ACTIVITY_SIZE,
+      );
+      activityIcon.setDepth(VILLAGER_ACTIVITY_DEPTH);
+
+      badge = { icon: activityIcon, outline };
+      this.villagerActivityBadges[objectState.id] = badge;
+    } else if (badge.icon.texture.key != texture) {
+      badge.icon.setTexture(texture);
+      badge.outline.setTexture(texture);
+    }
+
+    this.positionVillagerActivityBadge(objectState.id, badge, renderObject);
+  }
+
+  private positionVillagerActivityBadge(
+    objectId: string,
+    badge: VillagerActivityBadge,
+    renderObject: RenderObject,
+  ): void {
+    const progressBar = this.actionProgressBars[objectId];
+    const hasProgressBar = progressBar?.graphics.scene != null;
+    const yOffset = hasProgressBar
+      ? badgeCenterAboveProgressBar(
+          ACTION_PROGRESS_Y_OFFSET,
+          ACTION_PROGRESS_HEIGHT,
+          VILLAGER_ACTIVITY_OUTLINE_SIZE,
+          VILLAGER_ACTIVITY_PROGRESS_GAP,
+        )
+      : VILLAGER_ACTIVITY_Y_OFFSET;
+    const x = renderObject.x + 36;
+    const y = renderObject.y + yOffset;
+    badge.icon.setPosition(x, y);
+    badge.outline.setPosition(x, y);
+  }
+
+  private updateVillagerActivityBadges(): void {
+    for (var objectId in this.villagerActivityBadges) {
+      var objectState = Global.objectStates[objectId];
+      var renderObject = this.getRenderedObject(objectId);
+      const icon = villagerActivityIcon(objectState);
+
+      if (!objectState || !renderObject || !icon) {
+        this.destroyVillagerActivityBadge(objectId);
+        continue;
+      }
+
+      const badge = this.villagerActivityBadges[objectId];
+      const texture = VILLAGER_ACTIVITY_TEXTURE_PREFIX + icon;
+      if (badge.icon.texture.key != texture) {
+        badge.icon.setTexture(texture);
+        badge.outline.setTexture(texture);
+      }
+
+      this.positionVillagerActivityBadge(objectId, badge, renderObject);
+    }
   }
 
   private isActionProgressTarget(objectState: ObjectState): boolean {
@@ -747,7 +910,7 @@ export class ObjectScene extends Phaser.Scene {
       var objectState = objectStates[objectId] as ObjectState;
       console.log(objectState);
 
-      if (objectState.op != 'deleted') {
+      if (isPerceivedMapObject(objectState)) {
         this.processVisibleTiles(objectState, positiveVisibleTiles);
       }
 
@@ -911,7 +1074,6 @@ export class ObjectScene extends Phaser.Scene {
           id: 'shroud' + pixel.x + pixel.y,
           imageName: 'shroud'
         });
-
         this.add.existing(shroud);
         this.shroudTiles.push(shroud);
       }
@@ -994,7 +1156,6 @@ export class ObjectScene extends Phaser.Scene {
               id: 'shroud' + pixel.x + pixel.y,
               imageName: filename
             });
-
             this.add.existing(shroud);
             this.shroudTiles.push(shroud);
 
@@ -1008,7 +1169,7 @@ export class ObjectScene extends Phaser.Scene {
     for (var objectId in Global.objectStates) {
       var objectState = Global.objectStates[objectId];
 
-      if (objectState.op == 'deleted') {
+      if (!isPerceivedMapObject(objectState)) {
         continue;
       }
 
@@ -1032,7 +1193,6 @@ export class ObjectScene extends Phaser.Scene {
           y: pixel.y,
           imageName: 'shroud-one-tile'
         });
-
         this.add.existing(shroud);
         this.shroudTiles.push(shroud);
       }
@@ -1065,7 +1225,7 @@ export class ObjectScene extends Phaser.Scene {
 
     console.log(image);
 
-    if (objectState.state == FOUNDED) {
+    if (usesFoundationGraphic(objectState)) {
       if (image.imageName != 'foundation') {
         image.setTexture('foundation');
         image.imageName = 'foundation';
@@ -1074,6 +1234,14 @@ export class ObjectScene extends Phaser.Scene {
       image.setTexture(objectState.image);
       image.imageName = objectState.image;
     }
+    const presentationScale = isDroppedBagObject(objectState) ? DROPPED_BAG_RENDER_SCALE : 1;
+    const inset = this.applyImagePresentation(
+      image,
+      image.imageName,
+      presentationScale,
+    );
+    const renderX = pixel.x + inset.insetX;
+    const renderY = pixel.y + inset.insetY;
     console.log(pixel);
 
     if (objectState.class == 'structure') {
@@ -1085,8 +1253,8 @@ export class ObjectScene extends Phaser.Scene {
     }
 
     //Move completed, add tween to new location
-    if (image.x != pixel.x || image.y != pixel.y) {
-      this.startMoveTween(objectState.id, image, pixel.x, pixel.y);
+    if (image.x != renderX || image.y != renderY) {
+      this.startMoveTween(objectState.id, image, renderX, renderY);
     }
   }
 
@@ -1183,7 +1351,6 @@ export class ObjectScene extends Phaser.Scene {
 
       //Only follow if Hero
       if (objectState.subclass == HERO && objectState.player == Global.playerId) {
-
         var mapScene = this.scene.get('MapScene') as MapScene;
         mapScene.cameras.main.startFollow(sprite, true);
         mapScene.cameras.main.followOffset.x = -36;
@@ -1197,7 +1364,6 @@ export class ObjectScene extends Phaser.Scene {
         this.cameras.main.startFollow(sprite, true);
         this.cameras.main.followOffset.x = -36;
         this.cameras.main.followOffset.y = -36;
-
       }
 
       if (spriteReady) {
@@ -1228,18 +1394,25 @@ export class ObjectScene extends Phaser.Scene {
       container.setDepth(2);
     }
 
-    if (objectState.state == FOUNDED) {
-      container.removeAll(true);
+    if (usesFoundationGraphic(objectState)) {
+      const currentImage = container.list.length == 1
+        ? container.list[0]
+        : null;
+      const alreadyShowingFoundation = currentImage instanceof GameImage &&
+        currentImage.imageName == 'foundation';
 
-      var foundationImage = new GameImage({
-        scene: this,
-        x: 0,
-        y: 0,
-        id: objectState.id,
-        imageName: "foundation"
-      });
+      if (!alreadyShowingFoundation) {
+        container.removeAll(true);
+        var foundationImage = new GameImage({
+          scene: this,
+          x: 0,
+          y: 0,
+          id: objectState.id,
+          imageName: "foundation"
+        });
 
-      container.add(foundationImage);
+        container.add(foundationImage);
+      }
     } else if (objectState.state == 'none') {
       var multiImageList = this.multiImages[objectState.image];
       container.removeAll(true);
@@ -1364,7 +1537,7 @@ export class ObjectScene extends Phaser.Scene {
     var pixel = Util.hex_to_pixel(objectState.x, objectState.y);
     var imageName = '';
 
-    if (objectState.state == FOUNDED) {
+    if (usesFoundationGraphic(objectState)) {
       imageName = 'foundation';
     } else {
       imageName = objectState.image;
@@ -1377,6 +1550,11 @@ export class ObjectScene extends Phaser.Scene {
       id: objectState.id,
       imageName: imageName
     });
+
+    const presentationScale = isDroppedBagObject(objectState) ? DROPPED_BAG_RENDER_SCALE : 1;
+    const inset = this.applyImagePresentation(image, imageName, presentationScale);
+    image.x += inset.insetX;
+    image.y += inset.insetY;
 
     if (objectState.class == 'structure') {
       image.setDepth(1);
@@ -1420,7 +1598,7 @@ export class ObjectScene extends Phaser.Scene {
 
     this.objectList[objectState.id] = container;
 
-    if (objectState.state == FOUNDED) {
+    if (usesFoundationGraphic(objectState)) {
       var image = new GameImage({
         scene: this,
         x: 0,
@@ -1587,6 +1765,23 @@ export class ObjectScene extends Phaser.Scene {
     mapScene?.cameras?.main?.shake(180, 0.008);
   }
 
+  private playSpriteAction(source: RenderObject, action: string): void {
+    if (!(source instanceof GameSprite)) {
+      return;
+    }
+
+    const actionAnimation = source.imageName + '_' + action;
+    if (!this.anims.exists(actionAnimation)) {
+      return;
+    }
+
+    source.play(actionAnimation);
+    const idleAnimation = source.imageName + '_none';
+    if (this.anims.exists(idleAnimation)) {
+      source.anims.chain(idleAnimation);
+    }
+  }
+
   processDmgMessage(message) {
     console.log('Dmg Message: ' + message.source_id + ' -> ' + message.target_id);
     if (message.source_id in Global.objectStates && message.target_id in Global.objectStates) {
@@ -1616,10 +1811,13 @@ export class ObjectScene extends Phaser.Scene {
         }
 
         if (!sourceIsDead && message.attack_type == 'Shadow Bolt') {
-          source.play(source.imageName + '_cast');
-          source.anims.chain(source.imageName + '_none');
+          this.playSpriteAction(source, 'cast');
 
-          var shadowBolt = this.add.sprite(source.x + 36, source.y + 36, 'shadowbolt');
+          var shadowBolt = this.add.sprite(
+            source.x + 36,
+            source.y + 36,
+            'shadowbolt',
+          );
           shadowBolt.anims.play('shadowboltanim');
 
           var diffX = (target.x - source.x) * 0.5;
@@ -1638,8 +1836,7 @@ export class ObjectScene extends Phaser.Scene {
 
         } else if (!sourceIsDead) {
           console.log('Play attack');
-          source.play(source.imageName + '_attack');
-          source.anims.chain(source.imageName + '_none');
+          this.playSpriteAction(source, 'attack');
 
           var diffX = (target.x - source.x) * 0.5;
           var diffY = (target.y - source.y) * 0.5;
@@ -1713,7 +1910,11 @@ export class ObjectScene extends Phaser.Scene {
       var randomNeighbourPixel = Util.hex_to_pixel(randomNeighbour.q, randomNeighbour.r);
 
       // Add unknown unit sprite, not sure why it is offset by 36 compared to the target, must be origin 
-      var unknownUnit = this.add.sprite(randomNeighbourPixel.x + 36, randomNeighbourPixel.y + 36, 'unknownunit');
+      var unknownUnit = this.add.sprite(
+        randomNeighbourPixel.x + 36,
+        randomNeighbourPixel.y + 36,
+        'unknownunit',
+      );
       unknownUnit.setDepth(10);
 
       /*var diffX = (target.x - unknownUnit.x) * 0.5;
@@ -1860,8 +2061,7 @@ export class ObjectScene extends Phaser.Scene {
 
 
       console.log('Play attack');
-      source.play(source.imageName + '_attack');
-      source.anims.chain(source.imageName + '_none');
+      this.playSpriteAction(source, 'attack');
 
       var diffX = (target.x - source.x) * 0.5;
       var diffY = (target.y - source.y) * 0.5;
@@ -1918,8 +2118,7 @@ export class ObjectScene extends Phaser.Scene {
 
 
       console.log('Play attack');
-      source.play(source.imageName + '_attack');
-      source.anims.chain(source.imageName + '_none');
+      this.playSpriteAction(source, 'attack');
 
       var diffX = (target.x - source.x) * 0.5;
       var diffY = (target.y - source.y) * 0.5;
@@ -1976,8 +2175,7 @@ export class ObjectScene extends Phaser.Scene {
 
 
       console.log('Play attack');
-      source.play(source.imageName + '_attack');
-      source.anims.chain(source.imageName + '_none');
+      this.playSpriteAction(source, 'attack');
 
       var diffX = (target.x - source.x) * 0.5;
       var diffY = (target.y - source.y) * 0.5;
@@ -2049,6 +2247,16 @@ export class ObjectScene extends Phaser.Scene {
     var prev = this.lastVillagerActivity[message.id];
     this.lastVillagerActivity[message.id] = message.activity;
 
+    var objectState = Global.objectStates[message.id];
+    if (objectState?.subclass === VILLAGER) {
+      objectState.activity = message.activity;
+
+      var renderObject = this.getRenderedObject(message.id);
+      if (renderObject) {
+        this.syncVillagerActivityBadge(objectState, renderObject);
+      }
+    }
+
     // Yellow "!" floater on transition into Fleeing
     if (message.activity === 'Fleeing' && prev !== 'Fleeing') {
       this.showAlertFloater(message.id, '#FFD700');
@@ -2083,7 +2291,10 @@ export class ObjectScene extends Phaser.Scene {
     console.log('Sound Message: ' + JSON.stringify(message));
     var source = Util.hex_to_pixel(message.x, message.y);
     var graphics = this.add.graphics()
-    var container = this.add.container(source.x - 24, source.y - 20);
+    var container = this.add.container(
+      source.x + 36 - 60,
+      source.y - 20,
+    );
 
     if (message.sound.length < 40) {
       var soundText = this.add.text(60, 20, message.sound, { fontFamily: 'Alegreya', fontSize: 14, color: '#FFFFFF' });

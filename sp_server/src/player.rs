@@ -20,6 +20,7 @@ use crate::crisis_balance::{
 use crate::encounter::Encounter;
 use crate::event::{
     EventCompleted, GameEvent, GameEventType, GameEvents, MapEvents, Spell, VisibleEvent,
+    VisibleEvents,
 };
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
@@ -28,14 +29,15 @@ use crate::combat::{AttackOptions, Combat, CombatEffectsChanged, CombatQuery, Co
 use crate::effect::{ControlEffectDiminishingReturns, Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
-    is_loot_poi, is_pos_empty, sanctuary_full_radius, sanctuary_upgrade_cost,
-    sanctuary_weak_radius, survey_status_for_tile, BoundMonolith, Clients, CrisisAssaultUnit,
-    CrisisKind, CrisisPhase, DamageRecord, DebugObjs, EventInProgress, GameTick,
-    InitialEncounterState, IntroEncounterState, LogLevelOverrides, Merchant, Monolith,
-    MonolithInvestigation, MonolithProgress, NetworkReceiver, ObjQuery, Objectives,
-    PersonalCrisisHistory, PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat,
-    PlayerStats, RunScoreState, SettlementCrisisState, SpawnPositions, SurveyHistory,
-    WeakSanctuary, SANCTUARY_MAX_LEVEL,
+    burrow_supply_type_count, farm_harvest_duration_ticks, is_loot_poi, is_pos_empty,
+    sanctuary_radius, sanctuary_upgrade_cost, survey_status_for_tile, BoundMonolith,
+    CampfireVisibilityState, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase, DamageRecord,
+    DebugObjs, EventInProgress, GameTick, InitialEncounterState, IntroEncounterState,
+    InvestigatedPOIs, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
+    MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PersonalCrisisHistory,
+    PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
+    SettlementCrisisState, SpawnPositions, SurveyHistory, BANDAGE_USE_TICKS, BURROW_SUPPLY_GOAL,
+    SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -43,12 +45,13 @@ use crate::network::{
     self, send_to_client, CraftingItem, RefiningItem, ResponsePacket, StatsData, StructureList,
 };
 use crate::obj::{
-    is_combat_locked, ActiveTask, Assignment, Assignments, BaseAttrs, BuildProgressUpdate,
-    BuildUpgradeState, Campfire, Class, ClassStructure, EndRepeatAction, HeroClass,
-    HeroClassProfile, Id, LastCombatTick, LastDamageTick, Misc, Name, NewObj, Obj, Order,
-    Personality, PlayerId, Position, RemoveObj, SelectedUpgrade, Shelter, StartBuild, StartUpgrade,
-    State, StateBuilding, StateChange, StateDead, Stats, Subclass, SubclassHero, SubclassVillager,
-    Template, TrueDeath, UpdateObj, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
+    is_combat_locked, ActionProgress, ActiveTask, Assignment, Assignments, BaseAttrs, BaseQuery,
+    BuildProgressUpdate, BuildUpgradeState, Campfire, CancelEvents, Class, ClassStructure,
+    DroppedBag, EndRepeatAction, HeroClass, HeroClassProfile, Id, LastCombatTick, LastDamageTick,
+    Misc, Name, NewObj, Obj, Order, Personality, PlayerId, Portrait, Position, RemoveObj,
+    SelectedUpgrade, Shelter, StartBuild, StartUpgrade, State, StateBuilding, StateChange,
+    StateDead, Stats, Storage, Subclass, SubclassHero, SubclassVillager, Template, TrueDeath,
+    UpdateObj, Viewshed, WorkEntry, WorkQueue, WorkStatus, WorkType,
 };
 use crate::player_setup::{AssignedStartLocations, RunSpawnedObjs, StartLocations};
 use crate::recipe::Recipes;
@@ -61,7 +64,7 @@ use crate::safe_logout::{
 use crate::skill::{SkillData, Skills, MAX_RANK};
 use crate::skill_defs::Skill;
 use crate::structure::{self, Plans, Structure, WALL};
-use crate::templates::{ObjTemplate, ResReq, Templates};
+use crate::templates::{self, ObjTemplate, ResReq, Templates};
 use crate::terrain_feature::{TerrainFeature, TerrainFeatures};
 use crate::trade::{Prices, WantedItem};
 use crate::villager::{villager_activity_text, BlockedWork, ToolFetchTarget};
@@ -117,6 +120,7 @@ pub enum PlayerEvent {
         player_id: i32,
         hero_name: String,
         class_name: String,
+        portrait: String,
     },
     Login {
         player_id: i32,
@@ -184,6 +188,7 @@ pub enum PlayerEvent {
     Craft {
         player_id: i32,
         recipe_name: String,
+        signature_item_id: Option<i32>,
     },
     StructureRefine {
         player_id: i32,
@@ -194,6 +199,7 @@ pub enum PlayerEvent {
         player_id: i32,
         structure_id: i32,
         recipe_name: String,
+        signature_item_id: Option<i32>,
     },
     GetStats {
         player_id: i32,
@@ -275,6 +281,15 @@ pub enum PlayerEvent {
         item_id: i32,
         source_id: i32,
         target_id: i32,
+    },
+    LootAll {
+        player_id: i32,
+        source_id: i32,
+        target_id: i32,
+    },
+    DropItem {
+        player_id: i32,
+        item_id: i32,
     },
     ItemSplit {
         player_id: i32,
@@ -560,6 +575,8 @@ impl PlayerEvent {
             | Self::InfoMerchant { player_id, .. }
             | Self::InfoHire { player_id, .. }
             | Self::ItemTransfer { player_id, .. }
+            | Self::LootAll { player_id, .. }
+            | Self::DropItem { player_id, .. }
             | Self::ItemSplit { player_id, .. }
             | Self::OrderFollow { player_id, .. }
             | Self::OrderGather { player_id, .. }
@@ -709,6 +726,11 @@ impl PlayerEvent {
                 source_id,
                 target_id,
                 ..
+            }
+            | Self::LootAll {
+                source_id,
+                target_id,
+                ..
             } => protected(*source_id) || protected(*target_id),
             Self::ItemSplit { owner_id, .. } => protected(*owner_id),
             Self::OrderOperate {
@@ -843,11 +865,16 @@ struct CoreQuery {
     subclass: &'static Subclass,
     template: &'static Template,
     state: &'static State,
+    active_task: Option<&'static ActiveTask>,
     misc: &'static Misc,
+    portrait: Option<&'static Portrait>,
     effects: &'static Effects,
     inventory: &'static Inventory,
     hero_class: Option<&'static HeroClass>,
     last_combat_tick: Option<&'static LastCombatTick>,
+    assignment: Option<&'static Assignment>,
+    dropped_bag: Option<&'static DroppedBag>,
+    viewshed: Option<&'static Viewshed>,
 }
 
 fn combat_locked(last_combat_tick: Option<&LastCombatTick>, game_tick: i32) -> bool {
@@ -861,6 +888,30 @@ fn send_combat_locked_error(player_id: i32, clients: &Res<Clients>) {
         player_id,
         ResponsePacket::Error {
             errmsg: "Cannot do that while in combat.".to_string(),
+        },
+        clients,
+    );
+}
+
+const MIN_WORK_VISIBILITY_RANGE: u32 = 0;
+pub(crate) const INSUFFICIENT_WORK_VISIBILITY_NOTICE: &str =
+    "It is too dark to work. Equip and light a torch or move near a stronger light source.";
+
+pub(crate) fn has_sufficient_work_visibility(
+    viewshed: Option<&Viewshed>,
+    player_id: i32,
+    campfire_visibility: &CampfireVisibilityState,
+) -> bool {
+    viewshed.is_some_and(|viewshed| viewshed.range > MIN_WORK_VISIBILITY_RANGE)
+        || campfire_visibility.illuminates_player(player_id)
+}
+
+pub(crate) fn send_insufficient_work_visibility_notice(player_id: i32, clients: &Res<Clients>) {
+    send_to_client(
+        player_id,
+        ResponsePacket::Notice {
+            noticemsg: INSUFFICIENT_WORK_VISIBILITY_NOTICE.to_string(),
+            expiry: Some(5000),
         },
         clients,
     );
@@ -902,6 +953,85 @@ fn send_shipwreck_owner_error(player_id: i32, clients: &Res<Clients>) {
     );
 }
 
+fn can_access_shipwreck_inventory(
+    player_id: i32,
+    obj_id: i32,
+    template: &Template,
+    investigated_pois: &InvestigatedPOIs,
+) -> bool {
+    template.0 != "Shipwreck"
+        || investigated_pois
+            .get(&player_id)
+            .map(|poi_ids| poi_ids.contains(&obj_id))
+            .unwrap_or(false)
+}
+
+fn is_restricted_cooking_storage(template: &str) -> bool {
+    matches!(
+        template,
+        templates::CAMPFIRE_TEMPLATE | templates::SHELTER_TENT_TEMPLATE
+    )
+}
+
+fn accepts_completed_storage_item(template: &str, item_name: &str, item_subclass: &str) -> bool {
+    !is_restricted_cooking_storage(template)
+        || item_name == item::FIREWOOD
+        || item_name == item::CHARCOAL
+        || matches!(item_subclass, "Raw Meat" | "Cooked Meat")
+}
+
+fn send_shipwreck_search_error(player_id: i32, clients: &Res<Clients>) {
+    send_to_client(
+        player_id,
+        ResponsePacket::Error {
+            errmsg: "Search the Shipwreck before recovering its supplies.".to_string(),
+        },
+        clients,
+    );
+}
+
+fn is_loot_all_source(
+    player_id: i32,
+    source_player_id: i32,
+    source_template: &Template,
+    source_state: &State,
+) -> bool {
+    source_template.0 == templates::DROPPED_BAG_TEMPLATE
+        || (*source_state == State::Dead && source_player_id != player_id)
+}
+
+fn transfer_loot_that_fits(
+    source_inventory: &mut Inventory,
+    target_inventory: &mut Inventory,
+    target_capacity: i32,
+) -> usize {
+    let loot: Vec<(i32, i32)> = source_inventory
+        .items
+        .iter()
+        .filter(|item| item.quantity > 0)
+        .map(|item| {
+            (
+                item.id,
+                (item.quantity.max(0) as f32 * item.weight).max(0.0) as i32,
+            )
+        })
+        .collect();
+    let mut target_weight = target_inventory.get_total_weight();
+    let mut transferred = 0;
+
+    for (item_id, item_weight) in loot {
+        if target_weight.saturating_add(item_weight) > target_capacity {
+            continue;
+        }
+
+        Inventory::transfer(item_id, source_inventory, target_inventory);
+        target_weight = target_weight.saturating_add(item_weight);
+        transferred += 1;
+    }
+
+    transferred
+}
+
 #[derive(QueryData)]
 #[query_data(mutable, derive(Debug))]
 struct ItemTransferQuery {
@@ -920,6 +1050,312 @@ struct ItemTransferQuery {
     active_task: Option<&'static mut ActiveTask>,
     blocked_work: Option<&'static BlockedWork>,
     tool_fetch_target: Option<&'static ToolFetchTarget>,
+    dropped_bag: Option<&'static mut DroppedBag>,
+}
+
+fn dropped_bag_expires_in(expires_at: i32, game_tick: i32) -> i32 {
+    let remaining_ticks = expires_at.saturating_sub(game_tick).max(0);
+    (remaining_ticks + TICKS_PER_SEC - 1) / TICKS_PER_SEC
+}
+
+fn dropped_bag_can_accept(inventory: &Inventory, item: &Item) -> bool {
+    inventory
+        .get_total_weight()
+        .saturating_add((item.quantity as f32 * item.weight) as i32)
+        <= DROPPED_BAG_CAPACITY
+}
+
+fn cancel_empty_dropped_bag_despawn(
+    game_events: &mut GameEvents,
+    bag_id: i32,
+    fixed_expires_at: i32,
+) {
+    game_events.retain(|_, event| {
+        !matches!(event.event_type, GameEventType::DespawnObj { obj_id } if obj_id == bag_id)
+            || event.run_tick == fixed_expires_at
+    });
+}
+
+fn dropped_bag_warning_system(
+    game_tick: Res<GameTick>,
+    clients: Res<Clients>,
+    mut query: Query<(&Position, &mut DroppedBag)>,
+) {
+    for (pos, mut bag) in query.iter_mut() {
+        let remaining = bag.expires_at.saturating_sub(game_tick.0);
+        let warning =
+            if remaining <= DROPPED_BAG_TEN_SECOND_WARNING_TICKS && !bag.warned_ten_seconds {
+                bag.warned_ten_seconds = true;
+                bag.warned_one_minute = true;
+                Some("10 seconds")
+            } else if remaining <= DROPPED_BAG_ONE_MINUTE_WARNING_TICKS && !bag.warned_one_minute {
+                bag.warned_one_minute = true;
+                Some("one minute")
+            } else {
+                None
+            };
+
+        let Some(time) = warning else {
+            continue;
+        };
+        for player_id in bag.contributors.iter().copied() {
+            send_to_client(
+                player_id,
+                ResponsePacket::Notice {
+                    noticemsg: format!(
+                        "Your dropped bag at ({}, {}) disappears in {}.",
+                        pos.x, pos.y, time
+                    ),
+                    expiry: Some(8000),
+                },
+                &clients,
+            );
+        }
+    }
+}
+
+fn drop_item_system(
+    mut commands: Commands,
+    mut events: ResMut<PlayerEvents>,
+    clients: Res<Clients>,
+    mut ids: ResMut<Ids>,
+    mut entity_map: ResMut<EntityObjMap>,
+    templates: Res<Templates>,
+    presence: Res<PlayerWorldPresenceState>,
+    game_tick: Res<GameTick>,
+    mut game_events: ResMut<GameEvents>,
+    mut query: Query<ItemTransferQuery>,
+) {
+    let existing_bags: HashMap<Position, (i32, Entity)> = query
+        .iter()
+        .filter(|obj| obj.template.0 == templates::DROPPED_BAG_TEMPLATE)
+        .map(|obj| (*obj.pos, (obj.id.0, obj.entity)))
+        .collect();
+    let mut pending_bags: HashMap<Position, (i32, Inventory, DroppedBag)> = HashMap::new();
+    let drop_requests: Vec<(i32, PlayerEvent)> = events
+        .iter()
+        .filter_map(|(event_id, event)| match event {
+            PlayerEvent::DropItem { .. } => Some((*event_id, event.clone())),
+            _ => None,
+        })
+        .collect();
+
+    for (event_id, event) in drop_requests {
+        events.remove(&event_id);
+
+        if protected_player_event_mutation(&event, &ids, &presence) {
+            continue;
+        }
+
+        let PlayerEvent::DropItem { player_id, item_id } = event else {
+            continue;
+        };
+
+        let Some(hero_id) = ids.get_hero(player_id) else {
+            error!("Cannot drop item without a hero for player {:?}", player_id);
+            continue;
+        };
+        let Some(hero_entity) = entity_map.get_entity(hero_id) else {
+            error!("Cannot find hero entity for {:?}", hero_id);
+            continue;
+        };
+
+        let Ok(hero) = query.get(hero_entity) else {
+            error!("Cannot query hero entity {:?}", hero_entity);
+            continue;
+        };
+
+        if hero.player_id.0 != player_id || !hero.subclass.is_hero() {
+            send_to_client(
+                player_id,
+                ResponsePacket::Error {
+                    errmsg: "Items can only be dropped from your hero's inventory.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        }
+        if !hero.state.is_alive() {
+            send_to_client(
+                player_id,
+                ResponsePacket::Error {
+                    errmsg: "The dead cannot drop items.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        }
+
+        let hero_pos = *hero.pos;
+        let Some(dropped_item) = hero.inventory.get_by_id(item_id) else {
+            send_to_client(
+                player_id,
+                ResponsePacket::Error {
+                    errmsg: "That item is no longer in your inventory.".to_string(),
+                },
+                &clients,
+            );
+            continue;
+        };
+
+        let bag_expires_at;
+        if let Some((bag_id, bag_entity)) = existing_bags.get(&hero_pos).copied() {
+            let Ok([mut hero, mut bag]) = query.get_many_mut([hero_entity, bag_entity]) else {
+                error!("Cannot query hero and dropped bag on {:?}", hero_pos);
+                continue;
+            };
+            let Some(dropped_bag) = bag.dropped_bag.as_deref_mut() else {
+                error!("Dropped bag {:?} is missing its lifetime component", bag_id);
+                continue;
+            };
+            if dropped_bag.expires_at <= game_tick.0 {
+                send_to_client(
+                    player_id,
+                    ResponsePacket::Error {
+                        errmsg: "That dropped bag has already expired.".to_string(),
+                    },
+                    &clients,
+                );
+                continue;
+            }
+            if !dropped_bag_can_accept(&bag.inventory, &dropped_item) {
+                send_to_client(
+                    player_id,
+                    ResponsePacket::Error {
+                        errmsg: format!(
+                            "Dropped bags can hold only {} weight. Split the stack or use another tile.",
+                            DROPPED_BAG_CAPACITY
+                        ),
+                    },
+                    &clients,
+                );
+                continue;
+            }
+            Inventory::transfer(item_id, &mut hero.inventory, &mut bag.inventory);
+            dropped_bag.add_contributor(player_id);
+            cancel_empty_dropped_bag_despawn(&mut game_events, bag_id, dropped_bag.expires_at);
+            bag_expires_at = dropped_bag.expires_at;
+        } else {
+            let (bag_id, expires_at) = if let Some((bag_id, bag_inventory, dropped_bag)) =
+                pending_bags.get_mut(&hero_pos)
+            {
+                let Ok(mut hero) = query.get_mut(hero_entity) else {
+                    error!("Cannot query hero entity {:?}", hero_entity);
+                    continue;
+                };
+                if !dropped_bag_can_accept(bag_inventory, &dropped_item) {
+                    send_to_client(
+                        player_id,
+                        ResponsePacket::Error {
+                            errmsg: format!(
+                                "Dropped bags can hold only {} weight. Split the stack or use another tile.",
+                                DROPPED_BAG_CAPACITY
+                            ),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+                Inventory::transfer(item_id, &mut hero.inventory, bag_inventory);
+                dropped_bag.add_contributor(player_id);
+                (*bag_id, dropped_bag.expires_at)
+            } else {
+                if !dropped_bag_can_accept(
+                    &Inventory {
+                        owner: -1,
+                        items: Vec::new(),
+                    },
+                    &dropped_item,
+                ) {
+                    send_to_client(
+                        player_id,
+                        ResponsePacket::Error {
+                            errmsg: format!(
+                                "Dropped bags can hold only {} weight. Split the stack before dropping it.",
+                                DROPPED_BAG_CAPACITY
+                            ),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+                let bag_id = ids.new_obj_id();
+                let mut bag_inventory = Inventory {
+                    owner: bag_id,
+                    items: Vec::new(),
+                };
+                let Ok(mut hero) = query.get_mut(hero_entity) else {
+                    error!("Cannot query hero entity {:?}", hero_entity);
+                    continue;
+                };
+                Inventory::transfer(item_id, &mut hero.inventory, &mut bag_inventory);
+                let expires_at = game_tick.0 + DROPPED_BAG_LIFETIME_TICKS;
+                pending_bags.insert(
+                    hero_pos,
+                    (
+                        bag_id,
+                        bag_inventory,
+                        DroppedBag::new(expires_at, player_id),
+                    ),
+                );
+                (bag_id, expires_at)
+            };
+
+            debug!("Queued item {:?} for dropped bag {:?}", item_id, bag_id);
+            bag_expires_at = expires_at;
+        }
+
+        send_to_client(
+            player_id,
+            ResponsePacket::InfoItemsUpdate {
+                id: hero_id,
+                items_updated: Vec::new(),
+                items_removed: vec![item_id],
+            },
+            &clients,
+        );
+        send_to_client(
+            player_id,
+            ResponsePacket::Notice {
+                noticemsg: format!(
+                    "Dropped {} x{}. Anyone can loot it; this bag disappears in {} seconds. Adding items does not reset the timer.",
+                    dropped_item.name,
+                    dropped_item.quantity,
+                    dropped_bag_expires_in(bag_expires_at, game_tick.0),
+                ),
+                expiry: Some(6000),
+            },
+            &clients,
+        );
+    }
+
+    for (pos, (bag_id, inventory, dropped_bag)) in pending_bags {
+        let expires_at = dropped_bag.expires_at;
+        let bag = Obj::create_nospawn(
+            bag_id,
+            NPC_PLAYER_ID,
+            templates::DROPPED_BAG_TEMPLATE.to_string(),
+            pos,
+            State::None,
+            inventory,
+            &templates,
+        );
+        let bag_entity = commands.spawn((bag, dropped_bag)).id();
+        ids.new_obj(bag_id, NPC_PLAYER_ID);
+        entity_map.new_obj(bag_id, bag_entity);
+        commands.trigger(NewObj { entity: bag_entity });
+
+        let despawn_event_id = ids.new_map_event_id();
+        game_events.insert(
+            despawn_event_id,
+            GameEvent {
+                event_id: despawn_event_id,
+                start_tick: game_tick.0,
+                run_tick: expires_at,
+                event_type: GameEventType::DespawnObj { obj_id: bag_id },
+            },
+        );
+    }
 }
 
 #[derive(QueryData)]
@@ -1030,6 +1466,8 @@ impl Plugin for PlayerPlugin {
                 info_hire_system,
                 info_experiment_system,
                 item_transfer_system,
+                drop_item_system,
+                dropped_bag_warning_system,
                 item_split_system,
                 info_refine_system,
                 order_follow_system,
@@ -1112,6 +1550,7 @@ impl Plugin for PlayerPlugin {
         .insert_resource(active_infos)
         .insert_resource(start_locations)
         .init_resource::<AssignedStartLocations>()
+        .init_resource::<InvestigatedPOIs>()
         .init_resource::<RunSpawnedObjs>();
     }
 }
@@ -1251,6 +1690,7 @@ fn new_player_system(
         ResMut<CrisisBalanceObservationState>,
         ResMut<PersonalCrisisHistory>,
         ResMut<ResourceDiscoveries>,
+        ResMut<SurveyHistory>,
     ),
     monoliths: Query<ObjQuery, With<Monolith>>,
     crisis_assault_units: Query<(Entity, &Id, &CrisisAssaultUnit)>,
@@ -1263,6 +1703,7 @@ fn new_player_system(
                 player_id,
                 hero_name,
                 class_name,
+                portrait,
             } => {
                 events_to_remove.push(*event_id);
                 // SelectedClass is client-originated, so reject attempts to
@@ -1288,6 +1729,7 @@ fn new_player_system(
                         *player_id,
                         hero_name.to_string(),
                         class_name.to_string(),
+                        portrait.to_string(),
                         &mut commands,
                         &mut start_location_res.0,
                         &mut start_location_res.1,
@@ -1347,6 +1789,7 @@ fn new_player_system(
                         run_intro_state.7 .0.remove(player_id);
                         run_intro_state.8.by_player.remove(player_id);
                         run_intro_state.9.clear_player(*player_id);
+                        run_intro_state.10.remove(player_id);
                         initialize_player_presence(
                             *player_id,
                             clients.is_player_online(*player_id),
@@ -1660,11 +2103,11 @@ fn live_combo_history_for_target(
 pub(crate) fn combo_chain_cooldown_ticks(chain_length: usize) -> i32 {
     match chain_length {
         0 | 1 => ATTACK_COOLDOWN_TICKS,
-        2 => 40,
-        3 => 30,
+        2 => 25,
+        3 => 20,
         // Current templates top out at four attacks, so strict-prefix tempo
         // cannot reach this rung until a five-attack combo is introduced.
-        _ => 25,
+        _ => 15,
     }
 }
 
@@ -2058,7 +2501,7 @@ fn ability_def(ability_id: &str) -> Option<AbilityDef> {
             cost_type: AbilityCostType::Stamina,
             cost: 10,
             range: 1,
-            cooldown: 5,
+            cooldown: ATTACK_COOLDOWN_SECONDS,
             required_weapon_subclass: None,
             requires_target: true,
             effect: AbilityEffect::ShieldBash,
@@ -2071,7 +2514,7 @@ fn ability_def(ability_id: &str) -> Option<AbilityDef> {
             cost_type: AbilityCostType::Stamina,
             cost: 8,
             range: 3,
-            cooldown: 5,
+            cooldown: ATTACK_COOLDOWN_SECONDS,
             required_weapon_subclass: Some("Bow"),
             requires_target: true,
             effect: AbilityEffect::AimedShot,
@@ -2084,7 +2527,7 @@ fn ability_def(ability_id: &str) -> Option<AbilityDef> {
             cost_type: AbilityCostType::Stamina,
             cost: 8,
             range: 1,
-            cooldown: 5,
+            cooldown: ATTACK_COOLDOWN_SECONDS,
             required_weapon_subclass: None,
             requires_target: true,
             effect: AbilityEffect::Disengage,
@@ -2097,7 +2540,7 @@ fn ability_def(ability_id: &str) -> Option<AbilityDef> {
             cost_type: AbilityCostType::Mana,
             cost: 20,
             range: 3,
-            cooldown: 5,
+            cooldown: ATTACK_COOLDOWN_SECONDS,
             required_weapon_subclass: None,
             requires_target: true,
             effect: AbilityEffect::ArcaneBolt,
@@ -2110,7 +2553,7 @@ fn ability_def(ability_id: &str) -> Option<AbilityDef> {
             cost_type: AbilityCostType::Mana,
             cost: 15,
             range: 0,
-            cooldown: 5,
+            cooldown: ATTACK_COOLDOWN_SECONDS,
             required_weapon_subclass: None,
             requires_target: false,
             effect: AbilityEffect::Ward,
@@ -2628,7 +3071,8 @@ fn attack_system(
                 if let Some(errmsg) = Combat::fortified_outbound_attack_error_from_combat(
                     &attacker,
                     &target,
-                    attack_profile.is_ranged,
+                    attack_profile.is_ranged
+                        || Combat::equipped_weapon_has_fortification_reach(&attacker.inventory),
                 ) {
                     let packet = ResponsePacket::Error { errmsg };
                     send_to_client(*player_id, packet, &clients);
@@ -2903,14 +3347,10 @@ fn attack_system(
                                 &mut attacker.effects,
                                 &mut map_events,
                                 game_tick.0,
-                                Effect::WeakSanctuary,
+                                Effect::Sanctuary,
                                 MAGE_WARD_DURATION_TICKS,
                                 MAGE_WARD_AMPLIFIER,
                             );
-                            commands.entity(attacker.entity).insert(WeakSanctuary {
-                                id: attacker.id.0,
-                                pos: *attacker.pos,
-                            });
                             attacker.last_combat_tick.0 = game_tick.0;
                         }
                         _ => {}
@@ -3307,9 +3747,11 @@ fn attack_system(
                     continue;
                 }
 
-                if let Some(errmsg) =
-                    Combat::fortified_outbound_attack_error_from_combat(&attacker, &target, false)
-                {
+                if let Some(errmsg) = Combat::fortified_outbound_attack_error_from_combat(
+                    &attacker,
+                    &target,
+                    Combat::equipped_weapon_has_fortification_reach(&attacker.inventory),
+                ) {
                     let packet = ResponsePacket::Error { errmsg };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -3653,11 +4095,20 @@ fn gather_system(
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
+    campfire_visibility: Res<CampfireVisibilityState>,
     mut map_events: ResMut<MapEvents>,
+    mut visible_events: ResMut<VisibleEvents>,
     mut game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
     discoveries: Res<ResourceDiscoveries>,
-    hero_query: Query<(&Position, &State, &mut Inventory, Option<&LastCombatTick>)>,
+    mut hero_query: Query<(
+        &Position,
+        &State,
+        &mut Inventory,
+        Option<&LastCombatTick>,
+        Option<&mut ActiveTask>,
+        Option<&Viewshed>,
+    )>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -3677,8 +4128,14 @@ fn gather_system(
                     continue;
                 };
 
-                let Ok((hero_pos, hero_state, hero_inventory, last_combat_tick)) =
-                    hero_query.get(hero_entity)
+                let Ok((
+                    hero_pos,
+                    hero_state,
+                    hero_inventory,
+                    last_combat_tick,
+                    hero_active_task,
+                    hero_viewshed,
+                )) = hero_query.get_mut(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
                     continue;
@@ -3689,6 +4146,12 @@ fn gather_system(
                         errmsg: "The dead cannot gather".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !has_sufficient_work_visibility(hero_viewshed, *player_id, &campfire_visibility)
+                {
+                    send_insufficient_work_visibility_notice(*player_id, &clients);
                     continue;
                 }
 
@@ -3704,6 +4167,8 @@ fn gather_system(
                 let tool_resource_type = hero_inventory.get_equipped_main_hand().and_then(|tool| {
                     item::gather_resource_type_for_tool(&tool).map(str::to_string)
                 });
+                let hunting_tool_equipped =
+                    hero_inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting);
 
                 // Decide what to do, in priority order:
                 //   1. Tool's preferred resource is on the tile -> gather that.
@@ -3751,6 +4216,30 @@ fn gather_system(
                     _ => GATHER_TIME_SEC * TICKS_PER_SEC,
                 };
 
+                let gather_activity = gather_activity_for_event(&event_type, hunting_tool_equipped);
+                if let Some(mut active_task) = hero_active_task {
+                    ActiveTask::set_if_changed(&mut active_task, gather_activity.clone());
+                } else {
+                    commands.entity(hero_entity).insert(gather_activity.clone());
+                }
+
+                let activity = gather_activity.to_string();
+                visible_events.new(
+                    hero_id,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![("activity".to_string(), activity.clone())],
+                    },
+                );
+                send_to_client(
+                    *player_id,
+                    ResponsePacket::InfoActivityUpdate {
+                        id: hero_id,
+                        activity,
+                    },
+                    &clients,
+                );
+
                 commands.trigger(StateChange {
                     entity: hero_entity,
                     new_state: State::Gathering,
@@ -3779,11 +4268,38 @@ fn gather_system(
     }
 }
 
+fn gather_activity_for_event(
+    event_type: &GameEventType,
+    hunting_tool_equipped: bool,
+) -> ActiveTask {
+    let activity = match event_type {
+        GameEventType::GatherEvent { res_type, .. } => {
+            let task = ActiveTask::get_activity_from_res_type(res_type.clone());
+            if task == ActiveTask::Unknown {
+                ActiveTask::Gathering
+            } else {
+                task
+            }
+        }
+        GameEventType::ForageEvent { .. } => ActiveTask::Gathering,
+        _ => ActiveTask::Gathering,
+    };
+
+    // A hunt can begin on a tile where no hunting ground is currently revealed.
+    // That uses the terrain-forage fallback internally, but it is still a hunt
+    // from the player's perspective while a Hunting tool is equipped.
+    if activity == ActiveTask::Gathering && hunting_tool_equipped {
+        ActiveTask::Hunting
+    } else {
+        activity
+    }
+}
+
 fn gather_farm_refine_craft_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     game_tick: ResMut<GameTick>,
-    ids: ResMut<Ids>,
+    mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
@@ -3793,6 +4309,7 @@ fn gather_farm_refine_craft_system(
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     active_infos: ResMut<ActiveInfos>,
+    mut visible_events: ResMut<VisibleEvents>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<StructureQuery, With<ClassStructure>>,
     presence: Res<PlayerWorldPresenceState>,
@@ -3967,16 +4484,18 @@ fn gather_farm_refine_craft_system(
                     continue;
                 }
 
-                // Equipped item should have the ability to harvest
-                // Check if structure contains seeds
-                if !hero.inventory.has_by_class(item::HARVESTING.to_string()) {
+                let Some(tool) = hero.inventory.get_equipped_tool_for_attr(&AttrKey::Farming)
+                else {
                     trace!("Require a harvesting tool to harvest the crop.");
                     let packet = ResponsePacket::Error {
-                        errmsg: "Require a harvesting tool to harvest the crop.".to_string(),
+                        errmsg: "Equip a Farming tool to harvest the crop.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     break;
-                }
+                };
+                let Some(work_duration) = farm_harvest_duration_ticks(hero.inventory) else {
+                    continue;
+                };
 
                 //Harvesting state change
                 commands.trigger(StateChange {
@@ -3984,15 +4503,34 @@ fn gather_farm_refine_craft_system(
                     new_state: State::Harvesting,
                 });
 
+                let action_id = ids.new_map_event_id();
+                commands.entity(hero_entity).insert(ActionProgress {
+                    action_id,
+                    start_tick: game_tick.0,
+                    end_tick: game_tick.0 + work_duration,
+                });
+                visible_events.new(
+                    hero.id.0,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![
+                            ("state".to_string(), STATE_HARVESTING.to_string()),
+                            ("action_id".to_string(), action_id.to_string()),
+                            (
+                                "action_duration_ms".to_string(),
+                                (work_duration.saturating_mul(1000) / TICKS_PER_SEC).to_string(),
+                            ),
+                            ("action_elapsed_ms".to_string(), "0".to_string()),
+                        ],
+                    },
+                );
+
                 let plant_event = VisibleEvent::HarvestEvent {
                     structure_id: structure.id.0,
+                    tool_item_id: tool.id,
                 };
 
-                map_events.new(
-                    hero.id.0,
-                    game_tick.0 + 100, // in the future
-                    plant_event,
-                );
+                map_events.new(hero.id.0, game_tick.0 + work_duration, plant_event);
             }
             PlayerEvent::Operate {
                 player_id,
@@ -4093,15 +4631,18 @@ fn refine_system(
     clients: Res<Clients>,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
+    mut visible_events: ResMut<VisibleEvents>,
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     mut active_infos: ResMut<ActiveInfos>,
+    campfire_visibility: Res<CampfireVisibilityState>,
     hero_query: Query<(
         &Position,
         &State,
         &mut Inventory,
         &mut Skills,
         Option<&LastCombatTick>,
+        Option<&Viewshed>,
     )>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -4122,8 +4663,14 @@ fn refine_system(
                     continue;
                 };
 
-                let Ok((_hero_pos, hero_state, hero_inventory, hero_skills, last_combat_tick)) =
-                    hero_query.get(hero_entity)
+                let Ok((
+                    _hero_pos,
+                    hero_state,
+                    hero_inventory,
+                    hero_skills,
+                    last_combat_tick,
+                    hero_viewshed,
+                )) = hero_query.get(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
                     continue;
@@ -4134,6 +4681,12 @@ fn refine_system(
                         errmsg: "The dead cannot refine.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
+                if !has_sufficient_work_visibility(hero_viewshed, *player_id, &campfire_visibility)
+                {
+                    send_insufficient_work_visibility_notice(*player_id, &clients);
                     continue;
                 }
 
@@ -4192,9 +4745,31 @@ fn refine_system(
                     new_state: State::Refining,
                 });
 
+                let action_id = ids.new_map_event_id();
+                commands.entity(hero_entity).insert(ActionProgress {
+                    action_id,
+                    start_tick: game_tick.0,
+                    end_tick: game_tick.0 + refine_time,
+                });
+                visible_events.new(
+                    hero_id,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![
+                            ("state".to_string(), STATE_REFINING.to_string()),
+                            ("action_id".to_string(), action_id.to_string()),
+                            (
+                                "action_duration_ms".to_string(),
+                                (refine_time.saturating_mul(1000) / TICKS_PER_SEC).to_string(),
+                            ),
+                            ("action_elapsed_ms".to_string(), "0".to_string()),
+                        ],
+                    },
+                );
+
                 // Add Refine Event
                 let event = GameEvent {
-                    event_id: ids.new_map_event_id(),
+                    event_id: action_id,
                     start_tick: game_tick.0,
                     run_tick: game_tick.0 + refine_time,
                     event_type: GameEventType::RefineEvent {
@@ -4216,6 +4791,7 @@ fn refine_system(
             PlayerEvent::Craft {
                 player_id,
                 recipe_name,
+                signature_item_id,
             } => {
                 debug!("PlayerEvent::Craft");
                 events_to_remove.push(*event_id);
@@ -4230,8 +4806,14 @@ fn refine_system(
                     continue;
                 };
 
-                let Ok((_hero_pos, hero_state, hero_inventory, hero_skills, last_combat_tick)) =
-                    hero_query.get(hero_entity)
+                let Ok((
+                    _hero_pos,
+                    hero_state,
+                    hero_inventory,
+                    hero_skills,
+                    last_combat_tick,
+                    _hero_viewshed,
+                )) = hero_query.get(hero_entity)
                 else {
                     error!("Cannot find hero for {:?}", hero_entity);
                     continue;
@@ -4276,10 +4858,16 @@ fn refine_system(
                     continue;
                 }
 
-                if !hero_inventory.has_reqs(recipe.req.clone()) {
+                if !hero_inventory.has_craft_reqs(recipe.req.clone(), *signature_item_id) {
                     error!("Insufficient resources to craft {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
-                        errmsg: "Insufficient resources to craft".to_string(),
+                        errmsg: if signature_item_id.is_some() {
+                            "The selected signature component is unavailable or does not match this recipe"
+                                .to_string()
+                        } else {
+                            "Insufficient Common resources to craft; select a special component explicitly"
+                                .to_string()
+                        },
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -4302,6 +4890,7 @@ fn refine_system(
                     event_type: GameEventType::CraftEvent {
                         crafter_id: hero_id,
                         recipe_name: recipe_name.clone(),
+                        signature_item_id: *signature_item_id,
                     },
                 };
 
@@ -4535,6 +5124,7 @@ fn structure_refine_system(
                 player_id,
                 structure_id,
                 recipe_name,
+                signature_item_id,
             } => {
                 debug!("PlayerEvent::StructureCraft");
                 events_to_remove.push(*event_id);
@@ -4646,10 +5236,16 @@ fn structure_refine_system(
                     continue;
                 }
 
-                if !structure_inventory.has_reqs(recipe.req.clone()) {
+                if !structure_inventory.has_craft_reqs(recipe.req.clone(), *signature_item_id) {
                     error!("Insufficient resources to craft {:?}", *recipe_name);
                     let packet = ResponsePacket::Error {
-                        errmsg: "Insufficient resources to craft".to_string(),
+                        errmsg: if signature_item_id.is_some() {
+                            "The selected signature component is unavailable or does not match this recipe"
+                                .to_string()
+                        } else {
+                            "Insufficient Common resources to craft; select a special component explicitly"
+                                .to_string()
+                        },
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -4673,6 +5269,7 @@ fn structure_refine_system(
                         crafter_id: hero_id,
                         structure_id: *structure_id,
                         recipe_name: recipe_name.clone(),
+                        signature_item_id: *signature_item_id,
                         work_entry_id: None,
                     },
                 };
@@ -4834,7 +5431,9 @@ fn info_hero_system(
         class: obj.class.0.to_string(),
         subclass: obj.subclass.to_string(),
         state: obj.state.to_string(),
+        activity: obj.active_task.map(ActiveTask::to_string),
         image: obj.misc.image.clone(),
+        portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         items: items_packet,
         skills: skills_packet,
@@ -4984,6 +5583,7 @@ fn info_villager_system(
         subclass: obj.subclass.to_string(),
         state: obj.state.to_string(),
         image: obj.misc.image.clone(),
+        portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         items: items_packet,
         skills: skills_packet,
@@ -5343,6 +5943,8 @@ fn info_poi_system(
     info_poi_event: On<InfoPOIEvent>,
     clients: Res<Clients>,
     run_spawned_objs: Res<RunSpawnedObjs>,
+    investigated_pois: Res<InvestigatedPOIs>,
+    game_tick: Res<GameTick>,
     query: Query<CoreQuery>,
 ) {
     let Ok(obj) = query.get(info_poi_event.entity) else {
@@ -5360,7 +5962,13 @@ fn info_poi_system(
         return;
     }
 
-    let items_packet = Some(obj.inventory.get_packet());
+    let items_packet = can_access_shipwreck_inventory(
+        info_poi_event.player_id,
+        obj.id.0,
+        obj.template,
+        &investigated_pois,
+    )
+    .then(|| obj.inventory.get_packet());
 
     let response_packet = ResponsePacket::InfoPOI {
         id: obj.id.0,
@@ -5370,6 +5978,9 @@ fn info_poi_system(
         template: obj.template.0.to_string(),
         image: obj.misc.image.clone(),
         items: items_packet,
+        expires_in: obj
+            .dropped_bag
+            .map(|bag| dropped_bag_expires_in(bag.expires_at, game_tick.0)),
     };
 
     send_to_client(info_poi_event.player_id, response_packet, &clients);
@@ -5835,6 +6446,7 @@ fn info_upgrade_system(
                     let upgrade_template = network::UpgradeTemplate {
                         name: upgrade_structure_template.template.clone(),
                         template: upgrade_structure_template.template,
+                        image: upgrade_structure_template.image,
                         req: upgrade_structure_template.upgrade_req.unwrap_or(vec![]),
                         build_time: upgrade_structure_template.build_cost.unwrap_or(0),
                     };
@@ -5890,10 +6502,9 @@ fn info_tile_system(
 
                 for (monolith_pos, monolith) in monolith_query.iter() {
                     let distance = Map::dist(Position { x: *x, y: *y }, *monolith_pos);
-                    if distance < sanctuary_full_radius(monolith.sanctuary_level) {
-                        sanctuary = "Strong".to_string();
-                    } else if distance < sanctuary_weak_radius(monolith.sanctuary_level) {
-                        sanctuary = "Weak".to_string();
+                    if distance < sanctuary_radius(monolith.sanctuary_level) {
+                        sanctuary = "Sanctuary".to_string();
+                        break;
                     }
                 }
 
@@ -5965,6 +6576,7 @@ fn info_item_system(
     clients: Res<Clients>,
     entity_map: Res<EntityObjMap>,
     run_spawned_objs: Res<RunSpawnedObjs>,
+    investigated_pois: Res<InvestigatedPOIs>,
     prices: Res<Prices>,
     templates: Res<Templates>,
     query: Query<(&PlayerId, &Name, &Template, &Inventory)>,
@@ -5990,6 +6602,15 @@ fn info_item_system(
 
                 if !can_access_run_shipwreck(*player_id, *id, obj_template, &run_spawned_objs) {
                     send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    *id,
+                    obj_template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
                     continue;
                 }
 
@@ -6025,6 +6646,15 @@ fn info_item_system(
 
                 if !can_access_run_shipwreck(*player_id, *id, obj_template, &run_spawned_objs) {
                     send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    *id,
+                    obj_template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
                     continue;
                 }
 
@@ -6066,6 +6696,15 @@ fn info_item_system(
 
                 if !can_access_run_shipwreck(*player_id, *obj_id, obj_template, &run_spawned_objs) {
                     send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    *obj_id,
+                    obj_template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
                     continue;
                 }
 
@@ -6148,7 +6787,9 @@ fn info_item_system(
                             equipped: item.equipped,
                             price: None,
                             attrs: item.attrs,
-                            produces: item_template.produces.clone(),
+                            produces: item_template.produces.as_deref().map(|outputs| {
+                                item::produced_item_packets(outputs, &templates.item_templates)
+                            }),
                         };
 
                         send_to_client(*player_id, info_item_packet, &clients);
@@ -6248,19 +6889,8 @@ fn info_item_system(
                     continue;
                 };
 
-                let mut produces_list = Vec::new();
-
-                for produce in produces.iter() {
-                    let produce_template =
-                        Item::get_template(produce.to_string(), &templates.item_templates);
-
-                    produces_list.push(network::ProducedItem {
-                        name: produce_template.name.clone(),
-                        image: produce_template.image.clone(),
-                        class: produce_template.class.clone(),
-                        subclass: produce_template.subclass.clone(),
-                    });
-                }
+                let produces_list =
+                    item::produced_item_packets(&produces, &templates.item_templates);
 
                 // Get refine time
                 let item_template =
@@ -6341,17 +6971,193 @@ fn item_transfer_system(
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
     run_spawned_objs: Res<RunSpawnedObjs>,
+    investigated_pois: Res<InvestigatedPOIs>,
     mut active_infos: ResMut<ActiveInfos>,
     mut query: Query<ItemTransferQuery>,
     selected_upgrade_query: Query<&SelectedUpgrade>,
     game_tick: Res<GameTick>,
     mut game_events: ResMut<GameEvents>,
     presence: Res<PlayerWorldPresenceState>,
+    mut objectives: ResMut<Objectives>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
     for (event_id, event) in events.iter() {
         match event {
+            PlayerEvent::LootAll {
+                player_id,
+                source_id,
+                target_id,
+            } => {
+                events_to_remove.push(*event_id);
+
+                if protected_player_event_mutation(event, &ids, &presence) {
+                    continue;
+                }
+
+                if source_id == target_id {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Cannot loot items into the same inventory.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                let Some(source_entity) = entity_map.get_entity(*source_id) else {
+                    error!("Cannot find loot source entity from id: {:?}", source_id);
+                    continue;
+                };
+                let Some(target_entity) = entity_map.get_entity(*target_id) else {
+                    error!("Cannot find loot target entity from id: {:?}", target_id);
+                    continue;
+                };
+
+                let entities = [source_entity, target_entity];
+                let Ok([mut source, mut target]) = query.get_many_mut(entities) else {
+                    error!(
+                        "Cannot find loot source or target from entities {:?}",
+                        entities
+                    );
+                    continue;
+                };
+
+                if !can_access_run_shipwreck(
+                    *player_id,
+                    source.id.0,
+                    source.template,
+                    &run_spawned_objs,
+                ) {
+                    send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    source.id.0,
+                    source.template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
+                    continue;
+                }
+
+                if is_owner_offline_protected(source.player_id, &presence)
+                    || is_owner_offline_protected(target.player_id, &presence)
+                    || object_belongs_to_protected_run(source.id.0, &ids, &presence)
+                    || object_belongs_to_protected_run(target.id.0, &ids, &presence)
+                {
+                    continue;
+                }
+
+                if !is_loot_all_source(
+                    *player_id,
+                    source.player_id.0,
+                    source.template,
+                    source.state,
+                ) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg:
+                                "Loot All is only available for enemy corpses and dropped bags."
+                                    .to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                if target.player_id.0 != *player_id
+                    || !target.subclass.is_hero()
+                    || !target.state.is_alive()
+                {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Loot All can only transfer items to your living hero."
+                                .to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                if !Map::is_adjacent_including_source(*source.pos, *target.pos) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Loot is not nearby.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                let target_capacity =
+                    Obj::get_capacity(&target.template.0, &templates.obj_templates);
+
+                let transferred = transfer_loot_that_fits(
+                    &mut source.inventory,
+                    &mut target.inventory,
+                    target_capacity,
+                );
+
+                if transferred > 0
+                    && is_loot_poi(&source.template.0)
+                    && source.inventory.items.is_empty()
+                {
+                    let despawn_event_id = ids.new_map_event_id();
+                    game_events.insert(
+                        despawn_event_id,
+                        GameEvent {
+                            event_id: despawn_event_id,
+                            start_tick: game_tick.0,
+                            run_tick: game_tick.0 + LOOT_POI_EMPTY_DESPAWN_TICKS,
+                            event_type: GameEventType::DespawnObj {
+                                obj_id: source.id.0,
+                            },
+                        },
+                    );
+                }
+
+                let result = if source.inventory.items.is_empty() {
+                    "success"
+                } else if transferred > 0 {
+                    "partial"
+                } else {
+                    "full"
+                };
+
+                let source_capacity =
+                    Obj::get_capacity(&source.template.0, &templates.obj_templates);
+                let source_inventory = network::Inventory {
+                    id: source.id.0,
+                    cap: source_capacity,
+                    tw: source.inventory.get_total_weight(),
+                    items: source.inventory.get_packet(),
+                };
+                let target_inventory = network::Inventory {
+                    id: target.id.0,
+                    cap: target_capacity,
+                    tw: target.inventory.get_total_weight(),
+                    items: target.inventory.get_packet(),
+                };
+
+                send_to_client(
+                    *player_id,
+                    ResponsePacket::ItemTransfer {
+                        result: result.to_string(),
+                        source_id: source.id.0,
+                        sourceitems: source_inventory,
+                        target_id: target.id.0,
+                        targetitems: target_inventory,
+                        reqitems: Vec::new(),
+                    },
+                    &clients,
+                );
+            }
             PlayerEvent::ItemTransfer {
                 player_id,
                 source_id,
@@ -6393,6 +7199,20 @@ fn item_transfer_system(
                     &run_spawned_objs,
                 ) {
                     send_shipwreck_owner_error(*player_id, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    owner.id.0,
+                    owner.template,
+                    &investigated_pois,
+                ) || !can_access_shipwreck_inventory(
+                    *player_id,
+                    target.id.0,
+                    target.template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
                     continue;
                 }
 
@@ -6467,6 +7287,26 @@ fn item_transfer_system(
                 let owner_accepts_build_resources =
                     accepts_build_resource_transfer(owner.class, owner.state);
 
+                // Completed Campfires and Shelter Tents hold only cooking fuel,
+                // raw meat, and cooked meat rather than acting as general storage.
+                // Founded structures and structures being upgraded still use
+                // the build-resource path below.
+                if !target_accepts_build_resources
+                    && !accepts_completed_storage_item(
+                        &target.template.0,
+                        &item.name,
+                        &item.subclass,
+                    )
+                {
+                    let packet = ResponsePacket::Error {
+                        errmsg:
+                            "Only Firewood, Charcoal, Raw Meat, and Cooked Meat can be stored here."
+                                .to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Incomplete structures can receive build/upgrade resources, but should not be
                 // used like completed inventories.
                 if incomplete_structure_blocks_inventory_transfer(target.class, target.state) {
@@ -6482,6 +7322,18 @@ fn item_transfer_system(
                 let transfer_item_weight = (item.quantity as f32 * item.weight) as i32;
                 let target_capacity =
                     Obj::get_capacity(&target.template.0, &templates.obj_templates);
+                let target_dropped_bag_expiry =
+                    target.dropped_bag.as_deref().map(|bag| bag.expires_at);
+                if target_dropped_bag_expiry.is_some_and(|expires_at| expires_at <= game_tick.0) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "That dropped bag has already expired.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
 
                 info!(
                     "Item transfer target.class: {:?} target.template: {:?}",
@@ -6694,72 +7546,76 @@ fn item_transfer_system(
                     };
 
                     send_to_client(*player_id, item_transfer_packet, &clients);
-                } else if target.class.0 == "structure" && target.template.0 == "Tent" {
-                    info!("Allow fueling of campfire with wood");
+                } else if is_restricted_cooking_storage(&target.template.0) {
+                    info!("Transferring cooking supplies into restricted storage");
 
-                    // Only allow wood to be used to fuel campfire
-                    if item.class == item::FUEL.to_string() {
-                        let target_total_weight = target.inventory.get_total_weight();
-                        let remaining_capacity = target_capacity - target_total_weight;
-
-                        if transfer_item_weight > remaining_capacity {
-                            let num_to_transfer = remaining_capacity / item.weight as i32;
-
-                            Inventory::transfer_quantity(
-                                item.id,
-                                ids.new_item_id(),
-                                &mut owner.inventory,
-                                &mut target.inventory,
-                                num_to_transfer,
-                                &templates.item_templates,
-                            );
-                        } else {
-                            Inventory::transfer(
-                                item.id,
-                                &mut owner.inventory,
-                                &mut target.inventory,
-                            );
-                        }
-
-                        let source_capacity =
-                            Obj::get_capacity(&owner.template.0, &templates.obj_templates);
-                        let source_total_weight = owner.inventory.get_total_weight();
-
-                        let source_items = owner.inventory.get_packet().clone();
-                        let target_items = target.inventory.get_packet().clone();
-
-                        let source_inventory = network::Inventory {
-                            id: item.owner,
-                            cap: source_capacity,
-                            tw: source_total_weight,
-                            items: source_items.clone(),
-                        };
-
-                        let target_inventory = network::Inventory {
-                            id: *target_id,
-                            cap: target_capacity,
-                            tw: target_total_weight + transfer_item_weight,
-                            items: target_items.clone(),
-                        };
-
-                        let item_transfer_packet: ResponsePacket = ResponsePacket::ItemTransfer {
-                            result: "success".to_string(),
-                            source_id: item.owner,
-                            sourceitems: source_inventory,
-                            target_id: *target_id,
-                            targetitems: target_inventory,
-                            reqitems: Vec::new(),
-                        };
-
-                        send_to_client(*player_id, item_transfer_packet, &clients);
-                    } else {
-                        info!("Item is not fuel");
+                    let remaining_capacity = target_capacity - target_total_weight;
+                    if remaining_capacity <= 0 {
                         let packet = ResponsePacket::Error {
-                            errmsg: "Item is not fuel".to_string(),
+                            errmsg: "Target does not have enough capacity".to_string(),
                         };
                         send_to_client(*player_id, packet, &clients);
                         continue;
                     }
+
+                    let item_weight = item.weight.max(0.0);
+                    let num_to_transfer = if item_weight > 0.0 {
+                        ((remaining_capacity as f32 / item_weight).floor() as i32)
+                            .min(item.quantity)
+                    } else {
+                        item.quantity
+                    };
+
+                    if num_to_transfer <= 0 {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Target does not have enough capacity".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+
+                    if num_to_transfer < item.quantity {
+                        Inventory::transfer_quantity(
+                            item.id,
+                            ids.new_item_id(),
+                            &mut owner.inventory,
+                            &mut target.inventory,
+                            num_to_transfer,
+                            &templates.item_templates,
+                        );
+                    } else {
+                        Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
+                    }
+
+                    let source_inventory = network::Inventory {
+                        id: owner.id.0,
+                        cap: Obj::get_capacity(&owner.template.0, &templates.obj_templates),
+                        tw: owner.inventory.get_total_weight(),
+                        items: owner.inventory.get_packet(),
+                    };
+                    let target_inventory = network::Inventory {
+                        id: *target_id,
+                        cap: target_capacity,
+                        tw: target.inventory.get_total_weight(),
+                        items: target.inventory.get_packet(),
+                    };
+
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::ItemTransfer {
+                            result: if num_to_transfer < item.quantity {
+                                "partial".to_string()
+                            } else {
+                                "success".to_string()
+                            },
+                            source_id: owner.id.0,
+                            sourceitems: source_inventory,
+                            target_id: *target_id,
+                            targetitems: target_inventory,
+                            reqitems: Vec::new(),
+                        },
+                        &clients,
+                    );
                 } else {
                     if target_total_weight + transfer_item_weight > target_capacity {
                         let packet = ResponsePacket::Error {
@@ -6773,6 +7629,17 @@ fn item_transfer_system(
                     info!("Owner inventory: {:?}", owner.inventory);
                     info!("Target inventory: {:?}", target.inventory);
                     Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
+
+                    if let Some(fixed_expires_at) = target_dropped_bag_expiry {
+                        if let Some(dropped_bag) = target.dropped_bag.as_deref_mut() {
+                            dropped_bag.add_contributor(*player_id);
+                        }
+                        cancel_empty_dropped_bag_despawn(
+                            &mut game_events,
+                            target.id.0,
+                            fixed_expires_at,
+                        );
+                    }
 
                     // A loot cache that has just been emptied should despawn shortly
                     // after, leaving a brief beat so the player sees it go empty.
@@ -6889,6 +7756,17 @@ fn item_transfer_system(
                         send_to_client(*player_id, item_update_packet, &clients);
                     }
                 }
+
+                if target.player_id.0 == *player_id
+                    && target.template.0 == "Burrow"
+                    && Structure::is_built(*target.state)
+                    && burrow_supply_type_count(&target.inventory) >= BURROW_SUPPLY_GOAL
+                {
+                    objectives
+                        .entry(*player_id)
+                        .or_insert_with(PlayerObjectives::default)
+                        .stock_burrow = true;
+                }
             }
             PlayerEvent::InfoItemTransfer {
                 player_id,
@@ -6941,6 +7819,20 @@ fn item_transfer_system(
                     send_shipwreck_owner_error(*player_id, &clients);
                     continue;
                 }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    source.id.0,
+                    source.template,
+                    &investigated_pois,
+                ) || !can_access_shipwreck_inventory(
+                    *player_id,
+                    target.id.0,
+                    target.template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
+                    continue;
+                }
 
                 if !Map::is_adjacent_including_source(*source.pos, *target.pos) {
                     error!("Target is not nearby {:?}", target.id.0);
@@ -6974,7 +7866,9 @@ fn item_transfer_system(
                 let mut target_total_weight = -1; // -1 representing unknown
                 let mut selected_upgrade_name = None;
 
-                if target.player_id.0 == *player_id {
+                if target.player_id.0 == *player_id
+                    || target.template.0 == templates::DROPPED_BAG_TEMPLATE
+                {
                     target_capacity =
                         Obj::get_capacity(&target.template.0, &templates.obj_templates);
                     target_total_weight = target.inventory.get_total_weight();
@@ -7030,8 +7924,16 @@ fn item_transfer_system(
                 let info_item_transfer_packet: ResponsePacket = ResponsePacket::InfoItemTransfer {
                     source_id: *source_id,
                     sourceitems: source_inventory,
+                    source_expires_in: source
+                        .dropped_bag
+                        .as_deref()
+                        .map(|bag| dropped_bag_expires_in(bag.expires_at, game_tick.0)),
                     target_id: *target_id,
                     targetitems: target_inventory,
+                    target_expires_in: target
+                        .dropped_bag
+                        .as_deref()
+                        .map(|bag| dropped_bag_expires_in(bag.expires_at, game_tick.0)),
                     reqitems: req_items,
                 };
 
@@ -7056,6 +7958,7 @@ fn item_split_system(
     clients: Res<Clients>,
     templates: Res<Templates>,
     run_spawned_objs: Res<RunSpawnedObjs>,
+    investigated_pois: Res<InvestigatedPOIs>,
     mut query: Query<(&PlayerId, &Template, &mut Inventory)>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
@@ -7105,6 +8008,15 @@ fn item_split_system(
                         errmsg: "Owner is not owned by player".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+                if !can_access_shipwreck_inventory(
+                    *player_id,
+                    *owner_id,
+                    owner_template,
+                    &investigated_pois,
+                ) {
+                    send_shipwreck_search_error(*player_id, &clients);
                     continue;
                 }
 
@@ -7693,6 +8605,7 @@ fn create_foundation_system(
     mut entity_map: ResMut<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    campfire_visibility: Res<CampfireVisibilityState>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<(&Position, &Subclass), With<ClassStructure>>,
     presence: Res<PlayerWorldPresenceState>,
@@ -7737,6 +8650,12 @@ fn create_foundation_system(
                 // Check if hero is owned by player
                 if hero.player_id.0 != *player_id {
                     error!("Hero is not owned by player {:?}", *player_id);
+                    continue;
+                }
+
+                if !has_sufficient_work_visibility(hero.viewshed, *player_id, &campfire_visibility)
+                {
+                    send_insufficient_work_visibility_notice(*player_id, &clients);
                     continue;
                 }
 
@@ -7894,7 +8813,13 @@ fn build_system(
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    builder_query: Query<(&Position, &State, Option<&LastCombatTick>)>,
+    campfire_visibility: Res<CampfireVisibilityState>,
+    builder_query: Query<(
+        &Position,
+        &State,
+        Option<&Viewshed>,
+        Option<&LastCombatTick>,
+    )>,
     mut structure_query: Query<(&Name, &Position, &State, &Inventory, &mut Assignments)>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
@@ -7953,12 +8878,23 @@ fn build_system(
                     continue;
                 }
 
-                let Ok((builder_pos, builder_state, last_combat_tick)) =
+                let Ok((builder_pos, builder_state, builder_viewshed, last_combat_tick)) =
                     builder_query.get(builder_entity)
                 else {
                     error!("Cannot find builder for {:?}", builder_id);
                     continue;
                 };
+
+                if ids.get_hero(*player_id) == Some(*builder_id)
+                    && !has_sufficient_work_visibility(
+                        builder_viewshed,
+                        *player_id,
+                        &campfire_visibility,
+                    )
+                {
+                    send_insufficient_work_visibility_notice(*player_id, &clients);
+                    continue;
+                }
 
                 if combat_locked(last_combat_tick, game_tick.0) {
                     send_combat_locked_error(*player_id, &clients);
@@ -8181,7 +9117,13 @@ fn upgrade_system(
     map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
     templates: Res<Templates>,
-    builder_query: Query<(&Position, &State, Option<&LastCombatTick>)>,
+    campfire_visibility: Res<CampfireVisibilityState>,
+    builder_query: Query<(
+        &Position,
+        &State,
+        Option<&Viewshed>,
+        Option<&LastCombatTick>,
+    )>,
     mut structure_query: Query<
         (
             &Position,
@@ -8252,12 +9194,23 @@ fn upgrade_system(
                     continue;
                 }
 
-                let Ok((builder_pos, builder_state, last_combat_tick)) =
+                let Ok((builder_pos, builder_state, builder_viewshed, last_combat_tick)) =
                     builder_query.get(builder_entity)
                 else {
                     error!("Cannot find builder for {:?}", builder_id);
                     continue;
                 };
+
+                if ids.get_hero(*player_id) == Some(*builder_id)
+                    && !has_sufficient_work_visibility(
+                        builder_viewshed,
+                        *player_id,
+                        &campfire_visibility,
+                    )
+                {
+                    send_insufficient_work_visibility_notice(*player_id, &clients);
+                    continue;
+                }
 
                 if combat_locked(last_combat_tick, game_tick.0) {
                     send_combat_locked_error(*player_id, &clients);
@@ -8374,6 +9327,17 @@ fn experiment_system(
     }
 }
 
+fn usable_ignition_tool(inventory: &Inventory, templates: &Templates) -> Option<(i32, i32)> {
+    let tool = inventory.get_usable_by_class(IGNITION_TOOL)?;
+    let maximum_durability = Item::find_template(tool.name.clone(), &templates.item_templates)
+        .and_then(|template| template.durability)
+        .or(tool.durability)
+        .unwrap_or(1)
+        .max(1);
+
+    Some((tool.id, maximum_durability))
+}
+
 fn activate_system(
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
@@ -8486,10 +9450,10 @@ fn activate_system(
                 }
 
                 let is_standalone_campfire = *structure_subclass == Subclass::Campfire;
-                // A living hero can tend a standalone Campfire from its tile
-                // or any adjacent hex. Preserve exact-tile activation for
-                // other fire-capable owned structures such as Shelter Tents.
-                let out_of_range = if is_standalone_campfire {
+                let is_shelter_tent = structure_template.0 == templates::SHELTER_TENT_TEMPLATE;
+                // The Shelter Tent retains the upgraded Campfire's ordinary
+                // same-or-adjacent tending range while remaining owner-only.
+                let out_of_range = if is_standalone_campfire || is_shelter_tent {
                     Map::dist(*hero_pos, *structure_pos) > 1
                 } else {
                     hero_pos != structure_pos
@@ -8574,17 +9538,47 @@ fn activate_system(
                     continue;
                 }
 
-                // Player must have an Ignition Tool in their inventory
-                let Some(ignition_tool) = hero_inventory.get_by_class(IGNITION_TOOL.to_string())
+                // Ignition is paid by the acting hero's directly carried tool.
+                let Some((ignition_tool_id, maximum_durability)) =
+                    usable_ignition_tool(&hero_inventory, &templates)
                 else {
                     let packet = ResponsePacket::Error {
-                        errmsg: "You must have an Ignition Tool in your inventory".to_string(),
+                        errmsg: "You must have a usable Ignition Tool in your inventory"
+                            .to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 };
 
-                hero_inventory.update_durability(ignition_tool.id, 1);
+                let ignition_use = hero_inventory
+                    .consume_durability_use(ignition_tool_id, 1, maximum_durability)
+                    .expect("validated ignition tool must remain available during activation");
+                let items_removed = match ignition_use {
+                    item::DurabilityUseOutcome::Updated(_) => Vec::new(),
+                    item::DurabilityUseOutcome::Removed { id, name } => {
+                        send_to_client(
+                            *player_id,
+                            ResponsePacket::Notice {
+                                noticemsg: format!(
+                                    "Your {name} breaks after lighting the Campfire."
+                                ),
+                                expiry: Some(5000),
+                            },
+                            &clients,
+                        );
+                        vec![id]
+                    }
+                };
+
+                send_to_client(
+                    *player_id,
+                    ResponsePacket::InfoItemsUpdate {
+                        id: hero_id,
+                        items_updated: hero_inventory.get_packet(),
+                        items_removed,
+                    },
+                    &clients,
+                );
 
                 let activate_event = VisibleEvent::ActivateEvent {
                     structure_id: *structure_id,
@@ -9387,18 +10381,15 @@ fn equip_system(
                     continue;
                 }
 
-                // Get item from inventory
-                let Some((item_to_equip, source_item)) = owner_inventory.get_one_item_by_id(
-                    *item_id,
-                    ids.new_item_id(),
-                    &templates.item_templates,
-                ) else {
+                // Validate against the requested item before splitting a stack.
+                // Rejected or duplicate requests must not mutate inventory.
+                let Some(requested_item) = owner_inventory.get_by_id(*item_id) else {
                     error!("Cannot find item for {:?}", item_id);
                     continue;
                 };
 
                 // Check if equipable
-                if !item_to_equip.equipable() {
+                if requested_item.quantity <= 0 || !requested_item.equipable() {
                     let packet = ResponsePacket::Error {
                         errmsg: "Item is not equipable.".to_string(),
                     };
@@ -9415,8 +10406,47 @@ fn equip_system(
                     continue;
                 }
 
+                if requested_item.equipped == *status {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::InfoItemsUpdate {
+                            id: *obj_id,
+                            items_updated: owner_inventory.get_packet(),
+                            items_removed: Vec::new(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                let ignition_tool = if *status && requested_item.class == TORCH {
+                    let Some(ignition_tool) = usable_ignition_tool(&owner_inventory, &templates)
+                    else {
+                        let packet = ResponsePacket::Error {
+                            errmsg:
+                                "You must have a usable Ignition Tool in this character's inventory"
+                                    .to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    };
+                    Some(ignition_tool)
+                } else {
+                    None
+                };
+
+                let Some((item_to_equip, source_item)) = owner_inventory.get_one_item_by_id(
+                    *item_id,
+                    ids.new_item_id(),
+                    &templates.item_templates,
+                ) else {
+                    error!("Cannot prepare item for equip: {:?}", item_id);
+                    continue;
+                };
+
                 let mut items_updated: Vec<Item> = Vec::new();
                 let mut items_removed: Vec<i32> = Vec::new();
+                let mut vision_changed = false;
                 let meaningful_preparation_equip = *status
                     && !item_to_equip.equipped
                     && matches!(item_to_equip.class.as_str(), WEAPON | ARMOR);
@@ -9425,82 +10455,84 @@ fn equip_system(
 
                 // Equip if status is true
                 if *status {
-                    if item_to_equip.class == TORCH {
-                        // Player must have an Ignition Tool in their inventory
-                        let Some(ignition_tool) =
-                            owner_inventory.get_by_class(IGNITION_TOOL.to_string())
-                        else {
-                            let packet = ResponsePacket::Error {
-                                errmsg: "You must have an Ignition Tool in your inventory"
-                                    .to_string(),
-                            };
-                            send_to_client(*player_id, packet, &clients);
-                            continue;
-                        };
-
-                        // Update durability of Ignition Tool
-                        owner_inventory.update_durability(ignition_tool.id, 1);
-
-                        // Prepend lit to image
-                        let new_image = format!("lit{}", item_to_equip.image);
-                        owner_inventory.switch_image(item_to_equip.id, new_image);
-
-                        // Equip item slot after image switch
-                        items_updated = owner_inventory.equip(item_to_equip.id, item_to_equip.slot);
-
-                        // Set start time for duration of torch
-                        owner_inventory.set_start_time(item_to_equip.id, game_tick.0);
-
-                        let new_vision = Obj::set_viewshed_range(
-                            *obj_id,
-                            owner_template.0.clone(),
-                            game_tick.0,
-                            &owner_inventory,
-                            &templates,
-                            vision_modifier,
-                        );
-
-                        let mut viewshed: Mut<'_, Viewshed> =
-                            viewshed_query.get_mut(owner_entity).unwrap();
-                        viewshed.range = new_vision;
-
-                        //Add obj update event
-                        commands.trigger(UpdateObj {
-                            entity: owner_entity,
-                            attrs: vec![(VISION.to_string(), viewshed.range.to_string())],
-                        });
-                    } else {
-                        // Equip item slot
-                        items_updated = owner_inventory.equip(item_to_equip.id, item_to_equip.slot);
+                    if let Some((ignition_tool_id, maximum_durability)) = ignition_tool {
+                        let ignition_use = owner_inventory
+                            .consume_durability_use(ignition_tool_id, 1, maximum_durability)
+                            .expect("validated ignition tool must remain available during equip");
+                        if let item::DurabilityUseOutcome::Removed { id, name } = ignition_use {
+                            items_removed.push(id);
+                            send_to_client(
+                                *player_id,
+                                ResponsePacket::Notice {
+                                    noticemsg: format!(
+                                        "Your {name} breaks after lighting the torch."
+                                    ),
+                                    expiry: Some(5000),
+                                },
+                                &clients,
+                            );
+                        }
                     }
+
+                    // Equipping another off-hand item extinguishes the currently
+                    // equipped torch in the same way as explicitly unequipping it.
+                    let displaced_torches: Vec<i32> = owner_inventory
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            item.id != item_to_equip.id
+                                && item.equipped
+                                && item.slot == item_to_equip.slot
+                                && item.class == TORCH
+                        })
+                        .map(|item| item.id)
+                        .collect();
+                    for displaced_torch_id in displaced_torches {
+                        owner_inventory.remove_item(displaced_torch_id);
+                        items_removed.push(displaced_torch_id);
+                        vision_changed = true;
+                    }
+
+                    if item_to_equip.class == TORCH {
+                        let new_image = if item_to_equip.image.starts_with("lit") {
+                            item_to_equip.image.clone()
+                        } else {
+                            format!("lit{}", item_to_equip.image)
+                        };
+                        owner_inventory.switch_image(item_to_equip.id, new_image);
+                        owner_inventory.set_start_time(item_to_equip.id, game_tick.0);
+                        vision_changed = true;
+                    }
+
+                    items_updated = owner_inventory.equip(item_to_equip.id, item_to_equip.slot);
                 } else {
                     if item_to_equip.class == TORCH {
-                        // Remove item from inventory
                         owner_inventory.remove_item(item_to_equip.id);
                         items_removed.push(item_to_equip.id);
-
-                        // Recalculate vision
-                        let new_vision = Obj::set_viewshed_range(
-                            *obj_id,
-                            owner_template.0.clone(),
-                            game_tick.0,
-                            &owner_inventory,
-                            &templates,
-                            vision_modifier,
-                        );
-
-                        let mut viewshed: Mut<'_, Viewshed> =
-                            viewshed_query.get_mut(owner_entity).unwrap();
-                        viewshed.range = new_vision;
-
-                        // Trigger update obj event
-                        commands.trigger(UpdateObj {
-                            entity: owner_entity,
-                            attrs: vec![(VISION.to_string(), viewshed.range.to_string())],
-                        });
+                        vision_changed = true;
                     } else {
                         items_updated = owner_inventory.unequip(item_to_equip.id);
                     }
+                }
+
+                if vision_changed {
+                    let new_vision = Obj::set_viewshed_range(
+                        *obj_id,
+                        owner_template.0.clone(),
+                        game_tick.0,
+                        &owner_inventory,
+                        &templates,
+                        vision_modifier,
+                    );
+
+                    let mut viewshed: Mut<'_, Viewshed> =
+                        viewshed_query.get_mut(owner_entity).unwrap();
+                    viewshed.range = new_vision;
+
+                    commands.trigger(UpdateObj {
+                        entity: owner_entity,
+                        attrs: vec![(VISION.to_string(), viewshed.range.to_string())],
+                    });
                 }
 
                 if item_to_equip.id != source_item.id {
@@ -9845,7 +10877,8 @@ fn info_structure_queue_system(
                             game_events.get_structure_operate_event(work_entry.worker_id)
                         {
                             progress = (game_tick.0 - operate_event.start_tick) / TICKS_PER_SEC;
-                            work_time = 20;
+                            work_time =
+                                (operate_event.run_tick - operate_event.start_tick) / TICKS_PER_SEC;
                         }
                     }
 
@@ -9939,19 +10972,8 @@ fn info_refine_system(
                         continue;
                     };
 
-                    let mut produces_list = Vec::new();
-
-                    for produce in produces.iter() {
-                        let produce_template =
-                            Item::get_template(produce.to_string(), &templates.item_templates);
-
-                        produces_list.push(network::ProducedItem {
-                            name: produce_template.name.clone(),
-                            image: produce_template.image.clone(),
-                            class: produce_template.class.clone(),
-                            subclass: produce_template.subclass.clone(),
-                        });
-                    }
+                    let produces_list =
+                        item::produced_item_packets(&produces, &templates.item_templates);
 
                     // Get refine time
                     let item_template =
@@ -10193,7 +11215,7 @@ fn queued_craft_inputs_available(
         }
     }
 
-    available_inventory.has_reqs(new_recipe.req.clone())
+    available_inventory.has_craft_reqs(new_recipe.req.clone(), None)
 }
 
 fn structure_queue_system(
@@ -11197,10 +12219,13 @@ fn order_repair_system(
 }
 
 fn use_item_system(
+    mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
+    mut ids: ResMut<Ids>,
+    mut visible_events: ResMut<VisibleEvents>,
     mut map_events: ResMut<MapEvents>,
     mut query: Query<(&PlayerId, &State, &mut Inventory, Option<&LastCombatTick>)>,
     presence: Res<PlayerWorldPresenceState>,
@@ -11267,13 +12292,88 @@ fn use_item_system(
                     continue;
                 }
 
-                // Insert explore event
+                let is_bandage = item.class == item::MEDICAL && item.subclass.as_str() == "Bandage";
+                let pending_bandage_use = map_events.values().any(|map_event| {
+                    let VisibleEvent::UseItemEvent {
+                        item_id,
+                        item_owner_id,
+                    } = &map_event.event_type
+                    else {
+                        return false;
+                    };
+                    *item_owner_id == *obj_id
+                        && owner_inventory
+                            .get_by_id(*item_id)
+                            .is_some_and(|pending_item| {
+                                pending_item.class == item::MEDICAL
+                                    && pending_item.subclass.as_str() == "Bandage"
+                            })
+                });
+                if *owner_state == State::Healing || pending_bandage_use {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Finish applying the current bandage first.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+                if is_bandage {
+                    let already_using_item = map_events.values().any(|map_event| {
+                        matches!(
+                            &map_event.event_type,
+                            VisibleEvent::UseItemEvent { item_owner_id, .. }
+                                if *item_owner_id == *obj_id
+                        )
+                    });
+                    if *owner_state != State::None || already_using_item {
+                        send_to_client(
+                            *player_id,
+                            ResponsePacket::Error {
+                                errmsg: "Finish the current action before applying a bandage."
+                                    .to_string(),
+                            },
+                            &clients,
+                        );
+                        continue;
+                    }
+
+                    commands.trigger(StateChange {
+                        entity: owner_entity,
+                        new_state: State::Healing,
+                    });
+                    let action_id = ids.new_map_event_id();
+                    commands.entity(owner_entity).insert(ActionProgress {
+                        action_id,
+                        start_tick: game_tick.0,
+                        end_tick: game_tick.0 + BANDAGE_USE_TICKS,
+                    });
+                    visible_events.new(
+                        *obj_id,
+                        game_tick.0,
+                        VisibleEvent::UpdateObjEvent {
+                            attrs: vec![
+                                ("state".to_string(), STATE_HEALING.to_string()),
+                                ("action_id".to_string(), action_id.to_string()),
+                                (
+                                    "action_duration_ms".to_string(),
+                                    (BANDAGE_USE_TICKS.saturating_mul(1000) / TICKS_PER_SEC)
+                                        .to_string(),
+                                ),
+                                ("action_elapsed_ms".to_string(), "0".to_string()),
+                            ],
+                        },
+                    );
+                }
+
                 let use_item_event = VisibleEvent::UseItemEvent {
                     item_id: *item_id,
                     item_owner_id: *obj_id,
                 };
 
-                map_events.new(*obj_id, game_tick.0 + 1, use_item_event);
+                let use_delay = if is_bandage { BANDAGE_USE_TICKS } else { 1 };
+                map_events.new(*obj_id, game_tick.0 + use_delay, use_item_event);
             }
             PlayerEvent::DeleteItem {
                 player_id,
@@ -11354,7 +12454,8 @@ fn sleep_system(
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
-    query: Query<(&State, Option<&LastCombatTick>)>,
+    hero_query: Query<(&PlayerId, &Position, &State, Option<&LastCombatTick>), With<SubclassHero>>,
+    shelter_query: Query<(&PlayerId, &Position, &State, &Shelter), With<ClassStructure>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
 
@@ -11377,10 +12478,54 @@ fn sleep_system(
                     continue;
                 };
 
-                let Ok((hero_state, last_combat_tick)) = query.get(hero_entity) else {
+                let Ok((hero_player_id, hero_pos, hero_state, last_combat_tick)) =
+                    hero_query.get(hero_entity)
+                else {
                     error!("Cannot find hero state for {:?}", hero_entity);
                     continue;
                 };
+
+                let Some(structure_entity) = entity_map.get_entity(*structure_id) else {
+                    error!("Cannot find shelter for {:?}", structure_id);
+                    continue;
+                };
+                let Ok((shelter_player_id, shelter_pos, shelter_state, _)) =
+                    shelter_query.get(structure_entity)
+                else {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "This structure is not a completed shelter".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                };
+
+                if hero_player_id.0 != *player_id
+                    || shelter_player_id.0 != *player_id
+                    || !Structure::is_built(*shelter_state)
+                {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "This shelter is not available to your hero".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                if hero_pos != shelter_pos {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Your hero must be inside the shelter to sleep".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
 
                 if Obj::is_dead(hero_state) {
                     continue;
@@ -11788,7 +12933,7 @@ fn hire_system(
 }
 
 // Empower a Monolith's sanctuary by one level, paid in Soulshards. The hero must
-// be within the sanctuary's outer ring; each level widens the random-spawn
+// be within the sanctuary; each level widens the random-spawn
 // suppression radius and the in-zone defensive bonus (see move_event_completed_system
 // and combat damage reduction). Soulshards come from killing the random spawns the
 // sanctuary is meant to push back — the core "clear your area, then fortify it" loop.
@@ -11838,7 +12983,7 @@ fn upgrade_sanctuary_system(
         else {
             continue;
         };
-        if Map::dist(*hero_pos, *monolith_pos) >= sanctuary_weak_radius(monolith.sanctuary_level) {
+        if Map::dist(*hero_pos, *monolith_pos) >= sanctuary_radius(monolith.sanctuary_level) {
             send_to_client(
                 *player_id,
                 ResponsePacket::Error {
@@ -12317,6 +13462,7 @@ fn cancel_action_system(
                         entity: hero_entity,
                         new_state: State::None,
                     });
+                    commands.entity(hero_entity).remove::<ActionProgress>();
                 }
             }
             _ => {}
@@ -12549,6 +13695,7 @@ pub fn is_player(player_id: i32) -> bool {
 mod tests {
     use super::*;
     use crate::game::{Client, Fortified, SettlementCrisis};
+    use crate::item::Slot;
     use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence};
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
@@ -12580,6 +13727,107 @@ mod tests {
             base_speed: Some(1),
             base_vision: Some(1),
         }
+    }
+
+    fn loot_test_item(id: i32, owner: i32, weight: f32) -> Item {
+        Item {
+            id,
+            owner,
+            name: format!("Loot {id}"),
+            quantity: 1,
+            durability: None,
+            class: "Loot".to_string(),
+            subclass: "Loot".to_string(),
+            slot: None,
+            image: "loot.png".to_string(),
+            weight,
+            equipped: false,
+            experiment: None,
+            start_time: 0,
+            attrs: HashMap::new(),
+            produces: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn loot_all_accepts_public_bags_and_enemy_corpses_but_not_shipwrecks() {
+        let player_id = 7;
+        assert!(is_loot_all_source(
+            player_id,
+            NPC_PLAYER_ID,
+            &Template("Giant Rat".to_string()),
+            &State::Dead,
+        ));
+        assert!(!is_loot_all_source(
+            player_id,
+            NPC_PLAYER_ID,
+            &Template("Shipwreck".to_string()),
+            &State::None,
+        ));
+        assert!(is_loot_all_source(
+            player_id,
+            NPC_PLAYER_ID,
+            &Template(templates::DROPPED_BAG_TEMPLATE.to_string()),
+            &State::None,
+        ));
+        assert!(!is_loot_all_source(
+            player_id,
+            player_id,
+            &Template("Villager".to_string()),
+            &State::Dead,
+        ));
+        assert!(!is_loot_all_source(
+            player_id,
+            NPC_PLAYER_ID,
+            &Template("Giant Rat".to_string()),
+            &State::None,
+        ));
+        assert!(!is_loot_all_source(
+            player_id,
+            player_id,
+            &Template("Burrow".to_string()),
+            &State::None,
+        ));
+    }
+
+    #[test]
+    fn dropped_bag_capacity_accepts_fifty_weight_but_rejects_more() {
+        let inventory = Inventory {
+            owner: 20,
+            items: vec![loot_test_item(1, 20, 49.0)],
+        };
+
+        assert!(dropped_bag_can_accept(
+            &inventory,
+            &loot_test_item(2, 10, 1.0)
+        ));
+        assert!(!dropped_bag_can_accept(
+            &inventory,
+            &loot_test_item(3, 10, 2.0)
+        ));
+    }
+
+    #[test]
+    fn loot_all_transfers_every_whole_stack_that_fits_capacity() {
+        let mut source = Inventory {
+            owner: 20,
+            items: vec![loot_test_item(1, 20, 3.0), loot_test_item(2, 20, 8.0)],
+        };
+        let mut target = Inventory {
+            owner: 10,
+            items: vec![loot_test_item(3, 10, 2.0)],
+        };
+
+        assert_eq!(transfer_loot_that_fits(&mut source, &mut target, 10), 1);
+        assert_eq!(
+            source.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(target
+            .items
+            .iter()
+            .any(|item| item.id == 1 && item.owner == 10));
+        assert_eq!(target.get_total_weight(), 5);
     }
 
     #[derive(Component)]
@@ -12708,6 +13956,60 @@ mod tests {
                 "Raider targeting your stored value and structures"
             );
         }
+    }
+
+    #[test]
+    fn hero_gathering_uses_resource_or_equipped_hunting_activity() {
+        let forage_event = GameEventType::ForageEvent { forager_id: 7 };
+
+        assert_eq!(
+            gather_activity_for_event(
+                &GameEventType::GatherEvent {
+                    gatherer_id: 7,
+                    res_type: LOG.to_string(),
+                },
+                false
+            ),
+            ActiveTask::Logging
+        );
+        assert_eq!(
+            gather_activity_for_event(
+                &GameEventType::GatherEvent {
+                    gatherer_id: 7,
+                    res_type: GAME_ANIMAL.to_string(),
+                },
+                false,
+            ),
+            ActiveTask::Hunting
+        );
+        assert_eq!(
+            gather_activity_for_event(&forage_event, false),
+            ActiveTask::Gathering
+        );
+        assert_eq!(
+            gather_activity_for_event(&forage_event, true),
+            ActiveTask::Hunting
+        );
+
+        let item_template_file =
+            File::open("templates/item_template.yaml").expect("Could not open item templates");
+        let item_templates: Vec<crate::templates::ItemTemplate> =
+            serde_yaml::from_reader(item_template_file).expect("Could not read item templates");
+        let mut inventory = Inventory {
+            owner: 7,
+            items: Vec::new(),
+        };
+        inventory.new(1, "Sharpened Stick".to_string(), 1, &item_templates);
+        inventory.equip(1, Some(Slot::MainHand));
+
+        assert!(inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting));
+        assert_eq!(
+            gather_activity_for_event(
+                &forage_event,
+                inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting),
+            ),
+            ActiveTask::Hunting
+        );
     }
 
     fn equipped_test_weapon(name: &str, subclass: &str, range: i32, accuracy: i32) -> Item {
@@ -12932,6 +14234,20 @@ mod tests {
         assert_eq!(arcane_bolt.hero_class, HeroClass::Mage);
         assert_eq!(arcane_bolt.cost_type, AbilityCostType::Mana);
         assert_eq!(arcane_bolt.cost, 20);
+
+        for ability_id in [
+            "shield_bash",
+            "aimed_shot",
+            "disengage",
+            "arcane_bolt",
+            "ward",
+        ] {
+            assert_eq!(
+                ability_def(ability_id).unwrap().cooldown,
+                ATTACK_COOLDOWN_SECONDS,
+                "ability UI cooldown must match the shared hero combat cooldown"
+            );
+        }
     }
 
     #[test]
@@ -13012,7 +14328,7 @@ mod tests {
             shelter_tent.upgrade_req,
             Some(vec![
                 ResReq {
-                    req_type: LOG.to_string(),
+                    req_type: item::LOGS_OR_TIMBER.to_string(),
                     quantity: 5,
                     cquantity: None,
                 },
@@ -13023,6 +14339,217 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn completed_campfire_storage_accepts_cooking_fuel_and_meat_only() {
+        for template in [
+            templates::CAMPFIRE_TEMPLATE,
+            templates::SHELTER_TENT_TEMPLATE,
+        ] {
+            assert!(accepts_completed_storage_item(
+                template,
+                item::FIREWOOD,
+                "Firewood"
+            ));
+            assert!(accepts_completed_storage_item(
+                template,
+                "Bristleback Raw Meat",
+                "Raw Meat"
+            ));
+            assert!(accepts_completed_storage_item(
+                template,
+                "Bristleback Cooked Meat",
+                "Cooked Meat"
+            ));
+            assert!(accepts_completed_storage_item(
+                template,
+                item::CHARCOAL,
+                "Charcoal"
+            ));
+            assert!(!accepts_completed_storage_item(
+                template,
+                "Smoked Meat",
+                "Smoked Meat"
+            ));
+            assert!(!accepts_completed_storage_item(template, LOG, LOG));
+            assert!(!accepts_completed_storage_item(
+                template,
+                "Sharpened Stick",
+                "Spear"
+            ));
+        }
+
+        assert!(accepts_completed_storage_item("Burrow", LOG, LOG));
+        assert!(accepts_completed_storage_item(
+            "Burrow",
+            "Sharpened Stick",
+            "Spear"
+        ));
+    }
+
+    #[test]
+    fn hero_work_allows_a_lit_torch_or_active_campfire_but_not_darkness() {
+        let no_vision = Viewshed { range: 0 };
+        let torch_radius = Viewshed { range: 1 };
+        let stronger_light = Viewshed { range: 2 };
+        let mut campfire_visibility = CampfireVisibilityState::default();
+
+        assert!(!has_sufficient_work_visibility(
+            None,
+            7,
+            &campfire_visibility
+        ));
+        assert!(!has_sufficient_work_visibility(
+            Some(&no_vision),
+            7,
+            &campfire_visibility
+        ));
+        assert!(has_sufficient_work_visibility(
+            Some(&torch_radius),
+            7,
+            &campfire_visibility
+        ));
+        assert!(has_sufficient_work_visibility(
+            Some(&stronger_light),
+            7,
+            &campfire_visibility
+        ));
+
+        campfire_visibility.insert((7, 99));
+        assert!(has_sufficient_work_visibility(
+            Some(&no_vision),
+            7,
+            &campfire_visibility
+        ));
+        assert!(!has_sufficient_work_visibility(
+            Some(&no_vision),
+            8,
+            &campfire_visibility
+        ));
+
+        let mut app = App::new();
+        app.add_plugins(crate::templates::TemplatesPlugin);
+        let templates = app.world().resource::<Templates>();
+        let mut inventory = Inventory {
+            owner: 7,
+            items: Vec::new(),
+        };
+        inventory.new(1, "Crude Torch".to_string(), 1, &templates.item_templates);
+        inventory.equip(1, Some(Slot::OffHand));
+
+        let actual_torch_range = Obj::set_viewshed_range(
+            7,
+            "Novice Warrior".to_string(),
+            NIGHT,
+            &inventory,
+            templates,
+            0.0,
+        );
+        assert_eq!(actual_torch_range, 1);
+        assert!(has_sufficient_work_visibility(
+            Some(&Viewshed {
+                range: actual_torch_range,
+            }),
+            7,
+            &CampfireVisibilityState::default(),
+        ));
+    }
+
+    fn setup_refine_visibility_test(campfire_is_active: bool) -> (App, Entity) {
+        const PLAYER_ID: i32 = 7;
+        const HERO_ID: i32 = 70;
+        const CARCASS_ID: i32 = 501;
+
+        let mut app = App::new();
+        app.add_plugins(crate::templates::TemplatesPlugin);
+        app.add_systems(Update, refine_system);
+        app.insert_resource(GameTick(100));
+        app.insert_resource(MapEvents(HashMap::new()));
+        app.insert_resource(GameEvents(HashMap::new()));
+        app.insert_resource(VisibleEvents(Vec::new()));
+        app.insert_resource(Recipes::from_recipes(Vec::new()));
+        app.insert_resource(ActiveInfos(HashMap::new()));
+        app.insert_resource(PlayerEvents(HashMap::from([(
+            1,
+            PlayerEvent::Refine {
+                player_id: PLAYER_ID,
+                item_id: CARCASS_ID,
+            },
+        )])));
+
+        let mut ids = Ids::default();
+        ids.new_hero(HERO_ID, PLAYER_ID);
+        app.insert_resource(ids);
+
+        app.insert_resource(Clients::default());
+
+        let mut inventory = Inventory {
+            owner: HERO_ID,
+            items: Vec::new(),
+        };
+        inventory.new(
+            CARCASS_ID,
+            "Windstride Deer Carcass".to_string(),
+            1,
+            &app.world().resource::<Templates>().item_templates,
+        );
+        let hero_entity = app
+            .world_mut()
+            .spawn((
+                Position { x: 0, y: 0 },
+                State::None,
+                inventory,
+                Skills::new(),
+                Viewshed { range: 0 },
+            ))
+            .id();
+        app.insert_resource(EntityObjMap(HashMap::from([(HERO_ID, hero_entity)])));
+
+        let campfire_visibility = if campfire_is_active {
+            CampfireVisibilityState(HashSet::from([(PLAYER_ID, 99)]))
+        } else {
+            CampfireVisibilityState::default()
+        };
+        app.insert_resource(campfire_visibility);
+
+        (app, hero_entity)
+    }
+
+    #[test]
+    fn hero_cannot_start_refining_in_darkness_but_active_campfire_light_allows_it() {
+        let (mut dark_app, dark_hero) = setup_refine_visibility_test(false);
+        dark_app.update();
+
+        assert!(dark_app.world().resource::<GameEvents>().is_empty());
+        assert!(dark_app.world().get::<ActionProgress>(dark_hero).is_none());
+
+        let (mut lit_app, lit_hero) = setup_refine_visibility_test(true);
+        lit_app.update();
+
+        assert_eq!(lit_app.world().resource::<GameEvents>().len(), 1);
+        assert!(lit_app.world().get::<ActionProgress>(lit_hero).is_some());
+    }
+
+    #[test]
+    fn carrying_capacities_keep_people_below_settlement_storage() {
+        for hero in ["Novice Warrior", "Novice Ranger", "Novice Mage"] {
+            assert_eq!(template_by_name(hero).capacity, Some(100));
+        }
+        for hero in ["Skilled Warrior", "Skilled Ranger", "Skilled Mage"] {
+            assert_eq!(template_by_name(hero).capacity, Some(125));
+        }
+        for hero in ["Great Warrior", "Great Ranger", "Great Mage"] {
+            assert_eq!(template_by_name(hero).capacity, Some(150));
+        }
+        for hero in ["Legendary Warrior", "Legendary Ranger", "Legendary Mage"] {
+            assert_eq!(template_by_name(hero).capacity, Some(200));
+        }
+
+        assert_eq!(template_by_name("Human Villager").capacity, Some(75));
+        assert_eq!(template_by_name("Burrow").capacity, Some(300));
+        assert_eq!(template_by_name("Cache").capacity, Some(500));
+        assert_eq!(template_by_name("Warehouse").capacity, Some(1000));
     }
 
     #[test]
@@ -13144,17 +14671,46 @@ mod tests {
         let bow_inventory = inventory_with(equipped_test_weapon("Training Bow", "Bow", 3, 85));
         let sling_inventory =
             inventory_with(equipped_test_weapon("Improvised Sling", "Sling", 2, 75));
+        let throwing_spear_inventory =
+            inventory_with(equipped_test_weapon("Throwing Spear", "Throwing", 2, 75));
 
         let bow_profile =
             equipped_ranged_weapon_profile(&bow_inventory, &no_effects).expect("bow profile");
         let sling_profile =
             equipped_ranged_weapon_profile(&sling_inventory, &no_effects).expect("sling profile");
+        let throwing_spear_profile =
+            equipped_ranged_weapon_profile(&throwing_spear_inventory, &no_effects)
+                .expect("throwing spear profile");
 
         assert_eq!(bow_profile.range, 3);
         assert_eq!(bow_profile.accuracy, Some(85));
         assert_eq!(bow_profile.stamina_cost, BASIC_ATTACK_STAMINA_COST);
         assert_eq!(sling_profile.range, 2);
         assert_eq!(sling_profile.accuracy, Some(75));
+        assert_eq!(throwing_spear_profile.range, 2);
+        assert_eq!(throwing_spear_profile.accuracy, Some(75));
+        assert!(throwing_spear_profile.is_ranged);
+    }
+
+    #[test]
+    fn only_equipped_spear_subclass_weapons_gain_fortification_reach() {
+        let spear_inventory =
+            inventory_with(equipped_test_weapon("Stone-Tipped Spear", "Spear", 1, 100));
+        let axe_inventory = inventory_with(equipped_test_weapon("Copper Axe", "Axe", 1, 100));
+        let throwing_spear_inventory =
+            inventory_with(equipped_test_weapon("Throwing Spear", "Throwing", 2, 75));
+
+        assert!(Combat::equipped_weapon_has_fortification_reach(
+            &spear_inventory
+        ));
+        assert!(!Combat::equipped_weapon_has_fortification_reach(
+            &axe_inventory
+        ));
+        // Throwing Spears use their ordinary ranged profile instead of the
+        // adjacent Spear-reach exception, including when equipped by Warriors.
+        assert!(!Combat::equipped_weapon_has_fortification_reach(
+            &throwing_spear_inventory
+        ));
     }
 
     #[test]
@@ -13194,7 +14750,10 @@ mod tests {
                 None,
                 ability_is_ranged_attack(guard_bash),
             ),
-            Some("Only ranged attacks can be used from behind a wall.".to_string())
+            Some(
+                "Only ranged attacks or attacks with an equipped Spear can be used from behind a wall."
+                    .to_string()
+            )
         );
         assert_eq!(
             Combat::fortified_outbound_attack_error(
@@ -13246,15 +14805,23 @@ mod tests {
         let shipwreck = Template("Shipwreck".to_string());
         let campfire = Template("Campfire".to_string());
         let run_objects = RunSpawnedObjs(HashMap::from([(7, vec![101, 102])]));
+        let searched = InvestigatedPOIs(HashMap::from([(7, HashSet::from([101]))]));
 
         assert!(can_access_run_shipwreck(7, 101, &shipwreck, &run_objects));
         assert!(!can_access_run_shipwreck(8, 101, &shipwreck, &run_objects));
         assert!(!can_access_run_shipwreck(7, 999, &shipwreck, &run_objects));
         assert!(can_access_run_shipwreck(8, 101, &campfire, &run_objects));
+        assert!(can_access_shipwreck_inventory(
+            7, 101, &shipwreck, &searched
+        ));
+        assert!(!can_access_shipwreck_inventory(
+            7, 102, &shipwreck, &searched
+        ));
+        assert!(can_access_shipwreck_inventory(8, 101, &campfire, &searched));
     }
 
     #[test]
-    fn mage_ward_uses_timed_weak_sanctuary() {
+    fn mage_ward_uses_timed_sanctuary() {
         let ward = ability_def("ward").expect("ward ability");
         assert_eq!(ward.hero_class, HeroClass::Mage);
         assert_eq!(ward.cost_type, AbilityCostType::Mana);
@@ -13267,13 +14834,13 @@ mod tests {
             &mut effects,
             &mut map_events,
             200,
-            Effect::WeakSanctuary,
+            Effect::Sanctuary,
             MAGE_WARD_DURATION_TICKS,
             MAGE_WARD_AMPLIFIER,
         );
 
         assert_eq!(
-            effects.0.get(&Effect::WeakSanctuary),
+            effects.0.get(&Effect::Sanctuary),
             Some(&(200 + MAGE_WARD_DURATION_TICKS, MAGE_WARD_AMPLIFIER, 1))
         );
         assert!(map_events.values().any(|event| {
@@ -13282,7 +14849,7 @@ mod tests {
                 && matches!(
                     &event.event_type,
                     VisibleEvent::EffectExpiredEvent { effect }
-                        if *effect == Effect::WeakSanctuary
+                        if *effect == Effect::Sanctuary
                 )
         }));
     }
@@ -13316,6 +14883,7 @@ mod tests {
             player_id: 1,
             hero_name: "Test".to_string(),
             class_name: "Warrior".to_string(),
+            portrait: crate::obj::default_hero_portrait().to_string(),
         }
         .is_mutating_gameplay());
         assert!(!PlayerEvent::InfoInventory {
@@ -13338,12 +14906,18 @@ mod tests {
         assert!(PlayerEvent::Craft {
             player_id: 1,
             recipe_name: "Firewood".to_string(),
+            signature_item_id: None,
         }
         .is_mutating_gameplay());
         assert!(PlayerEvent::AddCraftingEntry {
             player_id: 1,
             structure_id: 100,
             recipe_name: "Firewood".to_string(),
+        }
+        .is_mutating_gameplay());
+        assert!(PlayerEvent::DropItem {
+            player_id: 1,
+            item_id: 100,
         }
         .is_mutating_gameplay());
         assert!(PlayerEvent::CancelAction { player_id: 1 }.is_mutating_gameplay());
@@ -13819,12 +15393,12 @@ mod tests {
 
     #[test]
     fn combo_tempo_uses_the_decided_cooldown_ladder() {
-        assert_eq!(combo_chain_cooldown_ticks(0), 50);
-        assert_eq!(combo_chain_cooldown_ticks(1), 50);
-        assert_eq!(combo_chain_cooldown_ticks(2), 40);
-        assert_eq!(combo_chain_cooldown_ticks(3), 30);
-        assert_eq!(combo_chain_cooldown_ticks(4), 25);
-        assert_eq!(cooldown_seconds(combo_chain_cooldown_ticks(4)), 2.5);
+        assert_eq!(combo_chain_cooldown_ticks(0), 30);
+        assert_eq!(combo_chain_cooldown_ticks(1), 30);
+        assert_eq!(combo_chain_cooldown_ticks(2), 25);
+        assert_eq!(combo_chain_cooldown_ticks(3), 20);
+        assert_eq!(combo_chain_cooldown_ticks(4), 15);
+        assert_eq!(cooldown_seconds(combo_chain_cooldown_ticks(4)), 1.5);
     }
 
     #[test]
@@ -13836,16 +15410,16 @@ mod tests {
             combo_chain_cooldown_ticks(combo_tempo_prefix_len(attacks, &templates))
         };
 
-        assert_eq!(cooldown(&[Quick]), 50);
-        assert_eq!(cooldown(&[Precise, Fierce]), 40);
-        assert_eq!(cooldown(&[Fierce, Precise, Quick]), 30);
-        assert_eq!(cooldown(&[Quick, Quick]), 50);
-        assert_eq!(cooldown(&[Fierce, Fierce]), 50);
+        assert_eq!(cooldown(&[Quick]), 30);
+        assert_eq!(cooldown(&[Precise, Fierce]), 25);
+        assert_eq!(cooldown(&[Fierce, Precise, Quick]), 20);
+        assert_eq!(cooldown(&[Quick, Quick]), 30);
+        assert_eq!(cooldown(&[Fierce, Fierce]), 30);
 
         let mut history = Vec::new();
         for _ in 0..6 {
             history = Combat::next_combo_attacks(&history, Quick, &templates);
-            assert_eq!(cooldown(&history), 50);
+            assert_eq!(cooldown(&history), 30);
         }
     }
 

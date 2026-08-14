@@ -207,7 +207,7 @@ fn queued_event_targets_protected_run(
         | VisibleEvent::SpoilEvent { target_id, .. }
         | VisibleEvent::StealEvent { target_id, .. }
         | VisibleEvent::TorchEvent { target_id, .. } => Some(*target_id),
-        VisibleEvent::SpellRaiseDeadEvent { corpse_id } => Some(*corpse_id),
+        VisibleEvent::SpellRaiseDeadEvent { corpse_id, .. } => Some(*corpse_id),
         _ => None,
     };
 
@@ -540,6 +540,58 @@ mod tests {
                 test_stats(),
                 empty_effects(),
                 empty_inventory(id),
+            ))
+            .id()
+    }
+
+    fn spawn_shipwreck_corpse_target(
+        app: &mut App,
+        id: i32,
+        pos: Position,
+        corpse_item_ids: &[i32],
+    ) -> Entity {
+        let inventory = Inventory {
+            owner: id,
+            items: corpse_item_ids
+                .iter()
+                .map(|item_id| Item {
+                    id: *item_id,
+                    owner: id,
+                    name: "Human Corpse".to_string(),
+                    quantity: 1,
+                    durability: None,
+                    class: item::CORPSE_ITEM.to_string(),
+                    subclass: "Human Corpse".to_string(),
+                    slot: None,
+                    image: "humancorpse".to_string(),
+                    weight: 75.0,
+                    equipped: false,
+                    experiment: None,
+                    start_time: 0,
+                    attrs: HashMap::new(),
+                    produces: Vec::new(),
+                })
+                .collect(),
+        };
+
+        app.world_mut()
+            .spawn((
+                Id(id),
+                PlayerId(MERCHANT_PLAYER_ID),
+                pos,
+                Name("Shipwreck".to_string()),
+                Template("Shipwreck".to_string()),
+                Class(CLASS_POI.to_string()),
+                Subclass::Poi,
+                State::None,
+                Misc {
+                    image: "shipwreck".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                inventory,
             ))
             .id()
     }
@@ -1945,34 +1997,17 @@ mod tests {
         let (npc_entity, scorer_entity) =
             spawn_scripted_corpse_hunt_scorer(&mut app, Position { x: 10, y: 10 }, corpse_anchor);
 
-        spawn_corpse_hunt_target(
-            &mut app,
-            1,
-            Position { x: 13, y: 10 },
-            CLASS_CORPSE,
-            "Human Corpse",
-        );
-        spawn_corpse_hunt_target(
-            &mut app,
-            2,
-            Position { x: 11, y: 10 },
-            CLASS_CORPSE,
-            "Human Corpse",
-        );
+        spawn_shipwreck_corpse_target(&mut app, 1, Position { x: 13, y: 10 }, &[101]);
+        spawn_shipwreck_corpse_target(&mut app, 2, Position { x: 11, y: 10 }, &[102]);
+        // A Human Corpse world object is no longer the scripted source.
         spawn_corpse_hunt_target(
             &mut app,
             3,
             Position { x: 10, y: 11 },
-            CLASS_UNIT,
-            "Human Corpse",
-        );
-        spawn_corpse_hunt_target(
-            &mut app,
-            4,
-            Position { x: 30, y: 30 },
             CLASS_CORPSE,
             "Human Corpse",
         );
+        spawn_shipwreck_corpse_target(&mut app, 4, Position { x: 30, y: 30 }, &[104]);
 
         app.update();
 
@@ -1992,19 +2027,13 @@ mod tests {
             Position { x: 12, y: 10 },
         );
 
-        spawn_corpse_hunt_target(
-            &mut app,
-            1,
-            Position { x: 13, y: 10 },
-            CLASS_UNIT,
-            "Human Corpse",
-        );
+        spawn_shipwreck_corpse_target(&mut app, 1, Position { x: 13, y: 10 }, &[]);
         spawn_corpse_hunt_target(
             &mut app,
             2,
             Position { x: 11, y: 10 },
             CLASS_CORPSE,
-            "Wolf Corpse",
+            "Human Corpse",
         );
 
         app.update();
@@ -2119,21 +2148,16 @@ mod tests {
     }
 
     #[test]
-    fn scripted_necromancer_thinker_schedules_move_to_shipwreck_corpse() {
+    fn scripted_necromancer_thinker_schedules_move_to_shipwreck_inventory() {
         let mut app = setup_scripted_necromancer_brain_app();
         let npc_entity = spawn_scripted_necromancer_brain(
             &mut app,
             Position { x: 16, y: 32 },
             Position { x: 15, y: 36 },
         );
-        let corpse_entity = spawn_corpse_hunt_target(
-            &mut app,
-            12,
-            Position { x: 16, y: 35 },
-            CLASS_CORPSE,
-            "Human Corpse",
-        );
-        register_test_obj(&mut app, 12, 999, corpse_entity);
+        let shipwreck_entity =
+            spawn_shipwreck_corpse_target(&mut app, 12, Position { x: 16, y: 35 }, &[120]);
+        register_test_obj(&mut app, 12, MERCHANT_PLAYER_ID, shipwreck_entity);
 
         for _ in 0..20 {
             app.update();
@@ -2161,14 +2185,9 @@ mod tests {
             Position { x: 5, y: 25 },
             Position { x: 5, y: 31 },
         );
-        let corpse_entity = spawn_corpse_hunt_target(
-            &mut app,
-            12,
-            Position { x: 4, y: 30 },
-            CLASS_CORPSE,
-            "Human Corpse",
-        );
-        register_test_obj(&mut app, 12, 999, corpse_entity);
+        let shipwreck_entity =
+            spawn_shipwreck_corpse_target(&mut app, 12, Position { x: 4, y: 30 }, &[120]);
+        register_test_obj(&mut app, 12, MERCHANT_PLAYER_ID, shipwreck_entity);
         spawn_blocking_test_unit(&mut app, 40, old_necromancer_pos);
 
         for _ in 0..20 {
@@ -4529,7 +4548,7 @@ pub fn scripted_corpse_hunt_scorer_system(
         ),
         With<SubclassNPC>,
     >,
-    target_query: Query<ObjQuery>,
+    target_query: Query<(ObjQuery, &Inventory)>,
     blocking_query: Query<BaseQuery>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ScriptedCorpseHuntScorer>>,
 ) {
@@ -4567,13 +4586,17 @@ pub fn scripted_corpse_hunt_scorer_system(
         let mut selected_corpse_id = NO_TARGET;
         let mut selected_distance = u32::MAX;
 
-        for target in target_query.iter() {
+        for (target, target_inventory) in target_query.iter() {
             if protection.owner_is_protected(target.player_id) {
                 continue;
             }
 
-            if target.class.0.as_str() != CLASS_CORPSE
-                || target.template.0.as_str() != "Human Corpse"
+            if target.template.0.as_str() != "Shipwreck"
+                || !target_inventory.items.iter().any(|item| {
+                    item.name == "Human Corpse"
+                        && item.class == item::CORPSE_ITEM
+                        && item.quantity > 0
+                })
             {
                 continue;
             }
@@ -5575,7 +5598,7 @@ pub fn move_to_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     dest_query: Query<&Destination>,
-    obj_query: Query<(&Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
+    obj_query: Query<(Entity, &Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
     state_query: Query<&mut State>,
     npc_effects_query: Query<&Effects>,
     mut event_executing_query: Query<&mut EventExecuting>,
@@ -5608,7 +5631,7 @@ pub fn move_to_system(
                     continue;
                 };
 
-                let blocking_list = Obj::blocking_list(player_id, actor, &obj_query, &state_query);
+                let blocking_list = Obj::blocking_list(player_id, &obj_query, &state_query);
 
                 let Ok(destination) = dest_query.get(*actor) else {
                     span.span().in_scope(|| {
@@ -5625,7 +5648,8 @@ pub fn move_to_system(
                     }
                 }
 
-                let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                let Ok((_entity, id, _player_id, pos, _class, _subclass, _stats)) =
+                    obj_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         npc_error!(*actor, obj_id, None, "Cannot get obj query");
@@ -5753,9 +5777,10 @@ pub fn move_to_system(
                     continue;
                 };
 
-                let blocking_list = Obj::blocking_list(player_id, actor, &obj_query, &state_query);
+                let blocking_list = Obj::blocking_list(player_id, &obj_query, &state_query);
 
-                if let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                if let Ok((_entity, id, _player_id, pos, _class, _subclass, _stats)) =
+                    obj_query.get(*actor)
                 {
                     let Ok(destination) = dest_query.get(*actor) else {
                         span.span().in_scope(|| {
@@ -7726,16 +7751,40 @@ pub fn raise_dead_system(
                                 id.0,
                                 player_id.clone(),
                                 *pos,
+                                None,
                             ))
                         },
                     )
                 } else {
-                    obj_query
-                        .get(target_entity)
-                        .ok()
-                        .map(|corpse| (corpse.id.0, corpse.player_id.clone(), *corpse.pos))
+                    obj_query.get(target_entity).ok().and_then(|corpse| {
+                        let corpse_item_id = if corpse.class.0 == CLASS_POI {
+                            Some(
+                                corpse
+                                    .inventory
+                                    .items
+                                    .iter()
+                                    .find(|item| {
+                                        item.name == "Human Corpse"
+                                            && item.class == item::CORPSE_ITEM
+                                            && item.quantity > 0
+                                    })?
+                                    .id,
+                            )
+                        } else if corpse.class.0 == CLASS_CORPSE {
+                            None
+                        } else {
+                            return None;
+                        };
+
+                        Some((
+                            corpse.id.0,
+                            corpse.player_id.clone(),
+                            *corpse.pos,
+                            corpse_item_id,
+                        ))
+                    })
                 };
-                let Some((corpse_id, corpse_player_id, corpse_pos)) = corpse else {
+                let Some((corpse_id, corpse_player_id, corpse_pos, corpse_item_id)) = corpse else {
                     *state = ActionState::Failure;
                     npc_error!(
                         *actor,
@@ -7789,7 +7838,10 @@ pub fn raise_dead_system(
                 map_events.new(
                     npc.id.0,
                     game_tick.0 + 30,
-                    VisibleEvent::SpellRaiseDeadEvent { corpse_id },
+                    VisibleEvent::SpellRaiseDeadEvent {
+                        corpse_id,
+                        corpse_item_id,
+                    },
                 );
 
                 *state = ActionState::Executing;

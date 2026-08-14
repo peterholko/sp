@@ -22,7 +22,7 @@ use crate::{
         SleepEventCompleted, VisibleEvent, VisibleEvents,
     },
     experiment::{self, Experiment, Experiments},
-    game::{Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
+    game::{farm_harvest_duration_ticks, Clients, GameTick, ObjQuery, ObjQueryMutPlayerTemplate},
     ids::{EntityObjMap, Ids},
     item::{self, AttrKey, Inventory, Item, ItemLocation},
     map::{Map, MapPos, TileType},
@@ -34,10 +34,13 @@ use crate::{
     safe_logout::{
         is_owner_offline_protected, object_belongs_to_protected_run, PlayerWorldPresenceState,
     },
+    structure::Structure,
     templates::Templates,
     villager_debug, villager_error, villager_info, villager_trace,
     villager_util::VillagerUtil,
-    villager_warn, with_span, AppState,
+    villager_warn, with_span,
+    world::{get_time_of_day, TimeOfDay},
+    AppState,
 };
 
 #[derive(SystemParam)]
@@ -180,6 +183,10 @@ pub struct DrinkingFromWater {
     pub pos: Position,
 }
 
+fn state_can_threaten_villager(state: &State) -> bool {
+    state.is_alive() && state.is_visible()
+}
+
 fn object_is_water_search_danger(
     actor: Entity,
     owner_player_id: i32,
@@ -196,7 +203,7 @@ fn object_is_water_search_danger(
         && player_id.0 != MERCHANT_PLAYER_ID
         && class.0 == CLASS_UNIT
         && state_dead.is_none()
-        && state.is_alive()
+        && state_can_threaten_villager(state)
         && Map::dist(pos, *object_pos) <= 2
 }
 
@@ -275,6 +282,15 @@ impl Morale {
 }
 
 const ROUGH_SLEEP_MORALE_PENALTY: f32 = 5.0;
+const NIGHT_REST_SCORE: f32 = URGENT_SCORE / 100.0;
+
+fn villagers_should_rest(game_tick: i32) -> bool {
+    get_time_of_day(game_tick) == TimeOfDay::Night
+}
+
+fn work_queue_is_paused(order: &Order, game_tick: i32) -> bool {
+    matches!(order, Order::WorkQueue) && villagers_should_rest(game_tick)
+}
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
 pub struct CapacityScorer;
@@ -366,8 +382,9 @@ fn order_activity(state: &State, order: &Order) -> ActiveTask {
         Order::Follow { .. } => ActiveTask::Following,
         Order::Gather { res_type, .. } => match res_type.as_str() {
             ORE => ActiveTask::Mining,
-            LOG => ActiveTask::Woodcutting,
+            LOG => ActiveTask::Logging,
             STONE => ActiveTask::Stonecutting,
+            GAME_ANIMAL => ActiveTask::Hunting,
             _ => ActiveTask::Gathering,
         },
         Order::Build => ActiveTask::Building,
@@ -385,6 +402,7 @@ fn order_activity(state: &State, order: &Order) -> ActiveTask {
         Order::Explore => ActiveTask::Exploring,
         Order::Plant => ActiveTask::Planting,
         Order::Tend => ActiveTask::Tending,
+        Order::Harvest => ActiveTask::Harvesting,
         _ => ActiveTask::Unknown,
     }
 }
@@ -434,6 +452,14 @@ fn order_activity_for_display(
             blocked_work,
             tool_fetch_target,
         ),
+        Order::WorkQueue if *state == State::Operating => [ORE, LOG, STONE, GAME_ANIMAL]
+            .into_iter()
+            .find(|res_type| {
+                item::required_tool_attr_for_res_type(res_type)
+                    .is_some_and(|attr| inventory.has_equipped_tool_for_attr(&attr))
+            })
+            .map(|res_type| ActiveTask::get_activity_from_res_type(res_type.to_string()))
+            .or_else(|| Some(order_activity(state, order))),
         _ => Some(order_activity(state, order)),
     }
 }
@@ -446,7 +472,9 @@ fn movement_activity_from_previous(previous: ActiveTask) -> Option<ActiveTask> {
         | ActiveTask::GettingFood
         | ActiveTask::Following
         | ActiveTask::Mining
-        | ActiveTask::Woodcutting
+        | ActiveTask::Hunting
+        | ActiveTask::Logging
+        | ActiveTask::Timberworking
         | ActiveTask::Stonecutting
         | ActiveTask::Gathering
         | ActiveTask::Building
@@ -539,7 +567,8 @@ fn active_task_priority(task: &ActiveTask) -> i32 {
         | ActiveTask::Operating
         | ActiveTask::Mining
         | ActiveTask::Hunting
-        | ActiveTask::Woodcutting
+        | ActiveTask::Logging
+        | ActiveTask::Timberworking
         | ActiveTask::Stonecutting
         | ActiveTask::Refining
         | ActiveTask::Crafting
@@ -569,7 +598,7 @@ fn active_task_tiebreaker(task: &ActiveTask) -> i32 {
         ActiveTask::Fleeing => 35,
         ActiveTask::FightingBack => 34,
         ActiveTask::Mining => 33,
-        ActiveTask::Woodcutting => 32,
+        ActiveTask::Logging | ActiveTask::Timberworking => 32,
         ActiveTask::Stonecutting => 31,
         ActiveTask::Gathering => 30,
         ActiveTask::Unloading => 29,
@@ -876,7 +905,7 @@ pub fn enemy_distance_scorer_system(
                     continue;
                 }
 
-                if *enemy_state == State::Dead {
+                if !state_can_threaten_villager(enemy_state) {
                     continue;
                 }
 
@@ -1134,6 +1163,7 @@ pub fn hungry_scorer_system(
 }
 
 pub fn drowsy_scorer_system(
+    game_tick: Res<GameTick>,
     protection: VillagerProtection,
     tired_query: Query<&Tired>,
     no_shelter: Query<&NoShelter>,
@@ -1189,11 +1219,16 @@ pub fn drowsy_scorer_system(
             final_score = 0.0;
         }
 
+        if villagers_should_rest(game_tick.0) {
+            final_score = final_score.max(NIGHT_REST_SCORE);
+        }
+
         score.set(final_score);
     }
 }
 
 pub fn exhausted_scorer_system(
+    game_tick: Res<GameTick>,
     protection: VillagerProtection,
     tired_query: Query<&Tired, Without<EventExecuting>>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<ExhaustedScorer>>,
@@ -1203,7 +1238,12 @@ pub fn exhausted_scorer_system(
             continue;
         }
 
-        if let Ok(tired) = tired_query.get(*actor) {
+        if villagers_should_rest(game_tick.0) {
+            // At night the drowsy scorer routes even exhausted villagers through
+            // FindShelter so they use their shelter or campfire instead of
+            // collapsing on the tile where they happened to be working.
+            score.set(0.0);
+        } else if let Ok(tired) = tired_query.get(*actor) {
             let exhausted_score;
 
             if tired.tired >= EXHAUSTED_SCORE {
@@ -1270,12 +1310,20 @@ pub fn heat_scorer_system(
 }
 
 pub fn morale_scorer_system(
+    game_tick: Res<GameTick>,
     protection: VillagerProtection,
     morale_query: Query<(&Morale, Option<&Order>)>,
     mut query: Query<(&Actor, &mut Score, &ScorerSpan), With<GoodMorale>>,
 ) {
     for (Actor(actor), mut score, _span) in &mut query {
         if protection.is_protected(*actor) {
+            continue;
+        }
+
+        if villagers_should_rest(game_tick.0) {
+            // GoodMorale drives assigned orders, including structure work
+            // queues. Night rest must prevent those jobs from being selected.
+            score.set(0.0);
             continue;
         }
 
@@ -1472,6 +1520,92 @@ pub fn idle_action_system(
 ///
 /// Returns ActionState::Failure for Order::None and orders without valid positions.
 /// This is expected behavior - idle villagers have Order::None by design.
+fn resolve_tool_aware_destination(
+    commands: &mut Commands,
+    actor: Entity,
+    villager_player_id: i32,
+    villager_pos: Position,
+    villager_inventory: &mut Inventory,
+    active_task: &mut Mut<'_, ActiveTask>,
+    res_type: &str,
+    work_pos: Position,
+    storage_query: &Query<BaseQuery, (With<ClassStructure>, Without<SubclassVillager>)>,
+    map: &Map,
+) -> Result<Position, String> {
+    let Some(required_attr) = item::required_tool_attr_for_res_type(res_type) else {
+        return Ok(work_pos);
+    };
+
+    let updated_items = villager_inventory.auto_equip_best_tool_for_attr(&required_attr);
+    if !updated_items.is_empty() || villager_inventory.has_equipped_tool_for_attr(&required_attr) {
+        commands.entity(actor).remove::<BlockedWork>();
+        commands.entity(actor).remove::<ToolFetchTarget>();
+        ActiveTask::set_if_changed(
+            active_task,
+            ActiveTask::get_activity_from_res_type(res_type.to_string()),
+        );
+        return Ok(work_pos);
+    }
+
+    let mut best_storage_tool: Option<(f32, u32, i32, i32, Position)> = None;
+    for structure in storage_query.iter() {
+        if villager_player_id != structure.player_id.0
+            || *structure.subclass != Subclass::Storage
+            || *structure.state != State::None
+        {
+            continue;
+        }
+
+        let Some(tool) = structure.inventory.best_tool_for_attr(&required_attr) else {
+            continue;
+        };
+        let Some((_path, cost)) = Map::find_fast_path(
+            villager_pos,
+            *structure.pos,
+            map,
+            villager_player_id,
+            Vec::new(),
+            true,
+            false,
+            false,
+            false,
+            true,
+        ) else {
+            continue;
+        };
+
+        let score = tool.attr_num(&required_attr);
+        let is_better = match best_storage_tool {
+            None => true,
+            Some((best_score, best_cost, best_item_id, _, _)) => {
+                score > best_score
+                    || (score == best_score
+                        && (cost < best_cost || (cost == best_cost && tool.id < best_item_id)))
+            }
+        };
+        if is_better {
+            best_storage_tool = Some((score, cost, tool.id, structure.id.0, *structure.pos));
+        }
+    }
+
+    if let Some((_score, _cost, item_id, storage_id, storage_pos)) = best_storage_tool {
+        commands.entity(actor).insert(ToolFetchTarget {
+            storage_id,
+            item_id,
+            res_type: res_type.to_string(),
+            required_attr,
+        });
+        commands.entity(actor).remove::<BlockedWork>();
+        ActiveTask::set_if_changed(active_task, ActiveTask::MovingToGatherPos);
+        Ok(storage_pos)
+    } else {
+        Err(format!(
+            "Needs {} tool",
+            item::tool_attr_label(&required_attr)
+        ))
+    }
+}
+
 pub fn set_order_destination_system(
     mut commands: Commands,
     entity_map: Res<EntityObjMap>,
@@ -1479,6 +1613,7 @@ pub fn set_order_destination_system(
     map: Res<Map>,
     obj_query: Query<(&PlayerId, &Id, &Position, &Class, &Stats)>,
     storage_query: Query<BaseQuery, (With<ClassStructure>, Without<SubclassVillager>)>,
+    structure_template_query: Query<&Template, With<ClassStructure>>,
     mut villager_query: Query<
         (
             &PlayerId,
@@ -1545,102 +1680,68 @@ pub fn set_order_destination_system(
                         storage_pos: _,
                         storage_id: _,
                     } => {
-                        if let Some(required_attr) = item::required_tool_attr_for_res_type(res_type)
-                        {
-                            let updated_items =
-                                villager_inventory.auto_equip_best_tool_for_attr(&required_attr);
-
-                            if !updated_items.is_empty()
-                                || villager_inventory.has_equipped_tool_for_attr(&required_attr)
-                            {
-                                commands.entity(*actor).remove::<BlockedWork>();
+                        match resolve_tool_aware_destination(
+                            &mut commands,
+                            *actor,
+                            villager_player_id.0,
+                            *villager_pos,
+                            &mut villager_inventory,
+                            &mut active_task,
+                            res_type,
+                            *pos,
+                            &storage_query,
+                            &map,
+                        ) {
+                            Ok(destination) => Some(destination),
+                            Err(reason) => {
+                                commands.entity(*actor).insert(BlockedWork { reason });
                                 commands.entity(*actor).remove::<ToolFetchTarget>();
-                                ActiveTask::set_if_changed(
-                                    &mut active_task,
-                                    ActiveTask::get_activity_from_res_type(res_type.clone()),
+                                ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                                *state = ActionState::Failure;
+                                continue;
+                            }
+                        }
+                    }
+                    Order::WorkQueue => {
+                        let Some(assignment) = assignment else {
+                            span.span().in_scope(|| {
+                                villager_error!(
+                                    *actor,
+                                    obj_id,
+                                    None,
+                                    "No assignment for work queue order"
                                 );
-                                Some(*pos)
-                            } else {
-                                let mut best_storage_tool: Option<(f32, u32, i32, i32, Position)> =
-                                    None;
+                            });
+                            *state = ActionState::Failure;
+                            continue;
+                        };
 
-                                for structure in storage_query.iter() {
-                                    if villager_player_id.0 != structure.player_id.0 {
-                                        continue;
-                                    }
-
-                                    if *structure.subclass != Subclass::Storage {
-                                        continue;
-                                    }
-
-                                    if *structure.state != State::None {
-                                        continue;
-                                    }
-
-                                    let Some(tool) =
-                                        structure.inventory.best_tool_for_attr(&required_attr)
-                                    else {
-                                        continue;
-                                    };
-
-                                    let Some((_path, cost)) = Map::find_fast_path(
-                                        *villager_pos,
-                                        *structure.pos,
-                                        &map,
-                                        villager_player_id.0,
-                                        Vec::new(),
-                                        true,
-                                        false,
-                                        false,
-                                        false,
-                                        true,
-                                    ) else {
-                                        continue;
-                                    };
-
-                                    let score = tool.attr_num(&required_attr);
-                                    let is_better = match best_storage_tool {
-                                        None => true,
-                                        Some((best_score, best_cost, best_item_id, _, _)) => {
-                                            score > best_score
-                                                || (score == best_score
-                                                    && (cost < best_cost
-                                                        || (cost == best_cost
-                                                            && tool.id < best_item_id)))
-                                        }
-                                    };
-
-                                    if is_better {
-                                        best_storage_tool = Some((
-                                            score,
-                                            cost,
-                                            tool.id,
-                                            structure.id.0,
-                                            *structure.pos,
-                                        ));
-                                    }
-                                }
-
-                                if let Some((_score, _cost, item_id, storage_id, storage_pos)) =
-                                    best_storage_tool
-                                {
-                                    commands.entity(*actor).insert(ToolFetchTarget {
-                                        storage_id,
-                                        item_id,
-                                        res_type: res_type.clone(),
-                                        required_attr,
-                                    });
-                                    commands.entity(*actor).remove::<BlockedWork>();
-                                    ActiveTask::set_if_changed(
-                                        &mut active_task,
-                                        ActiveTask::MovingToGatherPos,
-                                    );
-                                    Some(storage_pos)
-                                } else {
-                                    let reason = format!(
-                                        "Needs {} tool",
-                                        item::tool_attr_label(&required_attr)
-                                    );
+                        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id)
+                        else {
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+                        let Ok(structure_template) = structure_template_query.get(structure_entity)
+                        else {
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+                        let res_type = Structure::resource_type(structure_template.0.clone());
+                        if matches!(res_type.as_str(), LOG | ORE | STONE | GAME_ANIMAL) {
+                            match resolve_tool_aware_destination(
+                                &mut commands,
+                                *actor,
+                                villager_player_id.0,
+                                *villager_pos,
+                                &mut villager_inventory,
+                                &mut active_task,
+                                &res_type,
+                                assignment.structure_pos,
+                                &storage_query,
+                                &map,
+                            ) {
+                                Ok(destination) => Some(destination),
+                                Err(reason) => {
                                     commands.entity(*actor).insert(BlockedWork { reason });
                                     commands.entity(*actor).remove::<ToolFetchTarget>();
                                     ActiveTask::set_if_changed(
@@ -1652,15 +1753,37 @@ pub fn set_order_destination_system(
                                 }
                             }
                         } else {
-                            Some(*pos)
+                            Some(assignment.structure_pos)
                         }
                     }
-                    Order::Build
-                    | Order::Operate
-                    | Order::Plant
-                    | Order::Tend
-                    | Order::Harvest
-                    | Order::WorkQueue => {
+                    Order::Harvest => {
+                        let Some(assignment) = assignment else {
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+                        match resolve_tool_aware_destination(
+                            &mut commands,
+                            *actor,
+                            villager_player_id.0,
+                            *villager_pos,
+                            &mut villager_inventory,
+                            &mut active_task,
+                            FOOD,
+                            assignment.structure_pos,
+                            &storage_query,
+                            &map,
+                        ) {
+                            Ok(destination) => Some(destination),
+                            Err(reason) => {
+                                commands.entity(*actor).insert(BlockedWork { reason });
+                                commands.entity(*actor).remove::<ToolFetchTarget>();
+                                ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                                *state = ActionState::Failure;
+                                continue;
+                            }
+                        }
+                    }
+                    Order::Build | Order::Operate | Order::Plant | Order::Tend => {
                         if let Some(assignment) = assignment {
                             Some(assignment.structure_pos)
                         } else {
@@ -1763,7 +1886,10 @@ pub fn maybe_transfer_gather_tool_system(
     entity_map: Res<EntityObjMap>,
     protection: VillagerProtection,
     mut inventory_query: Query<(&PlayerId, &Position, &mut Inventory)>,
-    mut villager_query: Query<(&Order, &mut ActiveTask), With<SubclassVillager>>,
+    mut villager_query: Query<
+        (&Order, Option<&Assignment>, &mut ActiveTask),
+        With<SubclassVillager>,
+    >,
     fetch_query: Query<&ToolFetchTarget>,
     mut action_query: Query<(
         &Actor,
@@ -1808,7 +1934,9 @@ pub fn maybe_transfer_gather_tool_system(
                         reason: missing_tool_reason,
                     });
                     commands.entity(*actor).remove::<ToolFetchTarget>();
-                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                    if let Ok((_order, _assignment, mut active_task)) =
+                        villager_query.get_mut(*actor)
+                    {
                         ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
                     }
                     *state = ActionState::Failure;
@@ -1831,7 +1959,9 @@ pub fn maybe_transfer_gather_tool_system(
                         reason: missing_tool_reason,
                     });
                     commands.entity(*actor).remove::<ToolFetchTarget>();
-                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                    if let Ok((_order, _assignment, mut active_task)) =
+                        villager_query.get_mut(*actor)
+                    {
                         ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
                     }
                     *state = ActionState::Failure;
@@ -1856,7 +1986,9 @@ pub fn maybe_transfer_gather_tool_system(
                         reason: missing_tool_reason,
                     });
                     commands.entity(*actor).remove::<ToolFetchTarget>();
-                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                    if let Ok((_order, _assignment, mut active_task)) =
+                        villager_query.get_mut(*actor)
+                    {
                         ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
                     }
                     *state = ActionState::Failure;
@@ -1868,7 +2000,9 @@ pub fn maybe_transfer_gather_tool_system(
                         reason: missing_tool_reason,
                     });
                     commands.entity(*actor).remove::<ToolFetchTarget>();
-                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                    if let Ok((_order, _assignment, mut active_task)) =
+                        villager_query.get_mut(*actor)
+                    {
                         ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
                     }
                     *state = ActionState::Failure;
@@ -1887,30 +2021,52 @@ pub fn maybe_transfer_gather_tool_system(
                         reason: missing_tool_reason,
                     });
                     commands.entity(*actor).remove::<ToolFetchTarget>();
-                    if let Ok((_order, mut active_task)) = villager_query.get_mut(*actor) {
+                    if let Ok((_order, _assignment, mut active_task)) =
+                        villager_query.get_mut(*actor)
+                    {
                         ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
                     }
                     *state = ActionState::Failure;
                     continue;
                 }
 
-                let Ok((order, mut active_task)) = villager_query.get_mut(*actor) else {
+                let Ok((order, assignment, mut active_task)) = villager_query.get_mut(*actor)
+                else {
                     commands.entity(*actor).remove::<ToolFetchTarget>();
                     commands.entity(*actor).remove::<BlockedWork>();
                     *state = ActionState::Success;
                     continue;
                 };
 
-                if let Order::Gather { pos, .. } = order {
-                    commands.entity(*actor).insert(Destination { pos: *pos });
+                match order {
+                    Order::Gather { pos, .. } => {
+                        commands.entity(*actor).insert(Destination { pos: *pos });
+                    }
+                    Order::WorkQueue => {
+                        if let Some(assignment) = assignment {
+                            commands.entity(*actor).insert(Destination {
+                                pos: assignment.structure_pos,
+                            });
+                        }
+                    }
+                    Order::Harvest => {
+                        if let Some(assignment) = assignment {
+                            commands.entity(*actor).insert(Destination {
+                                pos: assignment.structure_pos,
+                            });
+                        }
+                    }
+                    _ => {}
                 }
 
                 commands.entity(*actor).remove::<ToolFetchTarget>();
                 commands.entity(*actor).remove::<BlockedWork>();
-                ActiveTask::set_if_changed(
-                    &mut active_task,
-                    ActiveTask::get_activity_from_res_type(fetch_target.res_type.clone()),
-                );
+                let next_task = if matches!(order, Order::Harvest) {
+                    ActiveTask::Harvesting
+                } else {
+                    ActiveTask::get_activity_from_res_type(fetch_target.res_type.clone())
+                };
+                ActiveTask::set_if_changed(&mut active_task, next_task);
 
                 *state = ActionState::Success;
             }
@@ -1989,6 +2145,19 @@ pub fn process_order_system(
                     continue;
                 };
 
+                if work_queue_is_paused(villager_order, game_tick.0) {
+                    span.span().in_scope(|| {
+                        villager_debug!(
+                            *actor,
+                            obj_id,
+                            None,
+                            "Work queue order paused for night rest"
+                        );
+                    });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 if order_is_combat_locked(villager_order)
                     && actor_is_combat_locked(*actor, game_tick.0, &last_combat_tick_query)
                 {
@@ -2050,7 +2219,7 @@ pub fn process_order_system(
                     }
                     Order::Gather {
                         res_type,
-                        pos: _,
+                        pos,
                         storage_pos: _,
                         storage_id: _,
                     } => {
@@ -2410,26 +2579,64 @@ pub fn process_order_system(
                             continue;
                         };
 
+                        let Some(tool) =
+                            villager_inventory.get_equipped_tool_for_attr(&AttrKey::Farming)
+                        else {
+                            commands.entity(*actor).insert(BlockedWork {
+                                reason: "Needs Farming tool".to_string(),
+                            });
+                            ActiveTask::set_if_changed(&mut active_task, ActiveTask::Unknown);
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+                        let Some(work_duration) = farm_harvest_duration_ticks(villager_inventory)
+                        else {
+                            *state = ActionState::Failure;
+                            continue;
+                        };
+
                         span.span().in_scope(|| {
                             villager_debug!(*actor, obj_id, None, "Creating Harvest Event");
                         });
                         // Create harvest event
                         let harvest_event = VisibleEvent::HarvestEvent {
                             structure_id: assignment.structure_id,
+                            tool_item_id: tool.id,
                         };
 
                         *villager_state = State::Harvesting;
+                        commands.entity(*actor).remove::<BlockedWork>();
+                        ActiveTask::set_if_changed(&mut active_task, ActiveTask::Harvesting);
 
                         commands.trigger(StateChange {
                             entity: *actor,
                             new_state: State::Harvesting,
                         });
 
-                        map_events.new(
+                        let action_id = ids.new_map_event_id();
+                        commands.entity(*actor).insert(ActionProgress {
+                            action_id,
+                            start_tick: game_tick.0,
+                            end_tick: game_tick.0 + work_duration,
+                        });
+                        visible_events.new(
                             villager_id.0,
-                            game_tick.0 + 50, // in the future
-                            harvest_event,
+                            game_tick.0,
+                            VisibleEvent::UpdateObjEvent {
+                                attrs: vec![
+                                    ("state".to_string(), STATE_HARVESTING.to_string()),
+                                    ("action_id".to_string(), action_id.to_string()),
+                                    (
+                                        "action_duration_ms".to_string(),
+                                        (work_duration.saturating_mul(1000) / TICKS_PER_SEC)
+                                            .to_string(),
+                                    ),
+                                    ("action_elapsed_ms".to_string(), "0".to_string()),
+                                ],
+                            },
                         );
+
+                        map_events.new(villager_id.0, game_tick.0 + work_duration, harvest_event);
                     }
                     Order::Repair => {
                         *villager_state = State::Repairing;
@@ -2474,6 +2681,21 @@ pub fn process_order_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
+                if villager_query
+                    .get(*actor)
+                    .is_ok_and(|(_, order, _, _, _)| work_queue_is_paused(order, game_tick.0))
+                {
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "Stopping work queue task at night");
+                    });
+                    if let Ok(mut event_executing) = event_executing_query.get_mut(*actor) {
+                        event_executing.state = EventExecutingState::None;
+                    }
+                    commands.trigger(CancelEvents { entity: *actor });
+                    *state = ActionState::Failure;
+                    continue;
+                }
+
                 if actor_is_combat_locked(*actor, game_tick.0, &last_combat_tick_query) {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cancelling order for combat lock");
@@ -2702,9 +2924,11 @@ pub fn fight_back_system(
                     continue;
                 }
 
-                if let Some(errmsg) =
-                    Combat::fortified_outbound_attack_error_from_combat(&villager, &attacker, false)
-                {
+                if let Some(errmsg) = Combat::fortified_outbound_attack_error_from_combat(
+                    &villager,
+                    &attacker,
+                    Combat::equipped_weapon_has_fortification_reach(&villager.inventory),
+                ) {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, Some(villager.id.0), None, "{}", errmsg);
                     });
@@ -3110,7 +3334,7 @@ pub fn set_flee_destination_system(
                 ) in threat_query.iter()
                 {
                     if enemy_entity == *actor
-                        || *enemy_state == State::Dead
+                        || !state_can_threaten_villager(enemy_state)
                         || enemy_class.is_poi()
                         || enemy_player_id.0 == villager_player_id.0
                         || enemy_player_id.0 == MERCHANT_PLAYER_ID
@@ -3623,7 +3847,9 @@ pub fn move_to_system(
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     dest_query: Query<&Destination>,
-    obj_query: Query<(&Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
+    order_query: Query<&Order>,
+    blocked_work_query: Query<&BlockedWork>,
+    obj_query: Query<(Entity, &Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
     state_query: Query<&mut State>,
     mut event_executing_query: Query<&mut EventExecuting>,
     mut action_query: Query<(&Actor, &mut ActionState, &MoveTo, &ActionSpan)>,
@@ -3656,7 +3882,7 @@ pub fn move_to_system(
                 };
 
                 let blocking_list =
-                    Obj::blocking_list(villager_player_id, actor, &obj_query, &state_query);
+                    Obj::blocking_list(villager_player_id, &obj_query, &state_query);
 
                 let Ok(destination) = dest_query.get(*actor) else {
                     span.span().in_scope(|| {
@@ -3666,7 +3892,8 @@ pub fn move_to_system(
                     continue;
                 };
 
-                let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                let Ok((_entity, id, _player_id, pos, _class, _subclass, _stats)) =
+                    obj_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_error!(*actor, obj_id, None, "Cannot get obj query");
@@ -3695,6 +3922,12 @@ pub fn move_to_system(
                     false,
                     true,
                 ) {
+                    if blocked_work_query
+                        .get(*actor)
+                        .is_ok_and(|blocked| blocked.reason == "No path to resource site")
+                    {
+                        commands.entity(*actor).remove::<BlockedWork>();
+                    }
                     span.span().in_scope(|| {
                         villager_trace!(
                             *actor,
@@ -3757,7 +3990,13 @@ pub fn move_to_system(
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot find path to destination");
                     });
-                    *state = ActionState::Failure
+                    if matches!(order_query.get(*actor), Ok(Order::Gather { .. })) {
+                        commands.entity(*actor).insert(BlockedWork {
+                            reason: "No path to resource site".to_string(),
+                        });
+                    }
+                    *state = ActionState::Failure;
+                    continue;
                 }
 
                 *state = ActionState::Executing;
@@ -3807,9 +4046,10 @@ pub fn move_to_system(
                 };
 
                 let blocking_list =
-                    Obj::blocking_list(villager_player_id, actor, &obj_query, &state_query);
+                    Obj::blocking_list(villager_player_id, &obj_query, &state_query);
 
-                if let Ok((id, _player_id, pos, _class, _subclass, _stats)) = obj_query.get(*actor)
+                if let Ok((_entity, id, _player_id, pos, _class, _subclass, _stats)) =
+                    obj_query.get(*actor)
                 {
                     let Ok(destination) = dest_query.get(*actor) else {
                         span.span().in_scope(|| {
@@ -3849,9 +4089,21 @@ pub fn move_to_system(
                                     "Cannot find path to destination"
                                 );
                             });
+                            if matches!(order_query.get(*actor), Ok(Order::Gather { .. })) {
+                                commands.entity(*actor).insert(BlockedWork {
+                                    reason: "No path to resource site".to_string(),
+                                });
+                            }
                             *state = ActionState::Failure;
                             continue;
                         };
+
+                        if blocked_work_query
+                            .get(*actor)
+                            .is_ok_and(|blocked| blocked.reason == "No path to resource site")
+                        {
+                            commands.entity(*actor).remove::<BlockedWork>();
+                        }
 
                         span.span().in_scope(|| {
                             villager_trace!(
@@ -4880,15 +5132,22 @@ pub fn find_shelter_system(
     protection: VillagerProtection,
     mut map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
-    mut villager_query: Query<(&Id, &Position, &mut ActiveShelter), With<SubclassVillager>>,
+    mut villager_query: Query<
+        (&Id, &PlayerId, &Position, &mut ActiveShelter),
+        With<SubclassVillager>,
+    >,
     structure_query: Query<&Position, (With<ClassStructure>, Without<SubclassVillager>)>,
+    campfire_query: Query<
+        (&Id, &PlayerId, &Position, &State, &Campfire),
+        (With<ClassStructure>, Without<SubclassVillager>),
+    >,
     mut event_executing_query: Query<&mut EventExecuting>,
     exhausted: Query<&Exhausted>,
     last_combat_tick_query: Query<&LastCombatTick>,
     mut morale_query: Query<&mut Morale>,
     mut action_query: Query<(&Actor, &mut ActionState, &FindShelter, &ActionSpan)>,
 ) {
-    for (Actor(actor), mut state, _find_shelter_action, span) in &mut action_query {
+    for (Actor(actor), mut state, find_shelter_action, span) in &mut action_query {
         if protection.is_protected(*actor) {
             continue;
         }
@@ -4896,7 +5155,8 @@ pub fn find_shelter_system(
         let obj_id = entity_map.get_obj_by_entity(*actor);
         match *state {
             ActionState::Requested => {
-                let Ok((villager_id, _villager_pos, _active_shelter)) = villager_query.get(*actor)
+                let Ok((villager_id, _player_id, _villager_pos, _active_shelter)) =
+                    villager_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_error!(*actor, obj_id, None, "Cannot get villager query");
@@ -4952,7 +5212,7 @@ pub fn find_shelter_system(
                     continue;
                 }
 
-                let Ok((villager_id, villager_pos, mut active_shelter)) =
+                let Ok((villager_id, villager_player_id, villager_pos, active_shelter)) =
                     villager_query.get_mut(*actor)
                 else {
                     span.span().in_scope(|| {
@@ -4962,7 +5222,11 @@ pub fn find_shelter_system(
                 };
 
                 if active_shelter.0 == NO_SHELTER {
-                    if exhausted.get(*actor).is_ok() {
+                    let is_sleep_search = find_shelter_action.trigger_event == "Sleep";
+                    let may_rough_sleep = exhausted.get(*actor).is_ok()
+                        || (is_sleep_search && villagers_should_rest(game_tick.0));
+
+                    if may_rough_sleep {
                         if actor_is_combat_locked(*actor, game_tick.0, &last_combat_tick_query) {
                             span.span().in_scope(|| {
                                 villager_debug!(
@@ -4976,9 +5240,26 @@ pub fn find_shelter_system(
                             continue;
                         }
 
+                        let rest_pos = if is_sleep_search {
+                            campfire_query
+                                .iter()
+                                .filter(|(_, owner, _, state, campfire)| {
+                                    owner.0 == villager_player_id.0
+                                        && **state == State::None
+                                        && campfire.is_lit
+                                })
+                                .min_by_key(|(id, _, pos, _, _)| {
+                                    (Map::dist(*villager_pos, **pos), id.0)
+                                })
+                                .map(|(_, _, pos, _, _)| *pos)
+                                .unwrap_or(*villager_pos)
+                        } else {
+                            *villager_pos
+                        };
+
                         commands
                             .entity(*actor)
-                            .insert(Destination { pos: *villager_pos });
+                            .insert(Destination { pos: rest_pos });
 
                         if let Ok(mut morale) = morale_query.get_mut(*actor) {
                             morale.add_rough_sleep_penalty(ROUGH_SLEEP_MORALE_PENALTY);
@@ -5030,7 +5311,8 @@ pub fn find_shelter_system(
                     event_executing.state = EventExecutingState::None;
                 }
 
-                let Ok((villager_id, villager_pos, _active_shelter)) = villager_query.get(*actor)
+                let Ok((villager_id, _player_id, _villager_pos, _active_shelter)) =
+                    villager_query.get(*actor)
                 else {
                     span.span().in_scope(|| {
                         villager_debug!(*actor, obj_id, None, "Cannot get villager query");
@@ -5164,20 +5446,57 @@ pub fn sleep_action_system(
                     continue;
                 };
 
-                if event_executing.state != EventExecutingState::Completed {
+                if event_executing.state == EventExecutingState::Completed {
+                    // The timed sleep has restored tiredness. At night, keep the
+                    // same Sleep action active until first light so the villager
+                    // remains at rest instead of immediately resuming work or
+                    // repeating the sleep event every few seconds.
+                    span.span().in_scope(|| {
+                        villager_debug!(*actor, obj_id, None, "Sleep Event completed");
+                    });
+                    event_executing.state = EventExecutingState::None;
+
+                    if villagers_should_rest(game_tick.0) {
+                        if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                            if *villager.state != State::Sleeping {
+                                *villager.state = State::Sleeping;
+                                commands.trigger(StateChange {
+                                    entity: *actor,
+                                    new_state: State::Sleeping,
+                                });
+                            }
+                        }
+                    } else {
+                        *state = ActionState::Success;
+                    }
+                } else if event_executing.state == EventExecutingState::None {
+                    if villagers_should_rest(game_tick.0) {
+                        if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                            if *villager.state != State::Sleeping {
+                                *villager.state = State::Sleeping;
+                                commands.trigger(StateChange {
+                                    entity: *actor,
+                                    new_state: State::Sleeping,
+                                });
+                            }
+                        }
+                    } else {
+                        if let Ok(mut villager) = villager_query.get_mut(*actor) {
+                            if *villager.state == State::Sleeping {
+                                *villager.state = State::None;
+                                commands.trigger(StateChange {
+                                    entity: *actor,
+                                    new_state: State::None,
+                                });
+                            }
+                        }
+                        *state = ActionState::Success;
+                    }
+                } else {
                     span.span().in_scope(|| {
                         villager_trace!(*actor, obj_id, None, "Sleep Event still executing");
                     });
-                    continue;
                 }
-
-                // Reset EventExecutingState back to none
-                span.span().in_scope(|| {
-                    villager_debug!(*actor, obj_id, None, "Sleep Event completed");
-                });
-                event_executing.state = EventExecutingState::None;
-
-                *state = ActionState::Success;
             }
             // All Actions should make sure to handle cancellations!
             ActionState::Cancelled => {
@@ -5193,6 +5512,14 @@ pub fn sleep_action_system(
                     *state = ActionState::Failure;
                     continue;
                 };
+
+                if *villager.state == State::Sleeping {
+                    *villager.state = State::None;
+                    commands.trigger(StateChange {
+                        entity: *actor,
+                        new_state: State::None,
+                    });
+                }
 
                 let event_type = GameEventType::CancelAllMapEvents {
                     obj_id: villager.id.0,
@@ -5592,7 +5919,9 @@ pub fn villager_activity_text(
 
 pub fn activity_update_system(
     clients: Res<Clients>,
+    game_tick: Res<GameTick>,
     active_infos: Res<ActiveInfos>,
+    mut visible_events: ResMut<VisibleEvents>,
     protection: VillagerProtection,
     changed_query: Query<
         (
@@ -5657,6 +5986,23 @@ pub fn activity_update_system(
             continue;
         };
 
+        let activity = villager_activity_text(
+            active_task,
+            state,
+            order,
+            inventory,
+            blocked_work,
+            tool_fetch_target,
+        );
+
+        visible_events.new(
+            id.0,
+            game_tick.0,
+            VisibleEvent::UpdateObjEvent {
+                attrs: vec![("activity".to_string(), activity.clone())],
+            },
+        );
+
         let Some(active_info_players) = active_infos.get(&(id.0, ActiveInfoType::Obj)) else {
             continue;
         };
@@ -5664,14 +6010,7 @@ pub fn activity_update_system(
         for player_id in active_info_players {
             let response_packet = ResponsePacket::InfoActivityUpdate {
                 id: id.0,
-                activity: villager_activity_text(
-                    active_task,
-                    state,
-                    order,
-                    inventory,
-                    blocked_work,
-                    tool_fetch_target,
-                ),
+                activity: activity.clone(),
             };
 
             debug!("Activity sending to client {:?}", response_packet);

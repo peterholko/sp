@@ -59,8 +59,8 @@ The snapshot below is serialized from the constants used by the authoritative cr
   "assault_vision": 14,
   "fallback_spawn_min_distance": 6,
   "fallback_spawn_max_distance": 8,
-  "sanctuary_spawn_min_offset_from_weak_radius": 1,
-  "sanctuary_spawn_max_offset_from_weak_radius": 3,
+  "sanctuary_spawn_min_offset_from_radius": 1,
+  "sanctuary_spawn_max_offset_from_radius": 3,
   "neighbouring_structure_exclusion_distance": 3,
   "spawn_candidate_limit": 96
 }
@@ -82,11 +82,11 @@ Human Villagers have 500 HP, 10,000 stamina, zero base damage/span, zero defence
 | Fieldstone Walls | 400 | 0 | blocking level-2 wall |
 | Watchtower | 50 | 0 | vision/light support; not a wall |
 
-The sanctuary maximum is level 5; upgrade costs are 3, 6, 9, 12, and 15 Soulshards; full and weak radii are `3 + level` and `5 + level`; each level contributes 0.25 to the existing defence amplifier. Full audit context, including anchor priority, target eligibility, equipment, and the runtime Health Potion/template discrepancy, is recorded in `docs/goblin_crisis_balance_milestone.md`.
+The sanctuary maximum is level 5; upgrade costs are 3, 6, 9, 12, and 15 Soulshards; the single sanctuary radius is `5 + level`; each level contributes 0.25 to the existing defence amplifier. Full audit context, including anchor priority, target eligibility, equipment, and the runtime Health Potion/template discrepancy, is recorded in `docs/goblin_crisis_balance_milestone.md`.
 
 ## Hero-class starting baseline
 
-These are architecture-confirmed starting values from the current hero templates and setup path; this checkpoint did not change them. Every class receives one custom 10-point Health Potion, Tattered Shirt and Tattered Pants.
+These are the historical values measured by this checkpoint. A later recovery-economy change moved the supplies into the Shipwreck and replaced the 10-point override with the canonical 50-HP Health Potion.
 
 | Class | HP | Stamina | Mana | Base damage / span | Defence | Speed | Vision | Starting weapon | Additional starting equipment |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---|
@@ -237,7 +237,7 @@ Natural-progression rows observe the existing starting economy and bot path. `st
 - The prepared policies can return home, equip an available non-hunting weapon, build existing walls, and upgrade the sanctuary, but the bot has no explicit armor-selection or structure-repair driver.
 - The Safe Logout setup helper repositions the hero and every currently alive, visible-target NPC and rebases headless recent-combat/damage observations beyond the unchanged production cooldown. Later spawns or new damage can still reject or cancel, and their typed telemetry remains in the ordinary run row. Comparison with prepared-solo is therefore a lifecycle probe rather than a perfectly paired balance experiment.
 - Ordinary crisis attackers currently damage owner units and walls; ordinary non-wall structures are not normal attack targets, limiting structure-damage observations.
-- The runtime starting Health Potion is overridden to Healing 10 even though the item template declares 50; the baseline reports runtime behavior.
+- This historical baseline measured a runtime Health Potion override of 10 HP. Current new runs use the canonical 50-HP potion from the Shipwreck.
 - A passive run has at most 25 pressure from danger unlock and online time, so it can enter Signs but cannot naturally reach Pressure under the current formula.
 - Warning timestamps represent the first successfully sent crisis status packet for the phase, not client rendering acknowledgement.
 - Checkpoint 1 records current behavior and does not change pressure, phase, enemy, class, economy, or Safe Logout balance values.

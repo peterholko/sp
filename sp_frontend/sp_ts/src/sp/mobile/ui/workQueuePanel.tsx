@@ -2,6 +2,7 @@ import * as React from "react";
 import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import { Util } from "../../core/util";
+import { operateWorkPresentation } from "../../core/workQueuePresentation";
 import cancelbutton from "ui_comp/exitbutton.png";
 import {
   MobileCard,
@@ -43,14 +44,14 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
     let structureName;
 
     if (Global.objectStates[this.props.structureData.id]) {
-      if (Util.isSprite(Global.objectStates[this.props.structureData.id].image)) {
-        structureImageName = Global.objectStates[this.props.structureData.id].image + '_single.png';
-      } else {
-        structureImageName = Global.objectStates[this.props.structureData.id].image + '.png';
-      }
+      structureImageName = Util.getImagePreviewName(
+        Global.objectStates[this.props.structureData.id].image
+      );
 
       structureName = Global.objectStates[this.props.structureData.id].name;
     }
+
+    const operatePresentation = operateWorkPresentation(structureName);
 
     const listStyle: React.CSSProperties = {
       display: 'flex',
@@ -114,7 +115,7 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
           hideExitButton={false}
           contentStyle={landscape ? { padding: '8px 0' } : undefined}>
           <MobileSplitPanelLayout
-            left={<MobileSummaryCard imageSrc={'/static/art/' + structureImageName} title={structureName || 'Structure'} subtitle="Queue" imageSize={landscape ? 58 : 82} />}
+            left={<MobileSummaryCard imageSrc={structureImageName ? '/static/art/' + structureImageName : undefined} title={structureName || 'Structure'} subtitle="Queue" imageSize={landscape ? 58 : 82} />}
             right={
               <MobileCard compact={landscape}>
                 {this.props.workQueue.length == 0 && <div style={emptyStyle}>No work in queue</div>}
@@ -132,8 +133,8 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
                         name = entry.refine_item_id;
                         imageName = entry.refine_item_image + '.png';
                       } else if (workType == 'Operate') {
-                        name = 'Operate';
-                        imageName = 'valleyruncopperore.png';
+                        name = operatePresentation.name;
+                        imageName = operatePresentation.imageName;
                       }
 
                       return (
@@ -155,6 +156,4 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       );
     }
   }
-
-
 

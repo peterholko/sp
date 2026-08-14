@@ -39,8 +39,8 @@ use crate::{
     obj::Obj,
     obj::{
         ActiveTask, Class, ClassStructure, HeroClass, HeroClassProfile, Id, Misc, Name, Order,
-        PlayerId, Position, State, StateAboard, Stats, Subclass, SubclassHero, SubclassVillager,
-        Template, Viewshed,
+        PlayerId, Portrait, Position, State, StateAboard, Stats, Subclass, SubclassHero,
+        SubclassVillager, Template, Viewshed, VILLAGER_PORTRAITS,
     },
     recipe::Recipes,
     skill::Skills,
@@ -53,6 +53,7 @@ pub fn new(
     player_id: i32,
     hero_name: String,
     class_name: String,
+    portrait: String,
     commands: &mut Commands,
     start_locations: &mut ResMut<StartLocations>,
     assigned_start_locations: &mut ResMut<AssignedStartLocations>,
@@ -186,8 +187,9 @@ pub fn new(
         owner: hero_id,
     };
 
-    // A fresh hero reaches the wreck with clothing only. Survival supplies and
-    // class equipment are recovered manually from that run's Shipwreck below.
+    // A fresh hero reaches the wreck with basic clothing and a carried starter
+    // weapon. Survival supplies, tools, and class equipment are recovered
+    // manually from that run's Shipwreck below.
     let shirt = inventory.new(
         ids.new_item_id(),
         "Tattered Shirt".to_string(),
@@ -197,6 +199,12 @@ pub fn new(
     let pants = inventory.new(
         ids.new_item_id(),
         "Tattered Pants".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory.new(
+        ids.new_item_id(),
+        "Sharpened Stick".to_string(),
         1,
         &templates.item_templates,
     );
@@ -254,6 +262,7 @@ pub fn new(
     let hero_entity_id = commands
         .spawn((
             hero,
+            Portrait(portrait),
             Viewshed {
                 range: Obj::set_viewshed_range(
                     hero_id,
@@ -266,6 +275,7 @@ pub fn new(
             },
             hero_attrs,
             hero_skills,
+            ActiveTask::None,
             EventExecuting {
                 event_type: "".to_string(),
                 state: EventExecutingState::None,
@@ -674,8 +684,16 @@ pub fn new(
 
     // Starting recipes
     recipes.create(player_id, "Cooked Meat".to_string(), &templates);
+    recipes.create(player_id, "Sickle".to_string(), &templates);
+    recipes.create(player_id, FISHING_ROD.to_string(), &templates);
     recipes.create(player_id, "Training Pick Axe".to_string(), &templates);
+    recipes.create(
+        player_id,
+        "Training Stonecutter Hammer".to_string(),
+        &templates,
+    );
     recipes.create(player_id, "Copper Training Axe".to_string(), &templates);
+    recipes.create(player_id, "Copper Felling Axe".to_string(), &templates);
     recipes.create(player_id, "Firewood".to_string(), &templates);
     recipes.create(player_id, "Sharpened Stick".to_string(), &templates);
     recipes.create(player_id, "Crude Torch".to_string(), &templates);
@@ -686,6 +704,35 @@ pub fn new(
     recipes.create(player_id, "Resin Torch".to_string(), &templates);
     recipes.create(player_id, "Herbal Poultice".to_string(), &templates);
     recipes.create(player_id, "Hide Wraps".to_string(), &templates);
+
+    // Primitive equipment is the dependable bridge between Shipwreck salvage
+    // and specialized production. These recipes still require their ordinary
+    // gathered ingredients; knowing them up front prevents core progression
+    // from depending on finding an exact same-family experiment source.
+    recipes.create(player_id, "Bone Dagger".to_string(), &templates);
+    recipes.create(player_id, "Flint Hatchet".to_string(), &templates);
+    recipes.create(player_id, "Stone-Tipped Spear".to_string(), &templates);
+    recipes.create(player_id, "Bone War Club".to_string(), &templates);
+    recipes.create(player_id, "Throwing Spear".to_string(), &templates);
+    recipes.create(player_id, "Hide Cap".to_string(), &templates);
+    recipes.create(player_id, "Hide Leggings".to_string(), &templates);
+    recipes.create(player_id, "Hide Boots".to_string(), &templates);
+    recipes.create(player_id, "Hide Mantle".to_string(), &templates);
+
+    // Foundational station recipes are deterministic. Their structure and
+    // skill requirements remain authoritative, while experimentation carries
+    // each item family onward into its iron and mithril tiers.
+    recipes.create(player_id, "Copper Dagger".to_string(), &templates);
+    recipes.create(player_id, "Copper Spear".to_string(), &templates);
+    recipes.create(player_id, "Copper Mace".to_string(), &templates);
+    recipes.create(player_id, "Copper Short Sword".to_string(), &templates);
+    recipes.create(player_id, "Copper Cuirass".to_string(), &templates);
+    recipes.create(player_id, "Copper Greaves".to_string(), &templates);
+    recipes.create(player_id, "Copper Sabatons".to_string(), &templates);
+    recipes.create(player_id, "Copper Pauldrons".to_string(), &templates);
+    recipes.create(player_id, "Copper Buckler".to_string(), &templates);
+    recipes.create(player_id, "Training Bow".to_string(), &templates);
+    recipes.create(player_id, "Hunting Bow".to_string(), &templates);
 
     // Starting plans (survival basics only — more plans acquired through exploration and villager)
     plans.add(player_id, "Campfire".to_string(), 0, 0);
@@ -778,7 +825,7 @@ pub fn new(
 
     // Spawn the merchant offshore at empire_pos. They stay there (out of the
     // player's viewshed) until MerchantArrival fires, scheduled from the
-    // SpawnVillager handler in game.rs ~3 minutes after the villager rescue.
+    // SpawnVillager handler in game.rs five game days after the villager rescue.
     // The big-brain Thinker / Transport sail-in is intentionally omitted for
     // this slice — see plan note "Out of scope".
     let viewshed_range = Obj::set_viewshed_range(
@@ -817,7 +864,12 @@ pub fn new(
         let cargo_attrs = VillagerUtil::generate_attributes(1);
         let cargo_skills = VillagerUtil::generate_skills(cargo_id, &templates.skill_templates);
 
-        let cargo_entity = commands.spawn((cargo, cargo_attrs, cargo_skills)).id();
+        let portrait = VILLAGER_PORTRAITS
+            [rand::thread_rng().gen_range(0..VILLAGER_PORTRAITS.len())]
+        .to_string();
+        let cargo_entity = commands
+            .spawn((cargo, cargo_attrs, cargo_skills, Portrait(portrait)))
+            .id();
         ids.new_obj(cargo_id, merchant_player_id);
         entity_map.new_obj(cargo_id, cargo_entity);
         run_obj_ids.push(cargo_id);
@@ -924,15 +976,9 @@ pub fn new(
         items: Vec::new(),
     };
 
-    // General survival supplies. The Crude Hatchet matches the Sharpened
-    // Stick's starter combat profile while providing the ordinary Logging tool
+    // General survival supplies. The Crude Hatchet matches the hero's carried
+    // Sharpened Stick combat profile while providing the ordinary Logging tool
     // attribute needed to lumberjack trees.
-    shipwreck_inventory.new(
-        ids.new_item_id(),
-        "Sharpened Stick".to_string(),
-        1,
-        &templates.item_templates,
-    );
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Crude Hatchet".to_string(),
@@ -969,14 +1015,23 @@ pub fn new(
         3,
         &templates.item_templates,
     );
-    let mut health_potion_attrs = HashMap::new();
-    health_potion_attrs.insert(item::AttrKey::Healing, item::AttrVal::Num(10.0));
-    shipwreck_inventory.new_with_attrs(
+    // The two bodies in the wreck are distinct inventory items. Corpse-class
+    // items are deliberately non-mergeable, so each keeps its own item id and
+    // occupies its own inventory slot rather than becoming quantity two.
+    for _ in 0..2 {
+        shipwreck_inventory.new_with_attrs(
+            ids.new_item_id(),
+            shipwreck_id,
+            "Human Corpse".to_string(),
+            1,
+            HashMap::new(),
+            &templates.item_templates,
+        );
+    }
+    shipwreck_inventory.new(
         ids.new_item_id(),
-        shipwreck_id,
         "Health Potion".to_string(),
         1,
-        health_potion_attrs,
         &templates.item_templates,
     );
 
@@ -999,6 +1054,22 @@ pub fn new(
         1,
         &templates.item_templates,
     );
+    // Enough existing Cloth to turn the known Twine recipe into a real early
+    // crafting choice without introducing a new cordage resource.
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Honeybell Cloth".to_string(),
+        5,
+        &templates.item_templates,
+    );
+    // The first skin starts the Shelter Tent material lesson. Hunting and
+    // butchering after the survivor is rescued teaches the renewable source.
+    shipwreck_inventory.new(
+        ids.new_item_id(),
+        "Windstride Raw Hide".to_string(),
+        1,
+        &templates.item_templates,
+    );
 
     // Settlement salvage.
     shipwreck_inventory.new(
@@ -1016,7 +1087,7 @@ pub fn new(
     shipwreck_inventory.new(
         ids.new_item_id(),
         "Valleyrun Copper Ingot".to_string(),
-        3,
+        1,
         &templates.item_templates,
     );
     shipwreck_inventory.new(
@@ -1095,39 +1166,6 @@ pub fn new(
         entity: shipwreck_entity_id,
     });
 
-    // Create human corpse
-    let (corpse1_id, _corpse1_entity) = Obj::create(
-        999,
-        "Human Corpse".to_string(),
-        Position {
-            x: start_location.corpse1_pos[0],
-            y: start_location.corpse1_pos[1],
-        },
-        State::Dead,
-        commands,
-        ids,
-        entity_map,
-        map_events,
-        &game_tick,
-        &templates,
-    );
-
-    let (corpse2_id, _corpse2_entity) = Obj::create(
-        999,
-        "Human Corpse".to_string(),
-        Position {
-            x: start_location.corpse2_pos[0],
-            y: start_location.corpse2_pos[1],
-        },
-        State::Dead,
-        commands,
-        ids,
-        entity_map,
-        map_events,
-        &game_tick,
-        &templates,
-    );
-
     /*Encounter::spawn_npc(
         NPC_PLAYER_ID,
         Position {
@@ -1141,9 +1179,6 @@ pub fn new(
         items,
         &templates,
     );*/
-
-    run_obj_ids.push(corpse1_id);
-    run_obj_ids.push(corpse2_id);
 
     // Scripted shipwreck intro pacing is handled relative to the player's join time
     let shipwreck_pos = Position {
@@ -1172,11 +1207,12 @@ pub fn new(
         "Wild Boar".to_string()
     };
 
-    // Spawn the necromancer and its mausoleum up front, but hidden: State::Hiding
-    // keeps them out of every perception path and we deliberately skip the NewObj
-    // trigger so the client is never told they exist. They are revealed and
-    // activated later by the NecroEvent, which is scheduled 5 minutes after the
-    // villager is rescued (see the SpawnVillager handler in game.rs).
+    // Spawn the necromancer and its mausoleum outside the initial sanctuary, but
+    // hidden: State::Hiding keeps them out of every perception path and we
+    // deliberately skip the NewObj trigger so the client is never told they
+    // exist. They are revealed and activated later by the NecroEvent, which is
+    // scheduled 5 minutes after the villager is rescued (see the SpawnVillager
+    // handler in game.rs).
     let mausoleum_pos = Position {
         x: start_location.mausoleum_pos[0],
         y: start_location.mausoleum_pos[1],
@@ -1248,9 +1284,8 @@ pub fn new(
     };
     game_events.insert(intro_notice.event_id, intro_notice);
 
-    // BB-B: the campfire lesson is now delivered as an action-driven nudge when
-    // the player actually builds a campfire (see objectives_system), instead of
-    // firing on a fixed clock here.
+    // The Survival Thread now teaches the Campfire-to-Shelter-Tent upgrade from
+    // authoritative objective state instead of firing a fixed-clock lesson.
 
     // Wolf howl sound event after the player has learned the first camp loop
     let hero_pos = Position {
@@ -1475,7 +1510,7 @@ pub fn new(
         }
     }
 
-    // Abandoned Mine - contains ore and mining supplies
+    // Abandoned Mine - contains ore plus mining and quarrying supplies.
     if let Some(ref pos) = start_location.abandoned_mine_pos {
         let poi_id = ids.new_obj_id();
         let mut poi_inventory = Inventory {
@@ -1497,6 +1532,12 @@ pub fn new(
         poi_inventory.new(
             ids.new_item_id(),
             "Training Pick Axe".to_string(),
+            1,
+            &templates.item_templates,
+        );
+        poi_inventory.new(
+            ids.new_item_id(),
+            "Training Stonecutter Hammer".to_string(),
             1,
             &templates.item_templates,
         );
@@ -1607,8 +1648,6 @@ pub struct StartLocation {
     pub burrow_pos: Vec<i32>,
     pub monolith_pos: Vec<i32>,
     pub shipwreck_pos: Vec<i32>,
-    pub corpse1_pos: Vec<i32>,
-    pub corpse2_pos: Vec<i32>,
     pub necromancer_pos: Vec<i32>,
     pub mausoleum_pos: Vec<i32>,
     pub merchant_pos: Vec<i32>,
@@ -1663,7 +1702,7 @@ pub struct StartLocations(pub Vec<StartLocation>);
 #[derive(Debug, Default, Resource, Deref, DerefMut)]
 pub struct AssignedStartLocations(pub HashMap<i32, StartLocation>);
 
-// Non-player-owned objects spawned for one player's run (shipwreck, corpses,
+// Non-player-owned objects spawned for one player's run (shipwreck,
 // intro NPCs, POIs, merchant...), keyed by player id. True Death removes them
 // before the start location is recycled — without this the next hero at the
 // same location spawns into the previous run's leftovers. In-memory only,
@@ -1702,8 +1741,55 @@ impl StartLocations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::sanctuary_radius;
     use crate::item::{Inventory, LOG};
+    use crate::map::Map;
     use std::fs::File;
+
+    #[test]
+    fn introductory_necromancer_sites_start_outside_their_sanctuaries() {
+        let start_location_file =
+            File::open("templates/player_start.yaml").expect("Could not open start locations");
+        let start_locations: Vec<StartLocation> =
+            serde_yaml::from_reader(start_location_file).expect("Could not read start locations");
+        let map = Map::load_map();
+        let initial_sanctuary_radius = sanctuary_radius(0);
+
+        for start_location in start_locations {
+            let monolith_pos = Position {
+                x: start_location.monolith_pos[0],
+                y: start_location.monolith_pos[1],
+            };
+            let mausoleum_pos = Position {
+                x: start_location.mausoleum_pos[0],
+                y: start_location.mausoleum_pos[1],
+            };
+            let authored_necromancer_pos = Position {
+                x: start_location.necromancer_pos[0],
+                y: start_location.necromancer_pos[1],
+            };
+
+            assert_eq!(
+                authored_necromancer_pos, mausoleum_pos,
+                "{} dormant Necromancer and Mausoleum must share their reveal anchor",
+                start_location.name,
+            );
+
+            assert!(
+                Map::dist(monolith_pos, mausoleum_pos) >= initial_sanctuary_radius,
+                "{} Mausoleum at {:?} must be outside the level-0 sanctuary centered at {:?}",
+                start_location.name,
+                mausoleum_pos,
+                monolith_pos,
+            );
+            assert!(
+                Map::is_passable(mausoleum_pos.x, mausoleum_pos.y, &map),
+                "{} Mausoleum at {:?} must use passable terrain",
+                start_location.name,
+                mausoleum_pos,
+            );
+        }
+    }
 
     #[test]
     fn starter_hatchet_matches_stick_combat_profile_and_can_gather_logs() {

@@ -11,7 +11,7 @@ pub enum Skill {
     Farming,
     Smelting,
     Masonry,
-    Woodcutting,
+    Timberworking,
     Butchery,
     Processing,
     Weaponsmithing,
@@ -52,7 +52,7 @@ impl Skill {
             "Tanning" => Some(Skill::Tanning),
             "Toolmaking" => Some(Skill::Toolmaking),
             "Weaponsmithing" => Some(Skill::Weaponsmithing),
-            "Woodcutting" => Some(Skill::Woodcutting),
+            "Timberworking" => Some(Skill::Timberworking),
             _ => None,
         }
     }
@@ -81,7 +81,18 @@ impl Skill {
             Skill::Tanning => "Tanning",
             Skill::Toolmaking => "Toolmaking",
             Skill::Weaponsmithing => "Weaponsmithing",
-            Skill::Woodcutting => "Woodcutting",
+            Skill::Timberworking => "Timberworking",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Skill;
+
+    #[test]
+    fn timberworking_round_trips_through_its_canonical_name() {
+        assert_eq!(Skill::from_str("Timberworking"), Some(Skill::Timberworking));
+        assert_eq!(Skill::Timberworking.to_str(), "Timberworking");
     }
 }

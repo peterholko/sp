@@ -1,4 +1,7 @@
 import * as React from "react";
+import styles from "./../ui.module.css";
+import { Global } from "../../core/global";
+import { shouldHighlightBurrowLogs } from "../../core/tutorialInventoryHighlight";
 
 interface MobileInventoryGridProps {
   ownerId: integer,
@@ -8,6 +11,7 @@ interface MobileInventoryGridProps {
   onSelect?: Function,
   compact?: boolean,
   emptyLabel?: string,
+  currentObjectiveId?: string,
 }
 
 export default class MobileInventoryGrid extends React.Component<MobileInventoryGridProps, any> {
@@ -62,6 +66,11 @@ export default class MobileInventoryGrid extends React.Component<MobileInventory
         {items.map((item, index) => {
           const disabled = this.props.disabledItems != null && this.props.disabledItems.includes(item.id);
           const selected = this.props.selectedItemId == item.id;
+          const highlighted = shouldHighlightBurrowLogs(
+            this.props.currentObjectiveId || '',
+            Global.objectStates[this.props.ownerId],
+            item,
+          );
 
           const cellStyle: React.CSSProperties = {
             position: 'relative',
@@ -102,6 +111,7 @@ export default class MobileInventoryGrid extends React.Component<MobileInventory
             <button
               key={item.id || index}
               type="button"
+              className={highlighted ? styles.tutorialItemHighlightCell : undefined}
               style={cellStyle}
               disabled={disabled}
               onClick={() => this.handleSelect(item, index)}

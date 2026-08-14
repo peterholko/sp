@@ -2,6 +2,7 @@ import * as React from "react";
 import HalfPanel from "./halfPanel";
 import { Global } from "../../core/global";
 import { isSafeLogoutProtectedObject } from "../../core/protectedSettlements";
+import DroppedBagExpiry from "../../core/droppedBagExpiry";
 
 interface ObjPanelProps {
   objData,
@@ -82,6 +83,16 @@ export default class ObjPanel extends React.Component<ObjPanelProps, any> {
               <td>State: </td>
               <td>{this.props.objData.state}</td>
             </tr>
+            {this.props.objData.expires_in != null &&
+              <tr>
+                <td colSpan={2}>
+                  <DroppedBagExpiry
+                    key={this.props.objData.id}
+                    expiresIn={this.props.objData.expires_in}
+                  />
+                </td>
+              </tr>
+            }
             {!hideSoulshards &&
               <tr>
                 <td>Soulshards: </td>

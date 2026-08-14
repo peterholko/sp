@@ -212,7 +212,7 @@ export default class StructureRefinePanel extends React.Component<StructureRefin
                 id: item.name,
                 name: item.name,
                 image: item.image,
-                quantity: 1,
+                quantity: item.quantity || 1,
             }))
             : [];
 

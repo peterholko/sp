@@ -9,17 +9,13 @@ import manabar from "ui_comp/manabar.png";
 import { NetworkEvent } from "../../core/networkEvent";
 import { STAT_BAR_WIDTH, STAT_BAR_HEIGHT } from "../../core/config";
 import { getNeedStatusIcon, isCriticalNeed, NeedKind } from "./needStatus";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 const NEED_STATUS_SIZE = 30;
 
-// Effect names as sent by the server (see sp_server effect.rs SANCTUARY / WEAK_SANCTUARY).
+// Single Sanctuary effect name sent by the server.
 const SANCTUARY_EFFECT = "Sanctuary";
-const WEAK_SANCTUARY_EFFECT = "Weak Sanctuary";
-
-// Sanctuary strength shown beside the HP/Stamina panel: green when strong, yellow when weak.
-type SanctuaryState = "strong" | "weak" | null;
-const SANCTUARY_STRONG_COLOR = "#3fb84f";
-const SANCTUARY_WEAK_COLOR = "#e2b007";
+const SANCTUARY_COLOR = "#3fb84f";
 
 const CRITICAL_NEED_WARNING_STYLE = `
 @keyframes criticalNeedIconPulse {
@@ -95,7 +91,7 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
 
     this.state = {
       hideHero : true,
-      sanctuary : null as SanctuaryState,
+      sanctuary : false,
     };
   }
 
@@ -103,8 +99,8 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     Global.gameEmitter.on(NetworkEvent.PERCEPTION, this.handlePerception, this);
     Global.gameEmitter.on(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
     Global.gameEmitter.on(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
-    Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
-    Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
+    Global.gameEmitter.on(NetworkEvent.HERO_DEATH_STATE, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleSanctuaryCleared, this);
   }
 
   componentWillUnmount() {
@@ -112,46 +108,31 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     Global.gameEmitter.off(NetworkEvent.PERCEPTION, this.handlePerception, this);
     Global.gameEmitter.off(NetworkEvent.GAINED_EFFECT, this.handleGainedEffect, this);
     Global.gameEmitter.off(NetworkEvent.LOST_EFFECT, this.handleLostEffect, this);
-    Global.gameEmitter.off(NetworkEvent.INCREASED_EFFECT, this.handleIncreasedEffect, this);
-    Global.gameEmitter.off(NetworkEvent.REDUCED_EFFECT, this.handleReducedEffect, this);
+    Global.gameEmitter.off(NetworkEvent.HERO_DEATH_STATE, this.handleSanctuaryCleared, this);
+    Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleSanctuaryCleared, this);
   }
 
   handlePerception() {
     this.setState({hideHero: false});
   }
 
-  // Track the hero's Sanctuary strength from effect-change packets. The server only
-  // sends these for the hero (villagers are skipped) as it crosses monolith ranges:
-  // gained -> entered, increased -> weak became strong, reduced -> strong became weak,
-  // lost -> left entirely.
+  // The server now has one Sanctuary tier: gained means green shield, lost means none.
   handleGainedEffect(message) {
     if (message.id != Global.heroId) return;
     if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "strong" });
-    } else if (message.effect == WEAK_SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "weak" });
+      this.setState({ sanctuary: true });
     }
   }
 
   handleLostEffect(message) {
     if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT || message.effect == WEAK_SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: null });
+    if (message.effect == SANCTUARY_EFFECT) {
+      this.setState({ sanctuary: false });
     }
   }
 
-  handleIncreasedEffect(message) {
-    if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "strong" });
-    }
-  }
-
-  handleReducedEffect(message) {
-    if (message.id != Global.heroId) return;
-    if (message.effect == SANCTUARY_EFFECT) {
-      this.setState({ sanctuary: "weak" });
-    }
+  handleSanctuaryCleared() {
+    this.setState({ sanctuary: false });
   }
 
   render() {
@@ -170,8 +151,8 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     const manaBarWidth = manaRatio * STAT_BAR_WIDTH;
 
     if(Global.heroId in Global.objectStates) {
-      let imageName = Global.objectStates[Global.heroId].image.toLowerCase().replace(/\s/g, '');
-      imagePath = '/static/art/' + imageName  + '_single.png';
+      const heroState = Global.objectStates[Global.heroId];
+      imagePath = characterImageUrl(heroState.portrait, heroState.image);
     }
 
     const heroringStyle = {
@@ -231,7 +212,11 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
     const heroStyle = {
       transform: 'translate(13px, 24px)',
       zIndex: 3,
-      position: 'fixed'
+      position: 'fixed',
+      width: '72px',
+      height: '72px',
+      borderRadius: '50%',
+      objectFit: 'cover'
     } as React.CSSProperties
 
     const thirstStatusStyle = {
@@ -279,9 +264,8 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
       filter: 'drop-shadow(0 0 2px rgba(0, 0, 0, 0.85))'
     } as React.CSSProperties
 
-    const sanctuary: SanctuaryState = this.state.sanctuary;
-    const sanctuaryColor = sanctuary === "strong" ? SANCTUARY_STRONG_COLOR : SANCTUARY_WEAK_COLOR;
-    const sanctuaryLabel = sanctuary === "strong" ? "Sanctuary (Strong)" : "Sanctuary (Weak)";
+    const sanctuary = this.state.sanctuary === true;
+    const sanctuaryLabel = "Sanctuary";
 
     return (
       
@@ -318,7 +302,7 @@ export default class HeroFrame extends React.Component<HeroFrameProps, any> {
               <title>{sanctuaryLabel}</title>
               <path
                 d="M12 1 L22 4.5 V13 C22 20 17.5 25 12 27 C6.5 25 2 20 2 13 V4.5 Z"
-                fill={sanctuaryColor}
+                fill={SANCTUARY_COLOR}
                 stroke="#0c0e10"
                 strokeWidth="1.6"
                 strokeLinejoin="round"

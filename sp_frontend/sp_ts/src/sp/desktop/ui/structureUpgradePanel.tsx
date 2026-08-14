@@ -8,6 +8,7 @@ import { Network } from "../../core/network";
 import { NetworkEvent } from "../../core/networkEvent";
 import ResourceItem from "./resourceItem";
 import { GameEvent } from "../../core/gameEvent";
+import { structureUpgradePreviewImageName } from "../../core/structureUpgradePresentation";
 
 interface SUPProps {
   upgradeData,
@@ -58,8 +59,10 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
   render() {
     console.log(this.state);
 
-    let structureImage = this.state.upgradeStructure.template.toLowerCase().replace(/\s/g, '');
-    let structureImagePath = '/static/art/' + structureImage + '.png';
+    const structureImageName = structureUpgradePreviewImageName(this.state.upgradeStructure);
+    const structureImagePath = structureImageName
+      ? '/static/art/' + structureImageName
+      : null;
 
     let nextStructureName = this.state.upgradeStructure.name;
 
@@ -132,7 +135,7 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
         panelType={'upgrade'}
         hideExitButton={false}>
 
-        <img src={structureImagePath} style={structureStyle} />
+        {structureImagePath && <img src={structureImagePath} style={structureStyle} />}
         <span style={nextStructureNameStyle}>{nextStructureName}</span>
 
         <table style={tableStyle}>
@@ -155,4 +158,3 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
     );
   }
 }
-

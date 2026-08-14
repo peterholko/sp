@@ -39,8 +39,8 @@ use crate::{
 use crate::{
     game::{ObjQueryItem, ObjQueryMutReadOnlyItem},
     item,
-    obj::HeroClassList,
-    obj::{ActionProgress, BuildUpgradeState},
+    obj::{is_valid_hero_portrait, HeroClassList},
+    obj::{ActionProgress, ActiveTask, BuildUpgradeState},
     resource::Property,
     templates::ResReq,
     trade::WantedItem,
@@ -101,6 +101,7 @@ enum NetworkPacket {
     SelectedClass {
         class_name: String,
         hero_name: String,
+        portrait: String,
     },
     #[serde(rename = "recreate_hero")]
     RecreateHero,
@@ -178,6 +179,8 @@ enum NetworkPacket {
         source_id: i32,
         target_id: i32,
     },
+    #[serde(rename = "loot_all")]
+    LootAll { source_id: i32, target_id: i32 },
     #[serde(rename = "item_split")]
     ItemSplit {
         owner_id: i32,
@@ -199,9 +202,18 @@ enum NetworkPacket {
     #[serde(rename = "structure_refine")]
     StructureRefine { structure_id: i32, item_id: i32 },
     #[serde(rename = "craft")]
-    Craft { recipe: String },
+    Craft {
+        recipe: String,
+        #[serde(default)]
+        signature_item_id: Option<i32>,
+    },
     #[serde(rename = "structure_craft")]
-    StructureCraft { structure_id: i32, recipe: String },
+    StructureCraft {
+        structure_id: i32,
+        recipe: String,
+        #[serde(default)]
+        signature_item_id: Option<i32>,
+    },
     #[serde(rename = "sleep")]
     Sleep { structure_id: i32 },
     #[serde(rename = "order_follow")]
@@ -449,8 +461,7 @@ pub struct ProtectedSettlementSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SanctuaryZoneSnapshot {
     pub monolith_id: i32,
-    /// Outer sanctuary-protection boundary. Today this is the weak radius; the
-    /// protocol remains tier-neutral if sanctuary tiers change later.
+    /// The single sanctuary-protection boundary.
     pub radius: u32,
 }
 
@@ -523,7 +534,9 @@ pub enum ResponsePacket {
         subclass: String,
         template: String,
         state: String,
+        activity: Option<String>,
         image: String,
+        portrait: Option<String>,
         hsl: Vec<i32>,
         items: Option<Vec<Item>>,
         skills: Option<HashMap<String, i32>>,
@@ -557,6 +570,7 @@ pub enum ResponsePacket {
         template: String,
         state: String,
         image: String,
+        portrait: Option<String>,
         hsl: Vec<i32>,
         items: Option<Vec<Item>>,
         skills: Option<HashMap<String, i32>>,
@@ -651,6 +665,8 @@ pub enum ResponsePacket {
         template: String,
         image: String,
         items: Option<Vec<Item>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_in: Option<i32>,
     },
     #[serde(rename = "info_obj")]
     InfoObj {
@@ -745,14 +761,18 @@ pub enum ResponsePacket {
         equipped: bool,
         price: Option<i32>,
         attrs: Option<HashMap<item::AttrKey, item::AttrVal>>,
-        produces: Option<Vec<String>>,
+        produces: Option<Vec<ProducedItem>>,
     },
     #[serde(rename = "info_item_transfer")]
     InfoItemTransfer {
         source_id: i32,
         sourceitems: Inventory,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_expires_in: Option<i32>,
         target_id: i32,
         targetitems: Inventory,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_expires_in: Option<i32>,
         reqitems: Vec<ResReq>,
     },
     #[serde(rename = "info_items_update")]
@@ -1098,11 +1118,14 @@ pub enum ResponsePacket {
     },
     #[serde(rename = "objectives")]
     Objectives {
+        // Legacy wire key: now reports completion of the tutorial's
+        // Campfire-to-Shelter-Tent upgrade.
         build_campfire: bool,
         build_3_structures: bool,
         recruit_villager: bool,
         explore_poi: bool,
         survive_5_nights: bool,
+        scavenge_shipwreck: bool,
     },
     #[serde(rename = "objective_state")]
     ObjectiveState {
@@ -1253,9 +1276,11 @@ pub struct MapObj {
     pub subclass: String,
     pub template: String,
     pub image: String,
+    pub portrait: Option<String>,
     pub x: i32,
     pub y: i32,
     pub state: String,
+    pub activity: Option<String>,
     pub vision: Option<u32>,
     pub hsl: Vec<i32>,
     pub groups: Vec<String>,
@@ -1335,6 +1360,7 @@ pub struct ProducedItem {
     pub image: String,
     pub class: String,
     pub subclass: String,
+    pub quantity: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1502,6 +1528,7 @@ pub struct TileTerrainFeature {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct TileResourceWithPos {
     pub name: String,
+    pub image: String,
     pub color: i32,
     pub yield_label: String,
     pub quantity_label: String,
@@ -1530,6 +1557,7 @@ pub struct HireData {
 pub struct UpgradeTemplate {
     pub name: String,
     pub template: String,
+    pub image: String,
     pub req: Vec<ResReq>,
     pub build_time: i32,
 }
@@ -1723,8 +1751,10 @@ pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj 
         class: obj.class.0.clone(),
         subclass: obj.subclass.to_string(),
         state: obj.state.to_string(),
+        activity: obj.active_task.map(ActiveTask::to_string),
         vision: None,
         image: obj.misc.image.clone(),
+        portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
         work_done,
@@ -1762,8 +1792,10 @@ pub fn network_obj(
         class: class,
         subclass: subclass,
         state: state,
+        activity: None,
         vision: None,
         image: image,
+        portrait: None,
         hsl: hsl,
         groups: groups,
         work_done: None,
@@ -1792,8 +1824,10 @@ pub fn to_map_obj(obj: ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
         class: obj.class.0.clone(),
         subclass: obj.subclass.to_string(),
         state: obj.state.to_string(),
+        activity: obj.active_task.map(ActiveTask::to_string),
         vision: None,
         image: obj.misc.image.clone(),
+        portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
         work_done,
@@ -1818,8 +1852,10 @@ pub fn to_map_without_vision(obj: ObjQueryMutReadOnlyItem<'_, '_>) -> MapObj {
         class: obj.class.0.clone(),
         subclass: obj.subclass.to_string(),
         state: obj.state.to_string(),
+        activity: None,
         vision: Some(obj.viewshed.range),
         image: obj.misc.image.clone(),
+        portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
         work_done: None,
@@ -2266,7 +2302,7 @@ async fn handle_connection(
 
     let row_session = client
         .query_one(
-            "SELECT player_id, created_at FROM sessions WHERE session = $1",
+            "SELECT player_id, created_at, last_login FROM sessions WHERE session = $1",
             &[&session_id],
         )
         .await;
@@ -2276,19 +2312,15 @@ async fn handle_connection(
         return Err((client_id, Error::AttackAttempt));
     };
 
-    // Check if the session is expired (older than 1 day)
     let created_at: DateTime<Utc> = row_session.get::<_, DateTime<Utc>>("created_at");
+    let last_login: Option<DateTime<Utc>> = row_session.get("last_login");
+    let last_active = last_login.unwrap_or(created_at);
     let now = chrono::Utc::now();
 
-    println!("created_at: {:?}", created_at);
-    println!("now: {:?}", now);
-
-    // Check if session is older than 1 day
-    if now.signed_duration_since(created_at) > chrono::Duration::days(1) {
-        println!(
-            "Session expired: created {} is older than 1 day",
-            created_at
-        );
+    // Match the web service's seven-day idle expiration policy. Using last_login
+    // keeps an active browser session from being rejected by the game socket.
+    if now.signed_duration_since(last_active) > chrono::Duration::days(7) {
+        println!("Session expired after seven days of inactivity");
         return Err((client_id, Error::AttackAttempt));
     }
 
@@ -2299,6 +2331,17 @@ async fn handle_connection(
 
     // Get the player id from the session
     let player_id: i32 = row_session.get("player_id");
+
+    if let Err(error) = client
+        .execute(
+            "UPDATE sessions SET last_login = NOW() WHERE session = $1",
+            &[&session_id],
+        )
+        .await
+    {
+        println!("Unable to refresh authenticated session: {error}");
+        return Err((client_id, Error::AttackAttempt));
+    }
 
     let (manager_to_stream_sender, mut manager_to_stream_receiver) =
         tokio::sync::mpsc::channel::<String>(100);
@@ -2577,12 +2620,13 @@ async fn handle_connection(
                                 let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
                                     Ok(packet) => {
                                         match packet {
-                                            NetworkPacket::SelectedClass{class_name, hero_name} => {
+                                            NetworkPacket::SelectedClass{class_name, hero_name, portrait} => {
                                                 handle_selected_class(
                                                     pool.clone(),
                                                     player_id,
                                                     class_name,
                                                     hero_name,
+                                                    portrait,
                                                     client_to_game_sender.clone()
                                                 ).await
                                             }
@@ -2704,6 +2748,9 @@ async fn handle_connection(
                                             NetworkPacket::ItemTransfer{item, source_id, target_id} => {
                                                 handle_item_transfer(player_id, item, source_id, target_id, client_to_game_sender.clone())
                                             }
+                                            NetworkPacket::LootAll{source_id, target_id} => {
+                                                handle_loot_all(player_id, source_id, target_id, client_to_game_sender.clone())
+                                            }
                                             NetworkPacket::ItemSplit{owner_id, item, quantity} => {
                                                 handle_item_split(player_id, owner_id, item, quantity, client_to_game_sender.clone())
                                             }
@@ -2728,11 +2775,11 @@ async fn handle_connection(
                                             NetworkPacket::StructureRefine{structure_id, item_id} => {
                                                 handle_structure_refine(player_id, structure_id, item_id, client_to_game_sender.clone())
                                             }
-                                            NetworkPacket::Craft{recipe} => {
-                                                handle_craft(player_id, recipe, client_to_game_sender.clone())
+                                            NetworkPacket::Craft{recipe, signature_item_id} => {
+                                                handle_craft(player_id, recipe, signature_item_id, client_to_game_sender.clone())
                                             }
-                                            NetworkPacket::StructureCraft{structure_id, recipe} => {
-                                                handle_structure_craft(player_id, structure_id, recipe, client_to_game_sender.clone())
+                                            NetworkPacket::StructureCraft{structure_id, recipe, signature_item_id} => {
+                                                handle_structure_craft(player_id, structure_id, recipe, signature_item_id, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::OrderFollow{source_id} => {
                                                 handle_order_follow(player_id, source_id, client_to_game_sender.clone())
@@ -2998,6 +3045,7 @@ async fn handle_selected_class(
     player_id: i32,
     class_name: String,
     hero_name: String,
+    portrait: String,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     println!("handle_selected_class: {:?}", player_id);
@@ -3018,6 +3066,12 @@ async fn handle_selected_class(
     if selected_class == HeroClassList::None {
         return ResponsePacket::Error {
             errmsg: "Invalid class".to_owned(),
+        };
+    }
+
+    if !is_valid_hero_portrait(&portrait) {
+        return ResponsePacket::Error {
+            errmsg: "Invalid hero portrait".to_owned(),
         };
     }
 
@@ -3054,6 +3108,7 @@ async fn handle_selected_class(
             player_id: player_id,
             hero_name: hero_name.clone(),
             class_name: class_name.clone(),
+            portrait: portrait.clone(),
         })
         .expect("Could not send message");
 
@@ -3527,6 +3582,24 @@ fn handle_item_transfer(
     ResponsePacket::None
 }
 
+fn handle_loot_all(
+    player_id: i32,
+    source_id: i32,
+    target_id: i32,
+    client_to_game_sender: AuthorizedPlayerEventSender,
+) -> ResponsePacket {
+    client_to_game_sender
+        .send(PlayerEvent::LootAll {
+            player_id,
+            source_id,
+            target_id,
+        })
+        .expect("Could not send message");
+
+    // Response will come from player.rs after the authoritative bulk transfer.
+    ResponsePacket::None
+}
+
 fn handle_item_split(
     player_id: i32,
     owner_id: i32,
@@ -3646,12 +3719,14 @@ fn handle_structure_refine(
 fn handle_craft(
     player_id: i32,
     recipe: String,
+    signature_item_id: Option<i32>,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Craft {
             player_id: player_id,
             recipe_name: recipe,
+            signature_item_id,
         })
         .expect("Could not send message");
 
@@ -3663,6 +3738,7 @@ fn handle_structure_craft(
     player_id: i32,
     structure_id: i32,
     recipe: String,
+    signature_item_id: Option<i32>,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
@@ -3670,6 +3746,7 @@ fn handle_structure_craft(
             player_id: player_id,
             structure_id: structure_id,
             recipe_name: recipe,
+            signature_item_id,
         })
         .expect("Could not send message");
 
@@ -4611,6 +4688,23 @@ mod tests {
         assert_eq!(action_progress_fields(None, 220), (None, None, None));
     }
 
+    #[test]
+    fn structure_upgrade_packet_preserves_the_configured_image_key() {
+        let value = serde_json::to_value(ResponsePacket::InfoUpgrade {
+            id: 7,
+            upgrade_list: vec![UpgradeTemplate {
+                name: "Shelter Tent".to_string(),
+                template: "Shelter Tent".to_string(),
+                image: "tent".to_string(),
+                req: Vec::new(),
+                build_time: 50,
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(value["upgrade_list"][0]["image"], "tent");
+    }
+
     fn no_crisis_status() -> CrisisStatusSnapshot {
         CrisisStatusSnapshot {
             version: 1,
@@ -4801,6 +4895,55 @@ mod tests {
         assert!(cancel.get("player_id").is_none());
         assert!(decode_network_packet(r#"{"cmd":"request_safe_logout","player_id":999}"#).is_err());
         assert!(decode_network_packet(r#"{"cmd":"cancel_safe_logout","player_id":999}"#).is_err());
+    }
+
+    #[test]
+    fn loot_all_request_uses_one_source_and_target_packet_without_a_player_id() {
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"loot_all","source_id":41,"target_id":7}"#).unwrap(),
+            NetworkPacket::LootAll {
+                source_id: 41,
+                target_id: 7
+            }
+        ));
+
+        let value = serde_json::to_value(NetworkPacket::LootAll {
+            source_id: 41,
+            target_id: 7,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"cmd": "loot_all", "source_id": 41, "target_id": 7})
+        );
+        assert!(value.get("player_id").is_none());
+    }
+
+    #[test]
+    fn drop_item_request_is_rejected_while_ground_drops_are_disabled() {
+        assert!(decode_network_packet(r#"{"cmd":"drop_item","item_id":41}"#).is_err());
+    }
+
+    #[test]
+    fn craft_requests_accept_legacy_common_and_explicit_signature_forms() {
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"craft","recipe":"Bone Dagger"}"#).unwrap(),
+            NetworkPacket::Craft {
+                recipe,
+                signature_item_id: None,
+            } if recipe == "Bone Dagger"
+        ));
+        assert!(matches!(
+            decode_network_packet(
+                r#"{"cmd":"structure_craft","structure_id":41,"recipe":"Copper Spear","signature_item_id":99}"#
+            )
+            .unwrap(),
+            NetworkPacket::StructureCraft {
+                structure_id: 41,
+                recipe,
+                signature_item_id: Some(99),
+            } if recipe == "Copper Spear"
+        ));
     }
 
     #[test]
@@ -5149,6 +5292,7 @@ mod tests {
                 player_id,
                 hero_name: "Linearized".to_string(),
                 class_name: "Warrior".to_string(),
+                portrait: crate::obj::default_hero_portrait().to_string(),
             })
             .unwrap();
         assert!(matches!(

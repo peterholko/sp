@@ -656,7 +656,7 @@
   base_def: 4
   base_speed: 5
   base_vision: 3
-  capacity: 500
+  capacity: 100
 
 - name: Novice Ranger
   class: unit
@@ -671,7 +671,7 @@
   base_def: 1
   base_speed: 7
   base_vision: 5
-  capacity: 750
+  capacity: 100
 
 - name: Novice Mage
   class: unit
@@ -686,7 +686,7 @@
   base_def: 0
   base_speed: 5
   base_vision: 4
-  capacity: 500
+  capacity: 100
 
 - name: Skilled Warrior
   class: unit
@@ -701,7 +701,7 @@
   base_def: 4
   base_speed: 5
   base_vision: 3
-  capacity: 600 
+  capacity: 125
 
 - name: Skilled Ranger
   class: unit
@@ -716,7 +716,7 @@
   base_def: 2
   base_speed: 8
   base_vision: 6
-  capacity: 850
+  capacity: 125
 
 - name: Skilled Mage
   class: unit
@@ -731,7 +731,7 @@
   base_def: 1
   base_speed: 5
   base_vision: 5
-  capacity: 600
+  capacity: 125
 
 - name: Great Warrior
   class: unit
@@ -746,7 +746,7 @@
   base_def: 6
   base_speed: 5
   base_vision: 3
-  capacity: 700
+  capacity: 150
 
 - name: Great Ranger
   class: unit
@@ -761,7 +761,7 @@
   base_def: 3
   base_speed: 8
   base_vision: 7
-  capacity: 950
+  capacity: 150
 
 - name: Great Mage
   class: unit
@@ -776,7 +776,7 @@
   base_def: 2
   base_speed: 6
   base_vision: 6
-  capacity: 700
+  capacity: 150
 
 - name: Legendary Warrior
   class: unit
@@ -791,7 +791,7 @@
   base_def: 8
   base_speed: 6
   base_vision: 4
-  capacity: 800   
+  capacity: 200
 
 - name: Legendary Ranger
   class: unit
@@ -806,7 +806,7 @@
   base_def: 4
   base_speed: 9
   base_vision: 8
-  capacity: 1100
+  capacity: 200
 
 - name: Legendary Mage
   class: unit
@@ -821,7 +821,7 @@
   base_def: 3
   base_speed: 6
   base_vision: 7
-  capacity: 800   
+  capacity: 200
 
 ##################
 #### VILLAGERS ###
@@ -840,7 +840,7 @@
   base_speed: 0
   base_vision: 2
   base_work: 25
-  capacity: 150
+  capacity: 75
   images: 
     - humanvillager1
     - humanvillager2
@@ -873,13 +873,13 @@
   capacity: 200
   activity: Crafting
   workspaces: 2
-  refine: [Log, Ore, Game Animal]
+  refine: [Log, Ore, Game Animal, Hide]
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Hide
       quantity: 5
-  upgrade_to: [Blacksmith, Workshop, Mason, Butchery]
+  upgrade_to: [Blacksmith, Workshop, Mason, Butchery, Tannery]
 
 - name: Blacksmith
   class: structure
@@ -895,14 +895,14 @@
   activity: Operating
   refine: [Ore]
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 15
     - type: Ingot
       quantity: 10
     - type: Stone
       quantity: 5
   upgrade_req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 10
@@ -920,12 +920,12 @@
   profession: the Carpenter
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 15
     - type: Ingot
       quantity: 5
   upgrade_req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -944,12 +944,12 @@
   activity: Operating
   refine: [Stone]
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Stone
       quantity: 10
   upgrade_req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Stone
       quantity: 10
@@ -968,12 +968,12 @@
   activity: Operating
   refine: [Game Animal]
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
   upgrade_req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -991,7 +991,7 @@
   profession: the Smoker
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Stone
       quantity: 5
@@ -1008,8 +1008,14 @@
   capacity: 100
   profession: the Tanner
   activity: Operating
+  refine: [Hide]
   req:
-    - type: Timber
+    - type: Logs or Timber
+      quantity: 10
+    - type: Ingot
+      quantity: 5
+  upgrade_req:
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -1027,7 +1033,7 @@
   profession: the Miller
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 15
     - type: Stone
       quantity: 5
@@ -1045,7 +1051,7 @@
   profession: the Spinner
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -1063,7 +1069,7 @@
   profession: the Baker
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Stone
       quantity: 5
@@ -1083,7 +1089,7 @@
   profession: the Tailor
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 10
@@ -1101,7 +1107,7 @@
   profession: the Herbalist
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -1119,7 +1125,7 @@
   profession: the Alchemist
   activity: Operating
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 10
@@ -1136,7 +1142,7 @@
   capacity: 21
   profession: the Innkeeper
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 5
@@ -1160,7 +1166,7 @@
   profession: the Miner
   operate_skill: Mining
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Ingot
       quantity: 3
@@ -1177,8 +1183,10 @@
   level: 0
   profession: the Forester
   activity: Logging
+  workspaces: 1
+  operate_skill: Logging
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
 
 - name: Quarry
@@ -1189,11 +1197,13 @@
   base_hp: 250
   base_def: 0
   build_cost: 100
+  capacity: 200
   level: 0
   profession: the Stonecutter
   activity: Stonecutting
+  workspaces: 1
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Ingot
       quantity: 3
@@ -1206,11 +1216,13 @@
   base_hp: 250
   base_def: 0
   build_cost: 100
+  capacity: 200
   level: 0
   profession: the Hunter
   activity: Hunting
+  workspaces: 1
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Hide
       quantity: 3
@@ -1227,7 +1239,7 @@
   level: 0
   profession: the Farmer
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
 
 ############################
@@ -1248,13 +1260,13 @@
   campfire: true
   level: 0
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Hide
       quantity: 3
   upgrade_to: [Large Tent]
   upgrade_req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Hide
       quantity: 3
@@ -1272,13 +1284,13 @@
   max_residents: 2
   level: 1
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 8
   upgrade_to: []
   upgrade_req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 8
@@ -1295,13 +1307,13 @@
   max_residents: 1
   level: 1
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 15
     - type: Hide
       quantity: 10
   upgrade_to: [Large Yurt]
   upgrade_req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 15
@@ -1318,7 +1330,7 @@
   max_residents: 3
   level: 2
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Hide
       quantity: 15
@@ -1337,9 +1349,9 @@
   base_def: 0
   build_cost: 50
   level: 0
-  capacity: 200
+  capacity: 300
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
 
 - name: Cache
@@ -1353,7 +1365,7 @@
   level: 1
   capacity: 500
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 10
     - type: Ingot
       quantity: 5
@@ -1369,7 +1381,7 @@
   level: 2
   capacity: 1000
   req:
-    - type: Timber
+    - type: Logs or Timber
       quantity: 25
     - type: Ingot
       quantity: 15
@@ -1390,7 +1402,7 @@
   level: 0
   req:
     - type: Log
-      quantity: 10
+      quantity: 15
   upkeep:
     - type: Log
       quantity: 1
@@ -1411,12 +1423,12 @@
   capacity: 100
   level: 0
   req:
-    - type: Log
+    - type: Logs or Timber
       quantity: 5
     - type: Ingot
       quantity: 3
   upkeep:
-    - type: Log
+    - type: Logs or Timber
       quantity: 1
 
 - name: Palisade
@@ -1433,7 +1445,7 @@
     - type: Timber
       quantity: 5
   upkeep:
-    - type: Log
+    - type: Timber
       quantity: 1
   upgrade_to: [Fieldstone Walls]
   upgrade_req:
@@ -1487,6 +1499,14 @@
   image: washedashore
   base_hp: 10000000
   capacity: 25
+
+- name: Dropped Bag
+  class: poi
+  subclass: poi
+  template: Dropped Bag
+  image: droppedbag
+  base_hp: 10000000
+  capacity: 50
 
 - name: Monolith
   class: poi

@@ -72,8 +72,8 @@ the Webpack output. `npm run serve` starts the interactive development server.
 - Runtime assets are loaded from `/static/art/...` and `/static/tileset.json`; keep those URL shapes stable unless the serving model changes too.
 - Both shells use shared authoritative perception and ordinary burning-object
   presentation. Tutorial & Help, protected-settlement wards, the live sanctuary
-  boundary, the public Campfire action, and the lit standalone-Campfire overlay
-  are currently desktop-only.
+  boundary and its shield toggle, the public Campfire action, and the lit
+  standalone-Campfire overlay are currently desktop-only.
 
 ## Important Files
 

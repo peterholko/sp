@@ -303,7 +303,7 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
           },
           {
             key: 'craft',
-            label: 'Craft',
+            label: 'Handcraft',
             icon: craftbutton,
             onClick: this.handleCraftClick,
           },
@@ -319,7 +319,7 @@ export default class CraftPanel extends React.Component<CraftPanelProps, any> {
     );
 
     return (
-      <MobilePanelScreen panelType="craft" title="Craft">
+      <MobilePanelScreen panelType="craft" title="Handcraft">
         <MobileSplitPanelLayout
           left={
             <React.Fragment>

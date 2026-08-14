@@ -19,6 +19,352 @@ fn load_obj_templates() -> Vec<ObjTemplate> {
 }
 
 #[test]
+fn lumbercamp_duration_uses_equipped_logging_tool_and_structure_efficiency() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    let tool = inventory.new(1, "Crude Hatchet".to_string(), 1, &templates.item_templates);
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(lumbercamp_work_duration_ticks(&inventory), Some(150));
+
+    let tool = inventory.new(
+        2,
+        "Copper Felling Axe".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == 1)
+        .unwrap()
+        .equipped = false;
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(lumbercamp_work_duration_ticks(&inventory), Some(90));
+
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = false;
+    assert_eq!(lumbercamp_work_duration_ticks(&inventory), None);
+
+    let lumbercamp = templates
+        .obj_templates
+        .get(crate::structure::LUMBERCAMP.to_string());
+    assert_eq!(lumbercamp.workspaces, Some(1));
+}
+
+#[test]
+fn mine_duration_uses_equipped_mining_tool_and_structure_efficiency() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    let tool = inventory.new(
+        1,
+        "Training Pick Axe".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(mine_work_duration_ticks(&inventory), Some(192));
+
+    let tool = inventory.new(2, "Iron Pick Axe".to_string(), 1, &templates.item_templates);
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == 1)
+        .unwrap()
+        .equipped = false;
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(mine_work_duration_ticks(&inventory), Some(96));
+
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = false;
+    assert_eq!(mine_work_duration_ticks(&inventory), None);
+
+    let mine = templates
+        .obj_templates
+        .get(crate::structure::MINE.to_string());
+    assert_eq!(mine.workspaces, Some(2));
+}
+
+#[test]
+fn quarry_duration_uses_equipped_stonecutting_tool_and_structure_efficiency() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    let tool = inventory.new(
+        1,
+        "Training Stonecutter Hammer".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(quarry_work_duration_ticks(&inventory), Some(192));
+
+    let tool = inventory.new(
+        2,
+        "Iron Stonecutter Hammer".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == 1)
+        .unwrap()
+        .equipped = false;
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(quarry_work_duration_ticks(&inventory), Some(96));
+
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = false;
+    assert_eq!(quarry_work_duration_ticks(&inventory), None);
+
+    let quarry = templates
+        .obj_templates
+        .get(crate::structure::QUARRY.to_string());
+    assert_eq!(quarry.workspaces, Some(1));
+    assert_eq!(quarry.capacity, Some(200));
+}
+
+#[test]
+fn fishing_duration_uses_the_selected_rod_rating() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    for (id, name, expected_ticks) in [
+        (1, "Fishing Rod", 300),
+        (2, "Copper Fishing Rod", 240),
+        (3, "Iron Fishing Rod", 180),
+        (4, "Mithril Fishing Rod", 120),
+    ] {
+        let rod = inventory.new(id, name.to_string(), 1, &templates.item_templates);
+        assert_eq!(fishing_duration_ticks(&rod), Some(expected_ticks));
+    }
+
+    let not_a_rod = inventory.new(
+        5,
+        "Training Pick Axe".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    assert_eq!(fishing_duration_ticks(&not_a_rod), None);
+}
+
+#[test]
+fn farm_harvest_duration_uses_the_equipped_sickle_rating() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    for (id, name, expected_ticks) in [
+        (1, "Sickle", 192),
+        (2, "Copper Sickle", 144),
+        (3, "Iron Sickle", 96),
+        (4, "Mithril Sickle", 96),
+    ] {
+        for item in &mut inventory.items {
+            item.equipped = false;
+        }
+        let sickle = inventory.new(id, name.to_string(), 1, &templates.item_templates);
+        inventory
+            .items
+            .iter_mut()
+            .find(|item| item.id == sickle.id)
+            .unwrap()
+            .equipped = true;
+        assert_eq!(
+            farm_harvest_duration_ticks(&inventory),
+            Some(expected_ticks)
+        );
+    }
+
+    for item in &mut inventory.items {
+        item.equipped = false;
+    }
+    assert_eq!(farm_harvest_duration_ticks(&inventory), None);
+}
+
+#[test]
+fn trapper_duration_uses_equipped_hunting_tool_and_structure_efficiency() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+
+    let mut inventory = Inventory {
+        owner: 1,
+        items: Vec::new(),
+    };
+    let tool = inventory.new(
+        1,
+        "Sharpened Stick".to_string(),
+        1,
+        &templates.item_templates,
+    );
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(trapper_work_duration_ticks(&inventory), Some(240));
+
+    let tool = inventory.new(2, "Hunting Bow".to_string(), 1, &templates.item_templates);
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == 1)
+        .unwrap()
+        .equipped = false;
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = true;
+    assert_eq!(trapper_work_duration_ticks(&inventory), Some(144));
+
+    inventory
+        .items
+        .iter_mut()
+        .find(|item| item.id == tool.id)
+        .unwrap()
+        .equipped = false;
+    assert_eq!(trapper_work_duration_ticks(&inventory), None);
+
+    let trapper = templates
+        .obj_templates
+        .get(crate::structure::TRAPPER.to_string());
+    assert_eq!(trapper.capacity, Some(200));
+    assert_eq!(trapper.workspaces, Some(1));
+    assert_eq!(
+        Structure::resource_type(crate::structure::TRAPPER.to_string()),
+        GAME_ANIMAL
+    );
+}
+
+#[test]
+fn hero_logging_activity_clears_when_gathering_ends() {
+    let mut app = App::new();
+    app.insert_resource(GameTick(100));
+    app.insert_resource(VisibleEvents(Vec::new()));
+    app.add_observer(state_change_observer);
+
+    let hero = app
+        .world_mut()
+        .spawn((
+            Id(7),
+            PlayerId(1),
+            Subclass::Hero,
+            State::Gathering,
+            ActiveTask::Logging,
+        ))
+        .id();
+
+    app.world_mut().trigger(StateChange {
+        entity: hero,
+        new_state: State::None,
+    });
+
+    let hero_ref = app.world().entity(hero);
+    assert_eq!(hero_ref.get::<State>(), Some(&State::None));
+    assert_eq!(hero_ref.get::<ActiveTask>(), Some(&ActiveTask::None));
+    assert!(app
+        .world()
+        .resource::<VisibleEvents>()
+        .iter()
+        .any(|event| matches!(
+            &event.event_type,
+            VisibleEvent::UpdateObjEvent { attrs }
+                if attrs == &vec![("activity".to_string(), "None".to_string())]
+        )));
+}
+
+#[test]
+fn state_changes_still_work_for_minimal_entities_without_a_subclass() {
+    let mut app = App::new();
+    app.insert_resource(GameTick(100));
+    app.insert_resource(VisibleEvents(Vec::new()));
+    app.add_observer(state_change_observer);
+
+    let entity = app.world_mut().spawn((Id(8), State::Crafting)).id();
+    app.world_mut().trigger(StateChange {
+        entity,
+        new_state: State::None,
+    });
+
+    assert_eq!(
+        app.world().entity(entity).get::<State>(),
+        Some(&State::None)
+    );
+}
+
+#[test]
 fn bleed_template_deserializes_flat_damage_over_time() {
     let file = File::open("templates/effect_template.yaml").expect("effect templates");
     let templates: Vec<EffectTemplate> = serde_yaml::from_reader(file).expect("effect yaml");
@@ -144,6 +490,362 @@ fn early_game_enemy_templates_are_loaded() {
 #[test]
 fn early_game_enemy_random_spawn_pool_excludes_bog_leech() {
     assert!(!EARLY_GAME_ENEMY_TEMPLATES.contains(&"Bog Leech"));
+    assert_eq!(
+        EARLY_GAME_ENEMY_TEMPLATES
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .len(),
+        EARLY_GAME_ENEMY_TEMPLATES.len()
+    );
+}
+
+#[test]
+fn random_encounter_deck_draws_every_archetype_before_reshuffling() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0xDEC0_51E6);
+    let mut deck = PlayerRandomEncounterDeck::default();
+    let first_deck = (0..RANDOM_ENCOUNTER_DECK.len())
+        .map(|_| draw_random_encounter_card(&mut deck, &mut rng))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        first_deck.iter().copied().collect::<HashSet<_>>().len(),
+        RANDOM_ENCOUNTER_DECK.len()
+    );
+    let last = *first_deck.last().expect("first deck draw");
+    let first_after_reshuffle = draw_random_encounter_card(&mut deck, &mut rng);
+    assert_ne!(first_after_reshuffle, last);
+}
+
+#[test]
+fn wilderness_randomness_waits_for_the_opening_threat() {
+    assert!(!random_encounters_unlocked(
+        Some(RANDOM_ENCOUNTER_GRACE_TICKS - 1),
+        false,
+        false
+    ));
+    assert!(!random_encounters_unlocked(
+        Some(RANDOM_ENCOUNTER_GRACE_TICKS),
+        false,
+        false
+    ));
+    assert!(random_encounters_unlocked(
+        Some(RANDOM_ENCOUNTER_GRACE_TICKS),
+        true,
+        false
+    ));
+    assert!(random_encounters_unlocked(Some(30), true, true));
+}
+
+#[test]
+fn day_one_contextual_threats_are_varied_and_power_capped() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let candidates = random_encounter_candidates(
+        TileType::Grasslands,
+        1,
+        false,
+        RandomEncounterDisposition::Hostile,
+        &templates,
+    );
+    let unique = candidates
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
+    assert!(
+        unique.len() >= 3,
+        "day-one grasslands should not be wolf-only"
+    );
+    assert!(!unique.contains("Wolf"));
+    for candidate in unique {
+        let template = templates.obj_templates.get(candidate.to_string());
+        assert!(template.kill_xp.unwrap_or(i32::MAX) <= 80);
+        assert_ne!(template.aggression.as_deref(), Some("passive"));
+    }
+}
+
+#[test]
+fn contextual_encounters_weight_night_creatures_without_duplicating_spawns() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let daylight = random_encounter_candidates(
+        TileType::DeciduousForest,
+        2,
+        false,
+        RandomEncounterDisposition::Hostile,
+        &templates,
+    );
+    let night = random_encounter_candidates(
+        TileType::DeciduousForest,
+        2,
+        true,
+        RandomEncounterDisposition::Hostile,
+        &templates,
+    );
+
+    let daylight_bats = daylight
+        .iter()
+        .filter(|name| name.as_str() == "Cave Bat")
+        .count();
+    let night_bats = night
+        .iter()
+        .filter(|name| name.as_str() == "Cave Bat")
+        .count();
+    assert!(night_bats > daylight_bats);
+}
+
+#[test]
+fn encounter_groups_use_distinct_passable_tiles_outside_sanctuary() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = flat_land_map();
+    let center = Position { x: 20, y: 20 };
+    let blocked = HashSet::from([Position { x: 22, y: 20 }]);
+    let sanctuary_zones = SanctuaryZones(HashMap::from([(
+        99,
+        SanctuaryZone {
+            pos: Position { x: 14, y: 20 },
+            level: 0,
+        },
+    )]));
+    let mut rng = StdRng::seed_from_u64(0x5A11_CAFE);
+
+    let positions =
+        random_encounter_spawn_positions(center, 3, 2, &blocked, &sanctuary_zones, &map, &mut rng);
+
+    assert_eq!(positions.len(), 3);
+    assert_eq!(positions.iter().copied().collect::<HashSet<_>>().len(), 3);
+    for position in positions {
+        assert!((2..=4).contains(&Map::dist(center, position)));
+        assert!(Map::is_passable(position.x, position.y, &map));
+        assert!(!blocked.contains(&position));
+        assert!(!sanctuary_zones.contains(position));
+    }
+}
+
+#[test]
+fn first_combat_encounter_is_bounded_for_a_starting_hero() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let terrains = [
+        TileType::DeciduousForest,
+        TileType::Grasslands,
+        TileType::Snow,
+        TileType::Desert,
+        TileType::Swamp,
+        TileType::Ocean,
+    ];
+
+    for card in [
+        RandomEncounterCard::LoneThreat,
+        RandomEncounterCard::Scavengers,
+    ] {
+        for terrain in terrains {
+            let options =
+                random_encounter_composition_options(card, terrain, 1, false, true, 70, &templates);
+            assert!(
+                !options.is_empty(),
+                "starter-safe options should exist for {card:?} on {terrain:?}"
+            );
+
+            for option in options {
+                assert!(matches!(
+                    option.kind,
+                    RandomEncounterCompositionKind::OneStrong
+                        | RandomEncounterCompositionKind::TwoOrdinary
+                ));
+                assert!((1..=2).contains(&option.templates.len()));
+                assert!(option.threat_budget <= 70);
+
+                for template_name in &option.templates {
+                    let template = templates.obj_templates.get(template_name.clone());
+                    assert!(template.base_hp.unwrap_or(i32::MAX) <= 20);
+                    assert!(template.base_dmg.unwrap_or(i32::MAX) <= 2);
+                    assert!(template.base_def.unwrap_or(i32::MAX) <= 2);
+                    if option.kind == RandomEncounterCompositionKind::TwoOrdinary {
+                        assert!(template.kill_xp.unwrap_or(i32::MAX) <= 35);
+                        assert!(template.base_hp.unwrap_or(i32::MAX) <= 15);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn encounter_budgets_offer_distinct_composition_shapes() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let lone_threat = random_encounter_composition_options(
+        RandomEncounterCard::LoneThreat,
+        TileType::DeciduousForest,
+        6,
+        false,
+        false,
+        500,
+        &templates,
+    );
+    let scavengers = random_encounter_composition_options(
+        RandomEncounterCard::Scavengers,
+        TileType::DeciduousForest,
+        6,
+        false,
+        false,
+        500,
+        &templates,
+    );
+
+    assert!(lone_threat
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::OneStrong));
+    assert!(lone_threat
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::TwoOrdinary));
+    assert!(lone_threat
+        .iter()
+        .any(|option| { option.kind == RandomEncounterCompositionKind::PredatorFollowingPrey }));
+    assert!(scavengers
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::TwoOrdinary));
+    assert!(scavengers
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::ThreeWeak));
+
+    for option in lone_threat.iter().chain(&scavengers) {
+        assert!(option.threat_budget <= 500);
+        match option.kind {
+            RandomEncounterCompositionKind::OneStrong => assert_eq!(option.templates.len(), 1),
+            RandomEncounterCompositionKind::TwoOrdinary
+            | RandomEncounterCompositionKind::PredatorFollowingPrey
+            | RandomEncounterCompositionKind::MixedRangedMelee => {
+                assert_eq!(option.templates.len(), 2)
+            }
+            RandomEncounterCompositionKind::ThreeWeak => assert_eq!(option.templates.len(), 3),
+        }
+    }
+}
+
+#[test]
+fn caster_melee_compositions_unlock_only_on_late_nights() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let options_for = |survival_day, at_night| {
+        random_encounter_composition_options(
+            RandomEncounterCard::Scavengers,
+            TileType::DeciduousForest,
+            survival_day,
+            at_night,
+            false,
+            900,
+            &templates,
+        )
+    };
+
+    assert!(!options_for(7, true)
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::MixedRangedMelee));
+    assert!(!options_for(8, false)
+        .iter()
+        .any(|option| option.kind == RandomEncounterCompositionKind::MixedRangedMelee));
+
+    let late_night = options_for(8, true);
+    let mixed = late_night
+        .iter()
+        .find(|option| option.kind == RandomEncounterCompositionKind::MixedRangedMelee)
+        .expect("a late-night forest should support a caster/melee composition");
+    assert_eq!(mixed.templates.len(), 2);
+    assert_eq!(mixed.templates[0], "Necromancer");
+    assert_ne!(mixed.templates[1], "Necromancer");
+    assert!(mixed.threat_budget <= 900);
+}
+
+#[test]
+fn forced_id_necromancer_spawn_keeps_the_spellcaster_thinker_components() {
+    fn spawn_once(
+        mut commands: Commands,
+        mut ids: ResMut<Ids>,
+        mut entity_map: ResMut<EntityObjMap>,
+        templates: Res<Templates>,
+        mut ran: Local<bool>,
+    ) {
+        if *ran {
+            return;
+        }
+        *ran = true;
+        Encounter::spawn_necromancer_with_id(
+            4242,
+            NPC_PLAYER_ID,
+            Position { x: 20, y: 20 },
+            Position { x: 20, y: 20 },
+            &mut commands,
+            &mut ids,
+            &mut entity_map,
+            &templates,
+        );
+    }
+
+    let mut app = App::new();
+    app.add_plugins(crate::templates::TemplatesPlugin);
+    app.insert_resource(Ids::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.add_systems(Update, spawn_once);
+    app.update();
+
+    let entity = app
+        .world()
+        .resource::<EntityObjMap>()
+        .get_entity(4242)
+        .expect("forced encounter id should be registered");
+    let necromancer = app.world().entity(entity);
+    assert_eq!(necromancer.get::<Id>(), Some(&Id(4242)));
+    assert!(necromancer.contains::<Minions>());
+    assert!(necromancer.contains::<Home>());
+    assert!(necromancer.contains::<VisibleTarget>());
+    assert!(necromancer.contains::<TaskTarget>());
+    assert!(!necromancer.contains::<WanderingBehavior>());
+    assert_eq!(
+        app.world().resource::<Ids>().get_player(4242),
+        Some(NPC_PLAYER_ID)
+    );
+}
+
+#[test]
+fn random_encounter_budget_scales_with_survival_day() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0xB0D6_E7);
+    for (day, expected_range) in [
+        (1, 80..=120),
+        (3, 130..=220),
+        (5, 240..=360),
+        (7, 350..=520),
+        (8, 650..=900),
+    ] {
+        for _ in 0..32 {
+            assert!(expected_range.contains(&random_encounter_budget(day, &mut rng)));
+        }
+    }
+}
+
+#[test]
+fn first_combat_encounter_spawns_farther_away_than_normal_groups() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = flat_land_map();
+    let center = Position { x: 20, y: 20 };
+    let mut rng = StdRng::seed_from_u64(0xE5CA_9E);
+    let positions = random_encounter_spawn_positions(
+        center,
+        3,
+        3,
+        &HashSet::new(),
+        &SanctuaryZones::default(),
+        &map,
+        &mut rng,
+    );
+
+    assert_eq!(positions.len(), 3);
+    assert!(positions
+        .iter()
+        .all(|position| (3..=4).contains(&Map::dist(center, *position))));
 }
 
 #[test]
@@ -160,6 +862,11 @@ fn shipwreck_opening_rat_count_is_randomized_within_one_to_three() {
         .all(|count| (OPENING_RAT_MIN_COUNT..=OPENING_RAT_MAX_COUNT).contains(count)));
     assert!(counts.contains(&OPENING_RAT_MIN_COUNT));
     assert!(counts.contains(&OPENING_RAT_MAX_COUNT));
+}
+
+#[test]
+fn first_merchant_visit_is_scheduled_five_game_days_after_rescue() {
+    assert_eq!(MERCHANT_FIRST_ARRIVAL_DELAY, GAME_TICKS_PER_DAY * 5);
 }
 
 #[test]
@@ -439,6 +1146,12 @@ fn poi_investigation_history_is_per_player_and_once() {
     assert!(!record_poi_investigation(1, 10, &mut investigated_pois));
     assert!(record_poi_investigation(2, 10, &mut investigated_pois));
     assert!(record_poi_investigation(1, 11, &mut investigated_pois));
+}
+
+#[test]
+fn shipwreck_search_does_not_auto_open_the_info_panel() {
+    assert!(!investigation_opens_info_panel("Shipwreck"));
+    assert!(investigation_opens_info_panel("Supply Cache"));
 }
 
 #[test]
@@ -812,6 +1525,76 @@ fn campfire_light_requires_a_living_nearby_hero_and_lit_live_fire() {
     ));
 }
 
+#[test]
+fn firewood_is_consumed_once_per_thirty_second_fuel_cycle() {
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    app.add_systems(Update, fuel_system);
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(FIREWOOD_BURN_TICKS - 1));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(Ids::default());
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(GameEvents(HashMap::new()));
+    app.insert_resource(ActiveInfos(HashMap::new()));
+
+    let mut inventory = Inventory {
+        owner: 10,
+        items: Vec::new(),
+    };
+    inventory.new(
+        1,
+        "Firewood".to_string(),
+        2,
+        &app.world().resource::<Templates>().item_templates,
+    );
+    let campfire = app
+        .world_mut()
+        .spawn((
+            PlayerId(1),
+            Id(10),
+            Position { x: 0, y: 0 },
+            Class(CLASS_STRUCTURE.to_string()),
+            Template("Campfire".to_string()),
+            inventory,
+            Campfire {
+                is_lit: true,
+                lit_at: 0,
+                duration: 0,
+            },
+        ))
+        .id();
+
+    let firewood_quantity = |app: &App| {
+        app.world()
+            .get::<Inventory>(campfire)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.name == "Firewood")
+            .map(|item| item.quantity)
+            .unwrap_or(0)
+    };
+
+    app.update();
+    assert_eq!(firewood_quantity(&app), 2);
+
+    app.world_mut().resource_mut::<GameTick>().0 = FIREWOOD_BURN_TICKS;
+    app.update();
+    assert_eq!(firewood_quantity(&app), 1);
+
+    app.world_mut().resource_mut::<GameTick>().0 = FIREWOOD_BURN_TICKS * 2 - 1;
+    app.update();
+    assert_eq!(firewood_quantity(&app), 1);
+
+    app.world_mut().resource_mut::<GameTick>().0 = FIREWOOD_BURN_TICKS * 2;
+    app.update();
+    assert_eq!(firewood_quantity(&app), 0);
+
+    assert_eq!(FIREWOOD_BURN_TICKS, TICKS_PER_SEC * 30);
+    assert_eq!(CHARCOAL_BURN_TICKS, FIREWOOD_BURN_TICKS * 5);
+}
+
 fn setup_new_obj_observer_test_app() -> App {
     let mut app = App::new();
     app.add_observer(new_obj_observer);
@@ -920,9 +1703,36 @@ fn completed_wall_fortifies_new_occupant_on_spawn() {
 }
 
 #[test]
+fn hidden_new_objects_are_not_sent_to_client_perception() {
+    let mut app = setup_new_obj_observer_test_app();
+    let hidden_enemy = app
+        .world_mut()
+        .spawn((
+            Id(20),
+            PlayerId(NPC_PLAYER_ID),
+            Position { x: 16, y: 32 },
+            Template("Necromancer".into()),
+            Class(CLASS_UNIT.into()),
+            Subclass::Npc,
+            State::Hiding,
+            Effects(HashMap::new()),
+        ))
+        .id();
+
+    app.world_mut().trigger(NewObj {
+        entity: hidden_enemy,
+    });
+    app.world_mut().flush();
+
+    assert!(app.world().resource::<VisibleEvents>().is_empty());
+}
+
+#[test]
 fn completed_wall_fortifies_builder_still_in_building_state() {
     let mut app = App::new();
     app.add_systems(Update, build_system);
+    app.insert_resource(CampfireVisibilityState::default());
+    app.insert_resource(Clients::default());
     app.insert_resource(GameTick(10));
     app.insert_resource(EntityObjMap(HashMap::new()));
     app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
@@ -1709,13 +2519,13 @@ fn due_find_shelter_event_fails_closed_without_event_executing() {
 #[test]
 fn sleep_heal_scales_with_tiredness() {
     // Fully exhausted sleeper gets the full fraction of max hp...
-    assert_eq!(sleep_heal_amount(110, 1.0), 22);
+    assert_eq!(sleep_heal_amount(110, 1.0), 38);
     // ...half-tired gets half...
-    assert_eq!(sleep_heal_amount(110, 0.5), 11);
+    assert_eq!(sleep_heal_amount(110, 0.5), 19);
     // ...and a rested sleeper gets nothing — sleep is not a spammable heal.
     assert_eq!(sleep_heal_amount(110, 0.0), 0);
     assert_eq!(sleep_heal_amount(110, -0.5), 0);
-    assert_eq!(sleep_heal_amount(110, 2.0), 22);
+    assert_eq!(sleep_heal_amount(110, 2.0), 38);
 }
 
 #[test]
@@ -1961,6 +2771,8 @@ fn combat_lock_interrupt_cancels_active_investigation() {
 fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     let mut app = App::new();
     app.add_systems(Update, upgrade_system);
+    app.insert_resource(CampfireVisibilityState::default());
+    app.insert_resource(Clients::default());
     app.insert_resource(GameTick(10));
     app.insert_resource(EntityObjMap(HashMap::new()));
     app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
@@ -2007,6 +2819,14 @@ fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
         ))
         .id();
 
+    app.world_mut()
+        .entity_mut(structure_entity)
+        .insert(Campfire {
+            is_lit: true,
+            lit_at: 1,
+            duration: 0,
+        });
+
     let worker_entity = app
         .world_mut()
         .spawn((
@@ -2040,6 +2860,11 @@ fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     assert_eq!(structure.get::<Template>().unwrap().0, "Shelter Tent");
     assert_eq!(*structure.get::<Subclass>().unwrap(), Subclass::Shelter);
     assert!(structure.get::<StateUpgrading>().is_none());
+    assert_eq!(structure.get::<Misc>().unwrap().image, "tentlit");
+    assert!(
+        structure.get::<Campfire>().is_some_and(|fire| fire.is_lit),
+        "the upgraded Shelter Tent must retain its lit Campfire"
+    );
 
     let shelter = structure
         .get::<Shelter>()
@@ -2049,6 +2874,41 @@ fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     let stats = structure.get::<Stats>().unwrap();
     assert_eq!(stats.base_hp, 100);
     assert_eq!(stats.hp, 100);
+    assert!(
+        structure.get::<CampfireToShelterTentUpgrade>().is_some(),
+        "the exact Campfire-to-Shelter-Tent completion records objective history"
+    );
+}
+
+#[test]
+fn shelter_tent_uses_the_radius_one_campfire_capability() {
+    assert!(is_radius_one_campfire(
+        &Template("Campfire".to_string()),
+        &Subclass::Campfire,
+    ));
+    assert!(is_radius_one_campfire(
+        &Template(templates::SHELTER_TENT_TEMPLATE.to_string()),
+        &Subclass::Shelter,
+    ));
+    assert!(!is_radius_one_campfire(
+        &Template("Large Tent".to_string()),
+        &Subclass::Shelter,
+    ));
+}
+
+#[test]
+fn shelter_tent_fire_images_use_the_configured_tent_art_key() {
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let shelter_tent = templates.obj_templates.get("Shelter Tent".to_string());
+
+    assert_eq!(
+        configured_fire_structure_image(&shelter_tent, false),
+        "tent"
+    );
+    assert_eq!(
+        configured_fire_structure_image(&shelter_tent, true),
+        "tentlit"
+    );
 }
 
 #[test]
@@ -2258,6 +3118,45 @@ fn watchtower_does_not_reveal_out_of_range_or_friendly_hidden_units() {
 }
 
 #[test]
+fn watchtower_does_not_reveal_dormant_intro_necromancer() {
+    let mut app = App::new();
+    app.add_systems(Update, watchtower_reveal_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(TICKS_PER_SEC));
+    app.insert_resource(PerceptionUpdates(HashSet::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    app.world_mut().spawn((
+        Id(1),
+        PlayerId(1),
+        Position { x: 16, y: 33 },
+        Viewshed { range: 3 },
+        State::None,
+        Watchtower,
+    ));
+
+    let dormant_necromancer = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(NPC_PLAYER_ID),
+            Position { x: 16, y: 32 },
+            Class(CLASS_UNIT.to_string()),
+            State::Hiding,
+            DormantIntroNecromancer,
+        ))
+        .id();
+
+    app.update();
+
+    assert_eq!(
+        app.world().get::<State>(dormant_necromancer),
+        Some(&State::Hiding)
+    );
+    assert!(app.world().resource::<PerceptionUpdates>().is_empty());
+}
+
+#[test]
 fn visible_event_move_packets_keep_source_coordinates() {
     let mut app = App::new();
     app.add_systems(Update, visible_event_system);
@@ -2420,6 +3319,7 @@ fn craft_event_system_creates_crafted_item_and_updates_skill() {
             event_type: GameEventType::CraftEvent {
                 crafter_id: 1,
                 recipe_name: "Test Item".to_string(),
+                signature_item_id: None,
             },
         },
     );
@@ -2697,6 +3597,7 @@ fn setup_structure_craft_event_test(
                 crafter_id: 1,
                 structure_id: 2,
                 recipe_name: "Test Item".to_string(),
+                signature_item_id: None,
                 work_entry_id: Some(1),
             },
         },
@@ -2782,7 +3683,9 @@ fn rejected_off_tile_work_releases_process_order_to_retry() {
     app.add_systems(Update, crate::villager::process_order_system);
     app.add_observer(start_work_observer);
     app.insert_resource(Clients::default());
-    app.insert_resource(GameTick(10));
+    // Work-queue retries are intentionally suppressed at night. Keep this
+    // fixture in daytime so it isolates off-tile release/retry behaviour.
+    app.insert_resource(GameTick(MORNING));
     app.insert_resource(PlayerWorldPresenceState::default());
     app.insert_resource(MapEvents(HashMap::new()));
     app.insert_resource(GameEvents(HashMap::new()));
@@ -2945,6 +3848,7 @@ fn structure_craft_event_completes_when_worker_is_on_structure_tile() {
 fn gather_event_system_marks_gatherer_event_completed() {
     let mut app = App::new();
     app.add_systems(Update, gather_event_system);
+    app.insert_resource(CampfireVisibilityState::default());
     app.add_plugins(ResourcePlugin);
 
     let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
@@ -2956,6 +3860,7 @@ fn gather_event_system_marks_gatherer_event_completed() {
     app.insert_resource(Recipes::from_recipes(vec![]));
     app.insert_resource(Templates::from_obj_templates(vec![]));
     app.insert_resource(ActiveInfos(HashMap::new()));
+    app.insert_resource(Objectives::default());
 
     let mut game_events = HashMap::new();
     game_events.insert(
@@ -2981,6 +3886,12 @@ fn gather_event_system_marks_gatherer_event_completed() {
             Template("Human Villager".to_string()),
             Subclass::Villager,
             State::Gathering,
+            Order::Gather {
+                res_type: ORE.to_string(),
+                pos: Position { x: 0, y: 0 },
+                storage_pos: None,
+                storage_id: None,
+            },
             ActionProgress {
                 action_id: 7,
                 start_tick: 0,
@@ -3019,6 +3930,7 @@ fn gather_event_system_marks_gatherer_event_completed() {
 fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
     let mut app = App::new();
     app.add_systems(Update, gather_event_system);
+    app.insert_resource(CampfireVisibilityState(HashSet::from([(1, 99)])));
     app.add_plugins(ResourcePlugin);
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(4);
@@ -3043,6 +3955,7 @@ fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
     app.insert_resource(Recipes::from_recipes(vec![]));
     app.insert_resource(Templates::from_obj_templates(vec![]));
     app.insert_resource(ActiveInfos(HashMap::new()));
+    app.insert_resource(Objectives::default());
 
     let mut game_events = HashMap::new();
     game_events.insert(
@@ -3067,6 +3980,7 @@ fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
             Name("Test Hero".to_string()),
             Template("Novice Warrior".to_string()),
             Subclass::Hero,
+            Viewshed { range: 0 },
             State::Gathering,
             Effects(HashMap::new()),
             Inventory {
@@ -3241,7 +4155,7 @@ fn personal_crisis_is_the_default_survival_director_mode() {
 }
 
 #[test]
-fn sanctuary_state_snapshot_uses_bound_monolith_weak_radius_and_fails_closed() {
+fn sanctuary_state_snapshot_uses_bound_monolith_radius_and_fails_closed() {
     let mut world = World::new();
     world.spawn((
         PlayerId(7),
@@ -3292,7 +4206,7 @@ fn sanctuary_state_snapshot_uses_bound_monolith_weak_radius_and_fails_closed() {
         build_sanctuary_state_snapshot(7, &zones, hero_query.iter(&world)),
         vec![SanctuaryZoneSnapshot {
             monolith_id: 701,
-            radius: WEAK_SANCTUARY_RANGE + 3,
+            radius: SANCTUARY_RANGE + 3,
         }]
     );
     assert!(build_sanctuary_state_snapshot(8, &zones, hero_query.iter(&world)).is_empty());
@@ -3302,13 +4216,14 @@ fn sanctuary_state_snapshot_uses_bound_monolith_weak_radius_and_fails_closed() {
 }
 
 #[test]
-fn sanctuary_zone_weak_boundary_uses_strict_distance() {
+fn sanctuary_zone_boundary_uses_former_outer_radius_and_strict_distance() {
     let zone = SanctuaryZone {
         pos: Position { x: 10, y: 10 },
         level: 0,
     };
-    assert!(zone.contains_weak(Position { x: 14, y: 10 }));
-    assert!(!zone.contains_weak(Position { x: 15, y: 10 }));
+    assert_eq!(zone.radius(), 5);
+    assert!(zone.contains(Position { x: 14, y: 10 }));
+    assert!(!zone.contains(Position { x: 15, y: 10 }));
 }
 
 #[test]
@@ -3353,7 +4268,7 @@ fn sanctuary_state_delivery_deduplicates_changes_and_clears_dead_hero() {
             zones
         } if zones == vec![SanctuaryZoneSnapshot {
             monolith_id,
-            radius: WEAK_SANCTUARY_RANGE,
+            radius: SANCTUARY_RANGE,
         }]
     ));
     app.update();
@@ -3369,7 +4284,7 @@ fn sanctuary_state_delivery_deduplicates_changes_and_clears_dead_hero() {
     assert!(matches!(
         upgraded,
         ResponsePacket::SanctuaryState { zones, .. }
-            if zones.first().map(|zone| zone.radius) == Some(WEAK_SANCTUARY_RANGE + 2)
+            if zones.first().map(|zone| zone.radius) == Some(SANCTUARY_RANGE + 2)
     ));
     app.update();
     assert!(receiver.try_recv().is_err());
@@ -3449,15 +4364,28 @@ fn client_presence_handles_multiple_connections_removals_and_stale_records() {
 }
 
 #[test]
-fn goblin_pressure_is_gated_deterministic_and_capped() {
+fn personal_crisis_playtest_flag_is_explicit_and_defaults_closed() {
+    for enabled in ["1", "true", "TRUE", " yes ", "On"] {
+        assert!(
+            playtest_flag_enabled(enabled),
+            "expected {enabled:?} to enable"
+        );
+    }
+    for disabled in ["", "0", "false", "off", "anything-else"] {
+        assert!(
+            !playtest_flag_enabled(disabled),
+            "expected {disabled:?} to remain disabled"
+        );
+    }
+}
+
+#[test]
+fn goblin_threat_is_gated_deterministic_and_excludes_readiness() {
     let developed = GoblinPressureFacts {
         danger_unlocked: true,
-        completed_structures: 3,
-        living_villagers: 1,
+        completed_structures: 5,
         stored_gold: 100,
-        sanctuary_level: 5,
         explore_poi: true,
-        choose_expansion: true,
         online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
     };
 
@@ -3465,9 +4393,9 @@ fn goblin_pressure_is_gated_deterministic_and_capped() {
     let second = calculate_goblin_pressure(&developed);
     let breakdown = calculate_goblin_pressure_breakdown(&developed);
     assert_eq!(first, second);
-    assert_eq!(first, GOBLIN_PRESSURE_MAX);
+    assert_eq!(first, 60);
     assert_eq!(breakdown.contributor_sum(), breakdown.raw_total);
-    assert_eq!(breakdown.raw_total, 110);
+    assert_eq!(breakdown.raw_total, 60);
     assert_eq!(breakdown.clamped_total, first);
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
@@ -3480,24 +4408,21 @@ fn goblin_pressure_is_gated_deterministic_and_capped() {
 }
 
 #[test]
-fn goblin_pressure_breakdown_uses_every_authoritative_category_and_snapshot_constants() {
+fn goblin_pressure_breakdown_contains_only_authoritative_threat_categories() {
     let facts = GoblinPressureFacts {
         danger_unlocked: true,
-        completed_structures: 3,
-        living_villagers: 1,
+        completed_structures: 5,
         stored_gold: GOBLIN_GOLD_TIER_THREE,
-        sanctuary_level: 5,
         explore_poi: true,
-        choose_expansion: true,
         online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
     };
     let breakdown = calculate_goblin_pressure_breakdown(&facts);
 
     assert_eq!(breakdown.danger_unlocked, GOBLIN_DANGER_UNLOCKED_PRESSURE);
-    assert_eq!(breakdown.structures, GOBLIN_THREE_STRUCTURES_PRESSURE);
+    assert_eq!(breakdown.structures, GOBLIN_COMPLETED_STRUCTURES_PRESSURE);
     assert_eq!(breakdown.villagers, GOBLIN_VILLAGER_PRESSURE);
     assert_eq!(breakdown.explore_poi, GOBLIN_EXPLORE_POI_PRESSURE);
-    assert_eq!(breakdown.choose_expansion, GOBLIN_CHOOSE_EXPANSION_PRESSURE);
+    assert_eq!(breakdown.stockades, GOBLIN_COMPLETED_STOCKADES_PRESSURE);
     assert_eq!(breakdown.stored_gold, GOBLIN_GOLD_PRESSURE_PER_TIER * 3);
     assert_eq!(breakdown.sanctuary, GOBLIN_SANCTUARY_PRESSURE_MAX);
     assert_eq!(breakdown.online_time, GOBLIN_ONLINE_PRESSURE_PER_TIER * 3);
@@ -3509,10 +4434,7 @@ fn goblin_pressure_breakdown_uses_every_authoritative_category_and_snapshot_cons
     assert_eq!(snapshot.signs_threshold, GOBLIN_SIGNS_PRESSURE);
     assert_eq!(snapshot.pressure_threshold, GOBLIN_PRESSURE_PHASE_PRESSURE);
     assert_eq!(snapshot.preparing_threshold, GOBLIN_PREPARING_PRESSURE);
-    assert_eq!(
-        snapshot.assault_ready_threshold,
-        GOBLIN_ASSAULT_READY_PRESSURE
-    );
+    assert_eq!(snapshot.assault_ready_threshold, None);
     assert_eq!(snapshot.game_ticks_per_day, GAME_TICKS_PER_DAY);
     assert_eq!(snapshot.preferred_launch_start_tick, DUSK);
     assert_eq!(snapshot.preferred_launch_wrap_end_tick, FIRST_LIGHT);
@@ -3525,45 +4447,49 @@ fn goblin_pressure_uses_named_fact_thresholds_without_double_counting() {
         danger_unlocked: true,
         ..Default::default()
     };
-    assert_eq!(calculate_goblin_pressure(&base), 10);
+    assert_eq!(calculate_goblin_pressure(&base), 0);
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
-            completed_structures: 3,
+            completed_structures: 4,
             ..base
         }),
-        30
+        0
     );
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
-            living_villagers: 1,
+            completed_structures: 5,
+            ..base
+        }),
+        20
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
             explore_poi: true,
-            choose_expansion: true,
-            ..base
-        }),
-        50
-    );
-    assert_eq!(
-        calculate_goblin_pressure(&GoblinPressureFacts {
-            stored_gold: 24,
             ..base
         }),
         10
     );
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
+            stored_gold: 24,
+            ..base
+        }),
+        0
+    );
+    assert_eq!(
+        calculate_goblin_pressure(&GoblinPressureFacts {
             stored_gold: 25,
             ..base
         }),
-        15
+        5
     );
     assert_eq!(
         calculate_goblin_pressure(&GoblinPressureFacts {
             stored_gold: 50,
-            sanctuary_level: 3,
             online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_TWO_TICKS,
             ..base
         }),
-        36
+        20
     );
 }
 
@@ -3630,9 +4556,10 @@ fn goblin_phase_transitions_are_ordered_timed_and_stop_at_assault_ready() {
     );
     assert!(crisis.warning_active);
 
-    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS - 1;
+    crisis.pressure = 0;
+    crisis.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS - 1;
     assert!(transition_goblin_crisis(&mut crisis, 60).is_none());
-    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    crisis.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS;
     assert_eq!(
         transition_goblin_crisis(&mut crisis, 61),
         Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
@@ -3671,10 +4598,11 @@ fn goblin_phase_pressure_thresholds_are_enforced() {
     );
 
     crisis.phase = CrisisPhase::Preparing;
-    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
-    crisis.pressure = GOBLIN_ASSAULT_READY_PRESSURE - 1;
+    crisis.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS - 1;
+    crisis.pressure = GOBLIN_PRESSURE_MAX;
     assert!(next_goblin_crisis_phase(&crisis).is_none());
-    crisis.pressure = GOBLIN_ASSAULT_READY_PRESSURE;
+    crisis.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS;
+    crisis.pressure = 0;
     assert_eq!(
         next_goblin_crisis_phase(&crisis),
         Some(CrisisPhase::AssaultReady)
@@ -3682,26 +4610,28 @@ fn goblin_phase_pressure_thresholds_are_enforced() {
 }
 
 #[test]
-fn goblin_balance_checkpoint2_values_are_exact_and_other_pacing_controls_are_unchanged() {
+fn goblin_balance_separates_threat_from_readiness_and_uses_a_fixed_window() {
     let snapshot = goblin_crisis_balance_config_snapshot();
 
     assert_eq!(snapshot.pressure_max, 100);
-    assert_eq!(snapshot.danger_unlocked_pressure, 10);
-    assert_eq!(snapshot.three_structures_pressure, 20);
-    assert_eq!(snapshot.villager_pressure, 15);
+    assert_eq!(snapshot.danger_unlocked_pressure, 0);
+    assert_eq!(snapshot.completed_structures_threshold, 5);
+    assert_eq!(snapshot.completed_structures_pressure, 20);
+    assert_eq!(snapshot.villager_pressure, 0);
     assert_eq!(snapshot.explore_poi_pressure, 10);
-    assert_eq!(snapshot.choose_expansion_pressure, 15);
+    assert_eq!(snapshot.completed_stockades_threshold, 1);
+    assert_eq!(snapshot.completed_stockades_pressure, 0);
     assert_eq!(snapshot.gold_tier_thresholds, [25, 50, 100]);
     assert_eq!(snapshot.gold_pressure_per_tier, 5);
-    assert_eq!(snapshot.sanctuary_pressure_per_level, 2);
-    assert_eq!(snapshot.sanctuary_pressure_max, 10);
+    assert_eq!(snapshot.sanctuary_pressure_per_level, 0);
+    assert_eq!(snapshot.sanctuary_pressure_max, 0);
     assert_eq!(snapshot.online_pressure_tier_ticks, [600, 1_800, 3_600]);
     assert_eq!(snapshot.online_pressure_per_tier, 5);
 
     assert_eq!(snapshot.signs_threshold, 20);
     assert_eq!(snapshot.pressure_threshold, 45);
     assert_eq!(snapshot.preparing_threshold, 45);
-    assert_eq!(snapshot.assault_ready_threshold, 49);
+    assert_eq!(snapshot.assault_ready_threshold, None);
     assert_eq!(snapshot.signs_min_online_ticks, 600);
     assert_eq!(snapshot.pressure_min_online_ticks, 1_200);
     assert_eq!(snapshot.preparing_min_online_ticks, 1_800);
@@ -3711,21 +4641,21 @@ fn goblin_balance_checkpoint2_values_are_exact_and_other_pacing_controls_are_unc
 }
 
 #[test]
-fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_skip_phases() {
+fn goblin_threat_growth_path_is_deterministic_ordered_and_cannot_skip_phases() {
     let passive = GoblinPressureFacts {
         danger_unlocked: true,
         online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_THREE_TICKS,
         ..Default::default()
     };
-    assert_eq!(calculate_goblin_pressure(&passive), 25);
+    assert_eq!(calculate_goblin_pressure(&passive), 15);
 
     let developed = GoblinPressureFacts {
-        completed_structures: 3,
-        sanctuary_level: 2,
+        completed_structures: 5,
+        explore_poi: true,
         ..passive
     };
     let expected = calculate_goblin_pressure_breakdown(&developed);
-    assert_eq!(expected.clamped_total, 49);
+    assert_eq!(expected.clamped_total, 45);
     for _ in 0..3 {
         assert_eq!(calculate_goblin_pressure_breakdown(&developed), expected);
     }
@@ -3749,17 +4679,21 @@ fn goblin_balance_checkpoint2_growth_path_is_deterministic_ordered_and_cannot_sk
         transition_goblin_crisis(&mut crisis, 3),
         Some((CrisisPhase::Pressure, CrisisPhase::Preparing))
     );
-    crisis.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
+    crisis.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS;
     assert_eq!(
         transition_goblin_crisis(&mut crisis, 4),
         Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady))
     );
 
-    let mut below_ready = SettlementCrisis::new(CrisisKind::Goblin, 0);
-    below_ready.phase = CrisisPhase::Preparing;
-    below_ready.phase_online_ticks = GOBLIN_PREPARING_MIN_ONLINE_TICKS;
-    below_ready.pressure = GOBLIN_ASSAULT_READY_PRESSURE - 1;
-    assert!(transition_goblin_crisis(&mut below_ready, 5).is_none());
+    let mut low_pressure = SettlementCrisis::new(CrisisKind::Goblin, 0);
+    low_pressure.phase = CrisisPhase::Preparing;
+    low_pressure.phase_online_ticks = GOBLIN_PREPARATION_WINDOW_TICKS;
+    low_pressure.pressure = 0;
+    assert_eq!(
+        transition_goblin_crisis(&mut low_pressure, 5),
+        Some((CrisisPhase::Preparing, CrisisPhase::AssaultReady)),
+        "readiness work cannot affect the fixed preparation clock"
+    );
 }
 
 #[test]
@@ -5053,6 +5987,89 @@ fn personal_crisis_test_app() -> App {
 }
 
 #[test]
+fn goblin_threat_counts_non_wall_growth_but_not_completed_stockades() {
+    let player_id = 76;
+    let mut app = personal_crisis_test_app();
+    app.world_mut().resource_mut::<PlayerIntroState>().insert(
+        player_id,
+        PlayerIntroEntry {
+            start_tick: 0,
+            shipwreck_chain_started: true,
+            villager_spawned: true,
+            danger_unlocked: true,
+        },
+    );
+    app.world_mut()
+        .spawn((PlayerId(player_id), State::None, SubclassHero));
+
+    for index in 0..4 {
+        app.world_mut().spawn((
+            PlayerId(player_id),
+            State::None,
+            Template(format!("Completed Structure {index}")),
+            ClassStructure,
+        ));
+    }
+
+    // The first evaluation creates an observable Dormant crisis; the second
+    // derives pressure from the four completed structures.
+    app.update();
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .pressure,
+        0
+    );
+
+    app.world_mut().spawn((
+        PlayerId(player_id),
+        State::None,
+        Template("Lumbercamp".to_string()),
+        ClassStructure,
+    ));
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<SettlementCrisisState>()
+            .get(&player_id)
+            .unwrap()
+            .pressure,
+        GOBLIN_COMPLETED_STRUCTURES_PRESSURE,
+        "a completed Lumbercamp is non-wall settlement growth"
+    );
+
+    app.world_mut().spawn((
+        PlayerId(player_id),
+        State::None,
+        Template("Stockade".to_string()),
+        Subclass::Wall,
+        ClassStructure,
+    ));
+    app.update();
+    let pressure = app
+        .world()
+        .resource::<SettlementCrisisState>()
+        .get(&player_id)
+        .unwrap()
+        .pressure;
+    assert_eq!(
+        pressure, GOBLIN_COMPLETED_STRUCTURES_PRESSURE,
+        "building a wall must not add threat"
+    );
+    let breakdown = app
+        .world()
+        .resource::<CrisisBalanceTelemetryState>()
+        .get(&player_id)
+        .unwrap()
+        .latest_pressure;
+    assert_eq!(breakdown.structures, GOBLIN_COMPLETED_STRUCTURES_PRESSURE);
+    assert_eq!(breakdown.stockades, 0);
+}
+
+#[test]
 fn crisis_balance_sampler_records_authoritative_preparation_deltas() {
     let player_id = 77;
     let hero_id = 7_700;
@@ -5888,6 +6905,217 @@ fn core_gameplay_objective_facts() -> EarlyObjectiveFacts {
     }
 }
 
+#[test]
+fn post_rescue_resource_tutorial_records_only_the_ordered_actions() {
+    let mut objectives = PlayerObjectives::default();
+
+    record_forest_prospect_completion(&mut objectives, false, TileType::DeciduousForest);
+    record_forest_prospect_completion(&mut objectives, true, TileType::Grasslands);
+    assert!(!objectives.prospect_forest);
+
+    record_forest_prospect_completion(&mut objectives, true, TileType::PineForest);
+    assert!(objectives.prospect_forest);
+
+    let logging_order = Order::Gather {
+        res_type: LOG.to_string(),
+        pos: Position { x: 8, y: 9 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    let plant_order = Order::Gather {
+        res_type: PLANT.to_string(),
+        pos: Position { x: 8, y: 9 },
+        storage_pos: None,
+        storage_id: None,
+    };
+    assert!(is_logging_order(Some(&logging_order)));
+    assert!(!is_logging_order(Some(&plant_order)));
+    assert!(!is_logging_order(None));
+
+    let carcass = network::Item {
+        id: 1,
+        name: "Windstride Deer Carcass".to_string(),
+        quantity: 1,
+        durability: None,
+        owner: 10,
+        class: "Carcass".to_string(),
+        subclass: "Carcass".to_string(),
+        slot: None,
+        image: "deer".to_string(),
+        weight: 10.0,
+        equipped: false,
+        refineable: true,
+        attrs: None,
+    };
+
+    record_hero_hunt_completion(
+        &mut objectives,
+        false,
+        GAME_ANIMAL,
+        std::slice::from_ref(&carcass),
+    );
+    assert!(!objectives.hunt_game_animal);
+
+    record_hero_hunt_completion(
+        &mut objectives,
+        true,
+        GAME_ANIMAL,
+        std::slice::from_ref(&carcass),
+    );
+    assert!(objectives.hunt_game_animal);
+
+    record_hero_carcass_refine_completion(&mut objectives, false, "Carcass", true);
+    record_hero_carcass_refine_completion(&mut objectives, true, "Carcass", false);
+    assert!(!objectives.refine_animal_carcass);
+
+    record_hero_carcass_refine_completion(&mut objectives, true, "Carcass", true);
+    assert!(objectives.refine_animal_carcass);
+}
+
+#[test]
+fn hero_refine_completion_aborts_if_the_light_goes_out() {
+    const PLAYER_ID: i32 = 7;
+    const HERO_ID: i32 = 70;
+    const CARCASS_ID: i32 = 501;
+
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    app.add_systems(Update, refine_event_system);
+    app.insert_resource(GameTick(100));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(ActiveInfos(HashMap::new()));
+    app.insert_resource(Objectives::default());
+    app.insert_resource(CampfireVisibilityState::default());
+
+    let mut ids = Ids::default();
+    ids.new_hero(HERO_ID, PLAYER_ID);
+    app.insert_resource(ids);
+
+    app.insert_resource(GameEvents(HashMap::from([(
+        1,
+        GameEvent {
+            event_id: 1,
+            start_tick: 0,
+            run_tick: 99,
+            event_type: GameEventType::RefineEvent {
+                refiner_id: HERO_ID,
+                item_id: CARCASS_ID,
+            },
+        },
+    )])));
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let client_id = Uuid::new_v4();
+    app.insert_resource(Clients(Arc::new(Mutex::new(HashMap::from([(
+        client_id,
+        Client {
+            id: client_id,
+            player_id: PLAYER_ID,
+            sender,
+        },
+    )])))));
+
+    let mut inventory = Inventory {
+        owner: HERO_ID,
+        items: Vec::new(),
+    };
+    inventory.new(
+        CARCASS_ID,
+        "Windstride Deer Carcass".to_string(),
+        1,
+        &app.world().resource::<Templates>().item_templates,
+    );
+    let hero = app
+        .world_mut()
+        .spawn((
+            Template("Novice Warrior".to_string()),
+            State::Refining,
+            inventory,
+            Skills::new(),
+            Viewshed { range: 0 },
+            ActionProgress {
+                action_id: 1,
+                start_tick: 0,
+                end_tick: 99,
+            },
+        ))
+        .id();
+    app.insert_resource(EntityObjMap(HashMap::from([(HERO_ID, hero)])));
+
+    app.update();
+
+    assert!(app.world().resource::<GameEvents>().is_empty());
+    assert!(app.world().get::<ActionProgress>(hero).is_none());
+    assert!(app
+        .world()
+        .get::<Inventory>(hero)
+        .unwrap()
+        .get_by_id(CARCASS_ID)
+        .is_some());
+    let message = receiver
+        .try_recv()
+        .expect("extinguished light should send the work visibility notice");
+    assert_eq!(
+        serde_json::from_str::<ResponsePacket>(&message).unwrap(),
+        ResponsePacket::Notice {
+            noticemsg: player::INSUFFICIENT_WORK_VISIBILITY_NOTICE.to_string(),
+            expiry: Some(5000),
+        }
+    );
+}
+
+#[test]
+fn core_gameplay_burrow_supplies_require_food_drink_and_a_logging_tool() {
+    let food = consumable_item(1, 10, "Honeybell Berries", FOOD, AttrKey::Feed, 6.0);
+    let second_food = consumable_item(2, 10, "Pine Nuts", FOOD, AttrKey::Feed, 25.0);
+    let drink = consumable_item(3, 10, "Waterskin (Filled)", DRINK, AttrKey::Thirst, 100.0);
+
+    assert_eq!(
+        burrow_supply_type_count(&Inventory {
+            owner: 10,
+            items: vec![food.clone(), second_food],
+        }),
+        1,
+        "multiple foods still satisfy only the Food portion of the task"
+    );
+    assert_eq!(
+        burrow_supply_type_count(&Inventory {
+            owner: 10,
+            items: vec![food, drink.clone()],
+        }),
+        2,
+        "food and water alone must not complete the task without the Hatchet"
+    );
+
+    let mut app = App::new();
+    app.add_plugins(TemplatesPlugin);
+    let templates = app.world().resource::<Templates>();
+    let mut stocked_burrow = Inventory {
+        owner: 10,
+        items: vec![
+            consumable_item(4, 10, "Honeybell Berries", FOOD, AttrKey::Feed, 6.0),
+            drink.clone(),
+        ],
+    };
+    stocked_burrow.new(5, "Crude Hatchet".to_string(), 1, &templates.item_templates);
+    assert_eq!(
+        burrow_supply_type_count(&stocked_burrow),
+        BURROW_SUPPLY_GOAL
+    );
+
+    let mut empty_drink_stack = drink;
+    empty_drink_stack.quantity = 0;
+    assert_eq!(
+        burrow_supply_type_count(&Inventory {
+            owner: 10,
+            items: vec![empty_drink_stack],
+        }),
+        0,
+        "empty stacks do not count as stored supplies"
+    );
+}
+
 fn core_gameplay_initial_encounter_entry() -> InitialEncounterEntry {
     InitialEncounterEntry {
         rat_ids: vec![1, 2, 3],
@@ -5974,6 +7202,7 @@ fn core_gameplay_checkpoint1_all_opening_rat_defeats_gate_first_fight_progress()
     assert!(!entry.all_opening_enemies_defeated());
 
     let mut objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
         scavenge_shipwreck: true,
         ..PlayerObjectives::default()
     };
@@ -5998,12 +7227,18 @@ fn core_gameplay_checkpoint1_all_opening_rat_defeats_gate_first_fight_progress()
     facts.has_burrow = true;
     let (current_id, _) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
-    assert_eq!(current_id, "build_campfire");
+    assert_eq!(current_id, "stock_burrow");
+
+    objectives.stock_burrow = true;
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "recruit_villager");
 }
 
 #[test]
 fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritative() {
     let mut objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
         build_campfire: true,
         recruit_villager: true,
         choose_expansion: true,
@@ -6028,26 +7263,57 @@ fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritat
     facts.hero_idle = true;
     let (current_id, packet_objectives) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
-    assert_eq!(current_id, "build_burrow");
+    assert_eq!(current_id, "win_first_fight");
     let active = packet_objectives
         .iter()
         .find(|objective| objective.state == "active")
-        .expect("Burrow construction is recommended after salvaging the Shipwreck");
-    assert_eq!(active.id, "build_burrow");
-    assert_eq!(active.blocker, None);
+        .expect("opening fight is recommended after salvaging the Shipwreck");
+    assert_eq!(active.id, "win_first_fight");
+    assert_eq!(
+        active.blocker.as_deref(),
+        Some("The opening threat has not appeared yet. Stay near the Shipwreck.")
+    );
 
-    facts.has_burrow = true;
+    facts.opening_enemy_spawned = 1;
     let (current_id, packet_objectives) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
     assert_eq!(current_id, "win_first_fight");
     let active = packet_objectives
         .iter()
         .find(|objective| objective.state == "active")
-        .expect("opening fight is recommended after the Burrow is complete");
+        .expect("opening fight remains recommended while it is resolving");
     assert_eq!(
         active.blocker.as_deref(),
-        Some("The opening threat has not appeared yet. Stay near the Shipwreck.")
+        Some("The opening fight is resolving. Stay near the Shipwreck.")
     );
+
+    objectives.win_first_fight = true;
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "build_burrow");
+    assert_eq!(
+        packet_objectives
+            .iter()
+            .find(|objective| objective.state == "active")
+            .unwrap()
+            .id,
+        "build_burrow"
+    );
+
+    facts.has_burrow = true;
+    facts.burrow_supply_types = 1;
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(current_id, "stock_burrow");
+    let stock_burrow = packet_objectives
+        .iter()
+        .find(|objective| objective.id == "stock_burrow")
+        .unwrap();
+    assert_eq!(stock_burrow.state, "active");
+    assert_eq!(stock_burrow.progress, Some(1));
+    assert_eq!(stock_burrow.goal, Some(BURROW_SUPPLY_GOAL));
+    assert_eq!(stock_burrow.blocker, None);
+
     assert_eq!(
         packet_objectives
             .iter()
@@ -6057,26 +7323,15 @@ fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritat
         "complete",
         "completed facts stay complete without bypassing an earlier prerequisite"
     );
-
-    facts.opening_enemy_spawned = 1;
-    let (_, packet_objectives) =
-        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
-    assert_eq!(
-        packet_objectives
-            .iter()
-            .find(|objective| objective.id == "win_first_fight")
-            .unwrap()
-            .blocker
-            .as_deref(),
-        Some("The opening fight is resolving. Stay near the Shipwreck.")
-    );
 }
 
 #[test]
 fn core_gameplay_checkpoint1_reconnect_and_fresh_run_reconstruct_without_cache() {
     let progressed = PlayerObjectives {
+        equip_sharpened_stick: true,
         scavenge_shipwreck: true,
         win_first_fight: true,
+        stock_burrow: true,
         build_campfire: true,
         recruit_villager: true,
         ..PlayerObjectives::default()
@@ -6101,7 +7356,7 @@ fn core_gameplay_checkpoint1_reconnect_and_fresh_run_reconstruct_without_cache()
     );
     assert_eq!(
         first_incomplete_objective_id(&progressed, &facts),
-        "assign_first_villager"
+        "prospect_forest"
     );
 
     let fresh_objectives = PlayerObjectives::default();
@@ -6111,10 +7366,10 @@ fn core_gameplay_checkpoint1_reconnect_and_fresh_run_reconstruct_without_cache()
         &fresh_facts,
         1,
     ));
-    assert_eq!(fresh_current, "scavenge_shipwreck");
+    assert_eq!(fresh_current, "equip_sharpened_stick");
     assert_eq!(
         first_incomplete_objective_id(&progressed, &facts),
-        "assign_first_villager"
+        "prospect_forest"
     );
 }
 
@@ -6130,23 +7385,50 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
             objectives,
             ..
         } => {
-            assert_eq!(current_id, "scavenge_shipwreck");
+            assert_eq!(current_id, "equip_sharpened_stick");
             assert_eq!(
                 objectives
                     .iter()
-                    .take(7)
+                    .take(13)
                     .map(|objective| objective.id.as_str())
                     .collect::<Vec<_>>(),
                 vec![
+                    "equip_sharpened_stick",
                     "scavenge_shipwreck",
-                    "build_burrow",
                     "win_first_fight",
-                    "build_campfire",
+                    "build_burrow",
+                    "stock_burrow",
                     "recruit_villager",
+                    "prospect_forest",
                     "assign_first_villager",
+                    "build_lumbercamp",
+                    "hunt_and_refine_animal",
+                    "upgrade_campfire_to_shelter_tent",
                     "build_shelter_storage",
+                    "build_fortification",
                 ]
             );
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.state == "active")
+                    .unwrap()
+                    .id,
+                "equip_sharpened_stick"
+            );
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.equip_sharpened_stick = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "scavenge_shipwreck");
             assert_eq!(
                 objectives
                     .iter()
@@ -6167,36 +7449,6 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
             objectives,
             ..
         } => {
-            assert_eq!(current_id, "build_burrow");
-            assert_eq!(
-                objectives
-                    .iter()
-                    .find(|obj| obj.state == "active")
-                    .unwrap()
-                    .id,
-                "build_burrow"
-            );
-            assert_eq!(
-                objectives
-                    .iter()
-                    .find(|obj| obj.id == "build_campfire")
-                    .unwrap()
-                    .state,
-                "locked",
-                "the campfire must not become primary before the Burrow and opening fight"
-            );
-        }
-        _ => panic!("expected objective_state packet"),
-    }
-
-    facts.has_burrow = true;
-    let packet = build_objective_state_packet(&objectives, &facts, 1);
-    match packet {
-        ResponsePacket::ObjectiveState {
-            current_id,
-            objectives,
-            ..
-        } => {
             assert_eq!(current_id, "win_first_fight");
             assert_eq!(
                 objectives
@@ -6206,23 +7458,109 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
                     .id,
                 "win_first_fight"
             );
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.id == "upgrade_campfire_to_shelter_tent")
+                    .unwrap()
+                    .state,
+                "locked",
+                "the Shelter Tent upgrade must not become primary before the opening fight, Burrow, and supplies"
+            );
         }
         _ => panic!("expected objective_state packet"),
     }
 
     objectives.win_first_fight = true;
-    facts.has_campfire = true;
     let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
-        ResponsePacket::ObjectiveState { current_id, .. } => {
-            assert_eq!(current_id, "build_campfire");
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "build_burrow");
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.state == "active")
+                    .unwrap()
+                    .id,
+                "build_burrow"
+            );
         }
         _ => panic!("expected objective_state packet"),
     }
 
-    objectives.build_campfire = true;
+    facts.has_burrow = true;
+    facts.burrow_supply_types = 1;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "stock_burrow");
+            let stock_burrow = objectives
+                .iter()
+                .find(|obj| obj.id == "stock_burrow")
+                .unwrap();
+            assert_eq!(stock_burrow.progress, Some(1));
+            assert_eq!(stock_burrow.goal, Some(BURROW_SUPPLY_GOAL));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.stock_burrow = true;
+    facts.has_campfire = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState { current_id, .. } => {
+            assert_eq!(current_id, "recruit_villager");
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
     objectives.recruit_villager = true;
+    facts.living_villagers = 1;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState { current_id, .. } => {
+            assert_eq!(current_id, "prospect_forest");
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.prospect_forest = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState { current_id, .. } => {
+            assert_eq!(current_id, "assign_first_villager");
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
     objectives.assign_first_villager = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "build_lumbercamp");
+            let lumbercamp = objectives
+                .iter()
+                .find(|objective| objective.id == "build_lumbercamp")
+                .unwrap();
+            assert_eq!(lumbercamp.progress, Some(0));
+            assert_eq!(lumbercamp.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.choose_expansion = true;
     facts.completed_structures = 2;
     let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
@@ -6231,23 +7569,83 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
             objectives,
             ..
         } => {
-            assert_eq!(current_id, "build_shelter_storage");
+            assert_eq!(current_id, "hunt_and_refine_animal");
+            let hunting = objectives
+                .iter()
+                .find(|objective| objective.id == "hunt_and_refine_animal")
+                .unwrap();
+            assert_eq!(hunting.progress, Some(0));
+            assert_eq!(hunting.goal, Some(2));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.hunt_game_animal = true;
+    objectives.refine_animal_carcass = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "upgrade_campfire_to_shelter_tent");
             let active = objectives.iter().find(|obj| obj.state == "active").unwrap();
-            assert_eq!(active.progress, Some(2));
-            assert_eq!(active.goal, Some(3));
+            assert_eq!(active.title, "Upgrade the Campfire to a Shelter Tent");
+            assert_eq!(active.target.as_deref(), Some("Shelter Tent"));
+            assert!(active
+                .action_hint
+                .contains("five Logs or Timber and three Hide"));
+            assert_eq!(active.progress, Some(0));
+            assert_eq!(active.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.build_campfire = true;
+    objectives.build_3_structures = true;
+    facts.completed_structures = 3;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "build_fortification");
+            let lumbercamp = objectives
+                .iter()
+                .find(|obj| obj.id == "build_lumbercamp")
+                .unwrap();
+            assert_eq!(lumbercamp.state, "complete");
+            assert_eq!(lumbercamp.progress, Some(1));
+            assert_eq!(lumbercamp.goal, Some(1));
+
+            let fortification = objectives
+                .iter()
+                .find(|obj| obj.id == "build_fortification")
+                .unwrap();
+            assert_eq!(fortification.state, "active");
+            assert_eq!(fortification.title, "Build Fortification");
+            assert!(!fortification.action_hint.contains("Stockade"));
         }
         _ => panic!("expected objective_state packet"),
     }
 }
 
 #[test]
-fn core_gameplay_checkpoint1_survival_thread_progresses_to_expansion_after_basic_camp() {
+fn core_gameplay_checkpoint1_requires_lumbercamp_before_fortification() {
     let objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
         scavenge_shipwreck: true,
         build_campfire: true,
         win_first_fight: true,
+        stock_burrow: true,
         recruit_villager: true,
+        prospect_forest: true,
         assign_first_villager: true,
+        hunt_game_animal: true,
+        refine_animal_carcass: true,
         build_3_structures: true,
         ..Default::default()
     };
@@ -6260,6 +7658,7 @@ fn core_gameplay_checkpoint1_survival_thread_progresses_to_expansion_after_basic
         completed_structures: 3,
         has_campfire: true,
         has_burrow: true,
+        has_stockade: false,
         ..EarlyObjectiveFacts::default()
     };
 
@@ -6270,7 +7669,21 @@ fn core_gameplay_checkpoint1_survival_thread_progresses_to_expansion_after_basic
             objectives,
             ..
         } => {
-            assert_eq!(current_id, "choose_expansion");
+            assert_eq!(current_id, "build_lumbercamp");
+            let lumbercamp = objectives
+                .iter()
+                .find(|obj| obj.id == "build_lumbercamp")
+                .unwrap();
+            assert_eq!(lumbercamp.state, "active");
+            assert_eq!(lumbercamp.target.as_deref(), Some("Lumbercamp"));
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.id == "build_fortification")
+                    .unwrap()
+                    .state,
+                "locked"
+            );
             let night_goal = objectives
                 .iter()
                 .find(|obj| obj.id == "survive_5_nights")
@@ -6280,13 +7693,85 @@ fn core_gameplay_checkpoint1_survival_thread_progresses_to_expansion_after_basic
         }
         _ => panic!("expected objective_state packet"),
     }
+
+    let early_stockade_facts = EarlyObjectiveFacts {
+        has_stockade: true,
+        ..facts
+    };
+    let packet = build_objective_state_packet(&objectives, &early_stockade_facts, 3);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "build_lumbercamp");
+            assert_eq!(
+                objectives
+                    .iter()
+                    .find(|obj| obj.id == "build_fortification")
+                    .unwrap()
+                    .state,
+                "complete"
+            );
+        }
+        _ => panic!("expected objective_state packet"),
+    }
 }
 
 #[test]
-fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
+fn core_gameplay_checkpoint1_tutorial_completes_without_defeating_the_fire_dragon() {
+    let objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
+        scavenge_shipwreck: true,
+        build_campfire: true,
+        win_first_fight: true,
+        stock_burrow: true,
+        build_3_structures: true,
+        recruit_villager: true,
+        prospect_forest: true,
+        assign_first_villager: true,
+        hunt_game_animal: true,
+        refine_animal_carcass: true,
+        explore_poi: true,
+        choose_expansion: true,
+        survive_5_nights: true,
+        find_legendary_hideout: true,
+        defeat_ashen_warlord: false,
+        ..PlayerObjectives::default()
+    };
+    let facts = EarlyObjectiveFacts {
+        hero_idle: true,
+        villager_spawned: true,
+        living_villagers: 1,
+        completed_structures: 3,
+        has_campfire: true,
+        has_burrow: true,
+        has_stockade: true,
+        burrow_supply_types: 2,
+        ..EarlyObjectiveFacts::default()
+    };
+
+    let (current_id, packet_objectives) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 6));
+
+    assert_eq!(current_id, "complete");
+    assert!(
+        packet_objectives
+            .iter()
+            .all(|objective| objective.id != "defeat_ashen_warlord"),
+        "Fire Dragon victory must not be sent as a tutorial objective"
+    );
+    assert_eq!(completed_objectives_count(Some(&objectives)), 9);
+}
+
+#[test]
+fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
     let mut objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
         scavenge_shipwreck: true,
         win_first_fight: true,
+        stock_burrow: true,
         build_campfire: true,
         ..PlayerObjectives::default()
     };
@@ -6299,6 +7784,7 @@ fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
         completed_structures: 2,
         has_campfire: true,
         has_burrow: true,
+        has_stockade: true,
         ..EarlyObjectiveFacts::default()
     };
 
@@ -6322,21 +7808,33 @@ fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
     );
 
     objectives.recruit_villager = true;
-    let objectives_before = serde_json::to_value(&objectives).unwrap();
     let facts_before = player_a_facts.clone();
     let (current_id, after_recruitment) = core_gameplay_objective_state(
         build_objective_state_packet(&objectives, &player_a_facts, 1),
     );
+    assert_eq!(current_id, "prospect_forest");
+    assert_eq!(
+        after_recruitment
+            .iter()
+            .find(|objective| objective.id == "prospect_forest")
+            .unwrap()
+            .state,
+        "active"
+    );
+
+    objectives.prospect_forest = true;
+    let objectives_before = serde_json::to_value(&objectives).unwrap();
+    let (current_id, after_prospecting) = core_gameplay_objective_state(
+        build_objective_state_packet(&objectives, &player_a_facts, 1),
+    );
     assert_eq!(current_id, "assign_first_villager");
-    let assignment = after_recruitment
+    let assignment = after_prospecting
         .iter()
         .find(|objective| objective.id == "assign_first_villager")
         .unwrap();
     assert_eq!(assignment.state, "active");
-    assert!(assignment.lesson.contains("unarmed"));
-    assert!(assignment
-        .lesson
-        .contains("safer than treating them as a defender"));
+    assert_eq!(assignment.title, "Assign the settler to Logging");
+    assert!(assignment.lesson.contains("persistent Logging order"));
     assert_eq!(assignment.blocker, None);
     assert_eq!(
         serde_json::to_value(&objectives).unwrap(),
@@ -6354,6 +7852,7 @@ fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
         completed_structures: 2,
         has_campfire: true,
         has_burrow: true,
+        has_stockade: true,
         ..EarlyObjectiveFacts::default()
     };
     let (player_b_current, player_b_packet) = core_gameplay_objective_state(
@@ -6363,30 +7862,46 @@ fn core_gameplay_checkpoint1_assignment_guidance_uses_only_real_player_facts() {
         .iter()
         .find(|objective| objective.id == "assign_first_villager")
         .unwrap();
-    assert_eq!(player_b_current, "build_shelter_storage");
+    assert_eq!(player_b_current, "build_lumbercamp");
     assert_eq!(
         player_b_assignment.state, "locked",
         "a dead or absent settler must make assignment guidance irrelevant"
     );
     assert_eq!(player_b_assignment.blocker, None);
-    assert!(!player_b_assignment
-        .lesson
-        .contains("rescued settler is unarmed"));
 
     objectives.assign_first_villager = true;
-    let (current_id, completed_packet) = core_gameplay_objective_state(
-        build_objective_state_packet(&objectives, &player_a_facts, 1),
-    );
-    assert_eq!(current_id, "build_shelter_storage");
+    let (current_id, hunting_packet) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "build_lumbercamp");
     assert_eq!(
-        completed_packet
+        hunting_packet
             .iter()
             .find(|objective| objective.id == "assign_first_villager")
             .unwrap()
             .state,
         "complete",
-        "only the observed Assignment completion fact completes this step"
+        "only the observed Logging order completion fact completes this step"
     );
+
+    objectives.choose_expansion = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "hunt_and_refine_animal");
+
+    objectives.hunt_game_animal = true;
+    objectives.refine_animal_carcass = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "build_shelter_storage");
 }
 
 #[test]
@@ -6428,11 +7943,14 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
     );
 
     let objectives = PlayerObjectives {
+        equip_sharpened_stick: true,
         scavenge_shipwreck: true,
         win_first_fight: true,
+        stock_burrow: true,
         build_campfire: true,
         recruit_villager: true,
         assign_first_villager: true,
+        choose_expansion: true,
         ..PlayerObjectives::default()
     };
     let facts = EarlyObjectiveFacts {
@@ -6440,6 +7958,7 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
         completed_structures: player_a_completed as i32,
         has_campfire: true,
         has_burrow: true,
+        has_stockade: true,
         ..EarlyObjectiveFacts::default()
     };
     let (current_id, packet) =
@@ -6457,6 +7976,33 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
 }
 
 #[test]
+fn build_fortification_objective_requires_a_completed_stockade() {
+    let mut structures = vec![
+        ("Stockade".to_string(), State::Founded),
+        ("Stockade".to_string(), State::Building),
+        ("Stockade".to_string(), State::Dead),
+        ("Burrow".to_string(), State::None),
+    ];
+    assert!(!has_built_structure(&structures, "Stockade"));
+
+    structures.push(("Stockade".to_string(), State::None));
+    assert!(has_built_structure(&structures, "Stockade"));
+}
+
+#[test]
+fn build_lumbercamp_objective_requires_a_completed_lumbercamp() {
+    let mut structures = vec![
+        ("Lumbercamp".to_string(), State::Founded),
+        ("Lumbercamp".to_string(), State::Building),
+        ("Lumbercamp".to_string(), State::Dead),
+    ];
+    assert!(!has_built_structure(&structures, "Lumbercamp"));
+
+    structures.push(("Lumbercamp".to_string(), State::None));
+    assert!(has_built_structure(&structures, "Lumbercamp"));
+}
+
+#[test]
 fn early_structure_costs_keep_stockade_more_lumber_intensive_than_burrow() {
     let templates = load_obj_templates();
     let burrow = templates
@@ -6471,7 +8017,7 @@ fn early_structure_costs_keep_stockade_more_lumber_intensive_than_burrow() {
             .iter()
             .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
             .collect::<Vec<_>>(),
-        vec![("Log", 5)]
+        vec![("Logs or Timber", 5)]
     );
 
     let stockade = templates
@@ -6487,7 +8033,7 @@ fn early_structure_costs_keep_stockade_more_lumber_intensive_than_burrow() {
             .iter()
             .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
             .collect::<Vec<_>>(),
-        vec![("Log", 10)]
+        vec![("Log", STOCKADE_LOG_COST)]
     );
 
     let crafting_tent = templates
@@ -6504,7 +8050,7 @@ fn early_structure_costs_keep_stockade_more_lumber_intensive_than_burrow() {
             .iter()
             .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
             .collect::<Vec<_>>(),
-        vec![("Log", 5), ("Hide", 5)]
+        vec![("Logs or Timber", 5), ("Hide", 5)]
     );
 }
 
@@ -6523,12 +8069,9 @@ fn core_gameplay_checkpoint1_assignment_flag_does_not_change_crisis_pressure() {
     let goblin_pressure_for = |objectives: &PlayerObjectives| {
         calculate_goblin_pressure(&GoblinPressureFacts {
             danger_unlocked: true,
-            completed_structures: 3,
-            living_villagers: 1,
+            completed_structures: 5,
             stored_gold: 25,
-            sanctuary_level: 2,
             explore_poi: objectives.explore_poi,
-            choose_expansion: objectives.choose_expansion,
             online_active_ticks: GOBLIN_ONLINE_PRESSURE_TIER_ONE_TICKS,
         })
     };
@@ -6950,7 +8493,9 @@ fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
         hero_idle: true,
         hero_equipped_weapon: Some("Training Bow".to_string()),
         hero_equipped_armor: 1,
-        hero_carried_healing: 1,
+        hero_max_hp: 110,
+        hero_carried_healing_hp: 50,
+        sanctuary_level: 2,
         ..CrisisPreparationFacts::default()
     };
 
@@ -6974,12 +8519,15 @@ fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
         option.state.as_str(),
         "ready" | "needs_attention" | "unavailable"
     )));
+    assert!(options[0]
+        .detail
+        .contains("Bound sanctuary level 2 is active"));
 
     let buildable = CrisisPreparationFacts {
         live_hero: true,
         hero_idle: true,
         stockade_plan_available: true,
-        stockade_log_units_carried: 10,
+        stockade_log_units_carried: STOCKADE_LOG_COST as usize,
         can_start_stockade: true,
         ..CrisisPreparationFacts::default()
     };
@@ -6992,7 +8540,7 @@ fn checkpoint3_preparation_options_have_fixed_order_states_and_cap() {
         hero_idle: true,
         current_tile_wall_present: true,
         stockade_plan_available: true,
-        stockade_log_units_carried: 10,
+        stockade_log_units_carried: STOCKADE_LOG_COST as usize,
         can_start_stockade: false,
         ..CrisisPreparationFacts::default()
     };
@@ -7021,7 +8569,7 @@ fn checkpoint3_recovery_uses_actual_usable_item_semantics() {
         item::POTION,
         item::HEALTH,
         false,
-        Some(10.0),
+        Some(50.0),
     );
     let zero_heal_potion = checkpoint3_guidance_item(
         3,
@@ -7038,6 +8586,32 @@ fn checkpoint3_recovery_uses_actual_usable_item_semantics() {
     assert!(is_usable_crisis_healing_item(&potion));
     assert!(!is_usable_crisis_healing_item(&zero_heal_potion));
     assert!(!is_usable_crisis_healing_item(&healing_food));
+    assert_eq!(crisis_healing_hp(&bandage), 10);
+    assert_eq!(crisis_healing_hp(&potion), 50);
+    assert_eq!(crisis_healing_hp(&zero_heal_potion), 0);
+    assert_eq!(crisis_healing_hp(&healing_food), 0);
+    assert_eq!(crisis_recovery_target_hp(110), 44);
+    assert_eq!(crisis_recovery_target_hp(80), 32);
+    assert_eq!(crisis_recovery_target_hp(60), 24);
+
+    let one_poultice = CrisisPreparationFacts {
+        live_hero: true,
+        hero_max_hp: 110,
+        hero_carried_healing_hp: 20,
+        ..CrisisPreparationFacts::default()
+    };
+    let one_poultice_options = derive_crisis_preparation_options(&one_poultice);
+    assert_eq!(one_poultice_options[3].state, "needs_attention");
+    assert!(one_poultice_options[3].detail.contains("44 HP target"));
+
+    let canonical_potion = CrisisPreparationFacts {
+        hero_carried_healing_hp: 50,
+        ..one_poultice
+    };
+    assert_eq!(
+        derive_crisis_preparation_options(&canonical_potion)[3].state,
+        "ready"
+    );
 
     let mut empty_bandage = bandage;
     empty_bandage.quantity = 0;
@@ -7048,7 +8622,8 @@ fn checkpoint3_recovery_uses_actual_usable_item_semantics() {
 fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
     let facts = CrisisPreparationFacts {
         live_hero: true,
-        hero_carried_healing: 1,
+        hero_max_hp: 110,
+        hero_carried_healing_hp: 50,
         ..CrisisPreparationFacts::default()
     };
     assert!(
@@ -7059,8 +8634,6 @@ fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
     );
     for phase in [
         CrisisPhase::Dormant,
-        CrisisPhase::Signs,
-        CrisisPhase::Pressure,
         CrisisPhase::AssaultActive,
         CrisisPhase::Resolved,
     ] {
@@ -7072,7 +8645,12 @@ fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
         );
     }
 
-    for phase in [CrisisPhase::Preparing, CrisisPhase::AssaultReady] {
+    for phase in [
+        CrisisPhase::Signs,
+        CrisisPhase::Pressure,
+        CrisisPhase::Preparing,
+        CrisisPhase::AssaultReady,
+    ] {
         let crisis = checkpoint4_crisis(phase, 70);
         let crisis_before = crisis.clone();
         let facts_before = facts.clone();
@@ -7082,6 +8660,14 @@ fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
         assert_eq!(facts, facts_before);
     }
 
+    let mut preparing = checkpoint4_crisis(CrisisPhase::Preparing, 70);
+    preparing.phase_online_ticks = 10;
+    assert_eq!(
+        build_crisis_status(Some(&preparing)).preparation_seconds_remaining,
+        Some((GOBLIN_PREPARATION_WINDOW_TICKS - 10) / TICKS_PER_SEC),
+        "the client countdown is derived from the fixed online preparation window"
+    );
+
     let crisis = checkpoint4_crisis(CrisisPhase::Preparing, 70);
     let baseline = build_crisis_status_with_preparation(Some(&crisis), Some(&facts));
     assert!(
@@ -7089,7 +8675,7 @@ fn checkpoint3_status_builder_is_phase_gated_read_only_and_structural() {
         "unchanged preparation rows must retain packet deduplication"
     );
     let mut changed_facts = facts;
-    changed_facts.hero_carried_healing = 0;
+    changed_facts.hero_carried_healing_hp = 0;
     let changed = build_crisis_status_with_preparation(Some(&crisis), Some(&changed_facts));
     assert!(crisis_status_changed(&baseline, &changed));
 }
@@ -7144,9 +8730,22 @@ fn checkpoint3_preparation_collector_is_owner_exact_and_non_mutating() {
                 owner: 10,
                 items: vec![weapon, bandage, healing_food],
             },
+            BoundMonolith {
+                id: 30,
+                pos: Position { x: 5, y: 5 },
+            },
             SubclassHero,
         ))
         .id();
+
+    app.world_mut().spawn((
+        Id(30),
+        Monolith {
+            soulshards: 0,
+            sanctuary_level: 2,
+        },
+        State::None,
+    ));
 
     app.world_mut().spawn((
         PlayerId(player_id),
@@ -7243,9 +8842,11 @@ fn checkpoint3_preparation_collector_is_owner_exact_and_non_mutating() {
     assert_eq!(facts.living_villagers, 1);
     assert_eq!(facts.combat_capable_villagers, 1);
     assert_eq!(facts.hero_equipped_weapon.as_deref(), Some("Training Bow"));
-    assert_eq!(facts.hero_carried_healing, 1, "food must not count");
+    assert_eq!(facts.hero_max_hp, 100);
+    assert_eq!(facts.hero_carried_healing_hp, 10, "food must not count");
+    assert_eq!(facts.sanctuary_level, 2);
     assert_eq!(
-        facts.stored_healing, 0,
+        facts.stored_healing_hp, 0,
         "other-player storage must not leak"
     );
 

@@ -229,14 +229,20 @@ function knownPreparationState(value: unknown): CrisisPreparationState | null {
 
 /**
  * Bounds and validates the optional additive preparation payload. Detailed
- * guidance is deliberately phase-scoped even if a malformed or future server
- * sends stale rows during another crisis phase.
+ * Guidance begins with the first warning signs so preparation can happen
+ * before the formal fixed preparation window. Stale rows remain hidden during
+ * Dormant, active combat, and resolution.
  */
 export function crisisPreparationOptionsView(
   phase?: string,
   options?: unknown,
 ): CrisisPreparationOptionView[] {
-  if (phase !== 'preparing' && phase !== 'assault_ready') {
+  if (
+    phase !== 'signs'
+    && phase !== 'pressure'
+    && phase !== 'preparing'
+    && phase !== 'assault_ready'
+  ) {
     return [];
   }
   if (!Array.isArray(options)) {

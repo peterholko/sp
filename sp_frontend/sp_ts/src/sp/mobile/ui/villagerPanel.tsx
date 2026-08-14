@@ -4,6 +4,7 @@ import skillsbutton from "ui_comp/skillsbutton.png";
 import { Global } from "../../core/global";
 import { getNeedStatusIcon, NeedKind } from "./needStatus";
 import MobilePanelScreen from "./mobilePanelScreen";
+import { characterImageUrl } from "../../core/portraitCatalog";
 
 interface VillagerPanelProps {
   villagerData,
@@ -62,8 +63,10 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
   }
 
   render() {
-    let imageName = this.props.villagerData.image;
-    imageName = imageName.replace(/ /g, '') + '_single.png';
+    const imagePath = characterImageUrl(
+      this.props.villagerData.portrait,
+      this.props.villagerData.image,
+    );
 
     const effects = this.props.villagerData.effects.join();
     const activity = this.props.activity && this.props.activity[this.props.villagerData.id] != null
@@ -83,8 +86,11 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     const heroStyle: React.CSSProperties = {
       width: '58px',
       height: '58px',
-      objectFit: 'contain',
-      imageRendering: 'pixelated',
+      boxSizing: 'border-box',
+      border: '2px solid rgba(201, 170, 113, 0.82)',
+      objectFit: 'cover',
+      borderRadius: '5px',
+      boxShadow: '0 1px 5px rgba(0, 0, 0, 0.7)',
     };
 
     const nameStyle: React.CSSProperties = {
@@ -122,7 +128,7 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
         }
       >
         <div style={summaryStyle}>
-          <img src={'/static/art/' + imageName} style={heroStyle} />
+          <img src={imagePath} style={heroStyle} />
           <div style={nameStyle}>{this.props.villagerData.name}</div>
         </div>
         <table style={tableStyle}>

@@ -203,6 +203,7 @@ pub fn register_all_types(app: &mut App) {
         .register_type::<obj::Name>()
         .register_type::<obj::PlayerId>()
         .register_type::<obj::Position>()
+        .register_type::<obj::Portrait>()
         .register_type::<obj::Sheltered>()
         .register_type::<obj::State>()
         .register_type::<obj::Subclass>()

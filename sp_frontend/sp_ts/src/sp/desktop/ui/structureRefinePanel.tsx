@@ -381,6 +381,7 @@ export default class StructureRefinePanel extends React.Component<StructureRefin
                 var itemId = this.props.refineItemData.produces[i].id;
                 var itemName = this.props.refineItemData.produces[i].name;
                 var image = this.props.refineItemData.produces[i].image;
+                var quantity = this.props.refineItemData.produces[i].quantity || 1;
 
                 producedItems.push(
                     <InventoryItem key={i}
@@ -388,7 +389,7 @@ export default class StructureRefinePanel extends React.Component<StructureRefin
                         itemId={-1}
                         itemName={itemName}
                         image={image}
-                        quantity={1}
+                        quantity={quantity}
                         index={i}
                         xPos={xPos}
                         yPos={yPos}

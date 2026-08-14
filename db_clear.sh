@@ -22,8 +22,8 @@ echo "Clearing all tables in database '$DB_NAME' on $DB_HOST as user '$DB_USER'.
 psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" <<'SQL'
 BEGIN;
 
--- device_tokens references accounts, so delete it first
-TRUNCATE TABLE device_tokens RESTART IDENTITY CASCADE;
+-- trusted_devices references accounts, so delete it first
+TRUNCATE TABLE trusted_devices RESTART IDENTITY CASCADE;
 TRUNCATE TABLE sessions;
 TRUNCATE TABLE scores RESTART IDENTITY CASCADE;
 TRUNCATE TABLE accounts RESTART IDENTITY CASCADE;
@@ -36,7 +36,7 @@ SELECT 'sessions',    COUNT(*) FROM sessions
 UNION ALL
 SELECT 'scores',      COUNT(*) FROM scores
 UNION ALL
-SELECT 'device_tokens', COUNT(*) FROM device_tokens;
+SELECT 'trusted_devices', COUNT(*) FROM trusted_devices;
 SQL
 
 echo "Done."

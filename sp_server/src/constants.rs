@@ -1,10 +1,14 @@
 // Game Constants
 pub const TICKS_PER_SEC: i32 = 10;
+pub const FIREWOOD_BURN_TICKS: i32 = TICKS_PER_SEC * 30;
+pub const CHARCOAL_BURN_TICKS: i32 = FIREWOOD_BURN_TICKS * 5;
 
 pub const NO_TARGET: i32 = -1;
-pub const ATTACK_COOLDOWN_TICKS: i32 = 50; // 5 seconds at 10 ticks/sec
-                                           // Random jitter (in ticks) added to an NPC's attack cooldown so NPCs that
-                                           // spawned on the same tick don't keep attacking in perfect lockstep.
+pub const ATTACK_COOLDOWN_SECONDS: i32 = 3;
+pub const ATTACK_COOLDOWN_TICKS: i32 = ATTACK_COOLDOWN_SECONDS * TICKS_PER_SEC;
+
+// Random jitter (in ticks) added to an NPC's attack cooldown so NPCs that
+// spawned on the same tick don't keep attacking in perfect lockstep.
 pub const NPC_ATTACK_JITTER_TICKS: i32 = 5; // up to 0.5s at 10 ticks/sec
 pub const BASE_MOVE_TICKS: f32 = 100.0;
 pub const BASE_SPEED: f32 = 1.0;
@@ -67,8 +71,8 @@ pub const HIGH: &str = "high";
 pub const AVERAGE: &str = "average";
 pub const LOW: &str = "low";
 
-pub const SANCTUARY_RANGE: u32 = 3;
-pub const WEAK_SANCTUARY_RANGE: u32 = 5;
+// The single Monolith sanctuary reaches the former outer/weak boundary.
+pub const SANCTUARY_RANGE: u32 = 5;
 
 pub const INIT_MONOLITH_SOULSHARDS: i32 = 10;
 
@@ -90,11 +94,15 @@ pub const GATHER_TIME_SEC: i32 = 15;
 
 pub const NO_SHELTER: i32 = -1;
 
-// Loot POI (Supply Cache, Washed Ashore Materials) lifetimes. Abandoned caches
-// auto-despawn after 5 minutes; once emptied they vanish shortly after, leaving
-// a brief beat so the player sees the cache go empty first.
+// Loot POI lifetimes. Abandoned exploration caches auto-despawn after 5 minutes;
+// caches and player-dropped bags vanish shortly after they are emptied, leaving
+// a brief beat so the player sees the container go empty first.
 pub const LOOT_POI_DESPAWN_TICKS: i32 = TICKS_PER_SEC * 60 * 5; // 5 minutes
 pub const LOOT_POI_EMPTY_DESPAWN_TICKS: i32 = TICKS_PER_SEC * 10; // 10 seconds
+pub const DROPPED_BAG_CAPACITY: i32 = 50;
+pub const DROPPED_BAG_LIFETIME_TICKS: i32 = TICKS_PER_SEC * 60 * 5; // 5 minutes
+pub const DROPPED_BAG_ONE_MINUTE_WARNING_TICKS: i32 = TICKS_PER_SEC * 60;
+pub const DROPPED_BAG_TEN_SECOND_WARNING_TICKS: i32 = TICKS_PER_SEC * 10;
 
 pub const IMAGE: &str = "image";
 pub const TEMPLATE: &str = "template";
@@ -150,6 +158,7 @@ pub const STATE_PROSPECTING: &str = "prospecting";
 pub const STATE_INVESTIGATING: &str = "investigating";
 pub const STATE_DRINKING: &str = "drinking";
 pub const STATE_EATING: &str = "eating";
+pub const STATE_HEALING: &str = "healing";
 pub const STATE_SLEEPING: &str = "sleeping";
 pub const STATE_HIDING: &str = "hiding";
 pub const STATE_EXPERIMENTING: &str = "experimenting";

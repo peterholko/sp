@@ -22,6 +22,18 @@ sequence.
 Before the assault launches, crisis timing advances only while the player is
 online.
 
+Goblin pressure now represents threat only. Non-wall settlement growth, stored
+gold, exploration, and online-active time create threat. The introduction
+danger flag is only a safety gate. Walls, villagers/defenders, equipment,
+healing, and sanctuary strength are readiness facts and add no pressure.
+
+The Goblin sequence enters `Preparing` at 45 pressure after the existing
+ordered phase gates. From that point, a fixed 1,800-tick / 180-online-second
+preparation window is the only requirement for `AssaultReady`; later pressure
+changes cannot shorten it. Offline time still does not advance the window.
+Readiness guidance is visible from `Signs` through `AssaultReady`, and the
+Defences row reports the live bound-sanctuary level alongside wall state.
+
 Once the assault launches, it remains active in the persistent world and
 continues if the player disconnects.
 
@@ -29,6 +41,14 @@ Personal-crisis attackers and spells may affect only the owning player's
 settlement, associated units, and exact attributed assault targets.
 
 Defeating all attributed attackers resolves the crisis exactly once.
+
+Recovery remains preparation-driven rather than passive. New runs can recover
+one canonical 50-HP Health Potion from their Shipwreck; Crude Bandages heal 10
+HP, cost 2 renewable Plant Fibers, and take 2 interruptible seconds to apply;
+Herbal Poultices heal 20 HP and still require a Crafting Tent, Berries, and
+Cloth. Fully tired sleep restores at most 35% of maximum HP. Crisis Recovery
+guidance reports `ready` only when carried effective healing reaches 40% of the
+live hero's maximum HP.
 
 The default runtime uses `SurvivalDirectorMode::PersonalCrisis`. The legacy
 automatic rat, wolf, Goblin, Undead, Pillager, nightly, and legendary systems
@@ -511,7 +531,7 @@ fallback while preventing a partial/stale hero row from becoming a settlement.
 No anchor leaves the crisis ready and produces one warning.
 
 For a bound sanctuary, candidates are drawn from the three rings beginning one
-tile outside that exact monolith's weak-sanctuary radius. Other anchors use
+tile outside that exact monolith's sanctuary radius. Other anchors use
 rings six through eight. The bounded helper rejects out-of-map, impassable,
 occupied, duplicate, and neighbouring-settlement-footprint tiles and requires
 a terrain path back to the anchor. It returns `None` rather than an invalid
@@ -924,26 +944,31 @@ evaluator or changes gameplay through it.
 
 ### Selected pressure model
 
+> Historical Checkpoint 2 record. The current threat/readiness separation in
+> the gameplay contract above supersedes these original contributor values.
+
 Pressure is recomputed from current read-only facts on a 0–100 scale. It is not
 incrementally awarded and has no global-day input:
 
 | Existing fact | Pressure |
 | --- | ---: |
 | Introduction danger unlocked | 10 |
-| At least three completed player-owned structures | 20 |
+| At least five completed player-owned structures | 20 |
 | At least one living player-owned villager | 15 |
 | `explore_poi` objective complete | 10 |
-| `choose_expansion` objective complete | 15 |
+| At least one completed player-owned Stockade | 15 |
 | Stored gold at 25 / 50 / 100 | 5 / 10 / 15 |
 | Bound sanctuary level | 2 per level, maximum 10 |
 | Online-active time at 600 / 1,800 / 3,600 ticks | 5 / 10 / 15 |
 
-The raw sum is capped at 100. Completed structures and living villagers are read
-from world facts; their corresponding `build_3_structures` and
-`recruit_villager` objective flags are deliberately not added again. Stored gold
-is read only from completed owned storage structures, so unfinished or dead
-storage does not count and no inventory is consumed or altered. Settlement facts
-are aggregated once per evaluation before per-player calculation.
+The raw sum is capped at 100. Completed structures, completed Stockades, and
+living villagers are read from world facts rather than tutorial flags. A
+completed Stockade intentionally contributes to both the five-structure
+threshold and the separate fortification threshold; Lumber Camps and unfinished
+Stockade foundations do not satisfy the fortification threshold. Stored gold is
+read only from completed owned storage structures, so unfinished or dead storage
+does not count and no inventory is consumed or altered. Settlement facts are
+aggregated once per evaluation before per-player calculation.
 
 ### Presence and online timing semantics
 
@@ -965,6 +990,10 @@ and pre-gate intervals update only the watermark, so none can be backfilled
 after reconnect, resurrection, or entity recreation.
 
 ### Phase thresholds, warning, and observability
+
+> Historical Checkpoint 2 record. The current Goblin `Preparing` transition is
+> 45 pressure, and `Preparing` → `AssaultReady` now uses only the fixed 1,800
+> online-tick window described in the gameplay contract.
 
 Transitions are strictly ordered and limited to one per player per evaluation:
 

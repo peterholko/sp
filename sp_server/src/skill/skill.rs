@@ -16,7 +16,7 @@ pub const FORAGING: &str = "Foraging";
 pub const FARMING: &str = "Farming";
 pub const FISHING: &str = "Fishing";
 pub const BUTCHERY: &str = "Butchery";
-pub const WOODCUTTING: &str = "Woodcutting";
+pub const TIMBERWORKING: &str = "Timberworking";
 pub const WEAPONSMITHING: &str = "Weaponsmithing";
 pub const ARMORSMITHING: &str = "Armorsmithing";
 pub const TOOLMAKING: &str = "Toolmaking";
@@ -278,6 +278,7 @@ impl SkillData {
         match item_class {
             item::WEAPON => Some(Skill::Weaponsmithing),
             item::ARMOR => Some(Skill::Armorsmithing),
+            crate::constants::TOOL => Some(Skill::Toolmaking),
             item::GATHERING => Some(Skill::Toolmaking),
             item::TORCH => Some(Skill::Toolmaking),
             item::MATERIAL => Some(Skill::Processing),
@@ -290,7 +291,7 @@ impl SkillData {
 
     pub fn item_subclass_to_skill(item_subclass: &str) -> Option<Skill> {
         match item_subclass {
-            item::FIREWOOD => Some(Skill::Woodcutting),
+            item::FIREWOOD => Some(Skill::Timberworking),
             _ => None,
         }
     }
@@ -327,5 +328,13 @@ mod tests {
 
         skills.update(Skill::Weaponsmithing, 200, &templates);
         assert!(skills.has_proficiency_requirement(Skill::Weaponsmithing, 25, &templates,));
+    }
+
+    #[test]
+    fn dedicated_tools_use_toolmaking() {
+        assert_eq!(
+            SkillData::item_class_to_skill(crate::constants::TOOL),
+            Some(Skill::Toolmaking)
+        );
     }
 }

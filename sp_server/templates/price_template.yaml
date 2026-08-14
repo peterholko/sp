@@ -83,6 +83,20 @@
   sell_quantity: 25
   impact_factor: 0.1
 
+- name: Stonecutter Hammer
+  buy_price: 10
+  buy_quantity: 100
+  sell_price: 25
+  sell_quantity: 25
+  impact_factor: 0.1
+
+- name: Fishing Rod
+  buy_price: 10
+  buy_quantity: 100
+  sell_price: 25
+  sell_quantity: 25
+  impact_factor: 0.1
+
 - name: Yurt Deed
   buy_price: 50
   buy_quantity: 100

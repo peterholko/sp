@@ -1,6 +1,7 @@
 // Safe Logout ward geometry; live sanctuary boundaries use this perimeter helper separately.
 
 import { ObjectState } from '../../core/objectState';
+import { isPerceivedMapObject } from '../../core/mapObjectPresence';
 import {
   ProtectedSettlement,
   ProtectedSettlementLookup,
@@ -44,15 +45,15 @@ function edgeKey(start: WardPoint, end: WardPoint): string {
 }
 
 /**
- * The server sanctuary predicate is `distance < full_radius`. Build the exact
+ * The server sanctuary predicate is `distance < radius`. Build the exact
  * union of those hexes, then cancel shared edges so only its perimeter remains.
  */
 export function sanctuaryWardSegments(
   anchorQ: number,
   anchorR: number,
-  fullRadius: number,
+  sanctuaryRadius: number,
 ): WardSegment[] {
-  const radius = Math.max(1, Math.floor(fullRadius));
+  const radius = Math.max(1, Math.floor(sanctuaryRadius));
   const edges = new Map<string, WardSegment>();
 
   for (const cell of Util.range(anchorQ, anchorR, radius - 1)) {
@@ -85,7 +86,11 @@ export function sanctuaryWardPresentation(
   objectState: ObjectState | undefined,
   settlements: ProtectedSettlementLookup,
 ): SanctuaryWardPresentation | null {
-  if (!objectState || objectState.subclass !== 'monolith' || objectState.op === 'deleted') {
+  if (
+    !objectState
+    || objectState.subclass !== 'monolith'
+    || !isPerceivedMapObject(objectState)
+  ) {
     return null;
   }
 

@@ -168,12 +168,8 @@ export default class SelectPanel extends React.Component<SelectPanelProps, any> 
       console.log(Global.objectStates[objId]);
 
       if (objId in Global.objectStates) {
-
-        if (Util.isSprite(Global.objectStates[objId].image)) {
-          var imageName = Global.objectStates[objId].image + '_single.png';
-        } else {
-          var imageName = Global.objectStates[objId].image + '.png';
-        }
+        const objectState = Global.objectStates[objId];
+        const imageName = Util.getImagePreviewName(objectState.image);
 
         var rightPos = i % MAX_SELECT_BOXES;
 
@@ -240,4 +236,3 @@ export default class SelectPanel extends React.Component<SelectPanelProps, any> 
     );
   }
 }
-

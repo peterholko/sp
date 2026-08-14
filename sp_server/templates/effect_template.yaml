@@ -119,10 +119,6 @@
   defense: 5.0
   duration: -1
 
-- name: Weak Sanctuary
-  defense: 2.0
-  duration: -1
-
 - name: Burning
   damage: 0.01
   duration: 20

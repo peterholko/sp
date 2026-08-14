@@ -46,6 +46,35 @@ impl PlayerId {
 #[reflect(Component)]
 pub struct Name(pub String);
 
+pub const HERO_PORTRAITS: [&str; 5] = [
+    "portraits/heroes/hero-01.png",
+    "portraits/heroes/hero-02.png",
+    "portraits/heroes/hero-03.png",
+    "portraits/heroes/hero-04.png",
+    "portraits/heroes/hero-05.png",
+];
+
+pub const VILLAGER_PORTRAITS: [&str; 6] = [
+    "portraits/villagers/villager-01.png",
+    "portraits/villagers/villager-02.png",
+    "portraits/villagers/villager-03.png",
+    "portraits/villagers/villager-04.png",
+    "portraits/villagers/villager-05.png",
+    "portraits/villagers/villager-06.png",
+];
+
+pub fn is_valid_hero_portrait(portrait: &str) -> bool {
+    HERO_PORTRAITS.contains(&portrait)
+}
+
+pub fn default_hero_portrait() -> &'static str {
+    HERO_PORTRAITS[0]
+}
+
+#[derive(Debug, Reflect, Component, Default, Clone, PartialEq, Eq)]
+#[reflect(Component)]
+pub struct Portrait(pub String);
+
 #[derive(Debug, Reflect, Component, Default, Clone)]
 #[reflect(Component)]
 pub struct Template(pub String);
@@ -279,6 +308,7 @@ pub enum State {
     Harvesting,
     Drinking,
     Eating,
+    Healing,
     Sleeping,
     Aboard,
     Casting,
@@ -369,6 +399,7 @@ impl State {
             State::Harvesting => STATE_HARVESTING.to_string(),
             State::Drinking => STATE_DRINKING.to_string(),
             State::Eating => STATE_EATING.to_string(),
+            State::Healing => STATE_HEALING.to_string(),
             State::Sleeping => STATE_SLEEPING.to_string(),
             State::Aboard => STATE_ABOARD.to_string(),
             State::Casting => STATE_CASTING.to_string(),
@@ -444,6 +475,7 @@ pub fn is_peaceful_interruptible_state(state: &State) -> bool {
             | State::Crafting
             | State::Drinking
             | State::Eating
+            | State::Healing
             | State::Sleeping
             | State::Fishing
     )
@@ -507,7 +539,8 @@ pub enum ActiveTask {
     Operating,
     Mining,
     Hunting,
-    Woodcutting,
+    Logging,
+    Timberworking,
     Stonecutting,
     Refining,
     Crafting,
@@ -558,7 +591,8 @@ impl ActiveTask {
             ActiveTask::Operating => "Operating",
             ActiveTask::Mining => "Mining",
             ActiveTask::Hunting => "Hunting",
-            ActiveTask::Woodcutting => "Woodcutting",
+            ActiveTask::Logging => "Logging",
+            ActiveTask::Timberworking => "Timberworking",
             ActiveTask::Stonecutting => "Stonecutting",
             ActiveTask::Refining => "Refining",
             ActiveTask::Crafting => "Crafting",
@@ -588,7 +622,8 @@ impl ActiveTask {
         match activity.as_str() {
             "Mining" => ActiveTask::Mining,
             "Hunting" => ActiveTask::Hunting,
-            "Woodcutting" => ActiveTask::Woodcutting,
+            "Logging" => ActiveTask::Logging,
+            "Timberworking" => ActiveTask::Timberworking,
             "Stonecutting" => ActiveTask::Stonecutting,
             "Refining" => ActiveTask::Refining,
             "Crafting" => ActiveTask::Crafting,
@@ -682,6 +717,33 @@ pub struct Assignment {
 
 #[derive(Debug, Component, Clone)]
 pub struct Assignments(pub Vec<i32>); // List of Ids
+
+/// Server-authoritative, non-renewable lifetime for an abandoned item bag.
+/// Contributors are tracked only so each player who added loot can be warned.
+#[derive(Debug, Component, Clone)]
+pub struct DroppedBag {
+    pub expires_at: i32,
+    pub contributors: Vec<i32>,
+    pub warned_one_minute: bool,
+    pub warned_ten_seconds: bool,
+}
+
+impl DroppedBag {
+    pub fn new(expires_at: i32, player_id: i32) -> Self {
+        Self {
+            expires_at,
+            contributors: vec![player_id],
+            warned_one_minute: false,
+            warned_ten_seconds: false,
+        }
+    }
+
+    pub fn add_contributor(&mut self, player_id: i32) {
+        if !self.contributors.contains(&player_id) {
+            self.contributors.push(player_id);
+        }
+    }
+}
 
 #[derive(Debug, Component, Clone)]
 pub struct SelectedUpgrade(pub String);
@@ -1010,6 +1072,15 @@ pub struct Obj {
 }
 
 impl Obj {
+    fn blocks_path_for(
+        mover_player_id: i32,
+        obj_player_id: &PlayerId,
+        obj_class: &Class,
+        obj_state: &State,
+    ) -> bool {
+        mover_player_id != obj_player_id.0 && obj_class.is_blocking() && obj_state.is_blocking()
+    }
+
     pub fn create(
         player_id: i32,
         template_name: String,
@@ -1156,6 +1227,7 @@ impl Obj {
             STATE_INVESTIGATING => State::Investigating,
             STATE_DRINKING => State::Drinking,
             STATE_EATING => State::Eating,
+            STATE_HEALING => State::Healing,
             STATE_SLEEPING => State::Sleeping,
             STATE_CASTING => State::Casting,
             STATE_HIDING => State::Hiding,
@@ -1186,6 +1258,7 @@ impl Obj {
             State::Investigating => STATE_INVESTIGATING,
             State::Drinking => STATE_DRINKING,
             State::Eating => STATE_EATING,
+            State::Healing => STATE_HEALING,
             State::Sleeping => STATE_SLEEPING,
             State::Casting => STATE_CASTING,
             State::Hiding => STATE_HIDING,
@@ -1295,26 +1368,29 @@ impl Obj {
 
     pub fn blocking_list(
         player_id: i32,
-        entity: &Entity,
-        query: &Query<(&Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
+        query: &Query<(Entity, &Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
         state_query: &Query<&mut State>,
     ) -> Vec<Blocker> {
         let mut collision_list: Vec<Blocker> = Vec::new();
 
-        for (obj_id, obj_player_id, obj_pos, obj_class, obj_subclass, _obj_stats) in query.iter() {
-            if let Ok(state) = state_query.get(*entity) {
-                if player_id != obj_player_id.0 && state.is_blocking() {
-                    let blocker = Blocker {
-                        player_id: obj_player_id.clone(),
-                        id: obj_id.clone(),
-                        pos: obj_pos.clone(),
-                        class: obj_class.clone(),
-                        subclass: obj_subclass.clone(),
-                        state: state.clone(),
-                    };
+        for (obj_entity, obj_id, obj_player_id, obj_pos, obj_class, obj_subclass, _obj_stats) in
+            query.iter()
+        {
+            let Ok(obj_state) = state_query.get(obj_entity) else {
+                continue;
+            };
 
-                    collision_list.push(blocker);
-                }
+            if Self::blocks_path_for(player_id, obj_player_id, obj_class, obj_state) {
+                let blocker = Blocker {
+                    player_id: obj_player_id.clone(),
+                    id: obj_id.clone(),
+                    pos: obj_pos.clone(),
+                    class: obj_class.clone(),
+                    subclass: obj_subclass.clone(),
+                    state: obj_state.clone(),
+                };
+
+                collision_list.push(blocker);
             }
         }
 
@@ -1325,7 +1401,7 @@ impl Obj {
         let mut collision_list: Vec<Blocker> = Vec::new();
 
         for obj in query.iter() {
-            if player_id != obj.player_id.0 && obj.state.is_blocking() && obj.class.is_blocking() {
+            if Self::blocks_path_for(player_id, obj.player_id, obj.class, obj.state) {
                 let blocker = Blocker {
                     player_id: obj.player_id.clone(),
                     id: obj.id.clone(),
@@ -1349,7 +1425,7 @@ impl Obj {
         let mut collision_list: Vec<Blocker> = Vec::new();
 
         for obj in query.iter() {
-            if player_id != obj.player_id.0 && obj.state.is_blocking() && obj.class.is_blocking() {
+            if Self::blocks_path_for(player_id, obj.player_id, obj.class, obj.state) {
                 let blocker = Blocker {
                     player_id: obj.player_id.clone(),
                     id: obj.id.clone(),
@@ -1487,7 +1563,103 @@ impl Obj {
 
 #[cfg(test)]
 mod tests {
-    use super::ActiveTask;
+    use super::{
+        is_valid_hero_portrait, ActiveTask, Class, Id, Obj, PlayerId, Position, State, Stats,
+        Subclass, HERO_PORTRAITS,
+    };
+    use crate::constants::{CLASS_CORPSE, CLASS_STRUCTURE, CLASS_UNIT, LOG};
+    use bevy::prelude::{App, Entity, Query, ResMut, Resource, Update};
+
+    #[derive(Resource, Default)]
+    struct CollectedBlockerIds(Vec<i32>);
+
+    fn collect_blocker_ids(
+        query: Query<(Entity, &Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
+        state_query: Query<&mut State>,
+        mut collected: ResMut<CollectedBlockerIds>,
+    ) {
+        collected.0 = Obj::blocking_list(1, &query, &state_query)
+            .into_iter()
+            .map(|blocker| blocker.id.0)
+            .collect();
+    }
+
+    fn blocker_test_stats() -> Stats {
+        Stats {
+            hp: 1,
+            stamina: None,
+            mana: None,
+            base_hp: 1,
+            base_stamina: None,
+            base_mana: None,
+            base_def: 0,
+            damage_range: None,
+            base_damage: None,
+            base_speed: None,
+            base_vision: None,
+        }
+    }
+
+    #[test]
+    fn path_blocker_policy_excludes_corpses_and_dead_objects() {
+        let foreign_player = PlayerId(999);
+
+        assert!(!Obj::blocks_path_for(
+            1,
+            &foreign_player,
+            &Class(CLASS_CORPSE.to_string()),
+            &State::Dead,
+        ));
+        assert!(!Obj::blocks_path_for(
+            1,
+            &foreign_player,
+            &Class(CLASS_UNIT.to_string()),
+            &State::Dead,
+        ));
+        assert!(Obj::blocks_path_for(
+            1,
+            &foreign_player,
+            &Class(CLASS_UNIT.to_string()),
+            &State::None,
+        ));
+        assert!(!Obj::blocks_path_for(
+            1,
+            &foreign_player,
+            &Class(CLASS_STRUCTURE.to_string()),
+            &State::Founded,
+        ));
+        assert!(!Obj::blocks_path_for(
+            foreign_player.0,
+            &foreign_player,
+            &Class(CLASS_UNIT.to_string()),
+            &State::None,
+        ));
+
+        let mut app = App::new();
+        app.init_resource::<CollectedBlockerIds>()
+            .add_systems(Update, collect_blocker_ids);
+
+        let fixtures = [
+            (2, 999, CLASS_CORPSE, Subclass::Corpse, State::None),
+            (3, 999, CLASS_UNIT, Subclass::Villager, State::None),
+            (4, 999, CLASS_UNIT, Subclass::Villager, State::Dead),
+            (5, 1, CLASS_UNIT, Subclass::Villager, State::None),
+        ];
+        for (id, player_id, class, subclass, state) in fixtures {
+            app.world_mut().spawn((
+                Id(id),
+                PlayerId(player_id),
+                Position { x: id, y: 1 },
+                Class(class.to_string()),
+                subclass,
+                blocker_test_stats(),
+                state,
+            ));
+        }
+
+        app.update();
+        assert_eq!(app.world().resource::<CollectedBlockerIds>().0, vec![3]);
+    }
 
     #[test]
     fn active_task_labels_cover_common_villager_panel_states() {
@@ -1502,7 +1674,8 @@ mod tests {
             (ActiveTask::Following, "Following"),
             (ActiveTask::Building, "Building"),
             (ActiveTask::Mining, "Mining"),
-            (ActiveTask::Woodcutting, "Woodcutting"),
+            (ActiveTask::Logging, "Logging"),
+            (ActiveTask::Timberworking, "Timberworking"),
             (ActiveTask::Stonecutting, "Stonecutting"),
             (ActiveTask::Refining, "Refining"),
             (ActiveTask::Crafting, "Crafting"),
@@ -1521,5 +1694,36 @@ mod tests {
         for (task, label) in cases {
             assert_eq!(task.to_string(), label);
         }
+    }
+
+    #[test]
+    fn logging_and_timberworking_are_distinct_activities() {
+        assert_eq!(
+            ActiveTask::get_activity_from_res_type(LOG.to_string()),
+            ActiveTask::Logging
+        );
+        assert_eq!(
+            ActiveTask::get_activity_from_string("Logging".to_string()),
+            ActiveTask::Logging
+        );
+        assert_eq!(
+            ActiveTask::get_activity_from_string("Timberworking".to_string()),
+            ActiveTask::Timberworking
+        );
+        assert_eq!(ActiveTask::Logging.to_string(), "Logging");
+        assert_eq!(ActiveTask::Timberworking.to_string(), "Timberworking");
+    }
+
+    #[test]
+    fn hero_portrait_allowlist_accepts_only_creation_choices() {
+        for portrait in HERO_PORTRAITS {
+            assert!(is_valid_hero_portrait(portrait));
+        }
+
+        assert!(!is_valid_hero_portrait(
+            "portraits/villagers/villager-01.png"
+        ));
+        assert!(!is_valid_hero_portrait("../../private/portrait.png"));
+        assert!(!is_valid_hero_portrait(""));
     }
 }
