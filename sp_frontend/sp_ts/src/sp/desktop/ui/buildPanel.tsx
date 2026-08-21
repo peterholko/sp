@@ -150,6 +150,11 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
               <td>Build Time:</td>
               <td>{this.state.structure.build_time}</td>
             </tr>
+            {this.state.structure.placement_resource &&
+              <tr>
+                <td>Placement:</td>
+                <td>{this.state.structure.placement_resource}</td>
+              </tr>}
             <tr>
               <td>Materials:</td>
             </tr>
@@ -165,6 +170,5 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
     );
   }
 }
-
 
 

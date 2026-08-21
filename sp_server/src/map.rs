@@ -1367,6 +1367,13 @@ impl Map {
     }*/
 
     pub fn get_wildness(&self, x: i32, y: i32) -> i32 {
+        // Wildness participates in client-facing tile inspection as well as
+        // encounter rolls. Invalid coordinates must fail closed instead of
+        // wrapping a negative index to usize and panicking the Bevy schedule.
+        if !Map::is_valid_pos((x, y)) {
+            return 0;
+        }
+
         let tile_index = y * WIDTH + x;
         let tile_index_usize = tile_index as usize;
 
@@ -1374,6 +1381,10 @@ impl Map {
     }
 
     pub fn get_wildness_string(&self, x: i32, y: i32) -> String {
+        if !Map::is_valid_pos((x, y)) {
+            return "Unknown".to_string();
+        }
+
         let wildness = self.get_wildness(x, y);
         match wildness {
             0 => "Secure".to_string(),
@@ -1386,6 +1397,10 @@ impl Map {
     }
 
     pub fn update_wildness(&mut self, x: i32, y: i32, value: i32) {
+        if !Map::is_valid_pos((x, y)) {
+            return;
+        }
+
         let tile_index = y * WIDTH + x;
         let tile_index_usize = tile_index as usize;
 
@@ -1439,6 +1454,42 @@ mod tests {
     }
 
     #[test]
+    fn southwest_start_has_nearby_deciduous_forest() {
+        let map = Map::load_map();
+
+        for (x, y) in [(16, 38), (17, 37), (18, 37)] {
+            let tile = &map.base[Map::pos_to_index(x, y)];
+            assert_eq!(tile.layers, vec![1, 19], "unexpected layers at ({x}, {y})");
+            assert_eq!(
+                tile.tile_type,
+                TileType::DeciduousForest,
+                "unexpected terrain at ({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn wildness_access_and_updates_fail_closed_outside_the_map() {
+        let mut map = flat_test_map();
+        map.wildness[0] = 3;
+
+        for (x, y) in [
+            (-1, 0),
+            (0, -1),
+            (WIDTH, 0),
+            (0, HEIGHT),
+            (i32::MIN, 0),
+            (i32::MAX, 0),
+        ] {
+            assert_eq!(map.get_wildness(x, y), 0);
+            assert_eq!(map.get_wildness_string(x, y), "Unknown");
+            map.update_wildness(x, y, 1);
+        }
+
+        assert_eq!(map.get_wildness(0, 0), 3);
+    }
+
+    #[test]
     fn test_get_tiles_by_range() {
         let map: Map = Map::load_map();
 
@@ -1446,7 +1497,7 @@ mod tests {
 
         println!("{:#?}", tiles);
 
-        let test_tiles = r#"[{"t":[13],"x":17,"y":34},{"t":[1],"x":16,"y":37},{"t":[1],"x":16,"y":35},{"t":[13],"x":18,"y":36},{"t":[5],"x":15,"y":36},{"t":[1],"x":17,"y":37},{"t":[1],"x":15,"y":34},{"t":[5],"x":14,"y":37},{"t":[13],"x":17,"y":35},{"t":[1],"x":16,"y":38},{"t":[1],"x":14,"y":35},{"t":[1],"x":16,"y":36},{"t":[1],"x":18,"y":37},{"t":[13],"x":16,"y":34},{"t":[5],"x":15,"y":37},{"t":[1],"x":18,"y":35},{"t":[13],"x":15,"y":35},{"t":[1],"x":17,"y":36},{"t":[13],"x":14,"y":36}]"#;
+        let test_tiles = r#"[{"t":[13],"x":17,"y":34},{"t":[1],"x":16,"y":37},{"t":[1],"x":16,"y":35},{"t":[13],"x":18,"y":36},{"t":[5],"x":15,"y":36},{"t":[1,19],"x":17,"y":37},{"t":[1],"x":15,"y":34},{"t":[5],"x":14,"y":37},{"t":[13],"x":17,"y":35},{"t":[1,19],"x":16,"y":38},{"t":[1],"x":14,"y":35},{"t":[1],"x":16,"y":36},{"t":[1,19],"x":18,"y":37},{"t":[13],"x":16,"y":34},{"t":[5],"x":15,"y":37},{"t":[1],"x":18,"y":35},{"t":[13],"x":15,"y":35},{"t":[1],"x":17,"y":36},{"t":[13],"x":14,"y":36}]"#;
 
         let deserialized_test_tiles: Vec<MapTile> = serde_json::from_str(&test_tiles).unwrap();
 

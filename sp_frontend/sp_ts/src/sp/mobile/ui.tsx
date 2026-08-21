@@ -13,6 +13,7 @@ import SingleInventoryPanel from './ui/singleInventoryPanel';
 import ItemPanel from './ui/itemPanel';
 
 import explorebutton from "ui/explorebutton.png";
+import smalliconborder from "ui/selectbordersmall.png";
 
 import movecompass from "ui/movecompass.png";
 import movecompass_click from "ui/movecompass_click.png"
@@ -23,7 +24,11 @@ import dodgebutton from "ui/dodgebutton.png";
 
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
-import { chooseCombatAutoTarget } from '../core/combatAutoTarget';
+import {
+  carryTransferableFinisherAfterKill,
+  chooseCombatAutoTarget,
+  retargetTransferableFinisher,
+} from '../core/combatAutoTarget';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
 import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
@@ -36,7 +41,8 @@ import {
   PRECISE,
   FIERCE,
   OBJ,
-  TILE
+  TILE,
+  GATHERING,
 } from '../core/config';
 import TargetActionPanel from './ui/targetActionPanel';
 import ItemTransferPanel from './ui/itemTransferPanel';
@@ -194,6 +200,7 @@ interface UIState {
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
   combatState: any,
+  heroGatheringActive: boolean,
 }
 
 export default class UI extends React.Component<any, UIState> {
@@ -310,6 +317,7 @@ export default class UI extends React.Component<any, UIState> {
       fatigueStatus: '',
       infoRefineItemTriggered: false,
       combatState: null,
+      heroGatheringActive: false,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -363,6 +371,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CONFIRMATION, this.handleConfirmation, this);
     Global.gameEmitter.on(GameEvent.CONFIRM_OK_CLICK, this.handleConfirmOkClick, this);
     Global.gameEmitter.on(GameEvent.RESOURCE_BUTTON_CLICK, this.handleResourceButtonClick, this);
+    Global.gameEmitter.on(GameEvent.TERRAIN_FEATURE_BUTTON_CLICK, this.handleTerrainFeatureButtonClick, this);
     Global.gameEmitter.on(GameEvent.OBJ_CREATED, this.handleObjCreated, this);
     Global.gameEmitter.on(GameEvent.OBJ_DELETED, this.handleObjDeleted, this);
     Global.gameEmitter.on(GameEvent.OBJ_MOVED, this.handleObjMoved, this);
@@ -379,6 +388,7 @@ export default class UI extends React.Component<any, UIState> {
 
     Global.gameEmitter.on(NetworkEvent.ERROR, this.handleError, this);
     Global.gameEmitter.on(NetworkEvent.NOTICE, this.handleNotice, this);
+    Global.gameEmitter.on(NetworkEvent.GATHER, this.handleGatherStarted, this);
     Global.gameEmitter.on(NetworkEvent.WORLD, this.handleWorld, this);
     Global.gameEmitter.on(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
     Global.gameEmitter.on(NetworkEvent.INFO_HERO, this.handleInfoHero, this);
@@ -433,10 +443,15 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.NEW_ITEMS, this.handleNewItems, this);
     Global.gameEmitter.on(NetworkEvent.DMG, this.handleDamage, this);
     Global.gameEmitter.on(NetworkEvent.STATS, this.handleStats, this);
+    Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.handleNearbyResources, this);
   }
 
   handleImageDefinitionReady() {
     this.forceUpdate();
+  }
+
+  handleGatherStarted() {
+    this.setState({ heroGatheringActive: true });
   }
 
   handleMoveClick(event: React.MouseEvent) {
@@ -612,7 +627,8 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ hideInventoryPanel: true });
       Global.network.sendInfoExit(this.state.inventoryData.id, "inventory");
     } else if (event.panelType == 'itemTransfer') {
-      this.setState({ hideItemTransferPanel: true })
+      this.setState({ hideItemTransferPanel: true });
+      Global.network.sendInfoExit(this.state.leftInventoryId, "item_transfer");
     } else if (event.panelType == 'merchant') {
       this.setState({ hideMerchantPanel: true })
     } else if (event.panelType == 'wanteditempanel') {
@@ -652,6 +668,7 @@ export default class UI extends React.Component<any, UIState> {
         hideStructurePanel: true,
         hideAssignPanel: true
       });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure");
     } else if (event.panelType == 'assign') {
       this.setState({ hideAssignPanel: true });
     } else if (event.panelType == 'refine') {
@@ -662,6 +679,7 @@ export default class UI extends React.Component<any, UIState> {
       Global.network.sendInfoExit(this.state.craftData.crafter_id, "craft");
     } else if (event.panelType == 'structure_craft') {
       this.setState({ hideStructureCraftPanel: true });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure_craft");
     } else if (event.panelType == 'structure_refine') {
       this.setState({ hideStructureRefinePanel: true });
       Global.network.sendInfoExit(this.state.structureData.id, "structure_refine");
@@ -796,23 +814,21 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroGatherClick(event: React.MouseEvent) {
-    /*this.setState({
+    this.setState({
       selectedKey: { type: OBJ, id: Global.heroId },
       hideGatherPanel: false
-    });*/
-    Global.network.sendGather();
+    });
   }
 
   handleHeroSleepClick(event: React.MouseEvent) {
-    //Network.sendRest(Global.heroId);
+    Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
+    this.setState({ resourcesIconBorder: Global.resourceLayerVisible });
+  }
 
-    if (!Global.resourceLayerVisible) {
-      Global.network.sendNearbyResources();
-      this.setState({ resourcesIconBorder: true });
-    } else {
-      Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
-      this.setState({ resourcesIconBorder: false });
-    }
+  handleNearbyResources(message) {
+    this.setState({
+      resourcesIconBorder: Array.isArray(message?.data) && message.data.length > 0,
+    });
   }
 
   handleHeroEquipClick(event: React.MouseEvent) {
@@ -831,9 +847,17 @@ export default class UI extends React.Component<any, UIState> {
       return;
     }
 
-    const targetId = combatState.target_id !== undefined
-      ? combatState.target_id
-      : Global.selectedKey.id;
+    const selectedTargetId = Global.selectedKey?.type === OBJ
+      ? Global.selectedKey.id
+      : undefined;
+    const targetId = combatState.finisher_transferable && selectedTargetId !== undefined
+      ? selectedTargetId
+      : combatState.target_id !== undefined
+        ? combatState.target_id
+        : selectedTargetId;
+    if (targetId === undefined) {
+      return;
+    }
     Global.network.sendCombo(Global.heroId, targetId, comboType);
   }
 
@@ -869,7 +893,21 @@ export default class UI extends React.Component<any, UIState> {
       Global.objectStates,
     );
 
+    const carriedCombatState = carryTransferableFinisherAfterKill(
+      Global.combatState,
+      message,
+      Global.heroId,
+      nextTargetId,
+    );
+
     if (nextTargetId === null) {
+      if (carriedCombatState) {
+        Global.combatState = carriedCombatState;
+        this.setState({
+          combatState: carriedCombatState,
+          hideAttacksPanel: false,
+        });
+      }
       return;
     }
 
@@ -880,16 +918,16 @@ export default class UI extends React.Component<any, UIState> {
 
     Global.selectedKey = selectedKey;
     Global.attacks.length = 0;
-    Global.combatState = null;
+    Global.combatState = carriedCombatState;
 
     this.setState({
       objIdsOnTile,
       hideSelectPanel: false,
       hideTargetActionPanel: false,
-      hideAttacksPanel: true,
+      hideAttacksPanel: carriedCombatState === null,
       selectedBoxPos,
       selectedKey,
-      combatState: null,
+      combatState: carriedCombatState,
     });
   }
 
@@ -908,6 +946,19 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleCombatState(message) {
+    const stateTarget = message && Global.objectStates[message.target_id];
+    if (message?.finisher_transferable && stateTarget?.state === 'dead') {
+      const selectedId = Global.selectedKey?.type === OBJ
+        && Number(Global.selectedKey.id) !== Number(message.target_id)
+        && Global.objectStates[Global.selectedKey.id]?.state !== 'dead'
+          ? Global.selectedKey.id
+          : null;
+      if (selectedId !== null) {
+        message = retargetTransferableFinisher(message, selectedId) || message;
+      }
+      Global.combatState = message;
+    }
+
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
     const hasTargetEffects = message && Array.isArray(message.target_effects) && message.target_effects.length > 0;
@@ -1050,6 +1101,10 @@ export default class UI extends React.Component<any, UIState> {
     });
   }
 
+  handleTerrainFeatureButtonClick(event) {
+    this.setState({ hideTerrainFeaturePanel: false });
+  }
+
   handleServerOffline() {
     Global.serverOffline = true;
 
@@ -1060,7 +1115,10 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroInit() {
-    this.setState({ selectedKey: { type: OBJ, id: Global.heroId } });
+    this.setState({
+      selectedKey: { type: OBJ, id: Global.heroId },
+      heroGatheringActive: Global.objectStates[Global.heroId]?.state === GATHERING,
+    });
   }
 
   handleHeroDead() {
@@ -1170,6 +1228,12 @@ export default class UI extends React.Component<any, UIState> {
 
   handleObjMoved(objId) {
     console.log('Obj Moved: ' + objId);
+    if (objId == Global.heroId) {
+      this.setState({
+        heroGatheringActive: Global.objectStates[objId].state === GATHERING,
+      });
+    }
+
     // Entering current selected tile
     if (this.state.selectedTile) {
       if (this.state.selectedTile.hexX == Global.objectStates[objId].x &&
@@ -1204,14 +1268,15 @@ export default class UI extends React.Component<any, UIState> {
     if (objId == Global.heroId) {
       const activityData = { ...(this.state.activityData || {}) };
       activityData[objId] = Global.objectStates[objId].activity;
+      const heroGatheringActive = Global.objectStates[objId].state === GATHERING;
 
       if (this.state.hideHeroPanel == false && objId == this.state.heroDetailedData.id) {
         const newHeroData = { ...this.state.heroDetailedData };
         newHeroData.state = Global.objectStates[objId].state;
         newHeroData.activity = Global.objectStates[objId].activity;
-        this.setState({ heroDetailedData: newHeroData, activityData });
+        this.setState({ heroDetailedData: newHeroData, activityData, heroGatheringActive });
       } else {
-        this.setState({ activityData });
+        this.setState({ activityData, heroGatheringActive });
       }
     }
 
@@ -1283,7 +1348,7 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({
       hideTilePanel: false,
       //hideTileResourcesPanel: false,
-      hideTerrainFeaturePanel: false,
+      hideTerrainFeaturePanel: true,
       tileData: message
     });
   }
@@ -1616,11 +1681,6 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
   }
 
-  /*handleNearbyResources(message) {
-    console.log("UI handleNearbyResources");
-    console.log(message);
-  }*/
-
   handleItemTransfer(message) {
     console.log('UI handleItemTransfer leftId: ' + this.state.leftInventoryId + ' rightId: ' +
       this.state.rightInventoryId + ' sourceId: ' + message.source_id + ' targetId: ' + message.target_id);
@@ -1864,15 +1924,28 @@ export default class UI extends React.Component<any, UIState> {
   render() {
     console.log("styles", styles);
     const abilityHints = this.getAbilityHints();
-    const mobileActionButton = (imageName: string, title: string, handler: any) => (
+    const mobileActionButton = (
+      imageName: string,
+      title: string,
+      handler: any,
+      active: boolean = false,
+      activeTitle: string = 'Gathering — move to stop',
+    ) => (
       <button
         type="button"
         className={styles.mobileActionIconButton}
-        title={title}
-        aria-label={title}
+        title={active ? activeTitle : title}
+        aria-label={active ? activeTitle : title}
+        aria-pressed={active}
         onClick={handler}
       >
         <img src={'/static/art/ui/' + imageName + '.png'} />
+        {active &&
+          <img
+            src={smalliconborder}
+            className={styles.activeGatherButton}
+            alt=""
+            aria-hidden="true" />}
       </button>
     );
     const mobileCooldownButton = (imageName: string, imageButton: any, title: string, handler: any, cooldownEvent: string, timeKey: string) => (
@@ -1894,10 +1967,10 @@ export default class UI extends React.Component<any, UIState> {
         <div className={styles.mobileActionGrid}>
           {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
           {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
-          {mobileCooldownButton('surveybutton', explorebutton, 'Survey', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
-          {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick)}
+          {mobileCooldownButton('surveybutton', explorebutton, 'Scout (daytime only)', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
+          {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick, this.state.heroGatheringActive)}
           {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
-          {mobileActionButton('resourcesbutton', 'Nearby Resources', this.handleHeroSleepClick)}
+          {mobileActionButton('resourcesbutton', 'Nearby Resources', this.handleHeroSleepClick, this.state.resourcesIconBorder, 'Nearby Resources — hide category icons')}
           {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
           {mobileActionButton('craftbutton', 'Handcraft', this.handleHeroCraftClick)}
         </div>

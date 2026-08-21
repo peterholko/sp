@@ -14,14 +14,18 @@ use crate::constants::TICKS_PER_SEC;
 use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
 use crate::farm::{CropStages, Crops};
 use crate::game::{
-    BoundMonolith, Burning, Client, Clients, CrisisAssaultUnit, CrisisPhase, ExploredMap, GameTick,
-    InitialEncounterState, IntroEncounterState, LegendaryThreatState, Merchant, Monolith,
-    PlayerIntroState, RunScoreState, SanctuaryZones, SettlementCrisisState,
+    BoundMonolith, Burning, Client, Clients, CrisisAssaultUnit, CrisisPhase,
+    CurrentConnectionSendError, ExploredMap, GameTick, InitialEncounterState, IntroEncounterState,
+    LegendaryThreatState, Merchant, Monolith, PlayerIntroState, RunScoreState, SanctuaryZones,
+    SettlementCrisisState,
 };
 use crate::ids::{EntityObjMap, Ids};
 use crate::item::Inventory;
 use crate::map::Map;
-use crate::network::{ProtectedSettlementSnapshot, ResponsePacket, SafeLogoutStatusSnapshot};
+use crate::network::{
+    serialize_authoritative_packet, ProtectedSettlementSnapshot, ResponsePacket,
+    SafeLogoutStatusSnapshot,
+};
 use crate::npc::{self, VisibleTarget};
 use crate::obj::{
     ActionProgress, BuildUpgradeState, Campfire, Id, LastAttacker, LastCombatTick, LastDamageTick,
@@ -341,7 +345,8 @@ enum SafeLogoutStatusSendOutcome {
 }
 
 /// Last successfully queued status per authenticated connection. Failed sends
-/// are not cached and remain retryable on the following update.
+/// are not cached; queue failures terminate that socket and its replacement
+/// receives a fresh authoritative snapshot.
 #[derive(Resource, Debug, Default)]
 struct SafeLogoutStatusDeliveryState {
     sent: HashMap<Uuid, SentSafeLogoutStatus>,
@@ -869,7 +874,10 @@ fn locked_client_is_active(
     player_id: i32,
 ) -> bool {
     clients.get(&client_id).is_some_and(|client| {
-        client.id == client_id && client.player_id == player_id && !client.sender.is_closed()
+        client.id == client_id
+            && client.player_id == player_id
+            && !client.sender.is_closed()
+            && !client.termination_requested()
     })
 }
 
@@ -879,11 +887,8 @@ fn locked_connection_is_current(
     connection_id: Uuid,
 ) -> bool {
     locked_client_is_active(clients, connection_id, player_id)
-        && !clients.iter().any(|(other_id, client)| {
-            *other_id != connection_id
-                && client.id == *other_id
-                && client.player_id == player_id
-                && !client.sender.is_closed()
+        && !clients.iter().any(|(other_id, _client)| {
+            *other_id != connection_id && locked_client_is_active(clients, *other_id, player_id)
         })
 }
 
@@ -1028,8 +1033,9 @@ fn game_event_belongs_to_player(
         object_run_owner(object_id, ordinary_owners, run_owners) == Some(player_id)
     };
     match &event.event_type {
-        // Login and notices are connection/presentation work created at the
-        // reconnect boundary, not protected-run simulation deadlines.
+        // Login and generic notices are connection/presentation work created
+        // at the reconnect boundary, not protected-run simulation deadlines.
+        // Authored follow-up speech remains run-owned so its delay is rebased.
         GameEventType::Login { .. } | GameEventType::PlayerNotice { .. } => false,
         GameEventType::MerchantArrival {
             player_id: owner, ..
@@ -1041,6 +1047,9 @@ fn game_event_belongs_to_player(
             player_id: owner, ..
         }
         | GameEventType::SpawnVillager {
+            player_id: owner, ..
+        }
+        | GameEventType::RescuedVillagerBurrowReminder {
             player_id: owner, ..
         }
         | GameEventType::AddEffectOnTile {
@@ -2689,7 +2698,7 @@ fn try_send_safe_logout_status_to_current_connection(
     let Some(client) = clients.get(&connection_id) else {
         return SafeLogoutStatusSendOutcome::StaleConnection;
     };
-    match client.sender.try_send(serialized) {
+    match client.try_queue_authoritative_bundle(vec![serialized]) {
         Ok(()) => {
             if consumes_resume_notice {
                 if let Some(record) = presence.players.get_mut(&player_id) {
@@ -2702,11 +2711,11 @@ fn try_send_safe_logout_status_to_current_connection(
             }
             SafeLogoutStatusSendOutcome::Sent
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            SafeLogoutStatusSendOutcome::ChannelFull
-        }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            SafeLogoutStatusSendOutcome::ChannelClosed
+        Err(CurrentConnectionSendError::Full) => SafeLogoutStatusSendOutcome::ChannelFull,
+        Err(CurrentConnectionSendError::Closed) => SafeLogoutStatusSendOutcome::ChannelClosed,
+        Err(CurrentConnectionSendError::NotCurrent) => SafeLogoutStatusSendOutcome::StaleConnection,
+        Err(CurrentConnectionSendError::RegistryUnavailable) => {
+            SafeLogoutStatusSendOutcome::RegistryUnavailable
         }
     }
 }
@@ -3103,8 +3112,9 @@ fn build_protected_settlements_snapshot(
 
 /// Send a full ward snapshot to every authoritative connection. Each
 /// connection gets an initial packet even when the list is empty, followed
-/// only by semantic changes. Capacity and authority races remain retryable
-/// because the delivery cache advances only after a successful enqueue.
+/// only by semantic changes. The delivery cache advances only after a
+/// successful enqueue; a full or closed queue terminates that connection so
+/// its replacement receives a fresh authoritative snapshot.
 fn protected_settlements_delivery_system(
     clients: Res<Clients>,
     presence: Res<PlayerWorldPresenceState>,
@@ -3155,11 +3165,7 @@ fn protected_settlements_delivery_system(
             version: PROTECTED_SETTLEMENTS_VERSION,
             settlements: settlements.clone(),
         };
-        let Ok(serialized) = serde_json::to_string(&packet) else {
-            error!(
-                "protected_settlements_serialization_failed player_id={}",
-                player_id
-            );
+        let Some(serialized) = serialize_authoritative_packet(player_id, &packet, &clients) else {
             continue;
         };
 
@@ -3175,7 +3181,7 @@ fn protected_settlements_delivery_system(
             }
             Err(error) => {
                 debug!(
-                    "protected_settlements_send_deferred player_id={} outcome={:?}",
+                    "protected_settlements_send_failed player_id={} outcome={:?}",
                     player_id, error
                 );
             }
@@ -3310,11 +3316,7 @@ fn safe_logout_status_delivery_system(
         let packet = ResponsePacket::SafeLogoutStatus {
             status: status.clone(),
         };
-        let Ok(serialized) = serde_json::to_string(&packet) else {
-            error!(
-                "safe_logout_status_serialization_failed player_id={}",
-                player_id
-            );
+        let Some(serialized) = serialize_authoritative_packet(player_id, &packet, &clients) else {
             continue;
         };
         let outcome = try_send_safe_logout_status_to_current_connection(
@@ -3339,7 +3341,7 @@ fn safe_logout_status_delivery_system(
             );
         } else {
             debug!(
-                "safe_logout_status_send_deferred player_id={} outcome={:?}",
+                "safe_logout_status_send_failed player_id={} outcome={:?}",
                 player_id, outcome
             );
         }
@@ -3349,6 +3351,37 @@ fn safe_logout_status_delivery_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rescued_villager_burrow_reminder_deadline_belongs_to_its_player_run() {
+        let event = GameEvent {
+            event_id: 1,
+            start_tick: 100,
+            run_tick: 400,
+            event_type: GameEventType::RescuedVillagerBurrowReminder {
+                villager_id: 23,
+                player_id: 5,
+            },
+        };
+        let ordinary_owners = HashMap::new();
+        let run_owners = HashMap::new();
+        let entity_objects = HashMap::new();
+
+        assert!(game_event_belongs_to_player(
+            &event,
+            5,
+            &ordinary_owners,
+            &run_owners,
+            &entity_objects,
+        ));
+        assert!(!game_event_belongs_to_player(
+            &event,
+            6,
+            &ordinary_owners,
+            &run_owners,
+            &entity_objects,
+        ));
+    }
 
     fn test_eligibility(eligible: bool) -> SafeLogoutEligibility {
         SafeLogoutEligibility {
@@ -3417,14 +3450,11 @@ mod tests {
 
         let client_id = Uuid::new_v4();
         let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
-        app.world().resource::<Clients>().lock().unwrap().insert(
-            client_id,
-            Client {
-                id: client_id,
-                player_id,
-                sender,
-            },
-        );
+        app.world()
+            .resource::<Clients>()
+            .lock()
+            .unwrap()
+            .insert(client_id, Client::new(client_id, player_id, sender));
         (client_id, receiver)
     }
 
@@ -3577,11 +3607,11 @@ mod tests {
 
         let replacement_id = Uuid::new_v4();
         let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(8);
-        app.world().resource::<Clients>().activate(Client {
-            id: replacement_id,
+        app.world().resource::<Clients>().activate(Client::new(
+            replacement_id,
             player_id,
-            sender: replacement_sender,
-        });
+            replacement_sender,
+        ));
         app.update();
         let replacement: ResponsePacket =
             serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
@@ -3707,7 +3737,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_settlements_failed_send_is_retried_and_not_cached() {
+    fn protected_settlements_full_send_terminates_connection_and_reconnect_resyncs() {
         let mut app = protected_settlements_delivery_test_app();
         let (client_id, mut receiver) = add_status_test_client(&mut app, 88, 1);
         let sender = app
@@ -3728,9 +3758,24 @@ mod tests {
             .sent
             .contains_key(&client_id));
         assert_eq!(receiver.try_recv().unwrap(), "occupied");
+        assert!(!app
+            .world()
+            .resource::<Clients>()
+            .is_current_connection(88, client_id));
 
         app.update();
-        let packet: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+        assert!(receiver.try_recv().is_err());
+
+        let replacement_id = Uuid::new_v4();
+        let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(1);
+        app.world().resource::<Clients>().activate(Client::new(
+            replacement_id,
+            88,
+            replacement_sender,
+        ));
+        app.update();
+        let packet: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
         assert!(matches!(
             packet,
             ResponsePacket::ProtectedSettlements { settlements, .. }
@@ -3740,7 +3785,7 @@ mod tests {
             .world()
             .resource::<ProtectedSettlementsDeliveryState>()
             .sent
-            .contains_key(&client_id));
+            .contains_key(&replacement_id));
     }
 
     #[test]
@@ -3942,10 +3987,10 @@ mod tests {
     }
 
     #[test]
-    fn safe_logout_checkpoint3_failed_send_is_retried_and_not_cached() {
+    fn safe_logout_full_send_terminates_connection_and_reconnect_resyncs() {
         let mut app = status_delivery_test_app();
         let (client_id, mut receiver) = add_status_test_client(&mut app, 3, 1);
-        let sender = app
+        let occupied_sender = app
             .world()
             .resource::<Clients>()
             .lock()
@@ -3954,7 +3999,7 @@ mod tests {
             .unwrap()
             .sender
             .clone();
-        sender.try_send("occupied".to_string()).unwrap();
+        occupied_sender.try_send("occupied".to_string()).unwrap();
 
         app.update();
         assert!(!app
@@ -3963,15 +4008,30 @@ mod tests {
             .sent
             .contains_key(&client_id));
         assert_eq!(receiver.try_recv().unwrap(), "occupied");
+        assert!(!app
+            .world()
+            .resource::<Clients>()
+            .is_current_connection(3, client_id));
 
         app.update();
-        let packet: ResponsePacket = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
+        assert!(receiver.try_recv().is_err());
+
+        let replacement_id = Uuid::new_v4();
+        let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(1);
+        app.world().resource::<Clients>().activate(Client::new(
+            replacement_id,
+            3,
+            replacement_sender,
+        ));
+        app.update();
+        let packet: ResponsePacket =
+            serde_json::from_str(&replacement_receiver.try_recv().unwrap()).unwrap();
         assert!(matches!(packet, ResponsePacket::SafeLogoutStatus { .. }));
         assert!(app
             .world()
             .resource::<SafeLogoutStatusDeliveryState>()
             .sent
-            .contains_key(&client_id));
+            .contains_key(&replacement_id));
     }
 
     #[test]
@@ -4730,11 +4790,11 @@ mod tests {
         let replacement_connection_id = Uuid::new_v4();
         let (old_sender, mut old_receiver) = tokio::sync::mpsc::channel(2);
         let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(2);
-        clients.activate(Client {
-            id: old_connection_id,
+        clients.activate(Client::new(
+            old_connection_id,
             player_id,
-            sender: old_sender.clone(),
-        });
+            old_sender.clone(),
+        ));
 
         let mut record = PlayerPresenceRecord::new(true);
         record.resume_notice_connection_id = Some(old_connection_id);
@@ -4746,11 +4806,11 @@ mod tests {
         // Replacement is already authoritative before delivery snapshots the
         // registry, so there is no attempted stale send to trigger retargeting.
         assert_eq!(
-            clients.activate(Client {
-                id: replacement_connection_id,
+            clients.activate(Client::new(
+                replacement_connection_id,
                 player_id,
-                sender: replacement_sender,
-            }),
+                replacement_sender
+            )),
             vec![old_connection_id]
         );
 
@@ -4806,11 +4866,7 @@ mod tests {
         let replacement_connection_id = Uuid::new_v4();
         let (old_sender, mut old_receiver) = tokio::sync::mpsc::channel(2);
         let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(2);
-        clients.activate(Client {
-            id: old_connection_id,
-            player_id,
-            sender: old_sender,
-        });
+        clients.activate(Client::new(old_connection_id, player_id, old_sender));
         let old_snapshot_sender = clients
             .lock()
             .unwrap()
@@ -4828,11 +4884,11 @@ mod tests {
         // but before it enqueues the status. Atomic activation must win this
         // interleaving completely.
         assert_eq!(
-            clients.activate(Client {
-                id: replacement_connection_id,
+            clients.activate(Client::new(
+                replacement_connection_id,
                 player_id,
-                sender: replacement_sender,
-            }),
+                replacement_sender
+            )),
             vec![old_connection_id]
         );
         let stale_status = build_safe_logout_status(

@@ -39,6 +39,15 @@ export function isSignatureComponent(item: { attrs?: Record<string, unknown> }):
   return itemRarity(item) !== 'Common';
 }
 
+export function signatureDisplayName(
+  item: { name: string; attrs?: Record<string, unknown> } | null | undefined,
+): string | null {
+  if (!item || !isSignatureComponent(item)) {
+    return null;
+  }
+  return `${itemRarity(item)} ${item.name}`;
+}
+
 export function canBeSignatureForRecipe(
   item: { name: string; class: string; subclass: string; attrs?: Record<string, unknown> },
   recipe: { req?: Array<{ type: string }> },

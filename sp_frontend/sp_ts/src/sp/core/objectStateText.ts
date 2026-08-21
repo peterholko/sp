@@ -5,7 +5,15 @@ const REPEATING_ANIMATED_STATES = new Set([
   'sleeping',
 ]);
 
+function isButcheringActivity(state: string, activity?: string): boolean {
+  return state === 'refining' && activity?.trim().toLowerCase() === 'skinning';
+}
+
 function displayedState(state: string, activity?: string): string {
+  if (isButcheringActivity(state, activity)) {
+    return 'Butchering';
+  }
+
   if (state === 'gathering') {
     const gatheringActivity = activity?.trim().toLowerCase();
     if (gatheringActivity === 'hunting') {
@@ -14,6 +22,13 @@ function displayedState(state: string, activity?: string): string {
     if (gatheringActivity === 'logging') {
       return 'Logging';
     }
+    if (gatheringActivity === 'foraging') {
+      return 'Foraging';
+    }
+  }
+
+  if (state === 'surveying') {
+    return 'Scouting';
   }
 
   return state;
@@ -38,7 +53,11 @@ export function repeatingObjectStateText(
     return null;
   }
 
-  if (animationExists && !REPEATING_ANIMATED_STATES.has(state)) {
+  if (
+    animationExists
+    && !REPEATING_ANIMATED_STATES.has(state)
+    && !isButcheringActivity(state, activity)
+  ) {
     return null;
   }
 

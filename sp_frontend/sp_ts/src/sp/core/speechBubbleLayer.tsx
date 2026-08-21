@@ -3,6 +3,12 @@ import { createPortal } from "react-dom";
 import { Global } from "./global";
 import { Util } from "./util";
 import { NetworkEvent } from "./networkEvent";
+import {
+  PerSpeakerSpeechQueue,
+  SPEAKER_MESSAGE_INTERVAL_MS,
+  speechFadeStartOffset,
+  speechLifetimeMs,
+} from "./speechBubbleTiming";
 
 // Renders NPC/villager speech as HTML elements in an overlay above the Phaser
 // canvas. Because the bubbles live in the DOM rather than in world space, they
@@ -27,7 +33,9 @@ const ANCHOR_GAP = 6; // px above the sprite top where the bubble sits
 export default class SpeechBubbleLayer extends React.Component<{}, State> {
   private nextId = 1;
   private rafId: number | null = null;
-  private timers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+  private removalTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+  private speakerTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private speakerQueue = new PerSpeakerSpeechQueue();
   private els: Map<number, HTMLDivElement> = new Map();
   private animated: Set<number> = new Set();
 
@@ -48,8 +56,11 @@ export default class SpeechBubbleLayer extends React.Component<{}, State> {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
-    this.timers.forEach((t) => clearTimeout(t));
-    this.timers.clear();
+    this.removalTimers.forEach((timer) => clearTimeout(timer));
+    this.removalTimers.clear();
+    this.speakerTimers.forEach((timer) => clearTimeout(timer));
+    this.speakerTimers.clear();
+    this.speakerQueue.clear();
   }
 
   handleSpeech(message) {
@@ -59,31 +70,55 @@ export default class SpeechBubbleLayer extends React.Component<{}, State> {
       return;
     }
 
-    // Match the previous canvas timing: shorter lines linger ~10s, longer ~6s,
-    // each spending the first half fully opaque and the second half fading out.
-    const total = message.speech.length < 60 ? 10000 : 6000;
+    const sourceId = String(message.source);
+    const next = this.speakerQueue.enqueue(sourceId, message.speech);
+    if (next !== null) {
+      this.showBubble(sourceId, next);
+    }
+  }
+
+  showBubble(sourceId: string, text: string) {
+    const total = speechLifetimeMs(text);
 
     const id = this.nextId++;
     const bubble: Bubble = {
       id,
-      sourceId: String(message.source),
-      text: message.speech,
+      sourceId,
+      text,
       total,
     };
 
     this.setState((prev) => ({ bubbles: [...prev.bubbles, bubble] }));
 
-    this.timers.set(id, setTimeout(() => this.removeBubble(id), total));
+    this.removalTimers.set(id, setTimeout(() => this.removeBubble(id), total));
+    this.speakerTimers.set(
+      sourceId,
+      setTimeout(() => this.advanceSpeaker(sourceId), SPEAKER_MESSAGE_INTERVAL_MS),
+    );
 
     if (this.rafId === null) {
       this.rafId = requestAnimationFrame(this.tick);
     }
   }
 
+  advanceSpeaker(sourceId: string) {
+    this.speakerTimers.delete(sourceId);
+
+    if (!Global.objectStates[sourceId]) {
+      this.speakerQueue.clearSource(sourceId);
+      return;
+    }
+
+    const next = this.speakerQueue.advance(sourceId);
+    if (next !== null) {
+      this.showBubble(sourceId, next);
+    }
+  }
+
   removeBubble(id: number) {
-    const timer = this.timers.get(id);
+    const timer = this.removalTimers.get(id);
     if (timer) clearTimeout(timer);
-    this.timers.delete(id);
+    this.removalTimers.delete(id);
     this.els.delete(id);
     this.animated.delete(id);
     this.setState((prev) => ({
@@ -103,10 +138,11 @@ export default class SpeechBubbleLayer extends React.Component<{}, State> {
 
     if (!this.animated.has(id) && typeof el.animate === "function") {
       this.animated.add(id);
+      const fadeStart = speechFadeStartOffset(total);
       el.animate(
         [
           { opacity: 1, offset: 0 },
-          { opacity: 1, offset: 0.5 },
+          { opacity: 1, offset: fadeStart },
           { opacity: 0, offset: 1 },
         ],
         { duration: total, easing: "linear", fill: "forwards" }

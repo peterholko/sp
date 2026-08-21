@@ -3,6 +3,7 @@ import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import { Util } from "../../core/util";
 import { operateWorkPresentation } from "../../core/workQueuePresentation";
+import WorkQueueProgressBar from "../../core/workQueueProgressBar";
 import cancelbutton from "ui_comp/exitbutton.png";
 import {
   MobileCard,
@@ -145,7 +146,12 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
                             <div style={nameStyle}>{name}</div>
                             <div style={metaStyle}>{workType}</div>
                           </div>
-                          {entry.work_time > 0 && <progress max={entry.work_time} value={entry.progress} style={progressStyle}>{entry.progress}</progress>}
+                          <WorkQueueProgressBar
+                            action_id={entry.action_id}
+                            action_duration_ms={entry.action_duration_ms}
+                            action_elapsed_ms={entry.action_elapsed_ms}
+                            style={progressStyle}
+                            label={name + ' progress'} />
                         </div>
                       );
                     })}
@@ -156,4 +162,3 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       );
     }
   }
-

@@ -4,6 +4,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use big_brain::prelude::*;
 use rand::Rng;
+use uuid::Uuid;
 
 use crate::ai_logging::entity_display;
 use crate::combat::{AttackType, Combat, CombatQuery};
@@ -14,7 +15,7 @@ use crate::crisis_balance::CrisisAttackTelemetryStage;
 use crate::effect::Effect;
 use crate::effect::Effects;
 use crate::event::{EventCompleted, EventExecuting, EventExecutingState, Spell};
-use crate::event::{GameEvent, GameEventType, GameEvents, MapEvents, VisibleEvent};
+use crate::event::{GameEvent, GameEventType, GameEvents, MapEvent, MapEvents, VisibleEvent};
 use crate::game::*;
 use crate::ids::EntityObjMap;
 use crate::ids::Ids;
@@ -34,13 +35,83 @@ use crate::safe_logout::{
     PlayerWorldPresenceState, SafeLogoutTelemetryState,
 };
 use crate::structure::Structure;
-use crate::templates::Templates;
+use crate::templates::{ObjTemplate, Templates};
 use crate::AppState;
 use crate::{constants::*, ids};
 use crate::{npc_debug, npc_error, npc_info, npc_trace, npc_warn, with_span};
 
 pub const BASE_MOVE_TICKS: f32 = 100.0;
 pub const BASE_SPEED: f32 = 1.0;
+
+fn pending_map_event(obj_id: i32, run_tick: i32, event_type: VisibleEvent) -> MapEvent {
+    MapEvent {
+        event_id: Uuid::new_v4(),
+        obj_id,
+        run_tick,
+        event_type,
+    }
+}
+
+/// Commit actor-owned map events and their tracking component in one deferred
+/// command. If another system despawns the actor first, neither side is
+/// committed, so a stale move or spell cannot execute without its source.
+fn queue_actor_map_events(
+    commands: &mut Commands,
+    actor: Entity,
+    tracked_event_id: Uuid,
+    events: Vec<MapEvent>,
+) {
+    debug_assert!(events
+        .iter()
+        .any(|event| event.event_id == tracked_event_id));
+
+    commands.queue(move |world: &mut World| {
+        if !world.contains_resource::<MapEvents>() {
+            return;
+        }
+
+        let Ok(mut actor_entity) = world.get_entity_mut(actor) else {
+            return;
+        };
+        actor_entity.insert(EventInProgress {
+            event_id: tracked_event_id,
+        });
+        drop(actor_entity);
+
+        let mut map_events = world.resource_mut::<MapEvents>();
+        for event in events {
+            map_events.insert(event.event_id, event);
+        }
+    });
+}
+
+fn player_stat_for_damage_record(
+    player_stats: &mut PlayerStats,
+    player_id: i32,
+) -> &mut PlayerStat {
+    if !player_stats.contains_key(&player_id) {
+        warn!(
+            "npc_attack_repaired_missing_player_stat player_id={}",
+            player_id
+        );
+    }
+
+    let player_stat = player_stats.entry(player_id).or_insert_with(|| PlayerStat {
+        player_id,
+        num_deaths: 0,
+        damage_records: std::collections::VecDeque::with_capacity(10),
+    });
+
+    if player_stat.player_id != player_id {
+        warn!(
+            "npc_attack_repaired_player_stat_identity key_player_id={} stored_player_id={}",
+            player_id, player_stat.player_id
+        );
+        player_stat.player_id = player_id;
+    }
+
+    player_stat
+}
 
 pub struct NPCTarget {
     pub id: i32,
@@ -146,6 +217,11 @@ impl VisibleTarget {
         Self { target }
     }
 }
+
+/// The strike type this NPC has already shown the player and will use on its
+/// next accepted attack. Keeping this on the NPC makes despawn its cleanup.
+#[derive(Debug, Clone, Component)]
+pub struct TelegraphedAttack(pub AttackType);
 
 #[derive(Debug, Component)]
 pub struct ProtectedTargetInvalidated {
@@ -397,6 +473,14 @@ mod tests {
         }
     }
 
+    fn attack_test_stats() -> Stats {
+        Stats {
+            stamina: Some(10),
+            base_stamina: Some(10),
+            ..test_stats()
+        }
+    }
+
     fn empty_effects() -> Effects {
         Effects(HashMap::<Effect, (i32, f32, i32)>::new())
     }
@@ -444,6 +528,7 @@ mod tests {
 
     fn minimal_templates() -> Templates {
         Templates::from_obj_templates(vec![
+            test_obj_template("Human", "cunning"),
             test_obj_template("Goblin", "cunning"),
             test_obj_template("Zombie", "mindless"),
             test_obj_template("Necromancer", "cunning"),
@@ -1076,6 +1161,48 @@ mod tests {
 
         let score = app.world().entity(scorer_entity).get::<Score>().unwrap();
         assert_eq!(score.get(), NORMAL_SCORE / 100.0);
+    }
+
+    #[test]
+    fn pre_crisis_skirmish_pursues_its_owner_beyond_ordinary_viewshed() {
+        let mut app = setup_target_scorer_app();
+        let (npc_entity, scorer_entity) =
+            spawn_target_scorer(&mut app, "Goblin", Position { x: 0, y: 0 }, 2);
+        app.world_mut()
+            .entity_mut(npc_entity)
+            .insert(PreCrisisSkirmishUnit {
+                owner_player_id: 7,
+                slot: PreCrisisSkirmishSlot::WildernessNuisance,
+                pursuit_target_id: 71,
+            });
+
+        app.world_mut().spawn((
+            Id(71),
+            PlayerId(7),
+            Position { x: 8, y: 0 },
+            State::None,
+            Class(CLASS_UNIT.to_string()),
+            Subclass::Hero,
+            empty_effects(),
+            test_stats(),
+        ));
+
+        app.update();
+
+        let visible_target = app
+            .world()
+            .entity(npc_entity)
+            .get::<VisibleTarget>()
+            .unwrap();
+        assert_eq!(visible_target.target, 71);
+        assert_eq!(
+            app.world()
+                .entity(scorer_entity)
+                .get::<Score>()
+                .unwrap()
+                .get(),
+            NORMAL_SCORE / 100.0
+        );
     }
 
     #[test]
@@ -2512,7 +2639,7 @@ mod tests {
                     hsl: Vec::new(),
                     groups: Vec::new(),
                 },
-                test_stats(),
+                attack_test_stats(),
                 empty_effects(),
                 empty_inventory(100),
                 LastCombatTick(0),
@@ -2571,6 +2698,94 @@ mod tests {
         }
 
         (app, npc_entity, target_entity, attack_action)
+    }
+
+    #[test]
+    fn npc_telegraphed_attack_is_cleaned_with_its_entity() {
+        let (mut app, npc_entity, _target_entity, _attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 1, y: 0 });
+
+        app.update();
+
+        assert!(app
+            .world()
+            .entity(npc_entity)
+            .contains::<TelegraphedAttack>());
+        assert!(app.world_mut().despawn(npc_entity));
+        assert!(app.world().get_entity(npc_entity).is_err());
+    }
+
+    #[test]
+    fn npc_attack_repairs_missing_player_stat_for_actual_hero() {
+        let (mut app, _npc_entity, _target_entity, _attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 1, y: 0 });
+        {
+            let mut ids = app.world_mut().resource_mut::<Ids>();
+            ids.new_hero(1, 1);
+            assert!(ids.is_hero(1));
+        }
+        assert!(app.world().resource::<PlayerStats>().get(&1).is_none());
+
+        app.update();
+
+        let player_stats = app.world().resource::<PlayerStats>();
+        let player_stat = player_stats
+            .get(&1)
+            .expect("an NPC hit should repair a missing hero statistics record");
+        assert_eq!(player_stat.player_id, 1);
+        assert_eq!(player_stat.num_deaths, 0);
+        assert_eq!(player_stat.damage_records.len(), 1);
+        assert_eq!(player_stat.damage_records[0].target, "Hero");
+    }
+
+    #[test]
+    fn npc_attack_on_player_villager_skips_hero_history_and_telegraph() {
+        let (mut app, _npc_entity, target_entity, _attack_action) =
+            npc_attack_boundary_fixture(State::None, Position { x: 1, y: 0 });
+        app.world_mut()
+            .entity_mut(target_entity)
+            .insert(Subclass::Villager);
+
+        {
+            let mut ids = app.world_mut().resource_mut::<Ids>();
+            ids.new_hero(2, 1);
+            assert!(ids.is_hero(2));
+            assert!(
+                !ids.is_hero(1),
+                "another object owned by the hero's player is not the hero"
+            );
+        }
+        app.world_mut().resource_mut::<PlayerStats>().insert(
+            1,
+            PlayerStat {
+                player_id: 1,
+                num_deaths: 0,
+                damage_records: std::collections::VecDeque::with_capacity(10),
+            },
+        );
+
+        let client_id = Uuid::new_v4();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let clients = Clients::default();
+        clients
+            .lock()
+            .unwrap()
+            .insert(client_id, Client::new(client_id, 1, sender));
+        app.world_mut().insert_resource(clients);
+
+        app.update();
+
+        assert!(app
+            .world()
+            .resource::<PlayerStats>()
+            .get(&1)
+            .expect("seeded player statistics remain available")
+            .damage_records
+            .is_empty());
+        assert!(
+            receiver.try_recv().is_err(),
+            "a player-owned villager must not receive hero combat telegraphs"
+        );
     }
 
     #[test]
@@ -3164,6 +3379,152 @@ mod tests {
         );
         assert!(app.world().resource::<MapEvents>().is_empty());
     }
+
+    #[derive(Resource)]
+    struct DeferredNpcDespawn(Entity);
+
+    fn queue_deferred_npc_despawn(mut commands: Commands, target: Res<DeferredNpcDespawn>) {
+        commands.entity(target.0).despawn();
+    }
+
+    fn cast_target_event_fixture(
+        target_pos: Position,
+        despawn_before_deferred_apply: bool,
+    ) -> (App, Entity, Entity) {
+        let mut app = App::new();
+        if despawn_before_deferred_apply {
+            app.add_systems(
+                Update,
+                (queue_deferred_npc_despawn, cast_target_system).chain_ignore_deferred(),
+            );
+        } else {
+            app.add_systems(Update, cast_target_system);
+        }
+        app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+        app.world_mut().insert_resource(Ids::default());
+        app.world_mut()
+            .insert_resource(EntityObjMap(HashMap::new()));
+        app.world_mut().insert_resource(flat_test_map());
+        app.world_mut().insert_resource(MapEvents::default());
+        app.world_mut().insert_resource(minimal_templates());
+
+        let npc_pos = Position { x: 10, y: 10 };
+        let npc_entity = app
+            .world_mut()
+            .spawn((
+                Id(100),
+                PlayerId(NPC_PLAYER_ID),
+                npc_pos,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Npc,
+                Template("Necromancer".to_string()),
+                State::None,
+                Misc {
+                    image: "necromancer".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(100),
+                LastCombatTick(0),
+                VisibleTarget::new(1),
+                SubclassNPC,
+            ))
+            .id();
+        let target_entity = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                target_pos,
+                Class(CLASS_UNIT.to_string()),
+                Subclass::Hero,
+                Template("Human".to_string()),
+                State::None,
+                Misc {
+                    image: "hero".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+                test_stats(),
+                empty_effects(),
+                empty_inventory(1),
+                LastCombatTick(0),
+            ))
+            .id();
+        let action_entity = app
+            .world_mut()
+            .spawn((
+                Actor(npc_entity),
+                ActionState::Executing,
+                ChaseAndCast {
+                    start_time: TICKS_PER_SEC,
+                },
+            ))
+            .id();
+
+        register_test_obj(&mut app, 100, NPC_PLAYER_ID, npc_entity);
+        register_test_obj(&mut app, 1, 1, target_entity);
+        if despawn_before_deferred_apply {
+            app.world_mut()
+                .insert_resource(DeferredNpcDespawn(npc_entity));
+        }
+
+        (app, npc_entity, action_entity)
+    }
+
+    fn assert_cast_event_is_actor_bound(
+        target_pos: Position,
+        expected_event: fn(&VisibleEvent) -> bool,
+    ) {
+        let (mut baseline, baseline_npc, _) = cast_target_event_fixture(target_pos, false);
+        baseline.update();
+
+        let tracked_event_id = baseline
+            .world()
+            .entity(baseline_npc)
+            .get::<EventInProgress>()
+            .expect("living caster should track its queued event")
+            .event_id;
+        let baseline_events = baseline.world().resource::<MapEvents>();
+        let tracked_event = baseline_events
+            .get(&tracked_event_id)
+            .expect("tracked caster event should be committed");
+        assert!(expected_event(&tracked_event.event_type));
+
+        let (mut raced, raced_npc, action_entity) = cast_target_event_fixture(target_pos, true);
+        raced.update();
+
+        assert!(raced.world().get_entity(raced_npc).is_err());
+        assert_eq!(
+            *raced
+                .world()
+                .entity(action_entity)
+                .get::<ActionState>()
+                .expect("the action entity remains available for verification"),
+            ActionState::Success,
+            "the cast path must run before the queued actor despawn is applied"
+        );
+        assert!(
+            raced.world().resource::<MapEvents>().is_empty(),
+            "an actor lost before deferred application must leave no map events"
+        );
+    }
+
+    #[test]
+    fn cast_target_actor_despawn_does_not_leave_orphaned_damage_event() {
+        assert_cast_event_is_actor_bound(Position { x: 12, y: 10 }, |event| {
+            matches!(event, VisibleEvent::SpellDamageEvent { .. })
+        });
+    }
+
+    #[test]
+    fn cast_target_actor_despawn_does_not_leave_orphaned_move_event() {
+        assert_cast_event_is_actor_bound(Position { x: 14, y: 10 }, |event| {
+            matches!(event, VisibleEvent::MoveEvent { .. })
+        });
+    }
 }
 
 #[derive(Debug, Clone, Component, ScorerBuilder)]
@@ -3350,6 +3711,7 @@ pub fn target_scorer_system(
             &EventExecuting,
             Option<&CrisisAssaultUnit>,
             Option<&CrisisAssaultRole>,
+            Option<&PreCrisisSkirmishUnit>,
             Option<&ProtectedTargetInvalidated>,
         ),
         With<SubclassNPC>,
@@ -3391,6 +3753,7 @@ pub fn target_scorer_system(
             event_executing,
             crisis_assault,
             crisis_assault_role,
+            pre_crisis_skirmish,
             protected_target_invalidated,
         )) = npc_query.get_mut(*actor)
         else {
@@ -3507,6 +3870,57 @@ pub fn target_scorer_system(
         if is_passive(&aggression) {
             score.set(0.0);
             continue;
+        }
+
+        // Minor scripted encounters are promised to one specific player. They
+        // must approach that player's hero instead of waiting for the hero to
+        // enter the ordinary two-tile NPC viewshed. Ordinary perception takes
+        // over naturally if the promised target disappears or becomes
+        // protected while the player is offline.
+        if let Some(skirmish) = pre_crisis_skirmish {
+            if let Some((
+                target_id,
+                target_player,
+                target_pos,
+                _target_state,
+                _target_class,
+                _target_subclass,
+                target_effects,
+                _target_stats,
+                _target_inventory,
+                _target_dead,
+            )) = target_query.iter().find(
+                |(
+                    target_id,
+                    target_player,
+                    _,
+                    target_state,
+                    target_class,
+                    target_subclass,
+                    _,
+                    target_stats,
+                    _,
+                    target_dead,
+                )| {
+                    target_id.0 == skirmish.pursuit_target_id
+                        && target_player.0 == skirmish.owner_player_id
+                        && player::is_player(target_player.0)
+                        && !protection.owner_is_protected(target_player)
+                        && target_state.is_alive()
+                        && target_class.0 == CLASS_UNIT
+                        && **target_subclass == Subclass::Hero
+                        && target_stats.hp > 0
+                        && target_dead.is_none()
+                },
+            ) {
+                selected_target = NPCTarget {
+                    id: target_id.0,
+                    player_id: target_player.0,
+                    pos: *target_pos,
+                    distance: Map::dist(*npc_pos, *target_pos),
+                    fortified: target_effects.has(Effect::Fortified),
+                };
+            }
         }
 
         if let (Some(assault), Some(role)) = (crisis_assault, crisis_assault_role) {
@@ -3845,7 +4259,7 @@ pub fn target_scorer_system(
             );
         });
         if selected_target.fortified && !bypass_fortified_wall {
-            commands.entity(*actor).remove::<AnimalFallback>();
+            commands.entity(*actor).try_remove::<AnimalFallback>();
             span.span().in_scope(|| {
                 npc_debug!(
                     *actor,
@@ -3912,7 +4326,7 @@ pub fn target_scorer_system(
             npc_visible_target.target = fortifier.id;
             score.set(NORMAL_SCORE / 100.0);
         } else if selected_target.id != NO_TARGET {
-            commands.entity(*actor).remove::<AnimalFallback>();
+            commands.entity(*actor).try_remove::<AnimalFallback>();
             span.span().in_scope(|| {
                 npc_info!(
                     *actor,
@@ -3926,7 +4340,7 @@ pub fn target_scorer_system(
             score.set(NORMAL_SCORE / 100.0);
         } else {
             if let Some((_distance, fallback)) = animal_fallback {
-                commands.entity(*actor).insert(fallback);
+                commands.entity(*actor).try_insert(fallback);
             }
             span.span().in_scope(|| {
                 npc_debug!(
@@ -5196,7 +5610,7 @@ pub fn set_home_system(
 
                 commands
                     .entity(*actor)
-                    .insert(Destination { pos: home.pos });
+                    .try_insert(Destination { pos: home.pos });
 
                 let speech_event = VisibleEvent::SpeechEvent {
                     speech: "My minions fall, but I will get my revenge!".to_string(),
@@ -6040,10 +6454,9 @@ pub fn move_to_target_system(
                 let npc_template = templates
                     .obj_templates
                     .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
-                let npc_int = npc_template.int.unwrap_or("mindless".to_string());
+                let npc_int = npc_template.int.clone().unwrap_or("mindless".to_string());
                 let allow_attackable_blockers =
                     !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
-                let mountainwalk = can_traverse_mountains(&npc.template.0);
 
                 let reached_destination = Map::is_adjacent_including_source(*npc.pos, *target.pos);
 
@@ -6075,16 +6488,13 @@ pub fn move_to_target_system(
                         * (1.0 / effect_speed_mod)
                         * random_factor) as i32;
 
-                    let Some(path_result) = Map::find_fast_path(
+                    let Some(path_result) = find_npc_target_path(
                         *npc.pos,
                         *target.pos,
+                        &npc_template,
                         &map,
                         npc_player_id,
                         collision_list,
-                        true,
-                        false,
-                        mountainwalk,
-                        true, // Allow move onto position with transport
                         allow_attackable_blockers,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
@@ -6198,10 +6608,9 @@ pub fn move_to_target_system(
                 let npc_template = templates
                     .obj_templates
                     .get_by_name_template(npc.template.0.clone(), npc.template.0.clone());
-                let npc_int = npc_template.int.unwrap_or("mindless".to_string());
+                let npc_int = npc_template.int.clone().unwrap_or("mindless".to_string());
                 let allow_attackable_blockers =
                     !scripted_corpse_hunt_query.contains(*actor) && !is_animal(&npc_int);
-                let mountainwalk = can_traverse_mountains(&npc.template.0);
 
                 // Check if NPC is stunned and cannot move
                 if npc.effects.has(Effect::Stunned) {
@@ -6237,16 +6646,13 @@ pub fn move_to_target_system(
                         continue;
                     }
 
-                    let Some(path_result) = Map::find_fast_path(
+                    let Some(path_result) = find_npc_target_path(
                         *npc.pos,
                         *target.pos,
+                        &npc_template,
                         &map,
                         npc_player_id,
                         collision_list,
-                        true,
-                        false,
-                        mountainwalk,
-                        true, // Allow move onto position with transport
                         allow_attackable_blockers,
                     ) else {
                         npc_debug!(*actor, obj_id, None, "No path found");
@@ -6894,12 +7300,11 @@ fn melee_target_is_still_adjacent(attacker: Position, target: Position) -> bool 
 }
 
 // BB-A: bundled so the attack system stays within Bevy's 16-param limit.
-// `next_attacks` remembers each NPC's telegraphed upcoming attack type.
 #[derive(SystemParam)]
 pub struct TelegraphState<'w, 's> {
     clients: Res<'w, Clients>,
     crisis_assault_units: Query<'w, 's, &'static CrisisAssaultUnit>,
-    next_attacks: Local<'s, std::collections::HashMap<i32, AttackType>>,
+    telegraphed_attacks: Query<'w, 's, &'static TelegraphedAttack>,
     protection: NpcProtection<'w, 's>,
     telemetry: Option<ResMut<'w, SafeLogoutTelemetryState>>,
 }
@@ -7160,9 +7565,9 @@ pub fn attack_target_system(
                 // BB-A: use the attack type telegraphed last cycle (Quick on the
                 // first swing) so the player had a chance to read and counter it.
                 let current_attack = telegraph
-                    .next_attacks
-                    .get(&npc.id.0)
-                    .cloned()
+                    .telegraphed_attacks
+                    .get(*actor)
+                    .map(|attack| attack.0.clone())
                     .unwrap_or(AttackType::Quick);
 
                 if telegraph
@@ -7225,10 +7630,9 @@ pub fn attack_target_system(
 
                 // Add damage record to target player's damage records
                 if ids.is_hero(target.id.0) {
-                    let damage_records = &mut player_stats
-                        .get_mut(&target.player_id.0)
-                        .unwrap()
-                        .damage_records;
+                    let damage_records =
+                        &mut player_stat_for_damage_record(&mut player_stats, target.player_id.0)
+                            .damage_records;
 
                     if damage_records.capacity() == damage_records.len() {
                         damage_records.pop_front();
@@ -7263,7 +7667,9 @@ pub fn attack_target_system(
                     1 => AttackType::Precise,
                     _ => AttackType::Fierce,
                 };
-                telegraph.next_attacks.insert(npc.id.0, next_attack.clone());
+                commands
+                    .entity(*actor)
+                    .try_insert(TelegraphedAttack(next_attack.clone()));
 
                 if ids.is_hero(target.id.0) {
                     if let Some(label) = &countered {
@@ -7365,7 +7771,6 @@ pub fn cast_target_system(
     protection: NpcProtection,
     entity_map: Res<EntityObjMap>,
     map: Res<Map>,
-    mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
     mut visible_target_query: Query<(&PlayerId, &mut VisibleTarget), Without<EventInProgress>>,
     mut npc_query: Query<CombatQuery, (With<SubclassNPC>, Without<EventInProgress>)>,
@@ -7465,12 +7870,14 @@ pub fn cast_target_system(
                         info!("Target is in range, time to cast spell");
 
                         // Shout spell
-                        let speech_event = VisibleEvent::SpeechEvent {
-                            speech: "Wis An Ben!".to_string(),
-                            intensity: 2,
-                        };
-
-                        map_events.new(npc.id.0, game_tick.0 + 4, speech_event);
+                        let speech_event = pending_map_event(
+                            npc.id.0,
+                            game_tick.0 + 4,
+                            VisibleEvent::SpeechEvent {
+                                speech: "Wis An Ben!".to_string(),
+                                intensity: 2,
+                            },
+                        );
 
                         *npc.state = State::Casting;
 
@@ -7479,17 +7886,21 @@ pub fn cast_target_system(
                             new_state: State::Casting,
                         });
 
-                        let spell_damage_event = VisibleEvent::SpellDamageEvent {
-                            spell: Spell::ShadowBolt,
-                            target_id: target.id.0,
-                        };
-
-                        let map_event =
-                            map_events.new(npc.id.0, game_tick.0 + 30, spell_damage_event);
-
-                        commands.entity(*actor).insert(EventInProgress {
-                            event_id: map_event.event_id,
-                        });
+                        let spell_damage_event = pending_map_event(
+                            npc.id.0,
+                            game_tick.0 + 30,
+                            VisibleEvent::SpellDamageEvent {
+                                spell: Spell::ShadowBolt,
+                                target_id: target.id.0,
+                            },
+                        );
+                        let tracked_event_id = spell_damage_event.event_id;
+                        queue_actor_map_events(
+                            &mut commands,
+                            *actor,
+                            tracked_event_id,
+                            vec![speech_event, spell_damage_event],
+                        );
 
                         // Set start time of action
                         chase_and_cast.start_time = game_tick.0;
@@ -7531,15 +7942,18 @@ pub fn cast_target_system(
                                     },
                                 };
 
-                                let move_map_event = map_events.new(
+                                let move_map_event = pending_map_event(
                                     npc.id.0,
                                     game_tick.0 + move_duration,
                                     move_event,
                                 );
-
-                                commands.entity(*actor).insert(EventInProgress {
-                                    event_id: move_map_event.event_id,
-                                });
+                                let tracked_event_id = move_map_event.event_id;
+                                queue_actor_map_events(
+                                    &mut commands,
+                                    *actor,
+                                    tracked_event_id,
+                                    vec![move_map_event],
+                                );
                             }
                         }
                     } else if target_dist == 1 {
@@ -7599,22 +8013,30 @@ pub fn cast_target_system(
                                 },
                             };
 
-                            let move_map_event =
-                                map_events.new(npc.id.0, game_tick.0 + move_duration, move_event);
-
-                            commands.entity(*actor).insert(EventInProgress {
-                                event_id: move_map_event.event_id,
-                            });
+                            let move_map_event = pending_map_event(
+                                npc.id.0,
+                                game_tick.0 + move_duration,
+                                move_event,
+                            );
+                            let tracked_event_id = move_map_event.event_id;
+                            queue_actor_map_events(
+                                &mut commands,
+                                *actor,
+                                tracked_event_id,
+                                vec![move_map_event],
+                            );
                         } else {
                             // No choice but has to fight
 
                             // Shout spell
-                            let speech_event = VisibleEvent::SpeechEvent {
-                                speech: "Wis An Ben!".to_string(),
-                                intensity: 2,
-                            };
-
-                            map_events.new(npc.id.0, game_tick.0 + 4, speech_event);
+                            let speech_event = pending_map_event(
+                                npc.id.0,
+                                game_tick.0 + 4,
+                                VisibleEvent::SpeechEvent {
+                                    speech: "Wis An Ben!".to_string(),
+                                    intensity: 2,
+                                },
+                            );
 
                             *npc.state = State::Casting;
 
@@ -7623,17 +8045,21 @@ pub fn cast_target_system(
                                 new_state: State::Casting,
                             });
 
-                            let spell_damage_event = VisibleEvent::SpellDamageEvent {
-                                spell: Spell::ShadowBolt,
-                                target_id: target.id.0,
-                            };
-
-                            let map_event =
-                                map_events.new(npc.id.0, game_tick.0 + 30, spell_damage_event);
-
-                            commands.entity(*actor).insert(EventInProgress {
-                                event_id: map_event.event_id,
-                            });
+                            let spell_damage_event = pending_map_event(
+                                npc.id.0,
+                                game_tick.0 + 30,
+                                VisibleEvent::SpellDamageEvent {
+                                    spell: Spell::ShadowBolt,
+                                    target_id: target.id.0,
+                                },
+                            );
+                            let tracked_event_id = spell_damage_event.event_id;
+                            queue_actor_map_events(
+                                &mut commands,
+                                *actor,
+                                tracked_event_id,
+                                vec![speech_event, spell_damage_event],
+                            );
 
                             // Set start time of action
                             chase_and_cast.start_time = game_tick.0;
@@ -8763,7 +9189,7 @@ pub fn cast_spell_target_system(
                     true,
                 ) {
                     npc_debug!(*actor, obj_id, npc_name, "{}", errmsg);
-                    commands.entity(*actor).remove::<Target>();
+                    commands.entity(*actor).try_remove::<Target>();
                     *state = ActionState::Failure;
                     continue;
                 }
@@ -8931,8 +9357,40 @@ fn animal_fallback_kind_for_template(template: &str) -> Option<AnimalFallbackKin
 }
 
 // Bats fly, so they can cross mountain terrain that ground-bound NPCs cannot.
-fn can_traverse_mountains(template: &str) -> bool {
+pub(crate) fn can_traverse_mountains(template: &str) -> bool {
     template.contains("Bat")
+}
+
+pub(crate) fn npc_traversal_modes(template: &ObjTemplate) -> (bool, bool, bool) {
+    (
+        template.landwalk.unwrap_or(1) != 0,
+        template.waterwalk.unwrap_or(0) != 0,
+        can_traverse_mountains(&template.template),
+    )
+}
+
+pub(crate) fn find_npc_target_path(
+    src_pos: Position,
+    dst_pos: Position,
+    template: &ObjTemplate,
+    map: &Map,
+    mover_player_id: i32,
+    blocking_list: Vec<Blocker>,
+    allow_attackable_blockers: bool,
+) -> Option<(Vec<MapPos>, u32)> {
+    let (landwalk, waterwalk, mountainwalk) = npc_traversal_modes(template);
+    Map::find_fast_path(
+        src_pos,
+        dst_pos,
+        map,
+        mover_player_id,
+        blocking_list,
+        landwalk,
+        waterwalk,
+        mountainwalk,
+        true,
+        allow_attackable_blockers,
+    )
 }
 
 fn npc_move_duration(

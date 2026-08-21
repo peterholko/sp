@@ -188,24 +188,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         lesson: 'Villagers turn one-off survival into repeatable work.',
         reward: 'A new worker and new guidance.',
       },
-      {
-        id: 'build_3_structures',
-        title: 'Build three structures',
-        state: this.state.build_3_structures ? 'complete' : 'locked',
-        category: 'Settlement',
-        action_hint: 'Add buildings that solve rest, storage, and defense.',
-        lesson: 'Each building should answer a visible problem.',
-        reward: 'A camp that can survive pressure.',
-      },
-      {
-        id: 'survive_5_nights',
-        title: 'Survive five nights',
-        state: this.state.survive_5_nights ? 'complete' : 'locked',
-        category: 'Survival',
-        action_hint: 'Use daylight to prepare before danger rises.',
-        lesson: 'Threats are pressure signals.',
-        reward: 'A stable foothold.',
-      },
     ];
   }
 
@@ -328,11 +310,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       fontWeight: 'bold',
       lineHeight: 1.25,
     };
-    const preparationStateColor = (state: string) => {
-      if (state === 'ready') return '#8fbf88';
-      if (state === 'needs_attention') return '#f2d27a';
-      return '#a9adb1';
-    };
     const urgentStyle: React.CSSProperties = {
       ...bodyStyle,
       color: crisis.assaultActive ? '#ffaaaa' : accent,
@@ -367,23 +344,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             <span>{crisis.phase === 'preparing' ? 'Preparation window' : 'Minimum warning'}</span>
             <span>{crisis.preparationLabel}</span>
           </div>}
-
-        {crisis.preparationOptions.length > 0 &&
-          <section style={detailSectionStyle} aria-label="Settlement preparation">
-            <div style={detailHeadingStyle}>Prepare your settlement</div>
-            {crisis.preparationOptions.map((option) =>
-              <div key={option.id} style={optionRowStyle}>
-                <div style={optionHeaderStyle}>
-                  <span>{option.label}</span>
-                  <span style={{ color: preparationStateColor(option.state) }}>
-                    {option.stateLabel}
-                  </span>
-                </div>
-                {option.detail && <div style={labelStyle}>{option.detail}</div>}
-                {option.actionHint &&
-                  <div style={labelStyle}><strong>Action:</strong> {option.actionHint}</div>}
-              </div>)}
-          </section>}
 
         {crisis.assaultActive &&
           <div style={statusRowStyle}>

@@ -563,6 +563,27 @@
   order: move_to_pos
   waterwalk: 1
 
+- name: Goblin Scout
+  class: unit
+  subclass: npc
+  template: Goblin Scout
+  # Reuse the Pillager presentation for Alpha; the scout has its own combat
+  # profile and can receive dedicated art later without a protocol change.
+  image: goblinpillager
+  family: Goblin
+  base_hp: 18
+  base_stamina: 140
+  base_dmg: 2
+  dmg_range: 3
+  base_def: 1
+  base_speed: 6
+  base_vision: 4
+  int: cunning
+  aggression: strategic
+  kill_xp: 60
+  order: move_to_pos
+  waterwalk: 1
+
 - name: Nightmare Shadow
   class: unit
   subclass: npc
@@ -832,7 +853,7 @@
   subclass: villager
   template: Human Villager
   image: humanvillager
-  base_hp: 500
+  base_hp: 80
   base_stamina: 10000
   base_dmg: 0
   dmg_range: 0
@@ -1242,6 +1263,20 @@
     - type: Logs or Timber
       quantity: 5
 
+- name: Well
+  class: structure
+  subclass: well
+  template: Well
+  image: wellstructure
+  base_hp: 200
+  base_def: 0
+  build_cost: 100
+  capacity: 20
+  level: 0
+  req:
+    - type: Stone
+      quantity: 10
+
 ############################
 ###### SHELTER #############
 ############################
@@ -1593,7 +1628,9 @@
   base_hp: 100
   base_def: 0
   build_cost: 24
-  capacity: 25
+  # Holds the 30-unit starter fuel reserve plus a small amount of permitted
+  # raw meat, cooked food, or charcoal without becoming general storage.
+  capacity: 40
   level: 0
   campfire: true
   upgrade_to: [Shelter Tent]

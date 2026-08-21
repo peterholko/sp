@@ -803,6 +803,46 @@ fn minimal_templates() -> Templates {
     Templates::from_obj_templates(vec![villager_template])
 }
 
+fn templates_with_waterskins() -> Templates {
+    let mut templates = minimal_templates();
+    templates.item_templates = vec![
+        crate::templates::ItemTemplate {
+            name: WATERSKIN_EMPTY.to_string(),
+            class: CONTAINER.to_string(),
+            subclass: WATERSKIN_SUBCLASS.to_string(),
+            image: "waterskin".to_string(),
+            weight: 1.0,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            slot: None,
+            duration: None,
+            attrs: None,
+        },
+        crate::templates::ItemTemplate {
+            name: WATERSKIN_FILLED.to_string(),
+            class: DRINK.to_string(),
+            subclass: WATERSKIN_SUBCLASS.to_string(),
+            image: "waterskin".to_string(),
+            weight: 1.0,
+            durability: None,
+            refine_skill: None,
+            refine_skill_req: None,
+            refine_time: None,
+            produces: None,
+            slot: None,
+            duration: None,
+            attrs: Some(vec![crate::templates::ItemAttr {
+                name: "Thirst".to_string(),
+                value: "100".to_string(),
+            }]),
+        },
+    ];
+    templates
+}
+
 // ==================== Action State Tests ====================
 
 use crate::effect::{Effect, Effects};
@@ -901,6 +941,12 @@ impl ActionTestVillagerBuilder {
 
     pub fn with_drink_item(mut self) -> Self {
         self.inventory_items.push(create_drink_item(self.id));
+        self
+    }
+
+    pub fn with_empty_waterskin(mut self, quantity: i32) -> Self {
+        self.inventory_items
+            .push(create_empty_waterskin(102, self.id, quantity));
         self
     }
 
@@ -1019,6 +1065,16 @@ fn spawn_wall_obj(world: &mut World, id: i32, player_id: i32, position: Position
     wall
 }
 
+fn spawn_campfire_obj(world: &mut World, id: i32, player_id: i32, position: Position) -> Entity {
+    let campfire = spawn_base_obj(world, id, player_id, position, Subclass::Campfire);
+    world.entity_mut(campfire).insert((
+        Class(CLASS_STRUCTURE.to_string()),
+        ClassStructure,
+        Template(CAMPFIRE_TEMPLATE.to_string()),
+    ));
+    campfire
+}
+
 fn combat_stats(hp: i32, stamina: i32, damage: i32, damage_range: i32) -> Stats {
     Stats {
         hp,
@@ -1110,6 +1166,26 @@ fn create_drink_item(owner: i32) -> Item {
         subclass: "Water".to_string(),
         slot: None,
         image: "spring_water.png".to_string(),
+        weight: 1.0,
+        equipped: false,
+        experiment: None,
+        start_time: 0,
+        attrs: HashMap::new(),
+        produces: Vec::new(),
+    }
+}
+
+fn create_empty_waterskin(id: i32, owner: i32, quantity: i32) -> Item {
+    Item {
+        id,
+        owner,
+        name: WATERSKIN_EMPTY.to_string(),
+        quantity,
+        durability: None,
+        class: CONTAINER.to_string(),
+        subclass: WATERSKIN_SUBCLASS.to_string(),
+        slot: None,
+        image: "waterskin".to_string(),
         weight: 1.0,
         equipped: false,
         experiment: None,
@@ -1311,8 +1387,7 @@ macro_rules! setup_action_test_app {
         app.world_mut().insert_resource(open_test_map());
         app.world_mut().insert_resource(minimal_templates());
         app.world_mut().insert_resource(Resources::default());
-        app.world_mut()
-            .insert_resource(PlayerEvents(HashMap::new()));
+        app.world_mut().insert_resource(PlayerEvents::default());
         app
     }};
 }
@@ -1862,6 +1937,37 @@ fn gather_order_without_tool_fetches_matching_storage_tool() {
 }
 
 #[test]
+fn starting_a_tool_fetch_announces_it_once() {
+    let mut app = App::new();
+    app.add_systems(Update, tool_fetch_speech_system);
+    app.world_mut().insert_resource(GameTick(TICKS_PER_SEC));
+    app.world_mut().insert_resource(MapEvents(HashMap::new()));
+
+    let villager = ActionTestVillagerBuilder::new().spawn(app.world_mut());
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(ToolFetchTarget {
+            storage_id: 2,
+            item_id: 200,
+            res_type: LOG.to_string(),
+            required_attr: AttrKey::Logging,
+        });
+
+    app.update();
+    app.update();
+
+    let map_events = app.world().resource::<MapEvents>();
+    let fetch_speech: Vec<_> = map_events
+        .values()
+        .filter_map(|event| match &event.event_type {
+            VisibleEvent::SpeechEvent { speech, .. } => Some((event.obj_id, speech.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetch_speech, vec![(1, "Fetching Logging tool")]);
+}
+
+#[test]
 fn harvest_order_fetches_and_equips_a_farming_tool() {
     let mut app = App::new();
     app.add_systems(
@@ -1980,7 +2086,7 @@ fn harvest_order_fetches_and_equips_a_farming_tool() {
 }
 
 #[test]
-fn lumbercamp_work_queue_fetches_and_equips_logging_tool() {
+fn lumbercamp_work_queue_fetches_one_crude_hatchet_from_stack_and_equips_it() {
     let mut app = App::new();
     app.add_systems(
         Update,
@@ -2011,6 +2117,12 @@ fn lumbercamp_work_queue_fetches_and_equips_logging_tool() {
     ));
     register_test_obj(&mut app, 1, 1, villager);
 
+    let mut stacked_hatchets = create_logging_tool_item(200, 2, false, 1.0);
+    stacked_hatchets.name = "Crude Hatchet".to_string();
+    stacked_hatchets.class = WEAPON.to_string();
+    stacked_hatchets.subclass = "Axe".to_string();
+    stacked_hatchets.quantity = 2;
+
     let storage = app
         .world_mut()
         .spawn((
@@ -2025,7 +2137,7 @@ fn lumbercamp_work_queue_fetches_and_equips_logging_tool() {
             ClassStructure,
             Inventory {
                 owner: 2,
-                items: vec![create_logging_tool_item(200, 2, false, 2.0)],
+                items: vec![stacked_hatchets],
             },
         ))
         .id();
@@ -2096,12 +2208,22 @@ fn lumbercamp_work_queue_fetches_and_equips_logging_tool() {
             .pos,
         lumbercamp_pos
     );
-    assert!(app
-        .world()
-        .entity(villager)
-        .get::<Inventory>()
-        .unwrap()
-        .has_equipped_tool_for_attr(&AttrKey::Logging));
+    let villager_inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    assert!(villager_inventory.has_equipped_tool_for_attr(&AttrKey::Logging));
+    assert_eq!(villager_inventory.items.len(), 1);
+    assert_eq!(villager_inventory.items[0].name, "Crude Hatchet");
+    assert_eq!(villager_inventory.items[0].quantity, 1);
+    assert_eq!(villager_inventory.items[0].owner, 1);
+    assert_eq!(villager_inventory.items[0].durability, Some(45));
+    assert!(villager_inventory.items[0].equipped);
+
+    let storage_inventory = app.world().entity(storage).get::<Inventory>().unwrap();
+    let remaining_hatchets = storage_inventory
+        .get_by_id(200)
+        .expect("one Crude Hatchet should remain in storage");
+    assert_eq!(remaining_hatchets.quantity, 1);
+    assert_eq!(remaining_hatchets.owner, 2);
+    assert_eq!(remaining_hatchets.durability, Some(45));
 }
 
 #[test]
@@ -3043,11 +3165,11 @@ fn set_flee_destination_succeeds_when_hero_is_reachable() {
     assert_eq!(*action_state, ActionState::Success);
 
     let destination = app.world().entity(villager).get::<Destination>().unwrap();
-    assert_ne!(destination.pos, villager_pos);
+    assert_eq!(destination.pos, Position { x: 7, y: 5 });
 }
 
 #[test]
-fn set_flee_destination_prefers_nearby_wall_over_hero() {
+fn set_flee_destination_prefers_stockade_over_campfire_and_hero() {
     let mut app = setup_action_test_app!(set_flee_destination_system);
     app.world_mut().insert_resource(open_test_map());
 
@@ -3076,6 +3198,7 @@ fn set_flee_destination_prefers_nearby_wall_over_hero() {
         Subclass::None,
     );
     let wall = spawn_wall_obj(app.world_mut(), 4, 1, wall_pos);
+    let campfire = spawn_campfire_obj(app.world_mut(), 5, 1, Position { x: 8, y: 5 });
 
     {
         let mut ids = app.world_mut().resource_mut::<Ids>();
@@ -3083,6 +3206,7 @@ fn set_flee_destination_prefers_nearby_wall_over_hero() {
         ids.new_hero(2, 1);
         ids.new_obj(3, 1001);
         ids.new_obj(4, 1);
+        ids.new_obj(5, 1);
     }
     {
         let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
@@ -3090,6 +3214,7 @@ fn set_flee_destination_prefers_nearby_wall_over_hero() {
         entity_map.new_obj(2, hero);
         entity_map.new_obj(3, enemy);
         entity_map.new_obj(4, wall);
+        entity_map.new_obj(5, campfire);
     }
 
     let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
@@ -3106,6 +3231,62 @@ fn set_flee_destination_prefers_nearby_wall_over_hero() {
 
     let destination = app.world().entity(villager).get::<Destination>().unwrap();
     assert_eq!(destination.pos, wall_pos);
+}
+
+#[test]
+fn set_flee_destination_prefers_campfire_over_hero_without_stockade() {
+    let mut app = setup_action_test_app!(set_flee_destination_system);
+    app.world_mut().insert_resource(open_test_map());
+
+    let villager_pos = Position { x: 5, y: 5 };
+    let hero_pos = Position { x: 7, y: 5 };
+    let campfire_pos = Position { x: 8, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_player_id(1)
+        .with_position(villager_pos)
+        .spawn(app.world_mut());
+
+    let hero = spawn_base_obj(app.world_mut(), 2, 1, hero_pos, Subclass::Hero);
+    app.world_mut().entity_mut(hero).insert(SubclassHero);
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        3,
+        1001,
+        Position { x: 4, y: 5 },
+        Subclass::None,
+    );
+    let campfire = spawn_campfire_obj(app.world_mut(), 4, 1, campfire_pos);
+
+    {
+        let mut ids = app.world_mut().resource_mut::<Ids>();
+        ids.new_obj(1, 1);
+        ids.new_hero(2, 1);
+        ids.new_obj(3, 1001);
+        ids.new_obj(4, 1);
+    }
+    {
+        let mut entity_map = app.world_mut().resource_mut::<EntityObjMap>();
+        entity_map.new_obj(1, villager);
+        entity_map.new_obj(2, hero);
+        entity_map.new_obj(3, enemy);
+        entity_map.new_obj(4, campfire);
+    }
+
+    let action_entity = spawn_action_as_requested(&mut app, &SetFleeDestination, villager);
+
+    app.update();
+    app.update();
+
+    let action_state = app
+        .world()
+        .entity(action_entity)
+        .get::<ActionState>()
+        .unwrap();
+    assert_eq!(*action_state, ActionState::Success);
+
+    let destination = app.world().entity(villager).get::<Destination>().unwrap();
+    assert_eq!(destination.pos, campfire_pos);
 }
 
 #[test]
@@ -3357,6 +3538,129 @@ fn routine_thirst_without_stocked_water_does_not_route_to_natural_water() {
 }
 
 #[test]
+fn routine_thirst_uses_spring_on_current_tile() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(62.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(start, false);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(start)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        start
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<DrinkingFromWater>()
+            .unwrap()
+            .pos,
+        start
+    );
+}
+
+#[test]
+fn routine_thirst_routes_to_adjacent_spring() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let spring_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(62.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(spring_pos, false);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Destination>()
+            .unwrap()
+            .pos,
+        spring_pos
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<DrinkingFromWater>()
+            .unwrap()
+            .pos,
+        spring_pos
+    );
+}
+
+#[test]
+fn villager_does_not_route_to_adjacent_spring_when_danger_is_nearby() {
+    let mut app = setup_action_test_app!(find_drink_system);
+    let start = Position { x: 5, y: 5 };
+    let spring_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(start)
+        .with_thirst(62.0)
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(spring_pos, true);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+    let enemy = spawn_base_obj(
+        app.world_mut(),
+        2,
+        NPC_PLAYER_ID,
+        Position { x: 7, y: 5 },
+        Subclass::Npc,
+    );
+    register_test_obj(&mut app, 2, NPC_PLAYER_ID, enemy);
+
+    let action = complete_find_drink_action(&mut app, villager);
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert!(app.world().entity(villager).get::<Destination>().is_none());
+    assert!(app
+        .world()
+        .entity(villager)
+        .get::<DrinkingFromWater>()
+        .is_none());
+}
+
+#[test]
 fn emergency_thirst_searches_exactly_one_safe_adjacent_tile() {
     let mut app = setup_action_test_app!(find_drink_system);
     let start = Position { x: 5, y: 5 };
@@ -3427,6 +3731,7 @@ fn villager_discovers_and_drinks_from_spring_only_after_arrival() {
     app.world_mut().entity_mut(villager).insert((
         DrinkingFromWater { pos: spring_pos },
         Destination { pos: spring_pos },
+        Dehydrated { at_tick: 0 },
     ));
     register_test_obj(&mut app, 1, 1, villager);
 
@@ -3475,7 +3780,88 @@ fn villager_discovers_and_drinks_from_spring_only_after_arrival() {
         .entity(villager)
         .get::<DrinkingFromWater>()
         .is_none());
+    assert!(
+        app.world().entity(villager).get::<Dehydrated>().is_none(),
+        "drinking from a spring must cancel the dehydration death countdown"
+    );
     assert!(app.world().entity(villager).get::<Destination>().is_none());
+}
+
+#[test]
+fn villager_fills_one_empty_waterskin_when_drinking_from_spring() {
+    let mut app = setup_action_test_app!((transfer_drink_system, drink_action_system));
+    app.world_mut().insert_resource(templates_with_waterskins());
+    let spring_pos = Position { x: 6, y: 5 };
+    let villager = ActionTestVillagerBuilder::new()
+        .with_position(spring_pos)
+        .with_thirst(80.0)
+        .with_empty_waterskin(2)
+        .spawn(app.world_mut());
+    app.world_mut().entity_mut(villager).insert((
+        DrinkingFromWater { pos: spring_pos },
+        Destination { pos: spring_pos },
+    ));
+    register_test_obj(&mut app, 1, 1, villager);
+
+    let spring = create_spring_resource(spring_pos, true);
+    app.world_mut()
+        .resource_mut::<Resources>()
+        .entry(spring_pos)
+        .or_default()
+        .insert(spring.name.clone(), spring);
+
+    let transfer = spawn_action_as_requested(&mut app, &TransferDrink, villager);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(transfer).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    let inventory = app.world().entity(villager).get::<Inventory>().unwrap();
+    assert_eq!(
+        inventory
+            .items
+            .iter()
+            .filter(|item| item.name == WATERSKIN_EMPTY)
+            .map(|item| item.quantity)
+            .sum::<i32>(),
+        1
+    );
+    assert_eq!(
+        inventory
+            .items
+            .iter()
+            .filter(|item| item.name == WATERSKIN_FILLED)
+            .map(|item| item.quantity)
+            .sum::<i32>(),
+        1
+    );
+
+    let drink = spawn_action_as_requested(&mut app, &Drink, villager);
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(drink).get::<ActionState>().unwrap(),
+        ActionState::Success
+    );
+    assert_eq!(
+        app.world().entity(villager).get::<Thirst>().unwrap().thirst,
+        0.0
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<Inventory>()
+            .unwrap()
+            .items
+            .iter()
+            .filter(|item| item.name == WATERSKIN_FILLED)
+            .map(|item| item.quantity)
+            .sum::<i32>(),
+        1,
+        "direct spring drinking should leave the newly filled waterskin available"
+    );
 }
 
 #[test]
@@ -3611,6 +3997,114 @@ fn drink_action_fails_when_villager_is_combat_locked() {
         State::None
     );
     assert!(app.world().resource::<MapEvents>().is_empty());
+}
+
+#[test]
+fn drink_action_interrupted_after_start_clears_drinking_state() {
+    let mut app = setup_action_test_app!(drink_action_system);
+
+    let villager = ActionTestVillagerBuilder::new()
+        .with_thirst(80.0)
+        .with_drink_item()
+        .spawn(app.world_mut());
+    register_test_obj(&mut app, 1, 1, villager);
+    let action = spawn_action_as_requested(&mut app, &Drink, villager);
+
+    app.update();
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::Drinking
+    );
+    assert_eq!(app.world().resource::<MapEvents>().len(), 1);
+
+    app.world_mut()
+        .entity_mut(villager)
+        .insert(LastCombatTick(TICKS_PER_SEC));
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(action).get::<ActionState>().unwrap(),
+        ActionState::Failure
+    );
+    assert_eq!(
+        *app.world().entity(villager).get::<State>().unwrap(),
+        State::None,
+        "combat interruption must not leave thirst frozen in Drinking"
+    );
+    assert_eq!(
+        app.world()
+            .entity(villager)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::None
+    );
+    assert!(app.world().resource::<MapEvents>().is_empty());
+}
+
+#[test]
+fn drinking_reconciliation_repairs_only_orphaned_state() {
+    let mut app = setup_action_test_app!(reconcile_orphaned_drinking_system);
+
+    let orphaned = ActionTestVillagerBuilder::new()
+        .with_id(1)
+        .with_active_task(ActiveTask::GettingDrink)
+        .with_event_state(EventExecutingState::Executing)
+        .spawn(app.world_mut());
+    let valid = ActionTestVillagerBuilder::new()
+        .with_id(2)
+        .with_active_task(ActiveTask::GettingDrink)
+        .with_event_state(EventExecutingState::Executing)
+        .spawn(app.world_mut());
+    *app.world_mut()
+        .entity_mut(orphaned)
+        .get_mut::<State>()
+        .unwrap() = State::Drinking;
+    *app.world_mut()
+        .entity_mut(valid)
+        .get_mut::<State>()
+        .unwrap() = State::Drinking;
+    app.world_mut().resource_mut::<MapEvents>().new(
+        2,
+        TICKS_PER_SEC * 4,
+        VisibleEvent::DrinkEvent {
+            item_id: 22,
+            obj_id: 2,
+        },
+    );
+
+    app.update();
+
+    assert_eq!(
+        *app.world().entity(orphaned).get::<State>().unwrap(),
+        State::None
+    );
+    assert_eq!(
+        *app.world().entity(orphaned).get::<ActiveTask>().unwrap(),
+        ActiveTask::Idle
+    );
+    assert_eq!(
+        app.world()
+            .entity(orphaned)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::None
+    );
+
+    assert_eq!(
+        *app.world().entity(valid).get::<State>().unwrap(),
+        State::Drinking,
+        "a live drink event must not be repaired as an orphan"
+    );
+    assert_eq!(
+        app.world()
+            .entity(valid)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::Executing
+    );
 }
 
 #[test]
@@ -4368,14 +4862,10 @@ fn activity_update_system_emits_when_blocked_work_is_removed() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     let client_id = Uuid::new_v4();
     let clients = Clients::default();
-    clients.lock().unwrap().insert(
-        client_id,
-        Client {
-            id: client_id,
-            player_id: 1,
-            sender,
-        },
-    );
+    clients
+        .lock()
+        .unwrap()
+        .insert(client_id, Client::new(client_id, 1, sender));
     app.world_mut().insert_resource(clients);
 
     let mut active_infos = ActiveInfos(HashMap::new());

@@ -39,7 +39,7 @@
   mausoleum_pos: [20,16]
   merchant_pos: [14,11]
   burned_house_pos: [18,9]
-  graveyard_pos: [11,10]
+  graveyard_pos: [8,10]
   sealed_cavern_pos: [17,16]
   abandoned_mine_pos: [10,17]
 

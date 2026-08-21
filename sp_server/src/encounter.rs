@@ -619,6 +619,11 @@ impl Encounter {
             VillagerUtil::generate_skills(villager_id, &templates.skill_templates);
         let base_attrs = VillagerUtil::generate_attributes(1);
 
+        villager.inventory.add_equipped_tattered_clothing(
+            ids.new_item_id(),
+            ids.new_item_id(),
+            &templates.item_templates,
+        );
         villager.inventory.new(
             ids.new_item_id(),
             "Crude Torch".to_string(),
@@ -1531,36 +1536,47 @@ impl Encounter {
     }
 
     fn loot_list(template: &ObjTemplate) -> Vec<Loot> {
-        let mut loot = match template.family.as_deref() {
-            Some("Animal") => Self::animal_loot_list(&template.template),
-            Some("Undead") => vec![
-                Self::loot("Mana", 0.65, 1, 4),
-                Self::loot("Valleyrun Copper Dust", 0.35, 1, 5),
-                Self::loot("Gold Coins", 0.45, 1, 7),
-                Self::loot("Crude Bandage", 0.08, 1, 2),
-                Self::loot("Copper Training Axe", 0.02, 1, 2),
-            ],
-            Some("Goblin") => vec![
-                Self::loot("Gold Coins", 0.90, 3, 13),
-                Self::loot("Crude Bandage", 0.30, 1, 3),
-                Self::loot("Resin Torch", 0.25, 1, 2),
-                Self::loot("Firewood", 0.25, 1, 4),
-                Self::loot("Copper Training Axe", 0.06, 1, 2),
-            ],
-            Some("Creature") => vec![
-                Self::loot("bones", 0.65, 1, 4),
-                Self::loot("Frostmane Raw Hide", 0.30, 1, 3),
-                Self::loot("Mana", 0.20, 1, 3),
-            ],
-            _ => vec![
-                Self::loot("Gold Coins", 0.25, 1, 5),
+        let mut loot = if template.template == "Goblin Scout" {
+            vec![
+                // A minor scout always provides a small practical reward but
+                // cannot inject early Gold pressure or Sanctuary currency.
+                Self::loot("Firewood", 1.0, 1, 3),
+                Self::loot("Plant Fibers", 0.45, 1, 3),
                 Self::loot("Crude Bandage", 0.10, 1, 2),
-            ],
+            ]
+        } else {
+            match template.family.as_deref() {
+                Some("Animal") => Self::animal_loot_list(&template.template),
+                Some("Undead") => vec![
+                    Self::loot("Mana", 0.65, 1, 4),
+                    Self::loot("Valleyrun Copper Dust", 0.35, 1, 5),
+                    Self::loot("Gold Coins", 0.45, 1, 7),
+                    Self::loot("Crude Bandage", 0.08, 1, 2),
+                    Self::loot("Copper Training Axe", 0.02, 1, 2),
+                ],
+                Some("Goblin") => vec![
+                    Self::loot("Gold Coins", 0.90, 3, 13),
+                    Self::loot("Crude Bandage", 0.30, 1, 3),
+                    Self::loot("Resin Torch", 0.25, 1, 2),
+                    Self::loot("Firewood", 0.25, 1, 4),
+                    Self::loot("Copper Training Axe", 0.06, 1, 2),
+                ],
+                Some("Creature") => vec![
+                    Self::loot("bones", 0.65, 1, 4),
+                    Self::loot("Frostmane Raw Hide", 0.30, 1, 3),
+                    Self::loot("Mana", 0.20, 1, 3),
+                ],
+                _ => vec![
+                    Self::loot("Gold Coins", 0.25, 1, 5),
+                    Self::loot("Crude Bandage", 0.10, 1, 2),
+                ],
+            }
         };
 
         // Hostile encounters remain the source of Sanctuary-upgrade currency,
         // while passive wildlife now yields only its physical carcass/materials.
-        if template.aggression.as_deref() != Some("passive") {
+        if template.aggression.as_deref() != Some("passive") && template.template != "Goblin Scout"
+        {
             loot.push(Self::loot("Soulshard", 0.90, 1, 2));
         }
 
@@ -1726,6 +1742,13 @@ mod tests {
         assert!(goblin.contains("Copper Training Axe"));
         assert!(goblin.contains("Soulshard"));
         assert!(!goblin.contains("Mana"));
+
+        let scout = loot_names(find("Goblin Scout"));
+        assert!(scout.contains("Firewood"));
+        assert!(scout.contains("Plant Fibers"));
+        assert!(scout.contains("Crude Bandage"));
+        assert!(!scout.contains("Gold Coins"));
+        assert!(!scout.contains("Soulshard"));
     }
 
     #[test]

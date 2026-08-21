@@ -8,6 +8,13 @@ interface DamageMessage {
   missed?: boolean;
 }
 
+interface CombatStateSnapshot {
+  target_id?: string | number;
+  available_finisher?: string;
+  finisher_transferable?: boolean;
+  [key: string]: unknown;
+}
+
 interface SelectedObjectKey {
   type?: string;
   id?: string | number;
@@ -29,6 +36,43 @@ type CombatTargetStates = Record<string, CombatTargetState>;
 
 function sameId(left: string | number | undefined, right: string | number): boolean {
   return left !== undefined && Number(left) === Number(right);
+}
+
+export function retargetTransferableFinisher(
+  combatState: CombatStateSnapshot | null | undefined,
+  nextTargetId: string | number | null,
+): CombatStateSnapshot | null {
+  if (!combatState?.available_finisher || combatState.finisher_transferable !== true) {
+    return null;
+  }
+
+  return {
+    ...combatState,
+    target_id: nextTargetId === null ? undefined : Number(nextTargetId),
+    enemy_intent: '',
+    matching_combos: [],
+    target_effects: [],
+    abilities: [],
+    counter_hint: '',
+  };
+}
+
+export function carryTransferableFinisherAfterKill(
+  combatState: CombatStateSnapshot | null | undefined,
+  damage: DamageMessage,
+  heroId: string | number,
+  nextTargetId: string | number | null,
+): CombatStateSnapshot | null {
+  if (
+    damage.missed
+    || damage.state !== DEAD
+    || !sameId(damage.source_id, heroId)
+    || !sameId(combatState?.target_id, damage.target_id)
+  ) {
+    return null;
+  }
+
+  return retargetTransferableFinisher(combatState, nextTargetId);
 }
 
 /**

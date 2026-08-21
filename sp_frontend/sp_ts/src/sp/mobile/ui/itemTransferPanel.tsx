@@ -5,6 +5,7 @@ import upgradebutton from "ui_comp/upgradebutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
 import { STRUCTURE, FOUNDED, PLANNING_UPGRADE } from "../../core/config";
+import { inventoryItemTransferLocked } from "../../core/inventoryTransferPolicy";
 import { Util } from "../../core/util";
 import MobilePanelScreen from "./mobilePanelScreen";
 import MobileInventoryGrid from "./mobileInventoryGrid";
@@ -201,11 +202,6 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     };
   }
 
-  ownerCanEquip(inventoryData) {
-    const ownerState = Global.objectStates[inventoryData.id];
-    return ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
-  }
-
   renderPager(side: 'left' | 'right', page: number, totalPages: number) {
     if (totalPages <= 1) return null;
 
@@ -359,11 +355,10 @@ export default class ItemTransferPanel extends React.Component<ITPProps, any> {
     const pageSize = 12;
     const pageState = side == 'left' ? this.state.leftPage : this.state.rightPage;
     const pageData = this.pagedItems(inventoryData.items, pageState, pageSize);
-    const disabledItems = this.ownerCanEquip(inventoryData)
-      ? pageData.items
-        .filter(item => item.equipped == true)
-        .map(item => item.id)
-      : [];
+    const ownerState = Global.objectStates[inventoryData.id];
+    const disabledItems = pageData.items
+      .filter(item => inventoryItemTransferLocked(ownerState, item))
+      .map(item => item.id);
     const summary = this.objectSummary(inventoryData);
     const capacityText = inventoryData.cap != null && inventoryData.tw != null
       ? inventoryData.tw + '/' + inventoryData.cap + ' lbs'

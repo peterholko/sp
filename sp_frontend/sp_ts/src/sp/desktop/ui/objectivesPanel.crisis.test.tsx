@@ -86,12 +86,11 @@ assert.match(
   /Preparation window\s+3m 00s/,
 );
 assert.doesNotMatch(renderedText, /Preparation time|\b0s\b/);
-assert.match(renderedText, /Prepare your settlement/);
-assert.match(renderedText, /Defences\s+Needs attention/);
-assert.match(renderedText, /Two defensive structures are damaged/);
-assert.match(renderedText, /Action:\s+Repair walls before the raid begins/);
-assert.match(renderedText, /Defenders\s+Ready/);
-assert.match(renderedText, /Equipment\s+Unavailable/);
+assert.doesNotMatch(
+  renderedText,
+  /Prepare your settlement|Defences|Defenders|Equipment|Two defensive structures are damaged|Repair walls before the raid begins/,
+  'the crisis card omits the verbose preparation breakdown even when the server sends it',
+);
 
 const active = crisisStatusView({
   ...status,

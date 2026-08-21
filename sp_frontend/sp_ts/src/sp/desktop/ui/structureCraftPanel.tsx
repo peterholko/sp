@@ -18,7 +18,12 @@ import wideframe from "ui_comp/wide_frame2.png";
 import ResourceItem from "./resourceItem";
 import BaseInventoryPanel from "./baseInventoryPanel";
 import SmallButton from "./smallButton";
-import { canBeSignatureForRecipe, itemRarity, rarityColor } from "../../core/itemRarity";
+import {
+  canBeSignatureForRecipe,
+  itemRarity,
+  rarityColor,
+  signatureDisplayName,
+} from "../../core/itemRarity";
 
 interface StructureCraftPanelProp {
   structureId,
@@ -218,7 +223,10 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
     const reqs = [];
     const signatureItem = (this.props.structureInventory.items || [])
       .find((item) => item.id == this.state.signatureItemId);
+    const signatureLabel = signatureDisplayName(signatureItem);
     const signatureRarity = signatureItem ? itemRarity(signatureItem) : 'Common';
+    const hasSignatureCandidate = (this.props.structureInventory.items || [])
+      .some((item) => canBeSignatureForRecipe(item, this.state.recipe));
 
     for (var i = 0; i < this.state.recipe.req.length; i++) {
       var req = this.state.recipe.req[i];
@@ -435,17 +443,19 @@ export default class StructureCraftPanel extends React.Component<StructureCraftP
                   <td>Requirements:</td>
                   <td></td>
                 </tr>
-                <tr>
-                  <td>Signature:</td>
-                  <td style={{ color: rarityColor(signatureRarity) }}>
-                    {signatureItem
-                      ? `${signatureRarity} ${signatureItem.name}`
-                      : 'Common materials only'}
-                  </td>
-                </tr>
-                <tr>
-                  <td colSpan={2}>Click a colored matching component to select it.</td>
-                </tr>
+                {signatureLabel &&
+                  <tr>
+                    <td>Signature:</td>
+                    <td style={{ color: rarityColor(signatureRarity) }}>
+                      {signatureLabel}
+                    </td>
+                  </tr>
+                }
+                {hasSignatureCandidate &&
+                  <tr>
+                    <td colSpan={2}>Click a colored matching component to select it.</td>
+                  </tr>
+                }
                 <tr>
                   <td colSpan={2}>
                     {reqs}

@@ -10,7 +10,7 @@ use crate::templates::{EffectTemplate, ResReq, SkillTemplate, SkillTemplates, Te
 use big_brain::actions::spawn_action;
 use big_brain::prelude::ActionState;
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 
 fn load_obj_templates() -> Vec<ObjTemplate> {
     let obj_template_file =
@@ -462,6 +462,55 @@ fn damage_over_time_ticks_once_per_second_and_handles_death() {
 }
 
 #[test]
+fn dehydration_death_timer_rechecks_current_thirst() {
+    let mut app = App::new();
+    app.insert_resource(GameTick(DEHYDRATED_DEATH_AT + 1));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.add_systems(Update, dehydrated_system);
+
+    let recovered = app
+        .world_mut()
+        .spawn((
+            Id(77),
+            PlayerId(1),
+            State::None,
+            Thirst::new(DEHYDRATED_RECOVERY_SCORE, 0.0),
+            Dehydrated { at_tick: 0 },
+            big_brain::thinker::ThinkerBuilder::default(),
+        ))
+        .id();
+    let still_dehydrated = app
+        .world_mut()
+        .spawn((
+            Id(78),
+            PlayerId(1),
+            State::None,
+            Thirst::new(DEHYDRATED_SCORE + 1.0, 0.0),
+            Dehydrated { at_tick: 0 },
+            big_brain::thinker::ThinkerBuilder::default(),
+        ))
+        .id();
+
+    app.update();
+
+    assert!(app.world().get::<Dehydrated>(recovered).is_none());
+    assert!(app.world().get::<StateDead>(recovered).is_none());
+    assert!(app
+        .world()
+        .get::<big_brain::thinker::ThinkerBuilder>(recovered)
+        .is_some());
+
+    assert_eq!(
+        app.world()
+            .get::<StateDead>(still_dehydrated)
+            .expect("an actor that remains dehydrated should still die")
+            .killer,
+        "Dehydration"
+    );
+}
+
+#[test]
 fn early_game_enemy_templates_are_loaded() {
     let obj_templates = load_obj_templates();
     let expected = [
@@ -611,8 +660,19 @@ fn encounter_groups_use_distinct_passable_tiles_outside_sanctuary() {
     )]));
     let mut rng = StdRng::seed_from_u64(0x5A11_CAFE);
 
-    let positions =
-        random_encounter_spawn_positions(center, 3, 2, &blocked, &sanctuary_zones, &map, &mut rng);
+    let catalog = Templates::from_obj_templates(load_obj_templates());
+    let template_names = vec!["Giant Rat".to_string(); 3];
+    let positions = random_encounter_spawn_positions(
+        center,
+        &template_names,
+        2,
+        &blocked,
+        &[],
+        &sanctuary_zones,
+        &map,
+        &catalog,
+        &mut rng,
+    );
 
     assert_eq!(positions.len(), 3);
     assert_eq!(positions.iter().copied().collect::<HashSet<_>>().len(), 3);
@@ -622,6 +682,58 @@ fn encounter_groups_use_distinct_passable_tiles_outside_sanctuary() {
         assert!(!blocked.contains(&position));
         assert!(!sanctuary_zones.contains(position));
     }
+}
+
+#[test]
+fn giant_crab_habitat_requires_passable_land_adjacent_to_ocean() {
+    let mut map = flat_land_map();
+    let inland = Position { x: 20, y: 20 };
+    let coastal_land = Position { x: 21, y: 20 };
+    let ocean = Position { x: 22, y: 20 };
+    set_test_tile_type(&mut map, ocean.x, ocean.y, TileType::Ocean);
+
+    assert!(!npc_spawn_position_matches_habitat(
+        GIANT_CRAB_TEMPLATE,
+        inland,
+        &map
+    ));
+    assert!(npc_spawn_position_matches_habitat(
+        GIANT_CRAB_TEMPLATE,
+        coastal_land,
+        &map
+    ));
+    assert!(!npc_spawn_position_matches_habitat(
+        GIANT_CRAB_TEMPLATE,
+        ocean,
+        &map
+    ));
+    assert!(npc_spawn_position_matches_habitat(
+        "Wild Boar",
+        inland,
+        &map
+    ));
+}
+
+#[test]
+fn template_aware_spawn_assignment_reserves_coastal_tiles_for_crabs() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut map = flat_land_map();
+    let inland = Position { x: 20, y: 20 };
+    let coastal_land = Position { x: 21, y: 20 };
+    set_test_tile_type(&mut map, 22, 20, TileType::Ocean);
+    let templates = vec!["Giant Rat".to_string(), GIANT_CRAB_TEMPLATE.to_string()];
+    let mut rng = StdRng::seed_from_u64(0xC0A5_7A1);
+
+    let positions =
+        template_aware_spawn_positions(vec![coastal_land, inland], &templates, &map, &mut rng);
+
+    assert_eq!(positions, vec![inland, coastal_land]);
+    assert!(npc_spawn_position_matches_habitat(
+        &templates[1],
+        positions[1],
+        &map
+    ));
 }
 
 #[test]
@@ -832,13 +944,17 @@ fn first_combat_encounter_spawns_farther_away_than_normal_groups() {
     let map = flat_land_map();
     let center = Position { x: 20, y: 20 };
     let mut rng = StdRng::seed_from_u64(0xE5CA_9E);
+    let catalog = Templates::from_obj_templates(load_obj_templates());
+    let template_names = vec!["Giant Rat".to_string(); 3];
     let positions = random_encounter_spawn_positions(
         center,
-        3,
+        &template_names,
         3,
         &HashSet::new(),
+        &[],
         &SanctuaryZones::default(),
         &map,
+        &catalog,
         &mut rng,
     );
 
@@ -846,6 +962,458 @@ fn first_combat_encounter_spawns_farther_away_than_normal_groups() {
     assert!(positions
         .iter()
         .all(|position| (3..=4).contains(&Map::dist(center, *position))));
+}
+
+#[test]
+fn pre_crisis_skirmish_slots_unlock_in_the_intended_order() {
+    let mut facts = PreCrisisSkirmishFacts::default();
+    assert!(!pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        facts
+    ));
+
+    facts.opening_threat_defeated = true;
+    facts.villager_rescued = true;
+    assert!(!pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        facts
+    ));
+    facts.completed_burrow = true;
+    assert!(pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        facts
+    ));
+    assert!(!pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::WorksiteScavengers,
+        facts
+    ));
+
+    facts.completed_lumbercamp = true;
+    assert!(pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::WorksiteScavengers,
+        facts
+    ));
+    assert!(!pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::GoblinScout,
+        facts
+    ));
+    facts.completed_fortification = true;
+    assert!(pre_crisis_skirmish_stage_eligible(
+        PreCrisisSkirmishSlot::GoblinScout,
+        facts
+    ));
+}
+
+#[test]
+fn pre_fortification_encounter_target_is_randomized_between_three_and_five() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0xA660_71A5);
+    let targets = (0..256)
+        .map(|_| random_pre_fortification_encounter_target(&mut rng))
+        .collect::<HashSet<_>>();
+
+    assert!(targets.iter().all(|target| {
+        (PRE_FORTIFICATION_ENCOUNTER_MIN..=PRE_FORTIFICATION_ENCOUNTER_MAX).contains(target)
+    }));
+    assert_eq!(
+        targets,
+        HashSet::from([3, 4, 5]),
+        "every supported nuisance-wave target should be reachable"
+    );
+}
+
+#[test]
+fn bounded_sequence_repeats_scavengers_until_its_target_then_arms_scouts() {
+    let mut progress = PlayerPreCrisisSkirmishes::with_target(100, 100, 3);
+
+    for (wave_index, expected_slot) in [
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        PreCrisisSkirmishSlot::WorksiteScavengers,
+        PreCrisisSkirmishSlot::WorksiteScavengers,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(progress.current_slot(), Some(expected_slot));
+        let unit_id = 40 + wave_index as i32;
+        progress.begin_encounter(expected_slot, vec![unit_id]);
+        progress.reconcile_active_units(&HashSet::new());
+        assert!(progress.finish_defeated_encounter());
+    }
+
+    assert_eq!(
+        progress.current_slot(),
+        Some(PreCrisisSkirmishSlot::GoblinScout)
+    );
+    progress.begin_encounter(PreCrisisSkirmishSlot::GoblinScout, vec![50]);
+    progress.reconcile_active_units(&HashSet::new());
+    assert!(progress.finish_defeated_encounter());
+    assert_eq!(progress.current_slot(), None);
+}
+
+#[test]
+fn pre_crisis_skirmish_clock_counts_only_eligible_online_time() {
+    let mut progress = PlayerPreCrisisSkirmishes::new(100, 100);
+    progress.required_online_ticks = Some(20);
+
+    progress.observe_tick(110, true, true);
+    assert_eq!(progress.eligible_online_ticks, 10);
+    progress.observe_tick(200, false, true);
+    assert_eq!(progress.eligible_online_ticks, 10);
+    progress.observe_tick(210, true, true);
+    assert_eq!(progress.eligible_online_ticks, 20);
+
+    progress.begin_encounter(PreCrisisSkirmishSlot::WildernessNuisance, vec![41, 42]);
+    progress.observe_tick(260, true, true);
+    assert_eq!(progress.eligible_online_ticks, 20);
+    progress.reconcile_active_units(&HashSet::from([42]));
+    assert!(!progress.finish_defeated_encounter());
+    progress.reconcile_active_units(&HashSet::new());
+    assert!(progress.finish_defeated_encounter());
+    assert_eq!(
+        progress.current_slot(),
+        Some(PreCrisisSkirmishSlot::WorksiteScavengers)
+    );
+    assert_eq!(progress.eligible_online_ticks, 0);
+    assert_eq!(progress.required_online_ticks, None);
+}
+
+#[test]
+fn stalled_pre_crisis_encounter_stops_suppressing_ambient_encounters_and_retries() {
+    let mut progress = PlayerPreCrisisSkirmishes::new(100, 100);
+    progress.begin_encounter(PreCrisisSkirmishSlot::WildernessNuisance, vec![41]);
+    let positions = HashMap::from([(41, Position { x: 10, y: 10 })]);
+
+    let elapsed = progress.observe_tick(110, true, true);
+    progress.observe_active_progress(elapsed, true, &positions);
+    assert!(progress.suppresses_random_encounters());
+
+    let almost_stalled_tick = 110 + PRE_CRISIS_STALL_TIMEOUT_TICKS - 1;
+    let elapsed = progress.observe_tick(almost_stalled_tick, true, true);
+    progress.observe_active_progress(elapsed, true, &positions);
+    assert!(progress.suppresses_random_encounters());
+
+    // Offline time must not retire a personal threat or advance its timeout.
+    let elapsed = progress.observe_tick(almost_stalled_tick + 1_000, false, true);
+    progress.observe_active_progress(elapsed, false, &positions);
+    assert!(progress.suppresses_random_encounters());
+
+    let elapsed = progress.observe_tick(almost_stalled_tick + 1_001, true, true);
+    progress.observe_active_progress(elapsed, true, &positions);
+    assert!(!progress.suppresses_random_encounters());
+
+    assert_eq!(progress.retry_stalled_encounter(), vec![41]);
+    assert!(!progress.has_active_encounter());
+    assert_eq!(
+        progress.current_slot(),
+        Some(PreCrisisSkirmishSlot::WildernessNuisance)
+    );
+    assert_eq!(
+        progress.required_online_ticks,
+        Some(PRE_CRISIS_RETRY_DELAY_TICKS)
+    );
+    assert!(progress.retry_stalled_encounter().is_empty());
+}
+
+#[test]
+fn movement_resets_the_pre_crisis_stall_timeout() {
+    let mut progress = PlayerPreCrisisSkirmishes::new(100, 100);
+    progress.begin_encounter(PreCrisisSkirmishSlot::WildernessNuisance, vec![41]);
+    let first = HashMap::from([(41, Position { x: 10, y: 10 })]);
+
+    let elapsed = progress.observe_tick(110, true, true);
+    progress.observe_active_progress(elapsed, true, &first);
+    let elapsed = progress.observe_tick(110 + PRE_CRISIS_STALL_TIMEOUT_TICKS - 1, true, true);
+    progress.observe_active_progress(elapsed, true, &first);
+
+    let moved = HashMap::from([(41, Position { x: 11, y: 10 })]);
+    let elapsed = progress.observe_tick(110 + PRE_CRISIS_STALL_TIMEOUT_TICKS, true, true);
+    progress.observe_active_progress(elapsed, true, &moved);
+
+    assert_eq!(progress.active_stalled_online_ticks, 0);
+    assert!(progress.suppresses_random_encounters());
+    assert!(progress.retry_stalled_encounter().is_empty());
+}
+
+#[test]
+fn pre_crisis_skirmish_delays_are_randomized_within_safe_windows() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(0xEA51_5A17);
+    for (slot, expected) in [
+        (
+            PreCrisisSkirmishSlot::WildernessNuisance,
+            PRE_CRISIS_WILDERNESS_DELAY_RANGE,
+        ),
+        (
+            PreCrisisSkirmishSlot::WorksiteScavengers,
+            PRE_CRISIS_WORKSITE_DELAY_RANGE,
+        ),
+        (
+            PreCrisisSkirmishSlot::GoblinScout,
+            PRE_CRISIS_SCOUT_DELAY_RANGE,
+        ),
+    ] {
+        let samples = (0..128)
+            .map(|_| pre_crisis_skirmish_delay(slot, &mut rng))
+            .collect::<HashSet<_>>();
+        assert!(samples.iter().all(|delay| expected.contains(delay)));
+        assert!(samples.len() > 1, "{slot:?} delay should not be fixed");
+    }
+}
+
+#[test]
+fn pre_crisis_compositions_vary_without_exceeding_easy_profiles() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let templates = Templates::from_obj_templates(load_obj_templates());
+    let mut rng = StdRng::seed_from_u64(0xC015_10A5);
+    let wilderness = choose_pre_crisis_skirmish_templates(
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        TileType::Grasslands,
+        false,
+        None,
+        &templates,
+        &mut rng,
+    );
+    assert_eq!(wilderness.len(), 1);
+    assert_ne!(wilderness[0], OPENING_RAT_TEMPLATE);
+    let wilderness_template = templates.obj_templates.get(wilderness[0].clone());
+    let wilderness_stats = pre_crisis_skirmish_stats(
+        PreCrisisSkirmishSlot::WildernessNuisance,
+        1,
+        &wilderness_template,
+    );
+    assert_eq!(
+        (wilderness_stats.hp, wilderness_stats.base_damage),
+        (8, Some(1))
+    );
+
+    let worksite_sizes = (0..128)
+        .map(|_| {
+            choose_pre_crisis_skirmish_templates(
+                PreCrisisSkirmishSlot::WorksiteScavengers,
+                TileType::Grasslands,
+                false,
+                None,
+                &templates,
+                &mut rng,
+            )
+            .len()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(worksite_sizes, HashSet::from([1, 2]));
+
+    let scout_sizes = (0..128)
+        .map(|_| {
+            choose_pre_crisis_skirmish_templates(
+                PreCrisisSkirmishSlot::GoblinScout,
+                TileType::Grasslands,
+                false,
+                None,
+                &templates,
+                &mut rng,
+            )
+            .len()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(scout_sizes, HashSet::from([1, 2]));
+    let scout = templates
+        .obj_templates
+        .get(GOBLIN_SCOUT_TEMPLATE.to_string());
+    assert_eq!(scout.image, "goblinpillager");
+    assert_eq!(scout.family.as_deref(), Some("Goblin"));
+    assert_eq!(scout.base_dmg, Some(2));
+}
+
+#[test]
+fn pre_crisis_spawns_are_reachable_and_outside_the_sanctuary() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = flat_land_map();
+    let center = Position { x: 20, y: 20 };
+    let sanctuary_zones = SanctuaryZones(HashMap::from([(
+        77,
+        SanctuaryZone {
+            pos: center,
+            level: 0,
+        },
+    )]));
+    let blocked = HashSet::from([Position { x: 25, y: 20 }]);
+    let mut rng = StdRng::seed_from_u64(0x0A75_1DE5);
+    let catalog = Templates::from_obj_templates(load_obj_templates());
+    let template_names = vec!["Giant Rat".to_string(); 2];
+    let positions = pre_crisis_skirmish_spawn_positions(
+        center,
+        center,
+        &template_names,
+        5,
+        7,
+        &blocked,
+        &[],
+        &sanctuary_zones,
+        &map,
+        &catalog,
+        &mut rng,
+    );
+
+    assert_eq!(positions.len(), 2);
+    assert_ne!(positions[0], positions[1]);
+    for position in positions {
+        assert!((5..=7).contains(&Map::dist(center, position)));
+        assert!(!sanctuary_zones.contains(position));
+        assert!(!blocked.contains(&position));
+        assert!(encounter_path_is_practical(
+            position,
+            center,
+            "Giant Rat",
+            &[],
+            &map,
+            &catalog,
+        ));
+    }
+}
+
+#[test]
+fn pre_crisis_spawns_respect_declared_river_traversal() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let mut map = flat_land_map();
+    for y in 0..HEIGHT {
+        set_test_tile_type(&mut map, 20, y, TileType::River);
+    }
+
+    let target = Position { x: 22, y: 25 };
+    let stranded_side = Position { x: 18, y: 25 };
+    let catalog = Templates::from_obj_templates(load_obj_templates());
+    assert!(!encounter_path_is_practical(
+        stranded_side,
+        target,
+        "Spider",
+        &[],
+        &map,
+        &catalog,
+    ));
+    assert!(
+        encounter_path_is_practical(
+            stranded_side,
+            target,
+            GOBLIN_SCOUT_TEMPLATE,
+            &[],
+            &map,
+            &catalog,
+        ),
+        "Goblin Scouts declare water traversal and must use it in both spawn validation and pursuit"
+    );
+    assert!(
+        !has_nearby_reachable_hostile(
+            target,
+            target,
+            &[(stranded_side, "Spider".to_string())],
+            &[],
+            &map,
+            &catalog,
+        ),
+        "an inaccessible hostile must not suppress the player's next bounded encounter"
+    );
+    assert!(has_nearby_reachable_hostile(
+        target,
+        target,
+        &[(Position { x: 24, y: 25 }, "Spider".to_string())],
+        &[],
+        &map,
+        &catalog,
+    ));
+
+    let mut rng = StdRng::seed_from_u64(0xA11C_E55);
+    let positions = pre_crisis_skirmish_spawn_positions(
+        target,
+        target,
+        &["Spider".to_string()],
+        5,
+        7,
+        &HashSet::new(),
+        &[],
+        &SanctuaryZones::default(),
+        &map,
+        &catalog,
+        &mut rng,
+    );
+
+    assert_eq!(positions.len(), 1);
+    assert!(positions[0].x > 20, "spawned across the river barrier");
+    assert!(encounter_path_is_practical(
+        positions[0],
+        target,
+        "Spider",
+        &[],
+        &map,
+        &catalog,
+    ));
+
+    let ambient_positions = random_encounter_spawn_positions(
+        target,
+        &["Spider".to_string()],
+        3,
+        &HashSet::new(),
+        &[],
+        &SanctuaryZones::default(),
+        &map,
+        &catalog,
+        &mut rng,
+    );
+    assert_eq!(ambient_positions.len(), 1);
+    assert!(
+        ambient_positions[0].x > 20,
+        "ambient encounter spawned across the river barrier"
+    );
+}
+
+#[test]
+fn minor_skirmishes_wait_until_the_hero_has_recovered() {
+    let template = load_obj_templates()
+        .into_iter()
+        .find(|template| template.template == GOBLIN_SCOUT_TEMPLATE)
+        .expect("Goblin Scout template");
+    let mut stats = pre_crisis_skirmish_stats(PreCrisisSkirmishSlot::GoblinScout, 1, &template);
+    let current_tick = 1_000;
+    let mut last_combat_tick = LastCombatTick(current_tick - crate::obj::COMBAT_LOCK_TICKS);
+
+    stats.hp = stats
+        .base_hp
+        .saturating_mul(PRE_CRISIS_MIN_HEALTH_PERCENT)
+        .saturating_add(99)
+        / 100;
+    assert!(hero_is_ready_for_minor_skirmish(
+        &stats,
+        &last_combat_tick,
+        current_tick
+    ));
+    stats.hp -= 1;
+    assert!(!hero_is_ready_for_minor_skirmish(
+        &stats,
+        &last_combat_tick,
+        current_tick
+    ));
+    stats.hp = stats.base_hp;
+    last_combat_tick.0 = current_tick - 1;
+    assert!(!hero_is_ready_for_minor_skirmish(
+        &stats,
+        &last_combat_tick,
+        current_tick
+    ));
+}
+
+#[test]
+fn preparing_retires_any_unresolved_minor_encounter() {
+    let mut progress = PlayerPreCrisisSkirmishes::new(10, 10);
+    progress.begin_encounter(PreCrisisSkirmishSlot::GoblinScout, vec![8, 9]);
+    let retired = progress.retire_remaining_encounters();
+
+    assert_eq!(retired, vec![8, 9]);
+    assert!(!progress.has_active_encounter());
+    assert_eq!(progress.current_slot(), None);
 }
 
 #[test]
@@ -1015,13 +1583,49 @@ fn intro_followup_tiles_are_available_around_every_curated_start() {
                 && Map::is_passable(candidate.x, candidate.y, &map)
         }));
 
-        let selected = random_intro_followup_spawn_position(start, &HashSet::new(), &map, &mut rng)
-            .expect("a seeded selection from the valid candidates");
+        let selected = random_intro_followup_spawn_position(
+            "Wild Boar",
+            start,
+            &HashSet::new(),
+            &map,
+            &mut rng,
+        )
+        .expect("a seeded selection from the valid candidates");
         assert!(candidates.contains(&selected));
         assert!(
             !intro_followup_spawn_candidates(start, &HashSet::from([selected]), &map)
                 .contains(&selected)
         );
+    }
+}
+
+#[test]
+fn intro_crab_followup_uses_coastal_land_at_every_curated_start() {
+    use rand::{rngs::StdRng, SeedableRng};
+
+    let map = Map::load_map();
+    let starts = [
+        Position { x: 16, y: 36 },
+        Position { x: 5, y: 21 },
+        Position { x: 14, y: 13 },
+        Position { x: 5, y: 30 },
+        Position { x: 18, y: 5 },
+    ];
+    let mut rng = StdRng::seed_from_u64(0xC0A5_7A2);
+
+    for start in starts {
+        let selected = random_intro_followup_spawn_position(
+            GIANT_CRAB_TEMPLATE,
+            start,
+            &HashSet::new(),
+            &map,
+            &mut rng,
+        )
+        .unwrap_or_else(|| panic!("curated start {start:?} needs a coastal crab spawn"));
+
+        assert!(position_is_passable_land_adjacent_to_ocean(selected, &map));
+        assert!((INTRO_FOLLOWUP_MIN_RADIUS..=INTRO_FOLLOWUP_MAX_RADIUS)
+            .contains(&(Map::dist(start, selected) as i32)));
     }
 }
 
@@ -1129,13 +1733,29 @@ fn survey_status_tracks_first_tile_survey_per_player() {
 }
 
 #[test]
-fn survey_history_only_allows_one_outcome_roll() {
+fn scout_history_deduplicates_tiles() {
     let pos = Position { x: 5, y: 6 };
 
     let mut survey_history = SurveyHistory(HashMap::new());
 
     assert!(record_tile_survey(7, pos, &mut survey_history));
     assert!(!record_tile_survey(7, pos, &mut survey_history));
+}
+
+#[test]
+fn scouting_records_center_and_six_adjacent_tiles() {
+    let player_id = 7;
+    let center = Position { x: 16, y: 36 };
+    let mut survey_history = SurveyHistory(HashMap::new());
+
+    let scouted = record_scouted_area(player_id, center, &mut survey_history);
+
+    assert_eq!(scouted.len(), 7);
+    assert!(scouted.contains(&center));
+    assert_eq!(survey_history.get(&player_id).unwrap().len(), 7);
+    assert!(scouted
+        .iter()
+        .all(|position| Map::dist(center, *position) <= 1));
 }
 
 #[test]
@@ -1608,6 +2228,60 @@ fn setup_new_obj_observer_test_app() -> App {
     app
 }
 
+#[test]
+fn remove_obj_observer_cleans_entity_and_all_object_owned_registries() {
+    let obj_id = 77;
+    let other_obj_id = 78;
+    let position = Position { x: 4, y: 5 };
+    let mut app = App::new();
+    app.add_observer(remove_obj_observer);
+    app.insert_resource(GameTick(123));
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Ids::default());
+    app.insert_resource(ActiveInfos::default());
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(InitialEncounterState::default());
+    app.insert_resource(VisibleEvents(Vec::new()));
+
+    let entity = app.world_mut().spawn((Id(obj_id), position)).id();
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(obj_id, entity);
+    app.world_mut().resource_mut::<Ids>().new_obj(obj_id, 7);
+    {
+        let mut active_infos = app.world_mut().resource_mut::<ActiveInfos>();
+        active_infos.add((obj_id, ActiveInfoType::Structure), 7);
+        active_infos.add((obj_id, ActiveInfoType::Inventory), 8);
+        active_infos.add((other_obj_id, ActiveInfoType::Inventory), 7);
+    }
+
+    app.world_mut().trigger(RemoveObj { entity });
+    app.world_mut().flush();
+
+    assert!(app.world().get_entity(entity).is_err());
+    assert_eq!(
+        app.world().resource::<EntityObjMap>().get_entity(obj_id),
+        None
+    );
+    assert_eq!(app.world().resource::<Ids>().get_player(obj_id), None);
+    let active_infos = app.world().resource::<ActiveInfos>();
+    assert!(active_infos
+        .keys()
+        .all(|(active_obj_id, _)| *active_obj_id != obj_id));
+    assert_eq!(
+        active_infos.get(&(other_obj_id, ActiveInfoType::Inventory)),
+        Some(&HashSet::from([7]))
+    );
+    assert!(app
+        .world()
+        .resource::<VisibleEvents>()
+        .iter()
+        .any(|event| matches!(
+            &event.event_type,
+            VisibleEvent::RemoveObjEvent { pos } if *pos == position
+        )));
+}
+
 fn spawn_fortification_test_unit(app: &mut App, id: i32) -> Entity {
     app.world_mut()
         .spawn((
@@ -1737,38 +2411,43 @@ fn completed_wall_fortifies_builder_still_in_building_state() {
     app.insert_resource(EntityObjMap(HashMap::new()));
     app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
 
-    app.world_mut().spawn((
-        Id(1),
-        PlayerId(1),
-        Position { x: 0, y: 0 },
-        State::Building,
-        Class(CLASS_STRUCTURE.to_string()),
-        ClassStructure,
-        Subclass::Wall,
-        Template("Stockade".to_string()),
-        Stats {
-            hp: 1,
-            stamina: None,
-            mana: None,
-            base_hp: 20,
-            base_stamina: None,
-            base_mana: None,
-            base_def: 0,
-            damage_range: None,
-            base_damage: None,
-            base_speed: None,
-            base_vision: None,
-        },
-        Assignments(vec![2]),
-        BuildUpgradeState {
-            build_upgrade_cost: 1.0,
-            work_done: 0.0,
-            work_per_sec: 0.0,
-            start_time: 0,
-        },
-        WorkQueue(Vec::new()),
-        StateBuilding,
-    ));
+    let structure_entity = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Building,
+            Class(CLASS_STRUCTURE.to_string()),
+            ClassStructure,
+            Subclass::Wall,
+            Template("Stockade".to_string()),
+            Stats {
+                hp: 1,
+                stamina: None,
+                mana: None,
+                base_hp: 20,
+                base_stamina: None,
+                base_mana: None,
+                base_def: 0,
+                damage_range: None,
+                base_damage: None,
+                base_speed: None,
+                base_vision: None,
+            },
+            Assignments(vec![2]),
+            BuildUpgradeState {
+                build_upgrade_cost: 1.0,
+                work_done: 0.0,
+                work_per_sec: 0.0,
+                progress_updated_at_tick: 0,
+                start_time: 0,
+                action_id: 0,
+            },
+            WorkQueue(Vec::new()),
+            StateBuilding,
+        ))
+        .id();
 
     let builder_entity = app
         .world_mut()
@@ -1802,6 +2481,13 @@ fn completed_wall_fortifies_builder_still_in_building_state() {
     let effects = app.world().get::<Effects>(builder_entity).unwrap();
     assert!(effects.has(Effect::Fortified));
     assert_eq!(app.world().get::<Fortified>(builder_entity).unwrap().id, 1);
+    assert_eq!(
+        app.world()
+            .get::<BuildUpgradeState>(structure_entity)
+            .unwrap()
+            .progress_updated_at_tick,
+        10,
+    );
 }
 
 #[test]
@@ -2449,6 +3135,74 @@ fn due_consumption_events_fail_closed_without_event_executing() {
 }
 
 #[test]
+fn missing_drink_item_fails_event_and_clears_drinking_state() {
+    let mut app = App::new();
+    app.add_systems(Update, drink_eat_system);
+    app.add_observer(state_change_observer);
+    app.insert_resource(GameTick(11));
+    app.insert_resource(Clients::default());
+    app.insert_resource(Ids::default());
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(Vec::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
+    app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(ActiveInfos(HashMap::new()));
+
+    let drinker = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            State::Drinking,
+            EventExecuting {
+                event_type: "Drink".to_string(),
+                state: EventExecutingState::Executing,
+            },
+            Inventory {
+                owner: 1,
+                items: Vec::new(),
+            },
+            Thirst::new(80.0, 0.0),
+            Hunger::new(0.0, 0.0),
+            Tired::new(0.0, 0.0),
+        ))
+        .id();
+
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(1, drinker);
+    app.world_mut().resource_mut::<MapEvents>().new(
+        1,
+        10,
+        VisibleEvent::DrinkEvent {
+            item_id: 999,
+            obj_id: 1,
+        },
+    );
+
+    app.update();
+
+    assert!(app.world().resource::<MapEvents>().is_empty());
+    assert_eq!(
+        *app.world().entity(drinker).get::<State>().unwrap(),
+        State::None,
+        "a vanished water item must not strand the villager in Drinking"
+    );
+    assert_eq!(
+        app.world()
+            .entity(drinker)
+            .get::<EventExecuting>()
+            .unwrap()
+            .state,
+        EventExecutingState::Failed
+    );
+    assert_eq!(
+        app.world().entity(drinker).get::<Thirst>().unwrap().thirst,
+        80.0
+    );
+}
+
+#[test]
 fn due_find_shelter_event_fails_closed_without_event_executing() {
     let mut app = App::new();
     app.add_systems(Update, find_shelter_system);
@@ -2767,6 +3521,356 @@ fn combat_lock_interrupt_cancels_active_investigation() {
     assert!(app.world().resource::<MapEvents>().is_empty());
 }
 
+fn upgrade_test_item(id: i32, owner: i32, class: &str, quantity: i32) -> Item {
+    Item {
+        id,
+        owner,
+        name: format!("Test {class}"),
+        quantity,
+        durability: None,
+        class: class.to_string(),
+        subclass: class.to_string(),
+        slot: None,
+        image: "test".to_string(),
+        weight: 1.0,
+        equipped: false,
+        experiment: None,
+        start_time: 0,
+        attrs: HashMap::new(),
+        produces: Vec::new(),
+    }
+}
+
+fn upgrade_observer_test_app() -> App {
+    let mut app = App::new();
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(10));
+    app.insert_resource(PlayerWorldPresenceState::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+    app.add_observer(start_upgrade_observer);
+    app
+}
+
+fn spawn_upgrade_test_worker(app: &mut App, id: i32, state: State) -> Entity {
+    let worker = app
+        .world_mut()
+        .spawn((Id(id), PlayerId(1), Position { x: 0, y: 0 }, state))
+        .id();
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(id, worker);
+    worker
+}
+
+#[test]
+fn construction_progress_update_assigns_a_stable_action_timeline() {
+    let mut app = App::new();
+    app.add_observer(build_progress_update_observer);
+    app.insert_resource(Clients::default());
+    app.insert_resource(GameTick(120));
+    app.insert_resource(Ids::default());
+    app.insert_resource(EntityObjMap(HashMap::new()));
+    app.insert_resource(Templates::from_obj_templates(load_obj_templates()));
+    app.insert_resource(CampfireVisibilityState::default());
+    app.insert_resource(PerceptionUpdates(HashSet::new()));
+
+    let worker = app
+        .world_mut()
+        .spawn((
+            Id(2),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::Building,
+            Template("Human Villager".to_string()),
+            Skills::new(),
+        ))
+        .id();
+    app.world_mut()
+        .resource_mut::<EntityObjMap>()
+        .new_obj(2, worker);
+
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            Assignments(vec![2]),
+            BuildUpgradeState {
+                build_upgrade_cost: 50.0,
+                work_done: 12.345,
+                work_per_sec: 0.0,
+                progress_updated_at_tick: 0,
+                start_time: 0,
+                action_id: 0,
+            },
+        ))
+        .id();
+
+    app.world_mut()
+        .trigger(BuildProgressUpdate { entity: structure });
+    app.update();
+
+    let progress = app
+        .world()
+        .entity(structure)
+        .get::<BuildUpgradeState>()
+        .unwrap();
+    assert_eq!(progress.start_time, 120);
+    assert_eq!(progress.progress_updated_at_tick, 120);
+    assert!(progress.action_id > 0);
+    assert!(progress.work_per_sec > 0.0);
+    assert!(app
+        .world()
+        .resource::<PerceptionUpdates>()
+        .contains(&(1, PerceptionUpdateType::UpdatePerception)));
+
+    app.world_mut().resource_mut::<GameTick>().0 = 130;
+    app.world_mut()
+        .trigger(BuildProgressUpdate { entity: structure });
+    app.update();
+
+    assert_eq!(
+        app.world()
+            .entity(structure)
+            .get::<BuildUpgradeState>()
+            .unwrap()
+            .progress_updated_at_tick,
+        120,
+        "a duplicate progress refresh must retain the real progress-change tick",
+    );
+}
+
+#[test]
+fn upgrade_does_not_consume_materials_without_an_eligible_builder() {
+    let mut app = upgrade_observer_test_app();
+    let worker = spawn_upgrade_test_worker(&mut app, 2, State::Gathering);
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::PlanningUpgrade,
+            ClassStructure,
+            Template("Campfire".to_string()),
+            Inventory {
+                owner: 1,
+                items: vec![
+                    upgrade_test_item(10, 1, LOG, 5),
+                    upgrade_test_item(11, 1, "Hide", 3),
+                ],
+            },
+            Assignments(vec![2]),
+            SelectedUpgrade("Shelter Tent".to_string()),
+            BuildUpgradeState {
+                build_upgrade_cost: 50.0,
+                work_done: 0.0,
+                work_per_sec: 0.0,
+                progress_updated_at_tick: 0,
+                start_time: 0,
+                action_id: 0,
+            },
+        ))
+        .id();
+
+    app.world_mut().trigger(StartUpgrade {
+        entity: structure,
+        builder_entity: worker,
+    });
+    app.update();
+
+    let structure_ref = app.world().entity(structure);
+    assert_eq!(structure_ref.get::<State>(), Some(&State::PlanningUpgrade));
+    assert!(structure_ref.get::<StateUpgrading>().is_none());
+    assert_eq!(
+        structure_ref
+            .get::<Inventory>()
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.quantity)
+            .sum::<i32>(),
+        8
+    );
+    assert_eq!(
+        app.world().entity(worker).get::<State>(),
+        Some(&State::Gathering)
+    );
+}
+
+#[test]
+fn interrupted_upgrade_resumes_without_consuming_materials_twice() {
+    let mut app = upgrade_observer_test_app();
+    let worker = spawn_upgrade_test_worker(&mut app, 2, State::None);
+    let structure = app
+        .world_mut()
+        .spawn((
+            Id(1),
+            PlayerId(1),
+            Position { x: 0, y: 0 },
+            State::PlanningUpgrade,
+            ClassStructure,
+            Template("Campfire".to_string()),
+            Inventory {
+                owner: 1,
+                items: vec![
+                    upgrade_test_item(10, 1, LOG, 5),
+                    upgrade_test_item(11, 1, "Hide", 3),
+                ],
+            },
+            Assignments(vec![2]),
+            SelectedUpgrade("Shelter Tent".to_string()),
+            BuildUpgradeState {
+                build_upgrade_cost: 50.0,
+                work_done: 0.0,
+                work_per_sec: 0.0,
+                progress_updated_at_tick: 0,
+                start_time: 0,
+                action_id: 0,
+            },
+        ))
+        .id();
+
+    app.world_mut().trigger(StartUpgrade {
+        entity: structure,
+        builder_entity: worker,
+    });
+    app.update();
+
+    assert_eq!(
+        app.world().entity(structure).get::<State>(),
+        Some(&State::Upgrading)
+    );
+    assert!(app
+        .world()
+        .entity(structure)
+        .get::<Inventory>()
+        .unwrap()
+        .items
+        .is_empty());
+    assert_eq!(
+        app.world().entity(worker).get::<State>(),
+        Some(&State::Upgrading)
+    );
+
+    // Simulate an interruption after some authoritative progress. The
+    // committed materials are gone, and an older stalled runtime may also be
+    // missing the marker consumed by the periodic upgrade system.
+    *app.world_mut()
+        .entity_mut(worker)
+        .get_mut::<State>()
+        .unwrap() = State::None;
+    app.world_mut()
+        .entity_mut(structure)
+        .remove::<StateUpgrading>();
+    app.world_mut()
+        .entity_mut(structure)
+        .get_mut::<BuildUpgradeState>()
+        .unwrap()
+        .work_done = 17.0;
+
+    app.world_mut().trigger(StartUpgrade {
+        entity: structure,
+        builder_entity: worker,
+    });
+    app.update();
+
+    let structure_ref = app.world().entity(structure);
+    assert_eq!(structure_ref.get::<State>(), Some(&State::Upgrading));
+    assert!(structure_ref.get::<StateUpgrading>().is_some());
+    assert!(structure_ref.get::<Inventory>().unwrap().items.is_empty());
+    assert_eq!(
+        structure_ref.get::<BuildUpgradeState>().unwrap().work_done,
+        17.0
+    );
+    assert_eq!(
+        app.world().entity(worker).get::<State>(),
+        Some(&State::Upgrading)
+    );
+}
+
+#[test]
+fn every_declared_structure_upgrade_can_resume_without_materials() {
+    let upgrade_paths = load_obj_templates()
+        .into_iter()
+        .filter(|template| template.class.eq_ignore_ascii_case("structure"))
+        .flat_map(|template| {
+            let source_template = template.template;
+            template
+                .upgrade_to
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |selected_upgrade| (source_template.clone(), selected_upgrade))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(!upgrade_paths.is_empty());
+
+    for (source_template, selected_upgrade) in upgrade_paths {
+        let mut app = upgrade_observer_test_app();
+        let worker = spawn_upgrade_test_worker(&mut app, 2, State::None);
+        let structure = app
+            .world_mut()
+            .spawn((
+                Id(1),
+                PlayerId(1),
+                Position { x: 0, y: 0 },
+                State::Upgrading,
+                ClassStructure,
+                Template(source_template.clone()),
+                Inventory {
+                    owner: 1,
+                    items: Vec::new(),
+                },
+                Assignments(vec![2]),
+                SelectedUpgrade(selected_upgrade.clone()),
+                BuildUpgradeState {
+                    build_upgrade_cost: 600.0,
+                    work_done: 125.0,
+                    work_per_sec: 0.0,
+                    progress_updated_at_tick: 0,
+                    start_time: 0,
+                    action_id: 0,
+                },
+            ))
+            .id();
+
+        app.world_mut().trigger(StartUpgrade {
+            entity: structure,
+            builder_entity: worker,
+        });
+        app.update();
+
+        let path = format!("{source_template} -> {selected_upgrade}");
+        let structure_ref = app.world().entity(structure);
+        assert_eq!(
+            structure_ref.get::<State>(),
+            Some(&State::Upgrading),
+            "{path} changed state while resuming"
+        );
+        assert!(
+            structure_ref.get::<StateUpgrading>().is_some(),
+            "{path} did not restore its upgrade marker"
+        );
+        assert!(
+            structure_ref.get::<Inventory>().unwrap().items.is_empty(),
+            "{path} required or consumed materials while resuming"
+        );
+        assert_eq!(
+            structure_ref.get::<BuildUpgradeState>().unwrap().work_done,
+            125.0,
+            "{path} lost its committed work"
+        );
+        assert_eq!(
+            app.world().entity(worker).get::<State>(),
+            Some(&State::Upgrading),
+            "{path} did not restart its builder"
+        );
+    }
+}
+
 #[test]
 fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     let mut app = App::new();
@@ -2812,7 +3916,9 @@ fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
                 build_upgrade_cost: 1.0,
                 work_done: 0.0,
                 work_per_sec: 0.0,
+                progress_updated_at_tick: 0,
                 start_time: 0,
+                action_id: 0,
             },
             SelectedUpgrade("Shelter Tent".to_string()),
             StateUpgrading,
@@ -2856,6 +3962,13 @@ fn upgrading_campfire_to_shelter_tent_adds_shelter_component() {
     app.update();
 
     let structure = app.world().entity(structure_entity);
+    assert_eq!(
+        structure
+            .get::<BuildUpgradeState>()
+            .unwrap()
+            .progress_updated_at_tick,
+        10,
+    );
     assert_eq!(structure.get::<Name>().unwrap().0, "Shelter Tent");
     assert_eq!(structure.get::<Template>().unwrap().0, "Shelter Tent");
     assert_eq!(*structure.get::<Subclass>().unwrap(), Subclass::Shelter);
@@ -3168,11 +4281,7 @@ fn visible_event_move_packets_keep_source_coordinates() {
     let client_id = Uuid::new_v4();
     app.insert_resource(Clients(Arc::new(Mutex::new(HashMap::from([(
         client_id,
-        Client {
-            id: client_id,
-            player_id: 1,
-            sender,
-        },
+        Client::new(client_id, 1, sender),
     )])))));
 
     app.world_mut().spawn((
@@ -3546,6 +4655,7 @@ fn setup_structure_craft_event_test(
     app.insert_resource(Recipes::from_recipes(vec![structure_craft_test_recipe()]));
     app.insert_resource(structure_craft_test_templates());
     app.insert_resource(ActiveInfos(HashMap::new()));
+    app.insert_resource(Objectives::default());
 
     let crafter = app
         .world_mut()
@@ -3857,6 +4967,7 @@ fn gather_event_system_marks_gatherer_event_completed() {
     app.insert_resource(Ids::default());
     app.insert_resource(Map::default());
     app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
     app.insert_resource(Recipes::from_recipes(vec![]));
     app.insert_resource(Templates::from_obj_templates(vec![]));
     app.insert_resource(ActiveInfos(HashMap::new()));
@@ -3927,7 +5038,7 @@ fn gather_event_system_marks_gatherer_event_completed() {
 }
 
 #[test]
-fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
+fn gather_event_system_notifies_hero_when_gathering_cannot_continue() {
     let mut app = App::new();
     app.add_systems(Update, gather_event_system);
     app.insert_resource(CampfireVisibilityState(HashSet::from([(1, 99)])));
@@ -3937,11 +5048,7 @@ fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
     let client_id = Uuid::new_v4();
     let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
         client_id,
-        Client {
-            id: client_id,
-            player_id: 1,
-            sender,
-        },
+        Client::new(client_id, 1, sender),
     )]))));
     app.insert_resource(clients);
     app.insert_resource(GameTick(10));
@@ -3952,6 +5059,7 @@ fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
 
     app.insert_resource(Map::default());
     app.insert_resource(MapEvents(HashMap::new()));
+    app.insert_resource(VisibleEvents(Vec::new()));
     app.insert_resource(Recipes::from_recipes(vec![]));
     app.insert_resource(Templates::from_obj_templates(vec![]));
     app.insert_resource(ActiveInfos(HashMap::new()));
@@ -4003,8 +5111,8 @@ fn gather_event_system_notifies_hero_when_no_item_is_gathered() {
     assert_eq!(
         packet,
         ResponsePacket::Notice {
-            noticemsg: "You gathered nothing.".to_string(),
-            expiry: Some(2000),
+            noticemsg: "There is nothing here you can continue gathering.".to_string(),
+            expiry: Some(8000),
         }
     );
 }
@@ -4302,11 +5410,7 @@ fn sanctuary_state_delivery_deduplicates_changes_and_clears_dead_hero() {
 }
 
 fn test_client(id: Uuid, player_id: i32, sender: tokio::sync::mpsc::Sender<String>) -> Client {
-    Client {
-        id,
-        player_id,
-        sender,
-    }
+    Client::new(id, player_id, sender)
 }
 
 #[test]
@@ -6916,6 +8020,25 @@ fn post_rescue_resource_tutorial_records_only_the_ordered_actions() {
     record_forest_prospect_completion(&mut objectives, true, TileType::PineForest);
     assert!(objectives.prospect_forest);
 
+    record_water_spring_prospect_completion(&mut objectives, TileType::Grasslands, Some(FORAGE));
+    record_water_spring_prospect_completion(
+        &mut objectives,
+        TileType::HillsGrasslands,
+        Some(SPRING_WATER),
+    );
+    record_water_spring_prospect_completion(&mut objectives, TileType::Grasslands, None);
+    assert!(
+        !objectives.prospect_water_spring,
+        "only a Spring Water reveal on a Grasslands tile should complete the lesson"
+    );
+
+    record_water_spring_prospect_completion(
+        &mut objectives,
+        TileType::Grasslands,
+        Some(SPRING_WATER),
+    );
+    assert!(objectives.prospect_water_spring);
+
     let logging_order = Order::Gather {
         res_type: LOG.to_string(),
         pos: Position { x: 8, y: 9 },
@@ -6931,6 +8054,24 @@ fn post_rescue_resource_tutorial_records_only_the_ordered_actions() {
     assert!(is_logging_order(Some(&logging_order)));
     assert!(!is_logging_order(Some(&plant_order)));
     assert!(!is_logging_order(None));
+
+    let lumbercamp_assignment = Assignment {
+        structure_id: 44,
+        structure_name: "Lumbercamp".to_string(),
+        structure_pos: Position { x: 8, y: 9 },
+    };
+    assert!(is_completed_lumbercamp_assignment(
+        Some(&lumbercamp_assignment),
+        &HashSet::from([44])
+    ));
+    assert!(!is_completed_lumbercamp_assignment(
+        Some(&lumbercamp_assignment),
+        &HashSet::from([45])
+    ));
+    assert!(!is_completed_lumbercamp_assignment(
+        None,
+        &HashSet::from([44])
+    ));
 
     let carcass = network::Item {
         id: 1,
@@ -6973,6 +8114,26 @@ fn post_rescue_resource_tutorial_records_only_the_ordered_actions() {
 }
 
 #[test]
+fn cooking_tutorial_requires_cooked_meat_from_the_campfire() {
+    let mut objectives = PlayerObjectives::default();
+
+    record_campfire_meat_cooking_completion(&mut objectives, "Shelter Tent", "Cooked Meat");
+    assert!(
+        !objectives.cook_animal_meat,
+        "cooking at another structure must not complete the Campfire lesson"
+    );
+
+    record_campfire_meat_cooking_completion(&mut objectives, "Campfire", "Cooked Fish");
+    assert!(
+        !objectives.cook_animal_meat,
+        "a different Campfire recipe must not complete the meat lesson"
+    );
+
+    record_campfire_meat_cooking_completion(&mut objectives, "Campfire", "Cooked Meat");
+    assert!(objectives.cook_animal_meat);
+}
+
+#[test]
 fn hero_refine_completion_aborts_if_the_light_goes_out() {
     const PLAYER_ID: i32 = 7;
     const HERO_ID: i32 = 70;
@@ -7009,11 +8170,7 @@ fn hero_refine_completion_aborts_if_the_light_goes_out() {
     let client_id = Uuid::new_v4();
     app.insert_resource(Clients(Arc::new(Mutex::new(HashMap::from([(
         client_id,
-        Client {
-            id: client_id,
-            player_id: PLAYER_ID,
-            sender,
-        },
+        Client::new(client_id, PLAYER_ID, sender),
     )])))));
 
     let mut inventory = Inventory {
@@ -7119,6 +8276,7 @@ fn core_gameplay_burrow_supplies_require_food_drink_and_a_logging_tool() {
 fn core_gameplay_initial_encounter_entry() -> InitialEncounterEntry {
     InitialEncounterEntry {
         rat_ids: vec![1, 2, 3],
+        opening_rat_ambush_armed: false,
         opening_enemy_spawned: vec![false; 3],
         opening_enemy_defeated: vec![false; 3],
         phase1_spawn: "Wild Boar".to_string(),
@@ -7259,8 +8417,29 @@ fn core_gameplay_checkpoint1_objective_prerequisites_and_blockers_are_authoritat
         Some("Finish the current action before inspecting the Shipwreck.")
     );
 
-    objectives.scavenge_shipwreck = true;
     facts.hero_idle = true;
+    facts.opening_enemy_active = true;
+    facts.opening_enemy_spawned = 1;
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(
+        current_id, "win_first_fight",
+        "the ambush should temporarily take priority over the interrupted search"
+    );
+
+    objectives.win_first_fight = true;
+    facts.opening_enemy_active = false;
+    let (current_id, _) =
+        core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
+    assert_eq!(
+        current_id, "scavenge_shipwreck",
+        "clearing the ambush should return the player to the unfinished search"
+    );
+
+    objectives.win_first_fight = false;
+    facts.opening_enemy_spawned = 0;
+
+    objectives.scavenge_shipwreck = true;
     let (current_id, packet_objectives) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
     assert_eq!(current_id, "win_first_fight");
@@ -7342,7 +8521,6 @@ fn core_gameplay_checkpoint1_reconnect_and_fresh_run_reconstruct_without_cache()
         villager_spawned: true,
         living_villagers: 1,
         has_unfinished_structure: true,
-        completed_structures: 2,
         has_campfire: true,
         has_burrow: true,
         ..EarlyObjectiveFacts::default()
@@ -7389,7 +8567,7 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
             assert_eq!(
                 objectives
                     .iter()
-                    .take(13)
+                    .take(17)
                     .map(|objective| objective.id.as_str())
                     .collect::<Vec<_>>(),
                 vec![
@@ -7400,11 +8578,15 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
                     "stock_burrow",
                     "recruit_villager",
                     "prospect_forest",
+                    "order_villager_to_follow",
                     "assign_first_villager",
-                    "build_lumbercamp",
                     "hunt_and_refine_animal",
+                    "cook_animal_meat",
+                    "build_lumbercamp",
+                    "assign_villager_to_lumbercamp",
+                    "prospect_water_spring",
+                    "fill_empty_waterskin",
                     "upgrade_campfire_to_shelter_tent",
-                    "build_shelter_storage",
                     "build_fortification",
                 ]
             );
@@ -7536,32 +8718,21 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
     let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState { current_id, .. } => {
+            assert_eq!(current_id, "order_villager_to_follow");
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.order_villager_to_follow = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState { current_id, .. } => {
             assert_eq!(current_id, "assign_first_villager");
         }
         _ => panic!("expected objective_state packet"),
     }
 
     objectives.assign_first_villager = true;
-    let packet = build_objective_state_packet(&objectives, &facts, 1);
-    match packet {
-        ResponsePacket::ObjectiveState {
-            current_id,
-            objectives,
-            ..
-        } => {
-            assert_eq!(current_id, "build_lumbercamp");
-            let lumbercamp = objectives
-                .iter()
-                .find(|objective| objective.id == "build_lumbercamp")
-                .unwrap();
-            assert_eq!(lumbercamp.progress, Some(0));
-            assert_eq!(lumbercamp.goal, Some(1));
-        }
-        _ => panic!("expected objective_state packet"),
-    }
-
-    objectives.choose_expansion = true;
-    facts.completed_structures = 2;
     let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState {
@@ -7589,6 +8760,110 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
             objectives,
             ..
         } => {
+            assert_eq!(current_id, "cook_animal_meat");
+            let cooking = objectives
+                .iter()
+                .find(|objective| objective.id == "cook_animal_meat")
+                .unwrap();
+            assert_eq!(cooking.title, "Cook the Animal Meat at the Campfire");
+            assert!(cooking.action_hint.contains("Cooked Meat"));
+            assert_eq!(cooking.progress, Some(0));
+            assert_eq!(cooking.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.cook_animal_meat = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "build_lumbercamp");
+            let lumbercamp = objectives
+                .iter()
+                .find(|objective| objective.id == "build_lumbercamp")
+                .unwrap();
+            assert_eq!(lumbercamp.progress, Some(0));
+            assert_eq!(lumbercamp.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.choose_expansion = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "assign_villager_to_lumbercamp");
+            let active = objectives.iter().find(|obj| obj.state == "active").unwrap();
+            assert_eq!(active.title, "Assign the villager to the Lumbercamp");
+            assert_eq!(active.target.as_deref(), Some("Completed Lumbercamp"));
+            assert!(active.action_hint.contains("choose Assign"));
+            assert_eq!(active.progress, Some(0));
+            assert_eq!(active.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.assign_villager_to_lumbercamp = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "prospect_water_spring");
+            let active = objectives.iter().find(|obj| obj.state == "active").unwrap();
+            assert_eq!(active.title, "Prospect for a Water Spring on Grasslands");
+            assert_eq!(
+                active.target.as_deref(),
+                Some("Grasslands and Spring Water")
+            );
+            assert!(active.action_hint.contains("try another Grasslands tile"));
+            assert_eq!(active.progress, Some(0));
+            assert_eq!(active.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.prospect_water_spring = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "fill_empty_waterskin");
+            let active = objectives.iter().find(|obj| obj.state == "active").unwrap();
+            assert_eq!(active.title, "Fill an Empty Waterskin");
+            assert_eq!(
+                active.target.as_deref(),
+                Some("Waterskin (Empty) and Spring Water")
+            );
+            assert!(active.action_hint.contains("choose Use"));
+            assert!(active.action_hint.contains("Drink a filled Waterskin"));
+            assert_eq!(active.progress, Some(0));
+            assert_eq!(active.goal, Some(1));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
+
+    objectives.fill_empty_waterskin = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
             assert_eq!(current_id, "upgrade_campfire_to_shelter_tent");
             let active = objectives.iter().find(|obj| obj.state == "active").unwrap();
             assert_eq!(active.title, "Upgrade the Campfire to a Shelter Tent");
@@ -7603,8 +8878,6 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
     }
 
     objectives.build_campfire = true;
-    objectives.build_3_structures = true;
-    facts.completed_structures = 3;
     let packet = build_objective_state_packet(&objectives, &facts, 1);
     match packet {
         ResponsePacket::ObjectiveState {
@@ -7631,6 +8904,25 @@ fn core_gameplay_checkpoint1_survival_thread_begins_with_shipwreck_and_advances_
         }
         _ => panic!("expected objective_state packet"),
     }
+
+    facts.has_stockade = true;
+    let packet = build_objective_state_packet(&objectives, &facts, 1);
+    match packet {
+        ResponsePacket::ObjectiveState {
+            current_id,
+            objectives,
+            ..
+        } => {
+            assert_eq!(current_id, "find_legendary_hideout");
+            assert!(objectives
+                .iter()
+                .all(|objective| objective.id != "build_shelter_storage"));
+            assert!(objectives
+                .iter()
+                .all(|objective| objective.id != "survive_5_nights"));
+        }
+        _ => panic!("expected objective_state packet"),
+    }
 }
 
 #[test]
@@ -7646,6 +8938,7 @@ fn core_gameplay_checkpoint1_requires_lumbercamp_before_fortification() {
         assign_first_villager: true,
         hunt_game_animal: true,
         refine_animal_carcass: true,
+        cook_animal_meat: true,
         build_3_structures: true,
         ..Default::default()
     };
@@ -7655,7 +8948,6 @@ fn core_gameplay_checkpoint1_requires_lumbercamp_before_fortification() {
         villager_spawned: true,
         living_villagers: 1,
         has_unfinished_structure: true,
-        completed_structures: 3,
         has_campfire: true,
         has_burrow: true,
         has_stockade: false,
@@ -7684,12 +8976,9 @@ fn core_gameplay_checkpoint1_requires_lumbercamp_before_fortification() {
                     .state,
                 "locked"
             );
-            let night_goal = objectives
+            assert!(objectives
                 .iter()
-                .find(|obj| obj.id == "survive_5_nights")
-                .unwrap();
-            assert_eq!(night_goal.progress, Some(2));
-            assert_eq!(night_goal.goal, Some(5));
+                .all(|objective| objective.id != "survive_5_nights"));
         }
         _ => panic!("expected objective_state packet"),
     }
@@ -7733,9 +9022,13 @@ fn core_gameplay_checkpoint1_tutorial_completes_without_defeating_the_fire_drago
         assign_first_villager: true,
         hunt_game_animal: true,
         refine_animal_carcass: true,
+        cook_animal_meat: true,
         explore_poi: true,
         choose_expansion: true,
-        survive_5_nights: true,
+        assign_villager_to_lumbercamp: true,
+        prospect_water_spring: true,
+        fill_empty_waterskin: true,
+        survive_5_nights: false,
         find_legendary_hideout: true,
         defeat_ashen_warlord: false,
         ..PlayerObjectives::default()
@@ -7744,7 +9037,6 @@ fn core_gameplay_checkpoint1_tutorial_completes_without_defeating_the_fire_drago
         hero_idle: true,
         villager_spawned: true,
         living_villagers: 1,
-        completed_structures: 3,
         has_campfire: true,
         has_burrow: true,
         has_stockade: true,
@@ -7762,7 +9054,13 @@ fn core_gameplay_checkpoint1_tutorial_completes_without_defeating_the_fire_drago
             .all(|objective| objective.id != "defeat_ashen_warlord"),
         "Fire Dragon victory must not be sent as a tutorial objective"
     );
-    assert_eq!(completed_objectives_count(Some(&objectives)), 9);
+    assert!(
+        packet_objectives
+            .iter()
+            .all(|objective| objective.id != "survive_5_nights"),
+        "five-night survival remains an internal milestone, not a tutorial objective"
+    );
+    assert_eq!(completed_objectives_count(Some(&objectives)), 7);
 }
 
 #[test]
@@ -7781,7 +9079,6 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
         living_villagers: 1,
         combat_capable_villagers: 0,
         has_unfinished_structure: true,
-        completed_structures: 2,
         has_campfire: true,
         has_burrow: true,
         has_stockade: true,
@@ -7827,13 +9124,21 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
     let (current_id, after_prospecting) = core_gameplay_objective_state(
         build_objective_state_packet(&objectives, &player_a_facts, 1),
     );
-    assert_eq!(current_id, "assign_first_villager");
+    assert_eq!(current_id, "order_villager_to_follow");
+    let follow = after_prospecting
+        .iter()
+        .find(|objective| objective.id == "order_villager_to_follow")
+        .unwrap();
+    assert_eq!(follow.state, "active");
+    assert_eq!(follow.title, "Order the Villager to Follow");
+    assert!(follow.lesson.contains("near the hero"));
+    assert_eq!(follow.blocker, None);
     let assignment = after_prospecting
         .iter()
         .find(|objective| objective.id == "assign_first_villager")
         .unwrap();
-    assert_eq!(assignment.state, "active");
-    assert_eq!(assignment.title, "Assign the settler to Logging");
+    assert_eq!(assignment.state, "locked");
+    assert_eq!(assignment.title, "Order the Villager to Harvest Logs");
     assert!(assignment.lesson.contains("persistent Logging order"));
     assert_eq!(assignment.blocker, None);
     assert_eq!(
@@ -7841,7 +9146,22 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
         objectives_before
     );
     assert_eq!(player_a_facts, facts_before);
+    assert!(!objectives.order_villager_to_follow);
     assert!(!objectives.assign_first_villager);
+
+    objectives.order_villager_to_follow = true;
+    let (current_id, after_follow) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "assign_first_villager");
+    let assignment = after_follow
+        .iter()
+        .find(|objective| objective.id == "assign_first_villager")
+        .unwrap();
+    assert_eq!(assignment.state, "active");
+    assert_eq!(assignment.title, "Order the Villager to Harvest Logs");
 
     let player_b_facts = EarlyObjectiveFacts {
         hero_idle: true,
@@ -7849,7 +9169,6 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
         living_villagers: 0,
         combat_capable_villagers: 0,
         has_unfinished_structure: true,
-        completed_structures: 2,
         has_campfire: true,
         has_burrow: true,
         has_stockade: true,
@@ -7875,7 +9194,7 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
         &player_a_facts,
         1,
     ));
-    assert_eq!(current_id, "build_lumbercamp");
+    assert_eq!(current_id, "hunt_and_refine_animal");
     assert_eq!(
         hunting_packet
             .iter()
@@ -7883,16 +9202,8 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
             .unwrap()
             .state,
         "complete",
-        "only the observed Logging order completion fact completes this step"
+        "only a Logging order accepted after Follow completes this step"
     );
-
-    objectives.choose_expansion = true;
-    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
-        &objectives,
-        &player_a_facts,
-        1,
-    ));
-    assert_eq!(current_id, "hunt_and_refine_animal");
 
     objectives.hunt_game_animal = true;
     objectives.refine_animal_carcass = true;
@@ -7901,47 +9212,68 @@ fn core_gameplay_checkpoint1_logging_guidance_follows_forest_prospecting() {
         &player_a_facts,
         1,
     ));
-    assert_eq!(current_id, "build_shelter_storage");
+    assert_eq!(current_id, "cook_animal_meat");
+
+    objectives.cook_animal_meat = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "build_lumbercamp");
+
+    objectives.choose_expansion = true;
+    objectives.assign_villager_to_lumbercamp = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "prospect_water_spring");
+
+    objectives.prospect_water_spring = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "fill_empty_waterskin");
+
+    objectives.fill_empty_waterskin = true;
+    let (current_id, _) = core_gameplay_objective_state(build_objective_state_packet(
+        &objectives,
+        &player_a_facts,
+        1,
+    ));
+    assert_eq!(current_id, "find_legendary_hideout");
 }
 
 #[test]
-fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_states() {
-    let player_a_states = [
-        State::None,
-        State::Operating,
-        State::Crafting,
-        State::Burning,
-    ];
-    let player_b_states = [
-        State::Founded,
-        State::Progressing,
-        State::Building,
-        State::PlanningUpgrade,
-        State::Upgrading,
-        State::Stalled,
-        State::Dead,
-    ];
+fn tutorial_villager_orders_follow_player_event_order_across_system_execution_order() {
+    let mut objectives = PlayerObjectives::default();
 
-    let player_a_completed = player_a_states
-        .into_iter()
-        .filter(|state| Structure::is_built(*state))
-        .count();
-    let player_b_completed = player_b_states
-        .into_iter()
-        .filter(|state| Structure::is_built(*state))
-        .count();
+    // Simulate the Logging system running before the Follow system even though
+    // Follow arrived first. Event IDs, rather than ECS system order, complete
+    // the sequence.
+    objectives.record_tutorial_log_order(11);
+    assert!(!objectives.assign_first_villager);
+    objectives.record_tutorial_follow_order(10);
+    assert!(objectives.order_villager_to_follow);
+    assert!(objectives.assign_first_villager);
 
-    assert_eq!(player_a_completed, 4);
-    assert_eq!(player_b_completed, 0);
-    assert_eq!(
-        player_a_states
-            .into_iter()
-            .filter(|state| Structure::is_built(*state))
-            .count(),
-        4,
-        "another player's incomplete states do not alter this player's count"
-    );
+    // Logging that arrived before Follow cannot satisfy the second lesson. A
+    // later Logging command is required.
+    let mut reversed = PlayerObjectives::default();
+    reversed.record_tutorial_log_order(20);
+    reversed.record_tutorial_follow_order(21);
+    assert!(reversed.order_villager_to_follow);
+    assert!(!reversed.assign_first_villager);
+    reversed.record_tutorial_log_order(22);
+    assert!(reversed.assign_first_villager);
+}
 
+#[test]
+fn core_gameplay_checkpoint1_omits_the_retired_working_settlement_objective() {
     let objectives = PlayerObjectives {
         equip_sharpened_stick: true,
         scavenge_shipwreck: true,
@@ -7951,11 +9283,12 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
         recruit_villager: true,
         assign_first_villager: true,
         choose_expansion: true,
+        prospect_water_spring: true,
+        fill_empty_waterskin: true,
         ..PlayerObjectives::default()
     };
     let facts = EarlyObjectiveFacts {
         hero_idle: true,
-        completed_structures: player_a_completed as i32,
         has_campfire: true,
         has_burrow: true,
         has_stockade: true,
@@ -7963,16 +9296,13 @@ fn core_gameplay_checkpoint1_functioning_structure_count_uses_canonical_built_st
     };
     let (current_id, packet) =
         core_gameplay_objective_state(build_objective_state_packet(&objectives, &facts, 1));
-    assert_eq!(current_id, "build_shelter_storage");
-    assert_eq!(
-        packet
-            .iter()
-            .find(|objective| objective.id == "build_shelter_storage")
-            .unwrap()
-            .progress,
-        Some(3),
-        "presentation clamps a functioning settlement count to its three-structure goal"
-    );
+    assert_eq!(current_id, "find_legendary_hideout");
+    assert!(packet
+        .iter()
+        .all(|objective| objective.id != "build_shelter_storage"));
+    assert!(packet
+        .iter()
+        .all(|objective| objective.id != "survive_5_nights"));
 }
 
 #[test]
@@ -8063,6 +9393,7 @@ fn core_gameplay_checkpoint1_assignment_flag_does_not_change_crisis_pressure() {
     };
     let after = PlayerObjectives {
         assign_first_villager: true,
+        assign_villager_to_lumbercamp: true,
         ..before.clone()
     };
 
@@ -8194,13 +9525,6 @@ fn timed_crisis_gates_use_player_survival_ticks() {
 }
 
 #[test]
-fn atmospheric_messages_use_player_day() {
-    assert!(atmospheric_event_message(1, 700).is_some());
-    assert_eq!(atmospheric_event_message(6, 700), None);
-    assert!(atmospheric_event_message(7, 650).is_some());
-}
-
-#[test]
 fn rescue_victory_uses_player_survival_day() {
     let join_tick = DAWN + (GAME_TICKS_PER_DAY * 10);
     let mut intro_state = PlayerIntroState(HashMap::new());
@@ -8237,37 +9561,169 @@ fn rescue_victory_uses_player_survival_day() {
 }
 
 #[test]
-fn shipwreck_rescue_requires_search_completed_burrow_and_entire_opening_wave() {
-    let mut entry = core_gameplay_initial_encounter_entry();
+fn shipwreck_rescue_requires_only_a_successful_search() {
     let objectives = PlayerObjectives {
         scavenge_shipwreck: true,
         ..Default::default()
     };
 
-    assert!(!shipwreck_inspection_can_spawn_villager(
-        &entry,
-        Some(&PlayerObjectives::default()),
-        true,
-    ));
-    assert!(!shipwreck_inspection_can_spawn_villager(
-        &entry,
-        Some(&objectives),
-        true,
-    ));
+    assert!(!shipwreck_inspection_can_spawn_villager(None));
+    assert!(!shipwreck_inspection_can_spawn_villager(Some(
+        &PlayerObjectives::default()
+    )));
+    assert!(shipwreck_inspection_can_spawn_villager(Some(&objectives)));
+}
 
-    entry.opening_enemy_spawned.fill(true);
-    entry.opening_enemy_defeated.fill(true);
+#[test]
+fn rescued_villager_burrow_reminder_is_scheduled_one_minute_after_rescue() {
+    let start_tick = 1_000;
+    let event = rescued_villager_burrow_reminder_event(17, start_tick, 23, 5);
 
-    assert!(!shipwreck_inspection_can_spawn_villager(
-        &entry,
-        Some(&objectives),
-        false,
+    assert_eq!(event.start_tick, start_tick);
+    assert_eq!(
+        event.run_tick,
+        start_tick + (60 * TICKS_PER_SEC),
+        "the follow-up should wait one minute of online simulation time"
+    );
+    assert!(matches!(
+        event.event_type,
+        GameEventType::RescuedVillagerBurrowReminder {
+            villager_id: 23,
+            player_id: 5,
+        }
     ));
-    assert!(shipwreck_inspection_can_spawn_villager(
-        &entry,
-        Some(&objectives),
-        true,
+}
+
+#[test]
+fn burrow_deed_remark_waits_twenty_seconds_after_rescue() {
+    assert_eq!(BURROW_DEED_REMARK_DELAY_TICKS, 20 * TICKS_PER_SEC);
+}
+
+#[test]
+fn rescued_villager_burrow_reminder_recognizes_only_a_completed_owned_burrow() {
+    assert!(is_completed_owned_burrow(5, 5, "Burrow", State::None));
+    assert!(!is_completed_owned_burrow(5, 5, "Burrow", State::Building));
+    assert!(!is_completed_owned_burrow(5, 9, "Burrow", State::None));
+    assert!(!is_completed_owned_burrow(
+        5,
+        5,
+        "Shelter Tent",
+        State::None
     ));
+}
+
+#[test]
+fn new_villager_ambient_dialogue_cooldown_starts_when_first_seen() {
+    let mut last_dialogue_tick = HashMap::new();
+    let first_seen_tick = 5_000;
+
+    assert!(!villager_ambient_dialogue_ready(
+        &mut last_dialogue_tick,
+        23,
+        first_seen_tick,
+    ));
+    assert_eq!(last_dialogue_tick.get(&23), Some(&first_seen_tick));
+    assert!(!villager_ambient_dialogue_ready(
+        &mut last_dialogue_tick,
+        23,
+        first_seen_tick + VILLAGER_AMBIENT_DIALOGUE_COOLDOWN_TICKS - 1,
+    ));
+    assert!(villager_ambient_dialogue_ready(
+        &mut last_dialogue_tick,
+        23,
+        first_seen_tick + VILLAGER_AMBIENT_DIALOGUE_COOLDOWN_TICKS,
+    ));
+}
+
+#[test]
+fn villager_tool_reminders_are_immediate_then_throttled() {
+    let first_tick = 5_000;
+    assert!(villager_tool_reminder_due(None, "Logging", first_tick));
+
+    let reminder = VillagerToolReminder {
+        tool_label: "Logging".to_string(),
+        last_spoken_tick: first_tick,
+    };
+    assert!(!villager_tool_reminder_due(
+        Some(&reminder),
+        "Logging",
+        first_tick + VILLAGER_TOOL_REMINDER_COOLDOWN_TICKS - 1,
+    ));
+    assert!(villager_tool_reminder_due(
+        Some(&reminder),
+        "Logging",
+        first_tick + VILLAGER_TOOL_REMINDER_COOLDOWN_TICKS,
+    ));
+    assert!(villager_tool_reminder_due(
+        Some(&reminder),
+        "Mining",
+        first_tick + 1,
+    ));
+}
+
+#[test]
+fn villager_tool_reminders_only_describe_missing_tool_blockers() {
+    let missing_tool = BlockedWork {
+        reason: "Needs Logging tool".to_string(),
+    };
+    let blocked_path = BlockedWork {
+        reason: "No path to resource site".to_string(),
+    };
+
+    assert_eq!(
+        blocked_work_tool_label(Some(&missing_tool)),
+        Some("Logging")
+    );
+    assert_eq!(blocked_work_tool_label(Some(&blocked_path)), None);
+    assert_eq!(blocked_work_tool_label(None), None);
+    assert_eq!(
+        villager_tool_reminder_speech("Logging"),
+        "I need a logging tool."
+    );
+}
+
+#[test]
+fn rescued_villager_prefers_an_unoccupied_campfire_tile() {
+    let map = flat_land_map();
+    let preferred = Position { x: 10, y: 9 };
+    let campfire = Position { x: 10, y: 10 };
+    let hero = Position { x: 11, y: 10 };
+    let unit_positions = HashSet::from([hero]);
+    let occupied_positions = HashSet::from([hero, campfire]);
+
+    assert_eq!(
+        resolve_rescued_villager_spawn_pos(
+            preferred,
+            Some(hero),
+            &[campfire],
+            &unit_positions,
+            &occupied_positions,
+            &map,
+        ),
+        Some(campfire)
+    );
+}
+
+#[test]
+fn rescued_villager_never_spawns_on_hero_occupying_campfire() {
+    let map = flat_land_map();
+    let campfire_and_hero = Position { x: 10, y: 10 };
+    let unit_positions = HashSet::from([campfire_and_hero]);
+    let occupied_positions = HashSet::from([campfire_and_hero]);
+
+    let spawn_pos = resolve_rescued_villager_spawn_pos(
+        campfire_and_hero,
+        Some(campfire_and_hero),
+        &[campfire_and_hero],
+        &unit_positions,
+        &occupied_positions,
+        &map,
+    )
+    .expect("an adjacent open rescue tile");
+
+    assert_ne!(spawn_pos, campfire_and_hero);
+    assert!(Map::dist(spawn_pos, campfire_and_hero) <= 1);
+    assert!(!occupied_positions.contains(&spawn_pos));
 }
 
 #[test]
@@ -9027,14 +10483,7 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
     let client_id = Uuid::new_v4();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
     let mut client_map = HashMap::new();
-    client_map.insert(
-        client_id,
-        Client {
-            id: client_id,
-            player_id,
-            sender,
-        },
-    );
+    client_map.insert(client_id, Client::new(client_id, player_id, sender));
 
     let mut crisis_state = SettlementCrisisState::default();
     crisis_state.insert(player_id, checkpoint4_crisis(CrisisPhase::Dormant, 10));
@@ -9112,11 +10561,7 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
     let (reconnect_sender, mut reconnect_receiver) = tokio::sync::mpsc::channel(4);
     clients.lock().unwrap().insert(
         client_id,
-        Client {
-            id: client_id,
-            player_id,
-            sender: reconnect_sender,
-        },
+        Client::new(client_id, player_id, reconnect_sender),
     );
     app.world_mut()
         .resource_mut::<CrisisStatusLoginSync>()
@@ -9167,11 +10612,7 @@ fn checkpoint4_delivery_deduplicates_and_resynchronizes_each_connection() {
     let (post_undead_sender, mut post_undead_receiver) = tokio::sync::mpsc::channel(4);
     clients.lock().unwrap().insert(
         client_id,
-        Client {
-            id: client_id,
-            player_id,
-            sender: post_undead_sender,
-        },
+        Client::new(client_id, player_id, post_undead_sender),
     );
     app.world_mut()
         .resource_mut::<CrisisStatusLoginSync>()
@@ -9192,11 +10633,7 @@ fn checkpoint4_login_sync_bundle_is_atomic_and_connection_exact() {
     let replacement_id = Uuid::new_v4();
     let clients = Clients::default();
     let (displaced_sender, mut displaced_receiver) = tokio::sync::mpsc::channel(1);
-    clients.activate(Client {
-        id: displaced_id,
-        player_id,
-        sender: displaced_sender,
-    });
+    clients.activate(Client::new(displaced_id, player_id, displaced_sender));
 
     assert_eq!(
         clients.try_send_current_bundle(
@@ -9214,11 +10651,7 @@ fn checkpoint4_login_sync_bundle_is_atomic_and_connection_exact() {
 
     let (replacement_sender, mut replacement_receiver) = tokio::sync::mpsc::channel(4);
     assert_eq!(
-        clients.activate(Client {
-            id: replacement_id,
-            player_id,
-            sender: replacement_sender,
-        }),
+        clients.activate(Client::new(replacement_id, player_id, replacement_sender)),
         vec![displaced_id]
     );
     assert_eq!(
@@ -9272,11 +10705,7 @@ fn checkpoint4_resume_sync_waits_for_crisis_and_perception_delivery() {
     let connection_id = Uuid::new_v4();
     let clients = Clients::default();
     let (sender, _receiver) = tokio::sync::mpsc::channel(4);
-    clients.activate(Client {
-        id: connection_id,
-        player_id,
-        sender,
-    });
+    clients.activate(Client::new(connection_id, player_id, sender));
     let mut app = checkpoint4_resume_sync_test_app(
         player_id,
         connection_id,
@@ -9322,11 +10751,7 @@ fn checkpoint4_resume_sync_rejects_authority_replaced_before_release() {
     let replacement_id = Uuid::new_v4();
     let clients = Clients::default();
     let (displaced_sender, _displaced_receiver) = tokio::sync::mpsc::channel(4);
-    clients.activate(Client {
-        id: displaced_id,
-        player_id,
-        sender: displaced_sender,
-    });
+    clients.activate(Client::new(displaced_id, player_id, displaced_sender));
     let mut app = checkpoint4_resume_sync_test_app(
         player_id,
         displaced_id,
@@ -9339,11 +10764,7 @@ fn checkpoint4_resume_sync_rejects_authority_replaced_before_release() {
     );
 
     let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(4);
-    clients.activate(Client {
-        id: replacement_id,
-        player_id,
-        sender: replacement_sender,
-    });
+    clients.activate(Client::new(replacement_id, player_id, replacement_sender));
     app.update();
 
     assert!(
@@ -9372,11 +10793,7 @@ fn checkpoint4_major_transition_notices_emit_once() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
     let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
         client_id,
-        Client {
-            id: client_id,
-            player_id,
-            sender,
-        },
+        Client::new(client_id, player_id, sender),
     )]))));
     let mut crisis_state = SettlementCrisisState::default();
     crisis_state.insert(player_id, checkpoint4_crisis(CrisisPhase::Pressure, 70));
@@ -9458,11 +10875,7 @@ fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     let clients = Clients(Arc::new(Mutex::new(HashMap::from([(
         client_id,
-        Client {
-            id: client_id,
-            player_id,
-            sender,
-        },
+        Client::new(client_id, player_id, sender),
     )]))));
     let mut state = SettlementCrisisState::default();
     state.insert(
@@ -9494,4 +10907,125 @@ fn checkpoint4_legacy_login_sends_only_a_clear_personal_crisis_status() {
             status: CrisisStatusSnapshot { exists: false, .. }
         }
     ));
+}
+
+#[test]
+fn snapshot_serializes_while_a_login_event_is_pending() {
+    let mut app = App::new();
+    crate::register_all_types(&mut app);
+    app.insert_resource(GameEvents(HashMap::from([
+        (
+            1,
+            GameEvent {
+                event_id: 1,
+                start_tick: 99,
+                run_tick: 101,
+                event_type: GameEventType::Login {
+                    player_id: 7,
+                    connection_id: Uuid::new_v4().as_u128(),
+                },
+            },
+        ),
+        (
+            2,
+            GameEvent {
+                event_id: 2,
+                start_tick: 99,
+                run_tick: 110,
+                event_type: GameEventType::PlayerNotice {
+                    player_id: 7,
+                    message: "Persistent notice".to_string(),
+                    expiry: Some(5_000),
+                },
+            },
+        ),
+    ])));
+
+    let (scene, omitted_login_events) = build_snapshot_scene(app.world());
+    let registry = app.world().resource::<AppTypeRegistry>().read();
+    let serialized = scene
+        .serialize(&registry)
+        .expect("a transient Login must not poison snapshot serialization");
+
+    assert_eq!(omitted_login_events, 1);
+    assert!(!serialized.contains("Login"));
+    assert!(serialized.contains("PlayerNotice"));
+    assert!(serialized.contains("Persistent notice"));
+    assert_eq!(
+        app.world().resource::<GameEvents>().len(),
+        2,
+        "building a snapshot must not mutate the live event queue"
+    );
+}
+
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
+struct UnsupportedSnapshotInteger(u128);
+
+#[test]
+fn snapshot_serialization_failure_is_logged_and_skipped() {
+    let mut app = App::new();
+    crate::register_all_types(&mut app);
+    app.register_type::<UnsupportedSnapshotInteger>();
+    app.insert_resource(GameTick(SNAPSHOT_INTERVAL_TICKS));
+    app.insert_resource(GameEvents::default());
+    app.insert_resource(UnsupportedSnapshotInteger(u128::MAX));
+
+    // The reflected u128 reproduces RON's unsupported-integer failure. The
+    // snapshot system must return without panicking or attempting a file write.
+    snapshot_system(app.world_mut());
+
+    assert_eq!(
+        app.world().resource::<UnsupportedSnapshotInteger>().0,
+        u128::MAX
+    );
+}
+
+#[test]
+fn snapshot_file_is_replaced_atomically_without_leaving_temp_files() {
+    let root =
+        std::env::temp_dir().join(format!("siege-perilous-snapshot-write-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("create snapshot test directory");
+    let snapshot_path = root.join("dynamic_scene.ron");
+    fs::write(&snapshot_path, "previous snapshot").expect("seed previous snapshot");
+
+    write_snapshot_atomically(&snapshot_path, "complete replacement")
+        .expect("replace snapshot atomically");
+
+    assert_eq!(
+        fs::read_to_string(&snapshot_path).expect("read replacement snapshot"),
+        "complete replacement"
+    );
+    assert_eq!(
+        fs::read_dir(&root)
+            .expect("read snapshot test directory")
+            .count(),
+        1,
+        "the committed snapshot should be the only remaining file"
+    );
+
+    fs::remove_dir_all(&root).expect("remove snapshot test directory");
+}
+
+#[test]
+fn snapshot_write_failure_preserves_destination_and_cleans_temp_file() {
+    let root = std::env::temp_dir().join(format!(
+        "siege-perilous-snapshot-failure-{}",
+        Uuid::new_v4()
+    ));
+    fs::create_dir_all(&root).expect("create snapshot failure test directory");
+    let invalid_snapshot_path = root.join("dynamic_scene.ron");
+    fs::create_dir(&invalid_snapshot_path).expect("create conflicting destination directory");
+
+    assert!(write_snapshot_atomically(&invalid_snapshot_path, "new snapshot").is_err());
+    assert!(invalid_snapshot_path.is_dir());
+    assert_eq!(
+        fs::read_dir(&root)
+            .expect("read snapshot failure test directory")
+            .count(),
+        1,
+        "a failed rename must clean its temporary file"
+    );
+
+    fs::remove_dir_all(&root).expect("remove snapshot failure test directory");
 }

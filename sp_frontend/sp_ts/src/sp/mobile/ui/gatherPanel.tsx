@@ -1,16 +1,15 @@
 
 import * as React from "react";
-import gatherpanel from "ui_comp/buttonsframe.png"
-import { Network } from "../../core/network";
+import gatherpanel from "ui_comp/errorframe.png"
 import { Global } from "../../core/global";
 
-import orebutton from "ui_comp/ore.png";
-import logbutton from "ui_comp/wood.png";
-import plantbutton from "ui_comp/plant.png";
-import stonebutton from "ui_comp/stone.png";
-//import waterbutton from "ui_comp/water.png";
-import fishbutton from "ui_comp/fish.png";
-import gamebutton from "ui_comp/game.png";
+import orebutton from "ui_comp/resource_categories/ore.png";
+import logbutton from "ui_comp/resource_categories/timber.png";
+import foragebutton from "ui_comp/resource_categories/forage.png";
+import stonebutton from "ui_comp/resource_categories/stone.png";
+import waterbutton from "ui_comp/resource_categories/water.png";
+import fishbutton from "ui_comp/resource_categories/fish.png";
+import gamebutton from "ui_comp/resource_categories/game.png";
 import { GameEvent } from "../../core/gameEvent";
 
 interface GatherProps {
@@ -26,9 +25,8 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
 
     this.handleOreClick = this.handleOreClick.bind(this)
     this.handleLogClick = this.handleLogClick.bind(this)
-    this.handlePlantClick = this.handlePlantClick.bind(this)
+    this.handleForageClick = this.handleForageClick.bind(this)
     this.handleStoneClick = this.handleStoneClick.bind(this)
-    //this.handleWaterClick = this.handleWaterClick.bind(this)
     this.handleFishClick = this.handleFishClick.bind(this)
     this.handleGameClick = this.handleGameClick.bind(this)
   }
@@ -36,7 +34,7 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
   handleOreClick(event: React.MouseEvent) {
     console.log('Ore Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Ore');
+      Global.network.sendGather('Ore');
     } else {
       Global.network.sendOrderGather(this.props.selectedKey.id, 'Ore');
     }
@@ -46,19 +44,19 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
   handleLogClick(event: React.MouseEvent) {
     console.log('Transfer Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Log');
+      Global.network.sendGather('Log');
     } else {
       Global.network.sendOrderGather(this.props.selectedKey.id, 'Log');
     }
     Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
   }
 
-  handlePlantClick(event: React.MouseEvent) {
-    console.log('Plant Click');
+  handleForageClick(event: React.MouseEvent) {
+    console.log('Forage Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Plant');
+      Global.network.sendGather('Forage');
     } else {
-      Global.network.sendOrderGather(this.props.selectedKey.id, 'Plant');
+      Global.network.sendOrderGather(this.props.selectedKey.id, 'Forage');
     }
     Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
   }
@@ -66,27 +64,17 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
   handleStoneClick(event: React.MouseEvent) {
     console.log('Stone Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Stone');
+      Global.network.sendGather('Stone');
     } else {
       Global.network.sendOrderGather(this.props.selectedKey.id, 'Stone');
     }
     Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
   }
 
-  /*handleWaterClick(event: React.MouseEvent) {
-    console.log('Water Click');
-    if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Water');
-    } else {
-      Global.network.sendOrderGather(this.props.selectedKey.id, 'Water');
-    }
-    Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
-  }*/
-
   handleFishClick(event: React.MouseEvent) {
     console.log('Fish Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Fish');
+      Global.network.sendGather('Fish');
     } else {
       Global.network.sendOrderGather(this.props.selectedKey.id, 'Fish');
     }
@@ -96,9 +84,9 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
   handleGameClick(event: React.MouseEvent) {
     console.log('Game Click');
     if (this.props.selectedKey.id == Global.heroId) {
-      Global.network.sendGather(this.props.selectedKey.id, 'Game');
+      Global.network.sendGather('Game Animal');
     } else {
-      Global.network.sendOrderGather(this.props.selectedKey.id, 'Game');
+      Global.network.sendOrderGather(this.props.selectedKey.id, 'Game Animal');
     }
     Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
   }
@@ -106,107 +94,115 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
   render() {
     var hideOreButton = false;
     var hideLogButton = false;
-    var hidePlantButton = false;
+    var hideForageButton = false;
     var hideStoneButton = false;
-    //var hideWaterButton = false;
+    var hideWaterButton = false;
     var hideFishButton = false;
     var hideGameButton = false;
-
-    var buttonOrder = {
-      ore: 0,
-      log: 1,
-      plant: 2,
-      stone: 3,
-      //water: 4,
-      fish: 4,
-      game: 5
-    };
 
     const gatherStyle = {
       top: '50%',
       left: '50%',
-      width: '320px',
-      height: '67px',
-      marginTop: '-33px',
-      marginLeft: '-160px',
+      width: '333px',
+      height: '119px',
+      transform: 'translate(-50%, -50%)',
       position: 'fixed',
       zIndex: 6
     } as React.CSSProperties
 
     const panelStyle = {
-      position: 'fixed'
+      position: 'absolute',
+      inset: 0,
+      width: '333px',
+      height: '119px',
+      pointerEvents: 'none'
     } as React.CSSProperties
 
-    const oreStyle = {
-      transform: 'translate(8px, 8px)',
-      position: 'fixed'
+    const buttonRowsStyle = {
+      position: 'absolute',
+      inset: '9px 10px 10px',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '3px'
     } as React.CSSProperties
 
-    const logStyle = {
-      transform: 'translate(58px, 8px)',
-      position: 'fixed'
+    const buttonRowStyle = {
+      display: 'flex',
+      justifyContent: 'center',
+      gap: '8px',
+      height: '48px'
     } as React.CSSProperties
 
-    const plantStyle = {
-      transform: 'translate(108px, 8px)',
-      position: 'fixed'
+    const buttonStyle = {
+      width: '48px',
+      height: '48px',
+      cursor: 'pointer'
     } as React.CSSProperties
 
-    const stoneStyle = {
-      transform: 'translate(158px, 8px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    /*const waterStyle = {
-      transform: 'translate(208px, 8px)',
-      position: 'fixed'
-    } as React.CSSProperties*/
-
-    const fishStyle = {
-      transform: 'translate(208px, 8px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-
-    const gameStyle = {
-      transform: 'translate(258px, 8px)',
-      position: 'fixed'
+    const waterStyle = {
+      ...buttonStyle,
+      cursor: 'help'
     } as React.CSSProperties
 
     return (
       <div style={gatherStyle} >
         <img src={gatherpanel} style={panelStyle} />
+        <div style={buttonRowsStyle}>
+          <div style={buttonRowStyle}>
+            {!hideOreButton &&
+              <img src={orebutton}
+                style={buttonStyle}
+                title="Ore"
+                alt="Ore"
+                onClick={this.handleOreClick} />}
 
-        {!hideOreButton &&
-          <img src={orebutton}
-            style={oreStyle}
-            onClick={this.handleOreClick} />}
+            {!hideLogButton &&
+              <img src={logbutton}
+                style={buttonStyle}
+                title="Timber"
+                alt="Timber"
+                onClick={this.handleLogClick} />}
 
-        {!hideLogButton &&
-          <img src={logbutton}
-            style={logStyle}
-            onClick={this.handleLogClick} />}
+            {!hideForageButton &&
+              <img src={foragebutton}
+                style={buttonStyle}
+                title="Forage — gather revealed underbrush, resin, or wild food"
+                alt="Forage"
+                onClick={this.handleForageClick} />}
 
-        {!hidePlantButton &&
-          <img src={plantbutton}
-            style={plantStyle}
-            onClick={this.handlePlantClick} />}
+            {!hideStoneButton &&
+              <img src={stonebutton}
+                style={buttonStyle}
+                title="Stone"
+                alt="Stone"
+                onClick={this.handleStoneClick} />}
+          </div>
 
-        {!hideStoneButton &&
-          <img src={stonebutton}
-            style={stoneStyle}
-            onClick={this.handleStoneClick} />}
+          <div style={buttonRowStyle}>
+            {!hideWaterButton &&
+              <img src={waterbutton}
+                style={waterStyle}
+                title="Water — use an empty waterskin at a revealed spring"
+                alt="Water"
+                aria-disabled="true" />}
 
-        {!hideFishButton &&
-          <img src={fishbutton}
-            style={fishStyle}
-            onClick={this.handleFishClick} />}
+            {!hideFishButton &&
+              <img src={fishbutton}
+                style={buttonStyle}
+                title="Fish"
+                alt="Fish"
+                onClick={this.handleFishClick} />}
 
-        {!hideGameButton &&
-          <img src={gamebutton}
-            style={gameStyle}
-            onClick={this.handleGameClick} />}
-
+            {!hideGameButton &&
+              <img src={gamebutton}
+                style={buttonStyle}
+                title="Game"
+                alt="Game"
+                onClick={this.handleGameClick} />}
+          </div>
+        </div>
       </div>
     );
   }

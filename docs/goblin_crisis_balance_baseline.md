@@ -73,7 +73,7 @@ The snapshot covers the crisis-owned constants. The following architecture-audit
 | Wolf Rider | 2 | 75 | 250 | 6 / 5 | 5 | 6 | 4 | 14 | 300 |
 | Goblin Pillager | 1 | 55 | 200 | 5 / 4 | 4 | 5 | 3 | 14 | 250 |
 
-Human Villagers have 500 HP, 10,000 stamina, zero base damage/span, zero defence, zero speed, vision 2, and base work 25. They count as combat-capable only when current base damage is positive or a weapon is equipped.
+Human Villagers have 80 HP, 10,000 stamina, zero base damage/span, zero defence, zero speed, vision 2, and base work 25. They count as combat-capable only when current base damage is positive or a weapon is equipped.
 
 | Existing defence | HP | Defence | Current role |
 |---|---:|---:|---|

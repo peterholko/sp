@@ -20,14 +20,14 @@ import {
   consumeSafeLogoutCompletion,
   hasSafeLogoutReconnectSuppression,
 } from "../core/safeLogoutStatus";
+import { shouldShowAccountSetupPrompt } from "../core/accountSetupPrompt";
 import HeroCreationPanel from "../core/heroCreationPanel";
 import { DEFAULT_HERO_PORTRAIT } from "../core/portraitCatalog";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
-  private readonly accountSetupDelay = 60000;
   private healthIntervalId?: number;
-  private accountSetupTimerId?: number;
+  private accountSetupPrompted = false;
   private readonly safeLogoutResumeNotice = new SafeLogoutResumeNoticeGuard();
 
   constructor(props) {
@@ -106,6 +106,7 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleNetworkError = this.handleNetworkError.bind(this);
     this.handleSafeLogoutComplete = this.handleSafeLogoutComplete.bind(this);
     this.handleSafeLogoutResumed = this.handleSafeLogoutResumed.bind(this);
+    this.handleThreatState = this.handleThreatState.bind(this);
 
     Global.gameEmitter.on(GameEvent.INTRO_OK_CLICK, this.handleIntroOkClick, this);
     Global.gameEmitter.on(GameEvent.ERROR_OK_CLICK, this.handleErrorOkClick, this);
@@ -119,6 +120,7 @@ export default class LoginControl extends React.Component<any, any> {
     Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleNetworkError, this);
     Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
     Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
+    Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
 
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleInfoTrueDeath, this);
 
@@ -185,11 +187,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleSafeLogoutComplete(data?) {
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-      this.accountSetupTimerId = undefined;
-    }
-
     Global.connected = false;
     Global.networkError = false;
     Global.serverOffline = false;
@@ -354,11 +351,9 @@ export default class LoginControl extends React.Component<any, any> {
   componentWillUnmount() {
     Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
     Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
+    Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     if (this.healthIntervalId) {
       window.clearInterval(this.healthIntervalId);
-    }
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
     }
   }
 
@@ -614,18 +609,18 @@ export default class LoginControl extends React.Component<any, any> {
     }
   }
 
-  startAccountSetupTimer() {
-    if (Global.accountSetupCompleted) {
+  handleThreatState(message) {
+    if (!shouldShowAccountSetupPrompt(
+      message?.day,
+      Global.accountSetupCompleted,
+      Global.heroDead,
+      this.accountSetupPrompted,
+    )) {
       return;
     }
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-    }
-    this.accountSetupTimerId = window.setTimeout(() => {
-      if (!Global.accountSetupCompleted && !Global.heroDead) {
-        this.setState({ hideAccountSetupPanel: false, accountSetupError: '' });
-      }
-    }, this.accountSetupDelay);
+
+    this.accountSetupPrompted = true;
+    this.setState({ hideAccountSetupPanel: false, accountSetupError: '' });
   }
 
   async handleAccountSetupSubmit(data) {
@@ -675,10 +670,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleHeroDead() {
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-      this.accountSetupTimerId = undefined;
-    }
     this.setState({ hideAccountSetupPanel: true });
   }
 
@@ -742,11 +733,19 @@ export default class LoginControl extends React.Component<any, any> {
     }
 
     if (data.errmsg == 'Hero name is inappropriate') {
-      this.setState({ inappropiateName: true });
+      this.setState({
+        inappropiateName: true,
+        hideSelectClass: false,
+        hideIntro: true,
+      });
     }
 
     if (data.errmsg == 'Hero name is already taken') {
-      this.setState({ takenName: true });
+      this.setState({
+        takenName: true,
+        hideSelectClass: false,
+        hideIntro: true,
+      });
     }
   }
 
@@ -777,9 +776,24 @@ export default class LoginControl extends React.Component<any, any> {
 
   handleIntroOkClick() {
     this.setState({ hideIntro: true });
+
+    const heroName = this.state.heroName.trim();
+    if (this.state.preConnectionSelect) {
+      Global.pendingClassSelection = {
+        className: this.state.selectedClass,
+        heroName,
+        portrait: this.state.selectedPortrait,
+      };
+      Global.network = new Network();
+      Global.network.connect();
+      Global.connected = true;
+      this.setState({ hideSelectClass: true, preConnectionSelect: false });
+      return;
+    }
+
     Global.network.sendSelectedClass(
       this.state.selectedClass,
-      this.state.heroName,
+      heroName,
       this.state.selectedPortrait,
     );
   }
@@ -815,10 +829,12 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleFirstLogin() {
+    this.accountSetupPrompted = false;
     this.clearSafeLogoutSuppression();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
+      hideIntro: true,
       hideTrueDeathPanel: true,
       hideGame: false,
       safeLogoutCompletionMessage: '',
@@ -837,13 +853,14 @@ export default class LoginControl extends React.Component<any, any> {
       }
     }).catch(() => {});
 
-    this.startAccountSetupTimer();
   }
 
   handleLoggedIn(data?) {
+    this.accountSetupPrompted = false;
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
+      hideIntro: true,
       hideTrueDeathPanel: true,
       hideGame: false,
       safeLogoutCompletionMessage: '',
@@ -851,7 +868,6 @@ export default class LoginControl extends React.Component<any, any> {
     if (data && data.has_account) {
       Global.accountSetupCompleted = true;
     }
-    this.startAccountSetupTimer();
   }
 
   handleInfoTrueDeath(message) {
@@ -887,24 +903,7 @@ export default class LoginControl extends React.Component<any, any> {
       return;
     }
 
-    if (this.state.preConnectionSelect) {
-      // New player: store selection and connect to game server
-      Global.pendingClassSelection = {
-        className: this.state.selectedClass,
-        heroName,
-        portrait: this.state.selectedPortrait,
-      };
-      Global.network = new Network();
-      Global.network.connect();
-      Global.connected = true;
-      this.setState({ hideSelectClass: true, preConnectionSelect: false });
-    } else {
-      Global.network.sendSelectedClass(
-        this.state.selectedClass,
-        heroName,
-        this.state.selectedPortrait,
-      );
-    }
+    this.setState({ hideSelectClass: true, hideIntro: false });
   }
 
   handleWarriorSelect() {

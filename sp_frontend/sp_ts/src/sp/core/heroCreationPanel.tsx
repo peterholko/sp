@@ -8,6 +8,7 @@ interface HeroCreationPanelProps {
   heroName: string;
   selectedClass: string;
   selectedPortrait: string;
+  classImageSize?: number;
   isHeroNameEmpty: boolean;
   isClassMissing: boolean;
   inappropriateName: boolean;
@@ -64,6 +65,9 @@ const choiceRowStyle: React.CSSProperties = {
 };
 
 export default function HeroCreationPanel(props: HeroCreationPanelProps) {
+  const classImageSize = props.classImageSize ?? 64;
+  const classChoiceWidth = classImageSize + 24;
+
   const error = props.inappropriateName
     ? 'Inappropriate name'
     : props.takenName
@@ -115,8 +119,9 @@ export default function HeroCreationPanel(props: HeroCreationPanelProps) {
               title={`${option.name}: ${option.title}`}
               aria-pressed={selected}
               style={{
-                width: '128px',
-                minHeight: '104px',
+                width: `${classChoiceWidth}px`,
+                minHeight: `${classImageSize + 40}px`,
+                boxSizing: 'border-box',
                 padding: '10px',
                 border: selected ? '2px solid #d9b46d' : '1px solid #596069',
                 borderRadius: '5px',
@@ -129,7 +134,14 @@ export default function HeroCreationPanel(props: HeroCreationPanelProps) {
               <img
                 src={option.image}
                 alt=""
-                style={{ width: '64px', height: '64px', imageRendering: 'pixelated', objectFit: 'contain' }}
+                style={{
+                  display: 'block',
+                  width: `${classImageSize}px`,
+                  height: `${classImageSize}px`,
+                  margin: '0 auto',
+                  imageRendering: 'pixelated',
+                  objectFit: 'contain',
+                }}
               />
               <span style={{ display: 'block', marginTop: '4px' }}>{option.name}</span>
             </button>

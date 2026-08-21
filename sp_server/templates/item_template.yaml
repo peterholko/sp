@@ -1208,9 +1208,27 @@
   image: deed
   weight: 1
 
+- name: Burrow Deed
+  class: Deed
+  subclass: Burrow
+  image: deed
+  weight: 1
+
 - name: Shelter Tent Deed
   class: Deed
   subclass: Shelter Tent
+  image: deed
+  weight: 1
+
+- name: Stockade Deed
+  class: Deed
+  subclass: Stockade
+  image: deed
+  weight: 1
+
+- name: Watchtower Deed
+  class: Deed
+  subclass: Watchtower
   image: deed
   weight: 1
 
@@ -1344,7 +1362,7 @@
 - name: Resin Torch
   class: Torch
   subclass: Resin Torch
-  image: torch
+  image: resintorch
   slot: Off Hand
   weight: 5
   attrs:
@@ -1398,6 +1416,17 @@
 ##################
 ###### TOOLS #####
 ##################
+
+- name: Foraging Kit
+  class: Tool
+  subclass: Foraging Kit
+  slot: Main Hand
+  image: foragingkit
+  weight: 2
+  durability: 30
+  attrs:
+    - name: Foraging
+      value: 2
 
 - name: Sickle
   class: Tool
@@ -1882,7 +1911,7 @@
     - name: Logging
       value: 2
 
-- name: Stone-Tipped Spear
+- name: Bone-Tipped Spear
   class: Weapon
   subclass: Spear
   slot: Main Hand

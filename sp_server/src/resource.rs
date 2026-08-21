@@ -110,6 +110,53 @@ impl Resources {
 }
 
 impl Resource {
+    pub fn scout_category_for_type(res_type: &str) -> Option<&'static str> {
+        match res_type {
+            ORE => Some("Ore"),
+            STONE => Some("Stone"),
+            LOG => Some("Timber"),
+            FORAGE => Some("Forage"),
+            SPRING_WATER => Some("Water"),
+            FISH => Some("Fish"),
+            GAME_ANIMAL => Some("Game"),
+            _ => None,
+        }
+    }
+
+    /// Return broad resource categories for the supplied tiles without
+    /// revealing individual deposits to the player. Multiple named deposits
+    /// of the same type collapse to one category icon per tile.
+    pub fn get_scouted_resource_categories(
+        positions: impl IntoIterator<Item = Position>,
+        resources: &Resources,
+    ) -> Vec<network::ScoutedResourceCategory> {
+        let mut categories = Vec::new();
+
+        for position in positions {
+            let Some(resources_on_tile) = resources.get(&position) else {
+                continue;
+            };
+
+            let mut tile_categories = resources_on_tile
+                .values()
+                .filter_map(|resource| Resource::scout_category_for_type(&resource.res_type))
+                .collect::<Vec<_>>();
+            tile_categories.sort_unstable();
+            tile_categories.dedup();
+
+            categories.extend(tile_categories.into_iter().map(|category| {
+                network::ScoutedResourceCategory {
+                    category: category.to_string(),
+                    x: position.x,
+                    y: position.y,
+                }
+            }));
+        }
+
+        categories.sort_by(|a, b| (a.y, a.x, &a.category).cmp(&(b.y, b.x, &b.category)));
+        categories
+    }
+
     pub fn is_visible_to(
         resource: &Resource,
         player_id: i32,
@@ -221,6 +268,13 @@ impl Resource {
                             }
                         }
 
+                        let terrain_name = tile_info.tile_type.to_string();
+                        let produces = res_template
+                            .produces_by_terrain
+                            .as_ref()
+                            .and_then(|outputs| outputs.get(&terrain_name).cloned())
+                            .or_else(|| res_template.produces.clone());
+
                         Resource::create(
                             res_template.name.to_string(),
                             res_template.res_type.to_string(),
@@ -231,7 +285,7 @@ impl Resource {
                             quantity,
                             Position { x: pos.0, y: pos.1 },
                             property_selected_list,
-                            res_template.produces.clone(),
+                            produces,
                             resources,
                         );
                     }
@@ -349,11 +403,11 @@ impl Resource {
     }
 
     /// Resolve one successful gather into concrete item templates. Ordinary
-    /// resource recipes keep all declared outputs, while a hunting ground
-    /// selects one animal carcass per hunt from its encounter pool.
+    /// resource recipes keep all declared outputs, while hunting grounds and
+    /// forage sites select one result from their available pool.
     pub fn gather_output_names<R: Rng + ?Sized>(resource: &Resource, rng: &mut R) -> Vec<String> {
         match resource.produces.as_ref() {
-            Some(outputs) if resource.res_type == GAME_ANIMAL => {
+            Some(outputs) if matches!(resource.res_type.as_str(), GAME_ANIMAL | FORAGE) => {
                 outputs.choose(rng).cloned().into_iter().collect::<Vec<_>>()
             }
             Some(outputs) if !outputs.is_empty() => outputs.clone(),
@@ -483,12 +537,10 @@ impl Resource {
         Grasslands:
         - Stick
         - Plant Fibers
-        - Pebble
         - Edible Berries
 
         Plains:
         - Stick
-        - Pebble
         - Plant Fibers
         - Mushrooms (rare)
 
@@ -502,7 +554,6 @@ impl Resource {
         - Stick
         - Resin
         - Pine Nuts (edible)
-        - Pebble
 
         Rainforest:
         - Stick
@@ -519,17 +570,14 @@ impl Resource {
         Frozen Forest:
         - Stick
         - Resin (low chance)
-        - Pebble
         - Edible Bark (emergency food)
 
         Snow Hills:
-        - Pebble
         - Stick (low chance)
         - Lichen (low Feed)
         - Resin (very rare)
 
         Desert:
-        - Pebble
         - Stick (very rare)
         - Cactus Fruit (hydration)
         - Dry Fiber (rope precursor)
@@ -546,11 +594,9 @@ impl Resource {
                 STICK.to_string(),
                 BERRIES.to_string(),
                 PLANT_FIBERS.to_string(),
-                PEBBLE.to_string(),
             ],
             TileType::Plains => vec![
                 STICK.to_string(),
-                PEBBLE.to_string(),
                 PLANT_FIBERS.to_string(),
                 MUSHROOM.to_string(),
             ],
@@ -561,17 +607,10 @@ impl Resource {
                 MUSHROOM.to_string(),
                 HONEY.to_string(),
             ],
-            TileType::PineForest => vec![
-                STICK.to_string(),
-                RESIN.to_string(),
-                PINE_NUTS.to_string(),
-                PEBBLE.to_string(),
-            ],
-            TileType::FrozenForest => vec![
-                STICK.to_string(),
-                PEBBLE.to_string(),
-                EDIBLE_BARK.to_string(),
-            ],
+            TileType::PineForest => {
+                vec![STICK.to_string(), RESIN.to_string(), PINE_NUTS.to_string()]
+            }
+            TileType::FrozenForest => vec![STICK.to_string(), EDIBLE_BARK.to_string()],
             _ => {
                 return Err(ResourceGatherError::CannotFindResourceTemplate);
             }
@@ -1127,6 +1166,7 @@ impl Resource {
             STONE => skill::STONECUTTING.to_string(),
             FISH => skill::FISHING.to_string(),
             FOOD => skill::FARMING.to_string(),
+            FORAGE | PLANT => skill::FORAGING.to_string(),
             GAME_ANIMAL => "Hunting".to_string(),
             _ => skill::FORAGING.to_string(),
             /*WATER => skill::FORAGING.to_string(),
@@ -1229,6 +1269,94 @@ mod tests {
     }
 
     #[test]
+    fn scouting_groups_named_deposits_into_one_category_per_tile() {
+        let position = Position { x: 3, y: 4 };
+        let mut first_ore = test_resource(false);
+        first_ore.name = "Valleyrun Copper Ore".to_string();
+        first_ore.res_type = ORE.to_string();
+        let mut second_ore = first_ore.clone();
+        second_ore.name = "Flameforge Copper Ore".to_string();
+        let timber = test_resource(false);
+
+        let resources = Resources(HashMap::from([(
+            position,
+            HashMap::from([
+                (first_ore.name.clone(), first_ore),
+                (second_ore.name.clone(), second_ore),
+                (timber.name.clone(), timber),
+            ]),
+        )]));
+
+        let categories = Resource::get_scouted_resource_categories([position], &resources);
+
+        assert_eq!(
+            categories,
+            vec![
+                network::ScoutedResourceCategory {
+                    category: "Ore".to_string(),
+                    x: 3,
+                    y: 4,
+                },
+                network::ScoutedResourceCategory {
+                    category: "Timber".to_string(),
+                    x: 3,
+                    y: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn scouting_only_reports_requested_tiles_and_supported_categories() {
+        let requested = Position { x: 3, y: 4 };
+        let outside = Position { x: 4, y: 4 };
+        let mut timber = test_resource(false);
+        let mut unsupported = test_resource(false);
+        unsupported.name = "Unknown Resource".to_string();
+        unsupported.res_type = "Unknown".to_string();
+        let mut outside_ore = test_resource(false);
+        outside_ore.name = "Outside Ore".to_string();
+        outside_ore.res_type = ORE.to_string();
+        outside_ore.pos = outside;
+        timber.pos = requested;
+        unsupported.pos = requested;
+
+        let resources = Resources(HashMap::from([
+            (
+                requested,
+                HashMap::from([
+                    (timber.name.clone(), timber),
+                    (unsupported.name.clone(), unsupported),
+                ]),
+            ),
+            (
+                outside,
+                HashMap::from([(outside_ore.name.clone(), outside_ore)]),
+            ),
+        ]));
+
+        let categories = Resource::get_scouted_resource_categories([requested], &resources);
+
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].category, "Timber");
+        assert_eq!((categories[0].x, categories[0].y), (3, 4));
+    }
+
+    #[test]
+    fn scouting_maps_every_gather_resource_type_to_a_player_facing_category() {
+        assert_eq!(Resource::scout_category_for_type(ORE), Some("Ore"));
+        assert_eq!(Resource::scout_category_for_type(STONE), Some("Stone"));
+        assert_eq!(Resource::scout_category_for_type(LOG), Some("Timber"));
+        assert_eq!(Resource::scout_category_for_type(FORAGE), Some("Forage"));
+        assert_eq!(
+            Resource::scout_category_for_type(SPRING_WATER),
+            Some("Water")
+        );
+        assert_eq!(Resource::scout_category_for_type(FISH), Some("Fish"));
+        assert_eq!(Resource::scout_category_for_type(GAME_ANIMAL), Some("Game"));
+    }
+
+    #[test]
     fn ordinary_resource_discovery_is_player_scoped() {
         let resource = test_resource(false);
         let mut discoveries = ResourceDiscoveries::default();
@@ -1278,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn hunting_ground_selects_one_carcass_while_other_resources_keep_all_outputs() {
+    fn encounter_and_forage_sites_select_one_output() {
         let mut hunting_ground = test_resource(false);
         hunting_ground.name = "Fruitful Hunting Grounds".to_string();
         hunting_ground.res_type = GAME_ANIMAL.to_string();
@@ -1296,6 +1424,17 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains(&hunted[0]));
+
+        let mut forage_site = test_resource(false);
+        forage_site.name = "Useful Underbrush".to_string();
+        forage_site.res_type = FORAGE.to_string();
+        forage_site.produces = Some(vec![
+            "Cragroot Maple Stick".to_string(),
+            "Plant Fibers".to_string(),
+        ]);
+        let foraged = Resource::gather_output_names(&forage_site, &mut rng);
+        assert_eq!(foraged.len(), 1);
+        assert!(forage_site.produces.as_ref().unwrap().contains(&foraged[0]));
 
         let mut ordinary = test_resource(false);
         ordinary.produces = Some(vec!["Log".to_string(), "Bark".to_string()]);

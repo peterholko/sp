@@ -4,7 +4,9 @@
 
 Make existing player-only attack chains reliable, faster as they develop, and
 readable in combat without changing the seven combo recipes, stance counters,
-stamina costs, per-target ownership, or adjacent finisher requirement.
+stamina costs, or adjacent finisher requirement. Partial chains remain
+target-owned; a completed finisher becomes target-transferable only when its
+final setup attack kills that target.
 
 ## Implemented checkpoint
 
@@ -17,6 +19,9 @@ stamina costs, per-target ownership, or adjacent finisher requirement.
 - Combo histories time out after 150 ticks and recover to their longest live
   suffix after a dead end. Finisher input performs the same timeout check
   directly, so a stale tracker cannot execute during a system-order gap.
+- A finisher completed by a killing blow remains ready for the next valid
+  target until the normal combo timeout. Partial chains and completed chains
+  against living targets remain bound to their original target.
 - Strict combo prefixes use the 30/25/20/15-tick basic-attack cooldown ladder.
   Exact completed recipes stay live for finisher hints but reset basic attacks
   to 30 ticks; suffix recovery cannot turn repeated completed inputs into a
@@ -28,7 +33,7 @@ stamina costs, per-target ownership, or adjacent finisher requirement.
 - Intimidating Shout, Shatter Cleave, and Massive Pummel apply their specified
   adjacent-NPC secondary behavior while excluding protected, dead, fortified,
   non-unit, and player-owned targets.
-- Combat State v2 is emitted only from the owning hero's combo tracker; villager
+- Combat State v3 is emitted only from the owning hero's combo tracker; villager
   trackers still expire and drive combat internally without overwriting hero UI.
   Desktop and mobile show live/next
   chain pips, target-effect badges, ready-finisher pulse, dynamic cooldowns,

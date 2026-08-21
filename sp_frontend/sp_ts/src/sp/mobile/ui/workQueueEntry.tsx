@@ -12,6 +12,7 @@ import refinegameanimalicon from "ui_comp/refinegameanimalbutton.png";
 import experimenticon from "ui_comp/experimentbutton.png";
 import frame from "ui_comp/itemframe.png";
 import { Global } from "../../core/global";
+import WorkQueueProgressBar from "../../core/workQueueProgressBar";
 
 interface WorkQueueEntryProps {
   xPos,
@@ -23,99 +24,22 @@ interface WorkQueueEntryProps {
   index,
   maxProgress,
   progress,
+  actionId?,
+  actionDurationMs?,
+  actionElapsedMs?,
   refineItemClass?,
   handleClick?,
   handleCancel?
 }
 
 export default class WorkQueueEntry extends React.Component<WorkQueueEntryProps, any> {
-  private timer;
-
   constructor(props) {
     super(props);
-    this.state = { progress: this.props.progress ?? 0 };
-
-    this.startTimer = this.startTimer.bind(this);
-    this.stopTimer = this.stopTimer.bind(this);
 
     this.handleClick = this.handleClick.bind(this);
     this.handleItemClick = this.handleItemClick.bind(this);
     this.handleWorkerClick = this.handleWorkerClick.bind(this);
     this.handleCancel = this.handleCancel.bind(this);
-  }
-
-  componentDidMount() {
-    // Only start if there's actual work to do
-    if (this.props.maxProgress > 0 && this.state.progress < this.props.maxProgress) {
-      this.startTimer();
-    }
-  }
-
-  componentWillUnmount() {
-    this.stopTimer();
-  }
-
-  componentDidUpdate(prevProps: WorkQueueEntryProps) {
-    const progressChanged = prevProps.progress !== this.props.progress;
-    const maxAppeared = (prevProps.maxProgress ?? 0) <= 0 && (this.props.maxProgress ?? 0) > 0;
-    const entryIdentityChanged =
-      prevProps.index !== this.props.index ||
-      prevProps.villagerId !== this.props.villagerId ||
-      prevProps.name !== this.props.name ||
-      prevProps.workType !== this.props.workType;
-
-    // If the entry changed, sync local state to incoming props and (re)start as needed
-    if (entryIdentityChanged) {
-      this.stopTimer();
-      this.setState({ progress: this.props.progress ?? 0 }, () => {
-        if (this.props.maxProgress > 0 && this.state.progress < this.props.maxProgress) {
-          this.startTimer();
-        }
-      });
-      return;
-    }
-
-    // If parent sends new progress, mirror it
-    if (progressChanged) {
-      this.setState({ progress: this.props.progress ?? 0 }, () => {
-        if (this.props.maxProgress > 0 && this.state.progress < this.props.maxProgress && !this.timer) {
-          this.startTimer();
-        }
-      });
-      return;
-    }
-
-    // If maxProgress changed from 0/undefined to a positive value, start the timer
-    if (maxAppeared && !this.timer && (this.state.progress ?? 0) < (this.props.maxProgress ?? 0)) {
-      this.startTimer();
-    }
-  }
-
-  startTimer() {
-    // Prevent duplicate intervals
-    if (this.timer) this.stopTimer();
-
-    if (!(this.props.maxProgress > 0)) return;
-
-    this.timer = setInterval(() => {
-      const max = this.props.maxProgress;
-      const cur = this.state.progress ?? 0;
-
-      if (cur + 1 >= max) {
-        // Finish at max, then stop
-        this.setState({ progress: 0 });
-        this.stopTimer();
-      } else {
-        this.setState({ progress: cur + 1 });
-      }
-    }, 1000);
-  }
-
-  stopTimer() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
   }
 
   handleClick = () => {
@@ -194,7 +118,8 @@ export default class WorkQueueEntry extends React.Component<WorkQueueEntryProps,
         workTypeIcon = refinewoodicon;
       } else if (this.props.refineItemClass == 'Stone') {
         workTypeIcon = refinestoneicon;
-      } else if (this.props.refineItemClass == 'Game Animal') {
+      } else if (this.props.refineItemClass == 'Game Animal' ||
+        this.props.refineItemClass == 'Carcass') {
         workTypeIcon = refinegameanimalicon;
       }
     } else if (this.props.workType == 'Experiment') {
@@ -210,9 +135,6 @@ export default class WorkQueueEntry extends React.Component<WorkQueueEntryProps,
     }
 
     console.log('-----  Index: ' + this.props.index + '  -----');
-    console.log('maxProgress Props: ' + this.props.maxProgress);
-    console.log('progress Props: ' + this.props.progress + ' State: ' + this.state.progress);
-
     return (
       <div style={divStyle}>
         <img src={cancelbutton} style={cancelStyle} onClick={this.handleCancel} />
@@ -221,9 +143,13 @@ export default class WorkQueueEntry extends React.Component<WorkQueueEntryProps,
         <img src={workTypeIcon} style={workTypeIconStyle} />
         <img src={frame} style={assignedFrameStyle} />
         {villagerImageName && <img src={'/static/art/' + villagerImageName} style={villagerFrameStyle} onClick={this.handleWorkerClick} />}
-        {this.props.maxProgress > 0 && <progress max={this.props.maxProgress} value={this.state.progress} style={progressStyle}>{this.state.progress}</progress>}
+        <WorkQueueProgressBar
+          action_id={this.props.actionId}
+          action_duration_ms={this.props.actionDurationMs}
+          action_elapsed_ms={this.props.actionElapsedMs}
+          style={progressStyle}
+          label={this.props.name + ' progress'} />
       </div>
     );
   }
 }
-

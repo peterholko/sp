@@ -70,6 +70,9 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
           yPos={yPos}
           maxProgress={this.props.workQueue[i].work_time}
           progress={this.props.workQueue[i].progress}
+          actionId={this.props.workQueue[i].action_id}
+          actionDurationMs={this.props.workQueue[i].action_duration_ms}
+          actionElapsedMs={this.props.workQueue[i].action_elapsed_ms}
           handleCancel={this.handleCancel} />)
       } else if (workType == 'Refine') {
         const refineItemId = this.props.workQueue[i].refine_item_id;
@@ -87,6 +90,9 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
           refineItemClass={this.props.workQueue[i].refine_item_class}
           maxProgress={this.props.workQueue[i].work_time}
           progress={this.props.workQueue[i].progress}
+          actionId={this.props.workQueue[i].action_id}
+          actionDurationMs={this.props.workQueue[i].action_duration_ms}
+          actionElapsedMs={this.props.workQueue[i].action_elapsed_ms}
           handleCancel={this.handleCancel} />)
       } else if (workType == 'Operate') {
 
@@ -101,6 +107,9 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
           yPos={yPos}
           maxProgress={this.props.workQueue[i].work_time}
           progress={this.props.workQueue[i].progress}
+          actionId={this.props.workQueue[i].action_id}
+          actionDurationMs={this.props.workQueue[i].action_duration_ms}
+          actionElapsedMs={this.props.workQueue[i].action_elapsed_ms}
           handleCancel={this.handleCancel} />)
         }
       }
@@ -147,5 +156,4 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       );
     }
   }
-
 

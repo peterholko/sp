@@ -31,14 +31,20 @@ import {
   shouldConfirmSanctuaryExit,
 } from '../core/sanctuaryExitWarning';
 import { showSanctuaryBorderForMonolithSelection } from '../core/sanctuaryBorderVisibility';
-import { chooseCombatAutoTarget } from '../core/combatAutoTarget';
+import {
+  carryTransferableFinisherAfterKill,
+  chooseCombatAutoTarget,
+  retargetTransferableFinisher,
+} from '../core/combatAutoTarget';
 import {
   TRIGGER_INVENTORY,
   QUICK,
   PRECISE,
   FIERCE,
   OBJ,
-  TILE
+  TILE,
+  combatZoomTransition,
+  desktopCameraZoom,
 } from '../core/config';
 import TargetActionPanel from './ui/targetActionPanel';
 import ItemTransferPanel from './ui/itemTransferPanel';
@@ -203,7 +209,6 @@ interface UIState {
   infoRefineItemTriggered: boolean,
   combatState: any,
   combatTelegraphs: any,
-  inCombatZoom: boolean,
   protectionRevision: number,
 }
 
@@ -212,6 +217,9 @@ export default class UI extends React.Component<any, UIState> {
   private heroDeathOverlayTimer: any = null;
   private nextNotificationId: number = 1;
   private sanctuaryExitConfirmedHeroId: string | null = null;
+  private currentCameraZoom: number = desktopCameraZoom();
+  private combatZoomActive: boolean = false;
+  private combatZoomRestore: number | null = null;
   // BB-A: per-attacker expiry timers, keyed by attacker_id. An entry is dropped
   // only when its attacker stops telegraphing (died/fled/disengaged).
   private telegraphTimers: { [id: number]: any } = {};
@@ -325,7 +333,6 @@ export default class UI extends React.Component<any, UIState> {
       infoRefineItemTriggered: false,
       combatState: null,
       combatTelegraphs: {},
-      inCombatZoom: false,
       protectionRevision: 0,
     }
 
@@ -380,6 +387,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CONFIRMATION, this.handleConfirmation, this);
     Global.gameEmitter.on(GameEvent.CONFIRM_OK_CLICK, this.handleConfirmOkClick, this);
     Global.gameEmitter.on(GameEvent.RESOURCE_BUTTON_CLICK, this.handleResourceButtonClick, this);
+    Global.gameEmitter.on(GameEvent.TERRAIN_FEATURE_BUTTON_CLICK, this.handleTerrainFeatureButtonClick, this);
     Global.gameEmitter.on(GameEvent.OBJ_CREATED, this.handleObjCreated, this);
     Global.gameEmitter.on(GameEvent.OBJ_DELETED, this.handleObjDeleted, this);
     Global.gameEmitter.on(GameEvent.OBJ_MOVED, this.handleObjMoved, this);
@@ -390,6 +398,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CANCEL_REFINE_CLICK, this.handleCancelRefineClick, this);
     Global.gameEmitter.on(GameEvent.REFINE_OK_CLICK, this.handleRefineOkClick, this);
     Global.gameEmitter.on(GameEvent.IMAGE_DEFINITION_READY, this.handleImageDefinitionReady, this);
+    Global.gameEmitter.on(GameEvent.CAMERA_ZOOM, this.handleCameraZoom, this);
 
     //Global.gameEmitter.on(NetworkEvent.SERVER_OFFLINE, this.handleServerOffline, this);
     //Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleNetworkError, this);
@@ -451,6 +460,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.NEW_ITEMS, this.handleNewItems, this);
     Global.gameEmitter.on(NetworkEvent.DMG, this.handleDamage, this);
     Global.gameEmitter.on(NetworkEvent.STATS, this.handleStats, this);
+    Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.handleNearbyResources, this);
     Global.gameEmitter.on(
       NetworkEvent.PROTECTED_SETTLEMENTS,
       this.handleProtectedSettlements,
@@ -466,6 +476,55 @@ export default class UI extends React.Component<any, UIState> {
 
   handleImageDefinitionReady() {
     this.forceUpdate();
+  }
+
+  handleCameraZoom(data) {
+    if (!data || typeof data.zoom !== 'number') {
+      return;
+    }
+
+    this.currentCameraZoom = data.zoom;
+    if (this.combatZoomActive && data.source === 'user') {
+      this.combatZoomRestore = data.zoom;
+    }
+  }
+
+  beginCombatZoom() {
+    if (this.combatZoomActive) {
+      return;
+    }
+
+    this.combatZoomActive = true;
+    const transition = combatZoomTransition(this.currentCameraZoom);
+    if (!transition) {
+      return;
+    }
+
+    this.combatZoomRestore = transition.restoreZoom;
+    Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, {
+      zoom: transition.zoom,
+      duration: 250,
+      source: 'combat',
+    });
+  }
+
+  endCombatZoom() {
+    if (!this.combatZoomActive) {
+      return;
+    }
+
+    this.combatZoomActive = false;
+    const restoreZoom = this.combatZoomRestore;
+    this.combatZoomRestore = null;
+    if (restoreZoom === null || restoreZoom === this.currentCameraZoom) {
+      return;
+    }
+
+    Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, {
+      zoom: restoreZoom,
+      duration: 350,
+      source: 'combat',
+    });
   }
 
   handleMoveClick(event: React.MouseEvent) {
@@ -656,7 +715,8 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ hideInventoryPanel: true });
       Global.network.sendInfoExit(this.state.inventoryData.id, "inventory");
     } else if (event.panelType == 'itemTransfer') {
-      this.setState({ hideItemTransferPanel: true })
+      this.setState({ hideItemTransferPanel: true });
+      Global.network.sendInfoExit(this.state.leftInventoryId, "item_transfer");
     } else if (event.panelType == 'merchant') {
       this.setState({ hideMerchantPanel: true })
     } else if (event.panelType == 'wanteditempanel') {
@@ -696,6 +756,7 @@ export default class UI extends React.Component<any, UIState> {
         hideStructurePanel: true,
         hideAssignPanel: true
       });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure");
     } else if (event.panelType == 'assign') {
       this.setState({ hideAssignPanel: true });
     } else if (event.panelType == 'refine') {
@@ -706,6 +767,7 @@ export default class UI extends React.Component<any, UIState> {
       Global.network.sendInfoExit(this.state.craftData.crafter_id, "craft");
     } else if (event.panelType == 'structure_craft') {
       this.setState({ hideStructureCraftPanel: true });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure_craft");
     } else if (event.panelType == 'structure_refine') {
       this.setState({ hideStructureRefinePanel: true });
       Global.network.sendInfoExit(this.state.structureData.id, "structure_refine");
@@ -840,23 +902,21 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroGatherClick(event: React.MouseEvent) {
-    /*this.setState({
+    this.setState({
       selectedKey: { type: OBJ, id: Global.heroId },
       hideGatherPanel: false
-    });*/
-    Global.network.sendGather();
+    });
   }
 
   handleHeroSleepClick(event: React.MouseEvent) {
-    //Network.sendRest(Global.heroId);
+    Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
+    this.setState({ resourcesIconBorder: Global.resourceLayerVisible });
+  }
 
-    if (!Global.resourceLayerVisible) {
-      Global.network.sendNearbyResources();
-      this.setState({ resourcesIconBorder: true });
-    } else {
-      Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
-      this.setState({ resourcesIconBorder: false });
-    }
+  handleNearbyResources(message) {
+    this.setState({
+      resourcesIconBorder: Array.isArray(message?.data) && message.data.length > 0,
+    });
   }
 
   handleHeroEquipClick(event: React.MouseEvent) {
@@ -875,9 +935,17 @@ export default class UI extends React.Component<any, UIState> {
       return;
     }
 
-    const targetId = combatState.target_id !== undefined
-      ? combatState.target_id
-      : Global.selectedKey.id;
+    const selectedTargetId = Global.selectedKey?.type === OBJ
+      ? Global.selectedKey.id
+      : undefined;
+    const targetId = combatState.finisher_transferable && selectedTargetId !== undefined
+      ? selectedTargetId
+      : combatState.target_id !== undefined
+        ? combatState.target_id
+        : selectedTargetId;
+    if (targetId === undefined) {
+      return;
+    }
     Global.network.sendCombo(Global.heroId, targetId, comboType);
   }
 
@@ -921,7 +989,21 @@ export default class UI extends React.Component<any, UIState> {
       Global.objectStates,
     );
 
+    const carriedCombatState = carryTransferableFinisherAfterKill(
+      Global.combatState,
+      message,
+      Global.heroId,
+      nextTargetId,
+    );
+
     if (nextTargetId === null) {
+      if (carriedCombatState) {
+        Global.combatState = carriedCombatState;
+        this.setState({
+          combatState: carriedCombatState,
+          hideAttacksPanel: false,
+        });
+      }
       return;
     }
 
@@ -932,16 +1014,16 @@ export default class UI extends React.Component<any, UIState> {
 
     Global.selectedKey = selectedKey;
     Global.attacks.length = 0;
-    Global.combatState = null;
+    Global.combatState = carriedCombatState;
 
     this.setState({
       objIdsOnTile,
       hideSelectPanel: false,
       hideTargetActionPanel: false,
-      hideAttacksPanel: true,
+      hideAttacksPanel: carriedCombatState === null,
       selectedBoxPos,
       selectedKey,
-      combatState: null,
+      combatState: carriedCombatState,
     });
   }
 
@@ -955,26 +1037,36 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ villagerData: newVillagerData });
     }
 
-    if (message.target_id == Global.heroId && !this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
-      this.setState({ inCombatZoom: true });
+    if (message.target_id == Global.heroId) {
+      this.beginCombatZoom();
     }
 
     this.autoTargetAfterKill(message);
   }
 
   handleCombatState(message) {
+    const stateTarget = message && Global.objectStates[message.target_id];
+    if (message?.finisher_transferable && stateTarget?.state === 'dead') {
+      const selectedId = Global.selectedKey?.type === OBJ
+        && Number(Global.selectedKey.id) !== Number(message.target_id)
+        && Global.objectStates[Global.selectedKey.id]?.state !== 'dead'
+          ? Global.selectedKey.id
+          : null;
+      if (selectedId !== null) {
+        message = retargetTransferableFinisher(message, selectedId) || message;
+      }
+      Global.combatState = message;
+    }
+
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
     const hasTargetEffects = message && Array.isArray(message.target_effects) && message.target_effects.length > 0;
     const inCombat = attackHistory.length > 0 || hasComboHint || hasTargetEffects;
 
-    if (inCombat && !this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 2, duration: 250 });
-      this.setState({ inCombatZoom: true });
-    } else if (!inCombat && this.state.inCombatZoom) {
-      Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: 1, duration: 350 });
-      this.setState({ inCombatZoom: false });
+    if (inCombat) {
+      this.beginCombatZoom();
+    } else {
+      this.endCombatZoom();
     }
 
     this.setState({
@@ -1228,6 +1320,10 @@ export default class UI extends React.Component<any, UIState> {
     });
   }
 
+  handleTerrainFeatureButtonClick(event) {
+    this.setState({ hideTerrainFeaturePanel: false });
+  }
+
   handleServerOffline() {
     Global.serverOffline = true;
 
@@ -1470,7 +1566,7 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({
       hideTilePanel: false,
       //hideTileResourcesPanel: false,
-      hideTerrainFeaturePanel: false,
+      hideTerrainFeaturePanel: true,
       tileData: message
     });
   }
@@ -1803,11 +1899,6 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
   }
 
-  /*handleNearbyResources(message) {
-    console.log("UI handleNearbyResources");
-    console.log(message);
-  }*/
-
   handleItemTransfer(message) {
     console.log('UI handleItemTransfer leftId: ' + this.state.leftInventoryId + ' rightId: ' +
       this.state.rightInventoryId + ' sourceId: ' + message.source_id + ' targetId: ' + message.target_id);
@@ -2075,10 +2166,11 @@ export default class UI extends React.Component<any, UIState> {
           className={styles.heroexplorebutton}
           cooldownEvent={NetworkEvent.SURVEY}
           timeKey="survey_time"
-          title="Survey" />
+          title="Scout — reveal nearby resource categories (daytime only)" />
 
         <GatherButton handler={this.handleHeroGatherClick}
           className={styles.herogatherbutton}
+          activeClassName={styles.activeGatherButton}
           title="Gather — collect resources from this tile" />
 
         <SmallButtonClassName handler={this.handleHeroBuildClick}
@@ -2089,6 +2181,7 @@ export default class UI extends React.Component<any, UIState> {
         <ToggleButton handler={this.handleHeroSleepClick}
           imageName="resourcesbutton"
           className={styles.herosleepbutton}
+          active={this.state.resourcesIconBorder}
           title="Nearby Resources" />
 
         <SmallButtonClassName handler={this.handleHeroEquipClick}

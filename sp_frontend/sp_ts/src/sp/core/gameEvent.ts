@@ -38,6 +38,7 @@ export namespace GameEvent {
     export const CONFIRMATION : string = 'CONFIRMATION';
     export const INTRO_OK_CLICK : string = 'INTRO_OK_CLICK';
     export const RESOURCE_BUTTON_CLICK : string = 'RESOURCE_BUTTON_CLICK';
+    export const TERRAIN_FEATURE_BUTTON_CLICK : string = 'TERRAIN_FEATURE_BUTTON_CLICK';
     export const ITEM_USE_CLICK : string = 'ITEM_USE_CLICK';
     export const ITEM_DELETE_CLICK : string = 'ITEM_DELETE_CLICK';
     export const OBJ_CREATED: string = 'OBJ_CREATED';

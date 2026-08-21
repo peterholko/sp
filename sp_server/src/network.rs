@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use futures_util::{SinkExt, StreamExt};
 use lazy_static::lazy_static;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -16,6 +17,7 @@ use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use deadpool_postgres::{Manager, Pool};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{self, Instant, MissedTickBehavior};
 use tokio_postgres::{Config, NoTls};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
@@ -30,8 +32,10 @@ use chrono::Utc;
 use crate::constants::{CREATING_HERO, DATABASE_MANAGER_ID, HERO_DEAD, PLAYING, TICKS_PER_SEC};
 use crate::database::DatabaseEvent;
 use crate::effect;
-use crate::game::{DatabaseClient, DatabaseManagers};
-use crate::map::MapTile;
+use crate::game::{
+    AuthoritativeDeliveryFailure, CurrentConnectionSendError, DatabaseClient, DatabaseManagers,
+};
+use crate::map::{Map, MapTile};
 use crate::{
     game::{Client, Clients},
     player::PlayerEvent,
@@ -59,12 +63,6 @@ macro_rules! net_debug {
     };
 }
 
-// Macro for network error logging (always shown)
-macro_rules! net_error {
-    ($($arg:tt)*) => {
-        eprintln!($($arg)*);
-    };
-}
 use glob::glob;
 
 use argon2::{
@@ -188,7 +186,7 @@ enum NetworkPacket {
         quantity: i32,
     },
     #[serde(rename = "gather")]
-    Gather,
+    Gather { res_type: String },
     #[serde(rename = "operate")]
     Operate { structure_id: i32 },
     #[serde(rename = "plant")]
@@ -624,10 +622,17 @@ pub enum ResponsePacket {
         build_cost: Option<f32>,
         upgrade_cost: Option<f32>,
         work_done: Option<f32>,
+        total_work: Option<f32>,
         work_per_sec: Option<f32>,
+        work_done_milliunits: Option<i64>,
+        total_work_milliunits: Option<i64>,
+        work_per_sec_milliunits: Option<i64>,
+        construction_action_id: Option<i32>,
+        construction_updated_at_ms: Option<i64>,
         req: Option<Vec<ResReq>>,
         upgrade_req: Option<Vec<ResReq>>,
         selected_upgrade: Option<String>,
+        selected_upgrade_image: Option<String>,
         crop_type: Option<String>,
         crop_quantity: Option<i32>,
         crop_stage: Option<String>,
@@ -857,7 +862,7 @@ pub enum ResponsePacket {
     },
     #[serde(rename = "nearby_resources")]
     NearbyResources {
-        data: Vec<TileResourceWithPos>,
+        data: Vec<ScoutedResourceCategory>,
     },
     #[serde(rename = "structure_list")]
     StructureList(StructureList),
@@ -893,6 +898,11 @@ pub enum ResponsePacket {
         work_done: f32,
         total_work: f32,
         work_per_sec: f32,
+        work_done_milliunits: i64,
+        total_work_milliunits: i64,
+        work_per_sec_milliunits: i64,
+        construction_action_id: i32,
+        construction_updated_at_ms: i64,
     },
     #[serde(rename = "craft")]
     Craft {
@@ -981,6 +991,9 @@ pub enum ResponsePacket {
         item_quantity: i32,
         work_time: i32,
         progress: i32,
+        action_id: Option<i32>,
+        action_duration_ms: Option<i32>,
+        action_elapsed_ms: Option<i32>,
     },
     #[serde(rename = "info_refine")]
     InfoRefine {
@@ -1171,6 +1184,8 @@ pub enum ResponsePacket {
         attack_history: Vec<String>,
         matching_combos: Vec<ComboHint>,
         available_finisher: Option<String>,
+        #[serde(default)]
+        finisher_transferable: bool,
         target_effects: Vec<String>,
         stamina_costs: StaminaCosts,
         abilities: Vec<AbilityHint>,
@@ -1287,6 +1302,11 @@ pub struct MapObj {
     pub work_done: Option<i32>,
     pub total_work: Option<i32>,
     pub work_per_sec: Option<i32>,
+    pub work_done_milliunits: Option<i64>,
+    pub total_work_milliunits: Option<i64>,
+    pub work_per_sec_milliunits: Option<i64>,
+    pub construction_action_id: Option<i32>,
+    pub construction_updated_at_ms: Option<i64>,
     pub action_id: Option<i32>,
     pub action_duration_ms: Option<i32>,
     pub action_elapsed_ms: Option<i32>,
@@ -1375,6 +1395,7 @@ pub struct Structure {
     pub build_time: i32,
     pub req: Vec<ResReq>,
     pub upgrade_req: Vec<ResReq>,
+    pub placement_resource: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1417,6 +1438,13 @@ pub struct WorkEntry {
     pub refine_item_class: Option<String>,
     pub work_time: i32,
     pub progress: i32,
+    /// Stable identity for the currently executing timed event. Consecutive
+    /// cycles in a persistent Operate workspace receive distinct ids.
+    pub action_id: Option<i32>,
+    /// Authoritative duration of the current action in milliseconds.
+    pub action_duration_ms: Option<i32>,
+    /// Authoritative elapsed time when this snapshot was produced.
+    pub action_elapsed_ms: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -1536,6 +1564,13 @@ pub struct TileResourceWithPos {
     pub y: i32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScoutedResourceCategory {
+    pub category: String,
+    pub x: i32,
+    pub y: i32,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct HireData {
     pub id: i32,
@@ -1618,11 +1653,13 @@ impl AuthorizedPlayerEventSender {
                 client.id == self.connection_id
                     && client.player_id == self.player_id
                     && !client.sender.is_closed()
+                    && !client.termination_requested()
                     && !clients.iter().any(|(other_id, other)| {
                         *other_id != self.connection_id
                             && other.id == *other_id
                             && other.player_id == self.player_id
                             && !other.sender.is_closed()
+                            && !other.termination_requested()
                     })
             })
             .unwrap_or(false)
@@ -1676,19 +1713,57 @@ impl AcceptedPlayerEventSender {
     }
 }
 
-pub fn send_to_client(player_id: i32, packet: ResponsePacket, clients: &Res<Clients>) {
-    for (_client_id, client) in clients.lock().unwrap().iter() {
-        if client.player_id == player_id {
-            match client
-                .sender
-                .try_send(serde_json::to_string(&packet).unwrap())
-            {
-                Ok(_) => (),
-                //TODO potentially remove client from client as the client is closed
-                Err(e) => println!("Error sending to client: {:?}", e),
-            }
+pub fn send_to_client(player_id: i32, packet: ResponsePacket, clients: &Res<Clients>) -> bool {
+    send_serializable_to_client(player_id, &packet, clients)
+}
+
+pub fn send_serializable_to_client<T: Serialize>(
+    player_id: i32,
+    packet: &T,
+    clients: &Res<Clients>,
+) -> bool {
+    let Some(serialized) = serialize_authoritative_packet(player_id, packet, clients) else {
+        return false;
+    };
+
+    match clients.try_send_to_player(player_id, serialized) {
+        Ok(()) => true,
+        Err(CurrentConnectionSendError::RegistryUnavailable) => {
+            warn!(
+                "authoritative_outbound_registry_unavailable player_id={}",
+                player_id
+            );
+            false
         }
+        // Full and Closed already emit the single structured warning while
+        // scheduling exact-connection termination. NotCurrent is an ordinary
+        // race with disconnect or replacement and requires no extra log spam.
+        Err(_) => false,
     }
+}
+
+pub fn serialize_authoritative_packet<T: Serialize>(
+    player_id: i32,
+    packet: &T,
+    clients: &Clients,
+) -> Option<String> {
+    // Serialization can be expensive and may fail for invalid floating-point
+    // values. Never perform it while holding the shared client registry lock.
+    let serialized = match serde_json::to_string(packet) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            warn!(
+                "authoritative_packet_serialization_failed player_id={} error={:?}",
+                player_id, error
+            );
+            let _ = clients.terminate_current_delivery(
+                player_id,
+                AuthoritativeDeliveryFailure::SerializationFailed,
+            );
+            return None;
+        }
+    };
+    Some(serialized)
 }
 
 pub fn send_to_database(database_event: DatabaseEvent, database_managers: &Res<DatabaseManagers>) {
@@ -1701,18 +1776,68 @@ pub fn send_to_database(database_event: DatabaseEvent, database_managers: &Res<D
     }
 }
 
-pub fn build_progress_fields(
-    build_state: Option<&BuildUpgradeState>,
-) -> (Option<i32>, Option<i32>, Option<i32>) {
-    if let Some(build_state) = build_state {
-        return (
-            Some(build_state.work_done.round() as i32),
-            Some(build_state.build_upgrade_cost.round() as i32),
-            Some(build_state.work_per_sec.round() as i32),
-        );
-    }
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BuildProgressFields {
+    pub work_done: Option<i32>,
+    pub total_work: Option<i32>,
+    pub work_per_sec: Option<i32>,
+    pub work_done_milliunits: Option<i64>,
+    pub total_work_milliunits: Option<i64>,
+    pub work_per_sec_milliunits: Option<i64>,
+    pub construction_action_id: Option<i32>,
+    pub construction_updated_at_ms: Option<i64>,
+}
 
-    (None, None, None)
+pub fn game_tick_to_millis(game_tick: i32) -> i32 {
+    game_tick.saturating_mul(1000) / TICKS_PER_SEC
+}
+
+pub fn game_tick_to_timestamp_millis(game_tick: i32) -> i64 {
+    i64::from(game_tick).saturating_mul(1000) / i64::from(TICKS_PER_SEC)
+}
+
+pub fn work_to_milliunits(value: f32) -> i64 {
+    (value * 1000.0).round() as i64
+}
+
+pub fn build_progress_fields(build_state: Option<&BuildUpgradeState>) -> BuildProgressFields {
+    let Some(build_state) = build_state else {
+        return BuildProgressFields::default();
+    };
+
+    let has_action = build_state.action_id > 0;
+
+    BuildProgressFields {
+        // Retain rounded fields for older clients while the shared timeline
+        // consumes the precise fixed-point values below.
+        work_done: Some(build_state.work_done.round() as i32),
+        total_work: Some(build_state.build_upgrade_cost.round() as i32),
+        work_per_sec: Some(build_state.work_per_sec.round() as i32),
+        work_done_milliunits: Some(work_to_milliunits(build_state.work_done)),
+        total_work_milliunits: Some(work_to_milliunits(build_state.build_upgrade_cost)),
+        work_per_sec_milliunits: Some(work_to_milliunits(build_state.work_per_sec)),
+        construction_action_id: has_action.then_some(build_state.action_id),
+        construction_updated_at_ms: has_action.then_some(game_tick_to_timestamp_millis(
+            build_state.progress_updated_at_tick,
+        )),
+    }
+}
+
+pub fn timed_action_progress_fields(
+    action_id: i32,
+    start_tick: i32,
+    end_tick: i32,
+    game_tick: i32,
+) -> (Option<i32>, Option<i32>, Option<i32>) {
+    let duration_ticks = end_tick.saturating_sub(start_tick).max(1);
+    let elapsed_ticks = game_tick
+        .saturating_sub(start_tick)
+        .clamp(0, duration_ticks);
+    (
+        Some(action_id),
+        Some(game_tick_to_millis(duration_ticks)),
+        Some(game_tick_to_millis(elapsed_ticks)),
+    )
 }
 
 pub fn action_progress_fields(
@@ -1723,21 +1848,16 @@ pub fn action_progress_fields(
         return (None, None, None);
     };
 
-    let duration_ticks = action.end_tick.saturating_sub(action.start_tick).max(1);
-    let elapsed_ticks = game_tick
-        .saturating_sub(action.start_tick)
-        .clamp(0, duration_ticks);
-    let ticks_to_ms = |ticks: i32| ticks.saturating_mul(1000) / TICKS_PER_SEC;
-
-    (
-        Some(action.action_id),
-        Some(ticks_to_ms(duration_ticks)),
-        Some(ticks_to_ms(elapsed_ticks)),
+    timed_action_progress_fields(
+        action.action_id,
+        action.start_tick,
+        action.end_tick,
+        game_tick,
     )
 }
 
 pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
-    let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+    let build_progress = build_progress_fields(obj.build_upgrade_state);
     let (action_id, action_duration_ms, action_elapsed_ms) =
         action_progress_fields(obj.action_progress, game_tick);
 
@@ -1757,9 +1877,14 @@ pub fn create_network_obj(obj: &ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj 
         portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
-        work_done,
-        total_work,
-        work_per_sec,
+        work_done: build_progress.work_done,
+        total_work: build_progress.total_work,
+        work_per_sec: build_progress.work_per_sec,
+        work_done_milliunits: build_progress.work_done_milliunits,
+        total_work_milliunits: build_progress.total_work_milliunits,
+        work_per_sec_milliunits: build_progress.work_per_sec_milliunits,
+        construction_action_id: build_progress.construction_action_id,
+        construction_updated_at_ms: build_progress.construction_updated_at_ms,
         action_id,
         action_duration_ms,
         action_elapsed_ms,
@@ -1801,6 +1926,11 @@ pub fn network_obj(
         work_done: None,
         total_work: None,
         work_per_sec: None,
+        work_done_milliunits: None,
+        total_work_milliunits: None,
+        work_per_sec_milliunits: None,
+        construction_action_id: None,
+        construction_updated_at_ms: None,
         action_id: None,
         action_duration_ms: None,
         action_elapsed_ms: None,
@@ -1810,7 +1940,7 @@ pub fn network_obj(
 }
 
 pub fn to_map_obj(obj: ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
-    let (work_done, total_work, work_per_sec) = build_progress_fields(obj.build_upgrade_state);
+    let build_progress = build_progress_fields(obj.build_upgrade_state);
     let (action_id, action_duration_ms, action_elapsed_ms) =
         action_progress_fields(obj.action_progress, game_tick);
 
@@ -1830,9 +1960,14 @@ pub fn to_map_obj(obj: ObjQueryItem<'_, '_>, game_tick: i32) -> MapObj {
         portrait: obj.portrait.map(|portrait| portrait.0.clone()),
         hsl: obj.misc.hsl.clone(),
         groups: obj.misc.groups.clone(),
-        work_done,
-        total_work,
-        work_per_sec,
+        work_done: build_progress.work_done,
+        total_work: build_progress.total_work,
+        work_per_sec: build_progress.work_per_sec,
+        work_done_milliunits: build_progress.work_done_milliunits,
+        total_work_milliunits: build_progress.total_work_milliunits,
+        work_per_sec_milliunits: build_progress.work_per_sec_milliunits,
+        construction_action_id: build_progress.construction_action_id,
+        construction_updated_at_ms: build_progress.construction_updated_at_ms,
         action_id,
         action_duration_ms,
         action_elapsed_ms,
@@ -1861,6 +1996,11 @@ pub fn to_map_without_vision(obj: ObjQueryMutReadOnlyItem<'_, '_>) -> MapObj {
         work_done: None,
         total_work: None,
         work_per_sec: None,
+        work_done_milliunits: None,
+        total_work_milliunits: None,
+        work_per_sec_milliunits: None,
+        construction_action_id: None,
+        construction_updated_at_ms: None,
         action_id: None,
         action_duration_ms: None,
         action_elapsed_ms: None,
@@ -2128,10 +2268,19 @@ pub async fn tokio_setup(
     let listener = TcpListener::bind(&addr).await.expect("Can't listen");
     net_debug!("Listening on: {}", addr);
 
-    while let Ok((stream, _)) = listener.accept().await {
-        let peer = stream
-            .peer_addr()
-            .expect("connected streams should have a peer address");
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // A transient accept failure (for example EMFILE or an
+                // aborted connection) must not permanently stop the server
+                // from accepting every later player. Back off to avoid a hot
+                // error loop while the operating system recovers.
+                warn!("tcp_accept_failed error={:?}; retrying", error);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
         net_debug!("Peer address: {}", peer);
 
         let tls_acceptor = tls_acceptor.clone();
@@ -2161,8 +2310,81 @@ pub async fn tokio_setup(
             }
         });
     }
+}
 
-    println!("Finished");
+fn cleanup_connection(client_id: Uuid, clients: &Clients, streams: &Streams) {
+    clients.remove_if_current(client_id);
+    match streams.0.lock() {
+        Ok(mut streams) => {
+            streams.remove(&client_id);
+        }
+        Err(error) => {
+            warn!(
+                "connection_stream_cleanup_failed client_id={} error={:?}",
+                client_id, error
+            );
+        }
+    }
+}
+
+const WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(10);
+const WEBSOCKET_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
+const WEBSOCKET_WRITE_TIMEOUT: Duration = WEBSOCKET_PING_INTERVAL;
+
+#[derive(Debug, Clone, Copy)]
+struct ConnectionLiveness {
+    last_seen: Instant,
+}
+
+impl ConnectionLiveness {
+    fn new(now: Instant) -> Self {
+        Self { last_seen: now }
+    }
+
+    fn record_activity(&mut self, now: Instant) {
+        self.last_seen = now;
+    }
+
+    fn deadline(&self) -> Instant {
+        self.last_seen + WEBSOCKET_INACTIVITY_TIMEOUT
+    }
+
+    fn has_timed_out(&self, now: Instant) -> bool {
+        now >= self.deadline()
+    }
+}
+
+async fn send_websocket_message<S>(sender: &mut S, message: Message) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = Error> + Unpin,
+{
+    match time::timeout(WEBSOCKET_WRITE_TIMEOUT, sender.send(message)).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "websocket write timed out",
+        ))),
+    }
+}
+
+async fn flush_websocket<S>(sender: &mut S) -> Result<()>
+where
+    S: futures_util::Sink<Message, Error = Error> + Unpin,
+{
+    match time::timeout(WEBSOCKET_WRITE_TIMEOUT, sender.flush()).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "websocket flush timed out",
+        ))),
+    }
+}
+
+fn websocket_text_payload(message: &Message) -> Option<&str> {
+    // The game protocol is JSON over WebSocket text frames. In particular,
+    // never call `to_text().unwrap()` for an arbitrary binary frame: invalid
+    // UTF-8 must close only this connection, not panic its task.
+    message.is_text().then(|| message.to_text().ok()).flatten()
 }
 
 async fn accept_connection(
@@ -2188,13 +2410,11 @@ async fn accept_connection(
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => {
                 info!("connection_closed reason={:?}", e);
-                clients.remove_if_current(client_id);
-                streams.0.lock().unwrap().remove(&client_id);
+                cleanup_connection(client_id, &clients, &streams);
             }
             err => {
                 warn!("connection_processing_failed reason={:?}", err);
-                clients.remove_if_current(client_id);
-                streams.0.lock().unwrap().remove(&client_id);
+                cleanup_connection(client_id, &clients, &streams);
             }
         }
     }
@@ -2217,8 +2437,6 @@ async fn handle_connection(
 
     net_debug!("New WebSocket connection from {}", peer);
 
-    // Get peer address
-    let peer: SocketAddr = stream.get_ref().0.peer_addr().unwrap();
     let peer_ip = peer.ip();
 
     net_debug!("Peer address: {:?}", peer_ip);
@@ -2253,7 +2471,14 @@ async fn handle_connection(
                 return Err(resp);
             };
 
-            let cookie_str = cookie.to_str().unwrap();
+            let Ok(cookie_str) = cookie.to_str() else {
+                warn!("invalid_cookie_header peer={}", peer);
+                let resp = Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Some("Invalid cookie header".into()))
+                    .expect("static invalid-cookie response must be valid");
+                return Err(resp);
+            };
 
             // Split the string by ';' to separate the key-value pairs
             let pairs: Vec<&str> = cookie_str.split(";").map(|s| s.trim()).collect();
@@ -2283,8 +2508,7 @@ async fn handle_connection(
     if health_check {
         net_debug!("Server health check");
         let (mut ws_sender, _ws_receiver) = ws_stream.split();
-        ws_sender
-            .send(Message::Text("Pong".into()))
+        send_websocket_message(&mut ws_sender, Message::Text("Pong".into()))
             .await
             .map_err(|e| (client_id, e))?;
 
@@ -2437,11 +2661,9 @@ async fn handle_connection(
     // Full session/account validation has completed. This atomic activation is
     // the authority boundary: displaced sockets immediately lose command
     // authority even if their asynchronous close has not arrived yet.
-    let displaced = clients.activate(Client {
-        id: client_id,
-        player_id,
-        sender: game_to_client_sender,
-    });
+    let (network_client, mut authoritative_termination_receiver) =
+        Client::with_termination_channel(client_id, player_id, game_to_client_sender);
+    let displaced = clients.activate(network_client);
     if !clients.is_current_connection(player_id, client_id) {
         return Err((client_id, Error::ConnectionClosed));
     }
@@ -2532,15 +2754,42 @@ async fn handle_connection(
         return Err((client_id, Error::ConnectionClosed));
     }
 
-    ws_sender
-        .send(Message::Text(res.into()))
+    send_websocket_message(&mut ws_sender, Message::Text(res.into()))
         .await
         .map_err(|e| (client_id, e))?;
 
-    //This loop uses the tokio select! macro to receive messages from either the websocket receiver
-    //or the game to client receiver
+    let now = Instant::now();
+    let mut liveness = ConnectionLiveness::new(now);
+    let mut ping_interval =
+        time::interval_at(now + WEBSOCKET_PING_INTERVAL, WEBSOCKET_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let inactivity_timeout = time::sleep_until(liveness.deadline());
+    tokio::pin!(inactivity_timeout);
+
+    // Receive websocket, game, manager, and liveness signals without allowing
+    // a closed channel to remain permanently selectable.
     loop {
         tokio::select! {
+            biased;
+
+            termination = authoritative_termination_receiver.changed() => {
+                match termination {
+                    Ok(()) if authoritative_termination_receiver.borrow_and_update().is_some() => {
+                        // The shared outbound policy already emitted the sole
+                        // structured failure warning. Prioritizing this control
+                        // signal prevents stale queued data from being drained
+                        // after delivery integrity has been lost.
+                        break;
+                    }
+                    Ok(()) => {}
+                    Err(_) => {
+                        // Replacement activation or registry teardown dropped
+                        // the exact connection's control sender.
+                        break;
+                    }
+                }
+            }
+
             //Receive messages from the websocket
             msg = ws_receiver.next() => {
                 match msg {
@@ -2549,24 +2798,29 @@ async fn handle_connection(
                             Ok(msg) => msg,
                             Err(e) => return Err((client_id, e)),
                         };
-                        if msg.is_text() || msg.is_binary() {
 
-                            if authenticated_player_for_connection(client_id, &clients)
-                                != Some(player_id)
-                            {
-                                info!(
-                                    "stale_connection_packet_rejected player_id={}",
-                                    player_id
-                                );
-                                break;
-                            }
+                        if authenticated_player_for_connection(client_id, &clients)
+                            != Some(player_id)
+                        {
+                            info!(
+                                "stale_connection_packet_rejected player_id={} client_id={}",
+                                player_id, client_id
+                            );
+                            break;
+                        }
+
+                        let now = Instant::now();
+                        liveness.record_activity(now);
+                        inactivity_timeout.as_mut().reset(liveness.deadline());
+
+                        if let Some(message_text) = websocket_text_payload(&msg) {
 
                             println!("player_id: {:?}", player_id);
 
                             //Check if the player is authenticated
                             /*if player_id == -1 {
                                 //Attempt to login
-                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(message_text) {
                                     Ok(packet) => {
                                         match packet {
                                             /*NetworkPacket::Register{account_name, password} => {
@@ -2615,9 +2869,9 @@ async fn handle_connection(
                                     return Err((player_id, e));
                                 }
                             } else {*/
-                                println!("Authenticated packet: {:?}", msg.to_text().unwrap());
+                                println!("Authenticated packet: {:?}", message_text);
 
-                                let res_packet: ResponsePacket = match decode_network_packet(msg.to_text().unwrap()) {
+                                let res_packet: ResponsePacket = match decode_network_packet(message_text) {
                                     Ok(packet) => {
                                         match packet {
                                             NetworkPacket::SelectedClass{class_name, hero_name, portrait} => {
@@ -2754,8 +3008,8 @@ async fn handle_connection(
                                             NetworkPacket::ItemSplit{owner_id, item, quantity} => {
                                                 handle_item_split(player_id, owner_id, item, quantity, client_to_game_sender.clone())
                                             }
-                                            NetworkPacket::Gather => {
-                                                handle_gather(player_id, client_to_game_sender.clone())
+                                            NetworkPacket::Gather{res_type} => {
+                                                handle_gather(player_id, res_type, client_to_game_sender.clone())
                                             }
                                             NetworkPacket::Operate{structure_id} => {
                                                 handle_operate(player_id, structure_id, client_to_game_sender.clone())
@@ -2973,7 +3227,7 @@ async fn handle_connection(
                                     Err(packet) => {
                                         let ping = r#"0"#;
 
-                                        if msg.to_text().unwrap() == ping {
+                                        if message_text == ping {
                                             ResponsePacket::Pong
                                         } else {
                                             println!("Error packet: {:?}", packet);
@@ -2982,16 +3236,44 @@ async fn handle_connection(
                                     }
                                 };
                                 if res_packet == ResponsePacket::Pong {
-                                    ws_sender.send(Message::Text("1".to_string().into())).await.map_err(|e| (client_id, e))?;
+                                    send_websocket_message(
+                                        &mut ws_sender,
+                                        Message::Text("1".to_string().into()),
+                                    )
+                                    .await
+                                    .map_err(|e| (client_id, e))?;
                                 }
                                 else if res_packet != ResponsePacket::None {
                                     let res = serde_json::to_string(&res_packet).unwrap();
-                                    ws_sender.send(Message::Text(res.into())).await.map_err(|e| (client_id, e))?;
+                                    send_websocket_message(&mut ws_sender, Message::Text(res.into()))
+                                        .await
+                                        .map_err(|e| (client_id, e))?;
                                 }
+                        } else if msg.is_binary() {
+                            warn!(
+                                "binary_websocket_frame_rejected player_id={} client_id={}",
+                                player_id, client_id
+                            );
+                            // Best-effort close. Even if the peer has already
+                            // gone away, falling through the loop performs the
+                            // authoritative Clients/Streams cleanup below.
+                            let _ = send_websocket_message(&mut ws_sender, Message::Close(None)).await;
+                            break;
                         } else if msg.is_close() {
                             println!("Message is closed for player: {:?}", player_id);
-                            handle_disconnect(client_id, clients.clone());
                             break;
+                        } else if msg.is_ping() {
+                            // Tungstenite queues the matching Pong while reading
+                            // the Ping. Flush that automatic control response.
+                            flush_websocket(&mut ws_sender)
+                                .await
+                                .map_err(|e| (client_id, e))?;
+                        } else if msg.is_pong() {
+                            net_debug!(
+                                "websocket_pong player_id={} client_id={}",
+                                player_id,
+                                client_id
+                            );
                         } else {
                             println!("Unknown network state: {:?}", msg);
                         }
@@ -3004,40 +3286,79 @@ async fn handle_connection(
             }
             //Receive messages from the game
             game_msg = game_to_client_receiver.recv() => {
-                if let Some(game_msg) = game_msg {
+                let Some(game_msg) = game_msg else {
+                    info!(
+                        "connection_outbound_channel_closed player_id={} client_id={}",
+                        player_id, client_id
+                    );
+                    break;
+                };
 
-                    match serde_json::from_str(game_msg.as_str()) {
-                        Ok(ResponsePacket::Disconnect { player, client }) => {
-                            info!("server_disconnect_requested player_id={}", player);
-                            ws_sender.send(Message::Close(None)).await.map_err(|e| (client_id, e))?;
-                            clients.remove_if_current(client);
-                            break;
-                        }
-                        _ => {
-                            ws_sender.send(Message::Text(game_msg.into())).await.map_err(|e| (client_id, e))?;
-                        }
+                match serde_json::from_str(game_msg.as_str()) {
+                    Ok(ResponsePacket::Disconnect { player, client }) => {
+                        info!("server_disconnect_requested player_id={}", player);
+                        send_websocket_message(&mut ws_sender, Message::Close(None))
+                            .await
+                            .map_err(|e| (client_id, e))?;
+                        clients.remove_if_current(client);
+                        break;
                     }
-
+                    _ => {
+                        send_websocket_message(&mut ws_sender, Message::Text(game_msg.into()))
+                            .await
+                            .map_err(|e| (client_id, e))?;
+                    }
                 }
             }
 
             //Receive messages from the manager
             manager_msg = manager_to_stream_receiver.recv() => {
-                if let Some(_manager_msg) = manager_msg {
-                    ws_sender.send(Message::Close(None)).await.map_err(|e| (client_id, e))?;
-                    clients.remove_if_current(client_id);
-                    let removed_stream = streams.0.lock().unwrap().remove(&client_id);
-                    let _ = removed_stream;
+                match manager_msg {
+                    Some(_manager_msg) => {
+                        send_websocket_message(&mut ws_sender, Message::Close(None))
+                            .await
+                            .map_err(|e| (client_id, e))?;
+                        break;
+                    }
+                    None => {
+                        info!(
+                            "connection_manager_channel_closed player_id={} client_id={}",
+                            player_id, client_id
+                        );
+                        break;
+                    }
+                }
+            }
+
+            _ = ping_interval.tick() => {
+                if liveness.has_timed_out(Instant::now()) {
+                    warn!(
+                        "websocket_inactivity_timeout player_id={} client_id={} timeout_seconds={}",
+                        player_id,
+                        client_id,
+                        WEBSOCKET_INACTIVITY_TIMEOUT.as_secs()
+                    );
                     break;
                 }
+
+                send_websocket_message(&mut ws_sender, Message::Ping(Vec::new().into()))
+                    .await
+                    .map_err(|e| (client_id, e))?;
+            }
+
+            _ = &mut inactivity_timeout => {
+                warn!(
+                    "websocket_inactivity_timeout player_id={} client_id={} timeout_seconds={}",
+                    player_id,
+                    client_id,
+                    WEBSOCKET_INACTIVITY_TIMEOUT.as_secs()
+                );
+                break;
             }
         }
     }
+    cleanup_connection(client_id, &clients, &streams);
     Ok(())
-}
-
-fn handle_disconnect(client_id: Uuid, clients: Clients) {
-    clients.remove_if_current(client_id);
 }
 
 async fn handle_selected_class(
@@ -3394,6 +3715,16 @@ fn handle_info_tile(
     y: i32,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
+    if !Map::is_valid_pos((x, y)) {
+        warn!(
+            "invalid_info_tile_coordinates player_id={} x={} y={}",
+            player_id, x, y
+        );
+        return ResponsePacket::Error {
+            errmsg: "Invalid tile coordinates.".to_string(),
+        };
+    }
+
     client_to_game_sender
         .send(PlayerEvent::InfoTile {
             player_id: player_id,
@@ -3412,6 +3743,16 @@ fn handle_info_tile_resources(
     y: i32,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
+    if !Map::is_valid_pos((x, y)) {
+        warn!(
+            "invalid_info_tile_resources_coordinates player_id={} x={} y={}",
+            player_id, x, y
+        );
+        return ResponsePacket::Error {
+            errmsg: "Invalid tile coordinates.".to_string(),
+        };
+    }
+
     client_to_game_sender
         .send(PlayerEvent::InfoTileResources {
             player_id: player_id,
@@ -3622,11 +3963,13 @@ fn handle_item_split(
 
 fn handle_gather(
     player_id: i32,
+    res_type: String,
     client_to_game_sender: AuthorizedPlayerEventSender,
 ) -> ResponsePacket {
     client_to_game_sender
         .send(PlayerEvent::Gather {
             player_id: player_id,
+            res_type,
         })
         .expect("Could not send message");
 
@@ -4686,6 +5029,83 @@ mod tests {
             (Some(41), Some(30_000), Some(30_000))
         );
         assert_eq!(action_progress_fields(None, 220), (None, None, None));
+
+        assert_eq!(
+            timed_action_progress_fields(42, 1_000, 1_150, 1_075),
+            (Some(42), Some(15_000), Some(7_500))
+        );
+    }
+
+    #[test]
+    fn construction_progress_fields_preserve_precision_identity_and_timestamp() {
+        let build = BuildUpgradeState {
+            build_upgrade_cost: 50.0,
+            work_done: 12.345,
+            work_per_sec: 2.5,
+            progress_updated_at_tick: 180,
+            start_time: 100,
+            action_id: 77,
+        };
+
+        let fields = build_progress_fields(Some(&build));
+        assert_eq!(fields.work_done, Some(12));
+        assert_eq!(fields.work_done_milliunits, Some(12_345));
+        assert_eq!(fields.total_work_milliunits, Some(50_000));
+        assert_eq!(fields.work_per_sec_milliunits, Some(2_500));
+        assert_eq!(fields.construction_action_id, Some(77));
+        assert_eq!(fields.construction_updated_at_ms, Some(18_000));
+
+        let value = serde_json::to_value(ResponsePacket::WorkUpdate {
+            structure_id: 9,
+            work_done: build.work_done,
+            total_work: build.build_upgrade_cost,
+            work_per_sec: build.work_per_sec,
+            work_done_milliunits: work_to_milliunits(build.work_done),
+            total_work_milliunits: work_to_milliunits(build.build_upgrade_cost),
+            work_per_sec_milliunits: work_to_milliunits(build.work_per_sec),
+            construction_action_id: build.action_id,
+            construction_updated_at_ms: fields.construction_updated_at_ms.unwrap(),
+        })
+        .unwrap();
+
+        assert!((value["work_done"].as_f64().unwrap() - 12.345).abs() < 0.000_001);
+        assert_eq!(value["work_done_milliunits"], 12_345);
+        assert_eq!(value["construction_action_id"], 77);
+        assert_eq!(value["construction_updated_at_ms"], 18_000);
+
+        // Construction can remain active in a persistent world well beyond
+        // the roughly 25-day range of a 32-bit millisecond counter.
+        assert_eq!(
+            game_tick_to_timestamp_millis(30 * 24 * 60 * 60 * TICKS_PER_SEC),
+            30_i64 * 24 * 60 * 60 * 1000,
+        );
+    }
+
+    #[test]
+    fn work_queue_packet_transmits_authoritative_cycle_timing() {
+        let value = serde_json::to_value(ResponsePacket::InfoStructureQueue {
+            structure_id: 7,
+            queue: vec![WorkEntry {
+                work_type: "Operate".to_string(),
+                work_status: "In Progress".to_string(),
+                villager_id: 12,
+                recipe_name: None,
+                recipe_image: None,
+                refine_item_id: None,
+                refine_item_image: None,
+                refine_item_class: None,
+                work_time: 15,
+                progress: 7,
+                action_id: Some(42),
+                action_duration_ms: Some(15_000),
+                action_elapsed_ms: Some(7_500),
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(value["queue"][0]["action_id"], 42);
+        assert_eq!(value["queue"][0]["action_duration_ms"], 15_000);
+        assert_eq!(value["queue"][0]["action_elapsed_ms"], 7_500);
     }
 
     #[test]
@@ -4754,15 +5174,203 @@ mod tests {
         let clients = Clients::default();
         let client_id = Uuid::new_v4();
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
-        clients.lock().unwrap().insert(
+        clients
+            .lock()
+            .unwrap()
+            .insert(client_id, Client::new(client_id, player_id, sender));
+        (clients, client_id, receiver)
+    }
+
+    #[test]
+    fn tile_info_handlers_reject_out_of_bounds_coordinates_without_enqueuing() {
+        let player_id = 61;
+        let (clients, client_id, _client_receiver) = authenticated_client(player_id);
+        let (event_sender, event_receiver) = crossbeam_channel::unbounded();
+        let sender = AuthorizedPlayerEventSender::new(event_sender, clients, player_id, client_id);
+
+        for (x, y) in [
+            (-1, 0),
+            (0, -1),
+            (crate::map::WIDTH, 0),
+            (0, crate::map::HEIGHT),
+            (i32::MIN, 0),
+            (i32::MAX, 0),
+        ] {
+            assert!(matches!(
+                handle_info_tile(player_id, x, y, sender.clone()),
+                ResponsePacket::Error { errmsg }
+                    if errmsg == "Invalid tile coordinates."
+            ));
+            assert!(matches!(
+                handle_info_tile_resources(player_id, x, y, sender.clone()),
+                ResponsePacket::Error { errmsg }
+                    if errmsg == "Invalid tile coordinates."
+            ));
+        }
+
+        assert!(event_receiver.try_recv().is_err());
+        assert_eq!(
+            handle_info_tile(player_id, 0, 0, sender),
+            ResponsePacket::None
+        );
+        assert!(matches!(
+            event_receiver.try_recv().unwrap(),
+            PlayerEvent::InfoTile { x: 0, y: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn websocket_payload_accepts_text_and_rejects_binary_without_utf8_conversion() {
+        let text = Message::Text(r#"{"cmd":"info_tile","x":0,"y":0}"#.into());
+        assert_eq!(
+            websocket_text_payload(&text),
+            Some(r#"{"cmd":"info_tile","x":0,"y":0}"#)
+        );
+
+        let invalid_utf8 = Message::Binary(vec![0xff, 0xfe, 0xfd].into());
+        assert_eq!(websocket_text_payload(&invalid_utf8), None);
+    }
+
+    #[test]
+    fn connection_liveness_expires_at_thirty_seconds_and_activity_resets_it() {
+        assert_eq!(WEBSOCKET_PING_INTERVAL, Duration::from_secs(10));
+        assert_eq!(WEBSOCKET_INACTIVITY_TIMEOUT, Duration::from_secs(30));
+
+        let connected_at = Instant::now();
+        let mut liveness = ConnectionLiveness::new(connected_at);
+        assert!(!liveness.has_timed_out(connected_at + Duration::from_secs(29)));
+        assert!(liveness.has_timed_out(connected_at + Duration::from_secs(30)));
+
+        let incoming_frame_at = connected_at + Duration::from_secs(20);
+        liveness.record_activity(incoming_frame_at);
+        assert_eq!(liveness.deadline(), connected_at + Duration::from_secs(50));
+        assert!(!liveness.has_timed_out(connected_at + Duration::from_secs(49)));
+        assert!(liveness.has_timed_out(connected_at + Duration::from_secs(50)));
+    }
+
+    #[test]
+    fn full_authoritative_queue_signals_independent_exact_connection_termination() {
+        let player_id = 64;
+        let client_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send("occupied".to_string()).unwrap();
+        let (client, mut termination_receiver) =
+            Client::with_termination_channel(client_id, player_id, sender);
+        clients.activate(client);
+
+        assert_eq!(
+            clients.try_send_to_player(player_id, "authoritative-delta".to_string()),
+            Err(CurrentConnectionSendError::Full)
+        );
+        assert_eq!(receiver.try_recv().unwrap(), "occupied");
+        assert!(termination_receiver.has_changed().unwrap());
+        assert_eq!(
+            *termination_receiver.borrow_and_update(),
+            Some(AuthoritativeDeliveryFailure::QueueFull)
+        );
+        assert!(!clients.is_current_connection(player_id, client_id));
+
+        assert_eq!(
+            clients.try_send_to_player(player_id, "second-delta".to_string()),
+            Err(CurrentConnectionSendError::Closed)
+        );
+        assert!(!termination_receiver.has_changed().unwrap());
+    }
+
+    #[test]
+    fn closed_authoritative_queue_signals_independent_exact_connection_termination() {
+        let player_id = 65;
+        let client_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let (client, mut termination_receiver) =
+            Client::with_termination_channel(client_id, player_id, sender);
+        clients.activate(client);
+
+        assert_eq!(
+            clients.try_send_to_player(player_id, "authoritative-delta".to_string()),
+            Err(CurrentConnectionSendError::Closed)
+        );
+        assert_eq!(
+            *termination_receiver.borrow_and_update(),
+            Some(AuthoritativeDeliveryFailure::QueueClosed)
+        );
+        assert!(!clients.is_current_connection(player_id, client_id));
+    }
+
+    #[test]
+    fn connection_cleanup_removes_both_client_and_stream_entries() {
+        let player_id = 62;
+        let (clients, client_id, _client_receiver) = authenticated_client(player_id);
+        let streams = Streams(Arc::new(Mutex::new(HashMap::new())));
+        let (manager_sender, _manager_receiver) = tokio::sync::mpsc::channel(1);
+        streams.0.lock().unwrap().insert(
             client_id,
-            Client {
-                id: client_id,
+            Stream {
                 player_id,
-                sender,
+                client_id,
+                sender: manager_sender,
             },
         );
-        (clients, client_id, receiver)
+
+        cleanup_connection(client_id, &clients, &streams);
+
+        assert!(clients.active_connection_ids(player_id).is_empty());
+        assert!(!streams.0.lock().unwrap().contains_key(&client_id));
+    }
+
+    #[test]
+    fn stale_connection_cleanup_cannot_remove_its_replacement() {
+        let player_id = 63;
+        let (clients, stale_id, stale_client_receiver) = authenticated_client(player_id);
+        let streams = Streams(Arc::new(Mutex::new(HashMap::new())));
+        let (stale_manager_sender, stale_manager_receiver) = tokio::sync::mpsc::channel(1);
+        streams.0.lock().unwrap().insert(
+            stale_id,
+            Stream {
+                player_id,
+                client_id: stale_id,
+                sender: stale_manager_sender,
+            },
+        );
+
+        let replacement_id = Uuid::new_v4();
+        let (replacement_client_sender, replacement_client_receiver) =
+            tokio::sync::mpsc::channel(1);
+        assert_eq!(
+            clients.activate(Client::new(
+                replacement_id,
+                player_id,
+                replacement_client_sender
+            )),
+            vec![stale_id]
+        );
+        let (replacement_manager_sender, replacement_manager_receiver) =
+            tokio::sync::mpsc::channel(1);
+        streams.0.lock().unwrap().insert(
+            replacement_id,
+            Stream {
+                player_id,
+                client_id: replacement_id,
+                sender: replacement_manager_sender,
+            },
+        );
+
+        cleanup_connection(stale_id, &clients, &streams);
+
+        assert_eq!(
+            clients.current_connection_id(player_id),
+            Some(replacement_id)
+        );
+        let streams = streams.0.lock().unwrap();
+        assert!(!streams.contains_key(&stale_id));
+        assert!(streams.contains_key(&replacement_id));
+        assert!(stale_client_receiver.is_closed());
+        assert!(stale_manager_receiver.is_closed());
+        assert!(!replacement_client_receiver.is_closed());
+        assert!(!replacement_manager_receiver.is_closed());
     }
 
     #[test]
@@ -4917,6 +5525,24 @@ mod tests {
             serde_json::json!({"cmd": "loot_all", "source_id": 41, "target_id": 7})
         );
         assert!(value.get("player_id").is_none());
+    }
+
+    #[test]
+    fn gather_request_carries_the_explicit_resource_category() {
+        assert!(matches!(
+            decode_network_packet(r#"{"cmd":"gather","res_type":"Forage"}"#).unwrap(),
+            NetworkPacket::Gather { res_type } if res_type == "Forage"
+        ));
+
+        let value = serde_json::to_value(NetworkPacket::Gather {
+            res_type: "Forage".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"cmd": "gather", "res_type": "Forage"})
+        );
+        assert!(decode_network_packet(r#"{"cmd":"gather"}"#).is_err());
     }
 
     #[test]
@@ -5075,20 +5701,12 @@ mod tests {
         let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
 
         assert!(clients
-            .activate(Client {
-                id: first_id,
-                player_id,
-                sender: first_sender,
-            })
+            .activate(Client::new(first_id, player_id, first_sender))
             .is_empty());
         assert!(clients.is_current_connection(player_id, first_id));
 
         assert_eq!(
-            clients.activate(Client {
-                id: second_id,
-                player_id,
-                sender: second_sender,
-            }),
+            clients.activate(Client::new(second_id, player_id, second_sender)),
             vec![first_id]
         );
         assert!(!clients.is_current_connection(player_id, first_id));
@@ -5118,22 +5736,8 @@ mod tests {
         let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
         let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
         clients.lock().unwrap().extend([
-            (
-                first_id,
-                Client {
-                    id: first_id,
-                    player_id,
-                    sender: first_sender,
-                },
-            ),
-            (
-                second_id,
-                Client {
-                    id: second_id,
-                    player_id,
-                    sender: second_sender,
-                },
-            ),
+            (first_id, Client::new(first_id, player_id, first_sender)),
+            (second_id, Client::new(second_id, player_id, second_sender)),
         ]);
 
         assert!(!clients.is_current_connection(player_id, first_id));
@@ -5158,32 +5762,20 @@ mod tests {
         let (original_sender, _original_receiver) = tokio::sync::mpsc::channel(1);
         let (first_sender, _first_receiver) = tokio::sync::mpsc::channel(1);
         let (second_sender, _second_receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(Client {
-            id: original_id,
-            player_id,
-            sender: original_sender,
-        });
+        clients.activate(Client::new(original_id, player_id, original_sender));
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let first_clients = clients.clone();
         let first_barrier = barrier.clone();
         let first = std::thread::spawn(move || {
             first_barrier.wait();
-            first_clients.activate(Client {
-                id: first_id,
-                player_id,
-                sender: first_sender,
-            })
+            first_clients.activate(Client::new(first_id, player_id, first_sender))
         });
         let second_clients = clients.clone();
         let second_barrier = barrier.clone();
         let second = std::thread::spawn(move || {
             second_barrier.wait();
-            second_clients.activate(Client {
-                id: second_id,
-                player_id,
-                sender: second_sender,
-            })
+            second_clients.activate(Client::new(second_id, player_id, second_sender))
         });
 
         barrier.wait();
@@ -5205,11 +5797,7 @@ mod tests {
         let clients = Clients::default();
         let (network_sender, network_receiver) = crossbeam_channel::unbounded();
         let (displaced_sender, _displaced_receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(Client {
-            id: displaced_id,
-            player_id,
-            sender: displaced_sender,
-        });
+        clients.activate(Client::new(displaced_id, player_id, displaced_sender));
         let displaced_events = AuthorizedPlayerEventSender::new(
             network_sender.clone(),
             clients.clone(),
@@ -5218,11 +5806,7 @@ mod tests {
         );
 
         let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(Client {
-            id: replacement_id,
-            player_id,
-            sender: replacement_sender,
-        });
+        clients.activate(Client::new(replacement_id, player_id, replacement_sender));
         let replacement_events =
             AuthorizedPlayerEventSender::new(network_sender, clients, player_id, replacement_id);
 
@@ -5264,11 +5848,7 @@ mod tests {
         let clients = Clients::default();
         let (network_sender, network_receiver) = crossbeam_channel::unbounded();
         let (accepted_sender, _accepted_receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(Client {
-            id: accepted_id,
-            player_id,
-            sender: accepted_sender,
-        });
+        clients.activate(Client::new(accepted_id, player_id, accepted_sender));
         let accepted_events = AuthorizedPlayerEventSender::new(
             network_sender,
             clients.clone(),
@@ -5280,11 +5860,7 @@ mod tests {
             .expect("operation accepted before replacement");
 
         let (replacement_sender, _replacement_receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(Client {
-            id: replacement_id,
-            player_id,
-            sender: replacement_sender,
-        });
+        clients.activate(Client::new(replacement_id, player_id, replacement_sender));
         assert!(accepted_events.begin_operation().is_none());
 
         operation
@@ -5366,14 +5942,10 @@ mod tests {
         let map_key = Uuid::new_v4();
         let mismatched_id = Uuid::new_v4();
         let (client_sender, _client_receiver) = tokio::sync::mpsc::channel(1);
-        clients.lock().unwrap().insert(
-            map_key,
-            Client {
-                id: mismatched_id,
-                player_id: 12,
-                sender: client_sender,
-            },
-        );
+        clients
+            .lock()
+            .unwrap()
+            .insert(map_key, Client::new(mismatched_id, 12, client_sender));
         let (sender, receiver) = crossbeam_channel::unbounded();
         let sender = AuthorizedPlayerEventSender::new(sender, clients.clone(), 12, map_key);
         assert!(matches!(
@@ -5385,14 +5957,10 @@ mod tests {
         let closed_id = Uuid::new_v4();
         let (closed_sender, closed_receiver) = tokio::sync::mpsc::channel(1);
         drop(closed_receiver);
-        clients.lock().unwrap().insert(
-            closed_id,
-            Client {
-                id: closed_id,
-                player_id: 13,
-                sender: closed_sender,
-            },
-        );
+        clients
+            .lock()
+            .unwrap()
+            .insert(closed_id, Client::new(closed_id, 13, closed_sender));
         let (sender, receiver) = crossbeam_channel::unbounded();
         let sender = AuthorizedPlayerEventSender::new(sender, clients.clone(), 13, closed_id);
         assert!(matches!(

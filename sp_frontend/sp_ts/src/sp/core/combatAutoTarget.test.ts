@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 
-import { chooseCombatAutoTarget } from './combatAutoTarget';
+import {
+  carryTransferableFinisherAfterKill,
+  chooseCombatAutoTarget,
+  retargetTransferableFinisher,
+} from './combatAutoTarget';
 
 const damage = {
   source_id: 10,
@@ -118,6 +122,56 @@ assert.equal(
   ),
   null,
   'the defeated target stays selected when no living enemy remains on its tile',
+);
+
+const transferableComboState = {
+  packet: 'combat_state',
+  version: 3,
+  target_id: 100,
+  attack_history: ['quick', 'quick'],
+  matching_combos: [],
+  available_finisher: 'Hamstring',
+  finisher_transferable: true,
+  enemy_intent: 'Fast attacker',
+  target_effects: ['Bleed'],
+  abilities: [{ id: 'shield_bash' }],
+  counter_hint: 'Dodge',
+};
+const carriedCombo = carryTransferableFinisherAfterKill(
+  transferableComboState,
+  damage,
+  10,
+  101,
+);
+assert.equal(carriedCombo?.target_id, 101);
+assert.equal(carriedCombo?.available_finisher, 'Hamstring');
+assert.deepEqual(carriedCombo?.attack_history, ['quick', 'quick']);
+assert.equal(carriedCombo?.enemy_intent, '');
+assert.deepEqual(carriedCombo?.target_effects, []);
+assert.deepEqual(carriedCombo?.abilities, []);
+
+assert.equal(
+  retargetTransferableFinisher(
+    { ...transferableComboState, finisher_transferable: false },
+    101,
+  ),
+  null,
+  'ordinary target-bound finishers cannot be moved to another enemy',
+);
+assert.equal(
+  carryTransferableFinisherAfterKill(
+    transferableComboState,
+    { ...damage, source_id: 11 },
+    10,
+    101,
+  ),
+  null,
+  'another actor killing the target cannot carry the hero combo',
+);
+assert.equal(
+  carryTransferableFinisherAfterKill(transferableComboState, damage, 10, null)?.target_id,
+  undefined,
+  'a ready finisher remains available for a later manual target selection',
 );
 
 console.log('combat auto-target policy checks passed');

@@ -11,7 +11,8 @@ interface HalfPanelProps {
   hideExitButton : boolean,
   children: React.ReactNode,
   middle?: boolean,
-  zIndexBonus?: number
+  zIndexBonus?: number,
+  bringToFrontKey?: unknown
 }
 
 export default class HalfPanel extends React.Component<HalfPanelProps, any> {
@@ -36,6 +37,15 @@ export default class HalfPanel extends React.Component<HalfPanelProps, any> {
   handleActivate() {
     const z = Global.zIndexManager.bringToFront(this.id);
     if (z !== this.state.z) this.setState({ z });
+  }
+
+  componentDidUpdate(previousProps: HalfPanelProps) {
+    if (
+      this.props.bringToFrontKey !== undefined
+      && this.props.bringToFrontKey !== previousProps.bringToFrontKey
+    ) {
+      this.handleActivate();
+    }
   }
 
   componentWillUnmount() {

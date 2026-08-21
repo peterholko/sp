@@ -57,7 +57,15 @@ export default class InventoryItem extends React.Component<InvItemProps, any> {
 
     const itemStyle = {
       transform: 'translate(0px, 0px)',
-      position: 'fixed'
+      position: 'fixed',
+      width: '48px',
+      height: '48px',
+      maxWidth: '48px',
+      maxHeight: '48px',
+      objectFit: 'contain',
+      objectPosition: 'center',
+      imageRendering: 'pixelated',
+      display: 'block',
     } as React.CSSProperties
 
     const rarity = itemRarity({ attrs: this.props.attrs });

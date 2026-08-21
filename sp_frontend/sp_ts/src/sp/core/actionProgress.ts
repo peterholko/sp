@@ -12,6 +12,14 @@ export interface AnchoredActionProgress {
 }
 
 /**
+ * These actions must never invent a client-side duration. Their server timing
+ * can vary independently of the presentation and must survive reconnects.
+ */
+export function requiresAuthoritativeActionProgress(state: string): boolean {
+  return state === 'prospecting';
+}
+
+/**
  * Anchor a server action snapshot to the receiving Phaser clock. The server
  * supplies elapsed time so perception refreshes and reconnects resume partway
  * through an action instead of restarting its bar.

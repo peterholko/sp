@@ -196,6 +196,7 @@ pub enum Subclass {
     Npc,
     Watchtower,
     Resource,
+    Well,
 }
 
 impl Subclass {
@@ -217,6 +218,7 @@ impl Subclass {
             SUBCLASS_NPC => Subclass::Npc,
             SUBCLASS_WATCHTOWER => Subclass::Watchtower,
             SUBCLASS_RESOURCE => Subclass::Resource,
+            SUBCLASS_WELL => Subclass::Well,
             _ => Subclass::None,
         }
     }
@@ -239,6 +241,7 @@ impl Subclass {
             Subclass::Npc => SUBCLASS_NPC.to_string(),
             Subclass::Watchtower => SUBCLASS_WATCHTOWER.to_string(),
             Subclass::Resource => SUBCLASS_RESOURCE.to_string(),
+            Subclass::Well => SUBCLASS_WELL.to_string(),
             Subclass::None => "none".to_string(),
         }
     }
@@ -536,6 +539,7 @@ pub enum ActiveTask {
     Following,
     Building,
     Gathering,
+    Foraging,
     Operating,
     Mining,
     Hunting,
@@ -543,6 +547,7 @@ pub enum ActiveTask {
     Timberworking,
     Stonecutting,
     Refining,
+    Skinning,
     Crafting,
     Experimenting,
     Exploring,
@@ -588,6 +593,7 @@ impl ActiveTask {
             ActiveTask::FightingBack => "Fighting back",
             ActiveTask::Building => "Building",
             ActiveTask::Gathering => "Gathering",
+            ActiveTask::Foraging => "Foraging",
             ActiveTask::Operating => "Operating",
             ActiveTask::Mining => "Mining",
             ActiveTask::Hunting => "Hunting",
@@ -595,6 +601,7 @@ impl ActiveTask {
             ActiveTask::Timberworking => "Timberworking",
             ActiveTask::Stonecutting => "Stonecutting",
             ActiveTask::Refining => "Refining",
+            ActiveTask::Skinning => "Skinning",
             ActiveTask::Crafting => "Crafting",
             ActiveTask::Experimenting => "Experimenting",
             ActiveTask::Exploring => "Prospecting",
@@ -621,11 +628,13 @@ impl ActiveTask {
     pub fn get_activity_from_string(activity: String) -> ActiveTask {
         match activity.as_str() {
             "Mining" => ActiveTask::Mining,
+            "Foraging" => ActiveTask::Foraging,
             "Hunting" => ActiveTask::Hunting,
             "Logging" => ActiveTask::Logging,
             "Timberworking" => ActiveTask::Timberworking,
             "Stonecutting" => ActiveTask::Stonecutting,
             "Refining" => ActiveTask::Refining,
+            "Skinning" => ActiveTask::Skinning,
             "Crafting" => ActiveTask::Crafting,
             "Operating" => ActiveTask::Operating,
             "Planting" => ActiveTask::Planting,
@@ -639,6 +648,14 @@ impl ActiveTask {
     pub fn get_activity_from_res_type(res_type: String) -> ActiveTask {
         let activity_str = Resource::type_to_skill(res_type);
         return Self::get_activity_from_string(activity_str);
+    }
+
+    pub fn for_refining_item_class(item_class: &str) -> ActiveTask {
+        if item_class == "Carcass" || item_class == GAME_ANIMAL {
+            ActiveTask::Skinning
+        } else {
+            ActiveTask::Refining
+        }
     }
 }
 
@@ -841,9 +858,16 @@ pub struct BuildUpgradeState {
     pub build_upgrade_cost: f32,
     pub work_done: f32,
     pub work_per_sec: f32,
+    // Game tick when work_done last changed. Network serializers must use
+    // this stable value instead of stamping each packet at serialization
+    // time, otherwise duplicate perception snapshots re-anchor client bars.
+    pub progress_updated_at_tick: i32,
     // Game tick when construction/upgrade actually started (0 when not building).
-    // Lets the client anchor and animate the progress bar from the build start.
+    // Used for server-side elapsed-time bookkeeping and safe-logout rebasing.
     pub start_time: i32,
+    // Stable identity for this construction or upgrade. Unlike start_time,
+    // this is not rebased when the owning player returns from safe logout.
+    pub action_id: i32,
 }
 
 /// Server-authoritative timing for a unit action rendered with an on-map
@@ -875,6 +899,28 @@ pub struct WorkEntry {
     pub refine_item_class: Option<String>,
 }
 
+impl WorkEntry {
+    fn idle_operate_workspace(entry_id: i32) -> Self {
+        Self {
+            entry_id,
+            worker_id: -1,
+            work_type: WorkType::Operate,
+            work_status: WorkStatus::Idle,
+            recipe_name: None,
+            recipe_image: None,
+            refine_item_id: None,
+            refine_item_image: None,
+            refine_item_class: None,
+        }
+    }
+
+    fn reset_operate_workspace(&mut self) {
+        debug_assert_eq!(self.work_type, WorkType::Operate);
+        self.worker_id = -1;
+        self.work_status = WorkStatus::Idle;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkType {
     Build,
@@ -882,6 +928,72 @@ pub enum WorkType {
     Refine,
     Experiment,
     Operate,
+}
+
+impl WorkQueue {
+    /// Ensure a resource structure retains the permanent Operate slots defined
+    /// by its template. Finite Craft and Refine jobs are deliberately ignored.
+    pub fn reconcile_operate_workspaces(&mut self, configured_workspaces: i32) -> usize {
+        let desired = configured_workspaces.max(0) as usize;
+        let existing = self
+            .0
+            .iter()
+            .filter(|entry| entry.work_type == WorkType::Operate)
+            .count();
+        let missing = desired.saturating_sub(existing);
+
+        let mut candidate_id = -1;
+        for _ in 0..missing {
+            while self.0.iter().any(|entry| entry.entry_id == candidate_id) {
+                candidate_id = candidate_id
+                    .checked_sub(1)
+                    .expect("work queue exhausted negative workspace ids");
+            }
+
+            self.0.push(WorkEntry::idle_operate_workspace(candidate_id));
+            candidate_id = candidate_id
+                .checked_sub(1)
+                .expect("work queue exhausted negative workspace ids");
+        }
+
+        missing
+    }
+
+    /// Cancel a queue entry while preserving permanent Operate capacity.
+    /// Finite jobs keep their existing remove-from-queue semantics.
+    pub fn cancel_entry_preserving_operate_workspace(&mut self, entry_id: i32) -> bool {
+        let Some(index) = self.0.iter().position(|entry| entry.entry_id == entry_id) else {
+            return false;
+        };
+
+        if self.0[index].work_type == WorkType::Operate {
+            self.0[index].reset_operate_workspace();
+        } else {
+            self.0.remove(index);
+        }
+
+        true
+    }
+
+    /// Release a worker from permanent Operate slots while retaining the
+    /// historical behavior of removing that worker's finite queued jobs.
+    pub fn unassign_worker_preserving_operate_workspaces(&mut self, worker_id: i32) -> bool {
+        let mut found = false;
+        self.0.retain_mut(|entry| {
+            if entry.worker_id != worker_id {
+                return true;
+            }
+
+            found = true;
+            if entry.work_type == WorkType::Operate {
+                entry.reset_operate_workspace();
+                true
+            } else {
+                false
+            }
+        });
+        found
+    }
 }
 
 impl ToString for WorkType {
@@ -1565,13 +1677,110 @@ impl Obj {
 mod tests {
     use super::{
         is_valid_hero_portrait, ActiveTask, Class, Id, Obj, PlayerId, Position, State, Stats,
-        Subclass, HERO_PORTRAITS,
+        Subclass, WorkEntry, WorkQueue, WorkStatus, WorkType, HERO_PORTRAITS,
     };
     use crate::constants::{CLASS_CORPSE, CLASS_STRUCTURE, CLASS_UNIT, LOG};
     use bevy::prelude::{App, Entity, Query, ResMut, Resource, Update};
 
     #[derive(Resource, Default)]
     struct CollectedBlockerIds(Vec<i32>);
+
+    fn test_work_entry(
+        entry_id: i32,
+        worker_id: i32,
+        work_type: WorkType,
+        work_status: WorkStatus,
+    ) -> WorkEntry {
+        WorkEntry {
+            entry_id,
+            worker_id,
+            work_type,
+            work_status,
+            recipe_name: None,
+            recipe_image: None,
+            refine_item_id: None,
+            refine_item_image: None,
+            refine_item_class: None,
+        }
+    }
+
+    #[test]
+    fn resource_workspace_reconciliation_repairs_missing_slots_idempotently() {
+        let mut queue = WorkQueue(vec![test_work_entry(
+            100,
+            -1,
+            WorkType::Craft,
+            WorkStatus::Idle,
+        )]);
+
+        assert_eq!(queue.reconcile_operate_workspaces(2), 2);
+        assert_eq!(queue.reconcile_operate_workspaces(2), 0);
+        assert_eq!(
+            queue
+                .0
+                .iter()
+                .filter(|entry| entry.work_type == WorkType::Operate)
+                .count(),
+            2
+        );
+        assert!(queue.0.iter().any(|entry| entry.entry_id == 100));
+        assert!(queue
+            .0
+            .iter()
+            .filter(|entry| entry.work_type == WorkType::Operate)
+            .all(|entry| entry.worker_id == -1 && entry.work_status == WorkStatus::Idle));
+
+        queue.0.retain(|entry| entry.entry_id != -1);
+        assert_eq!(queue.reconcile_operate_workspaces(2), 1);
+        assert!(queue.0.iter().any(|entry| {
+            entry.entry_id == -1 && entry.work_type == WorkType::Operate && entry.worker_id == -1
+        }));
+    }
+
+    #[test]
+    fn cancelling_operate_resets_workspace_but_finite_jobs_are_removed() {
+        let mut queue = WorkQueue(vec![
+            test_work_entry(-1, 7, WorkType::Operate, WorkStatus::InProgress),
+            test_work_entry(10, 7, WorkType::Craft, WorkStatus::InProgress),
+            test_work_entry(11, -1, WorkType::Refine, WorkStatus::Idle),
+        ]);
+
+        assert!(queue.cancel_entry_preserving_operate_workspace(-1));
+        let operate = queue
+            .0
+            .iter()
+            .find(|entry| entry.entry_id == -1)
+            .expect("Operate workspace remains present");
+        assert_eq!(operate.worker_id, -1);
+        assert_eq!(operate.work_status, WorkStatus::Idle);
+
+        assert!(queue.cancel_entry_preserving_operate_workspace(10));
+        assert!(!queue.0.iter().any(|entry| entry.entry_id == 10));
+        assert!(queue.0.iter().any(|entry| entry.entry_id == 11));
+    }
+
+    #[test]
+    fn unassigning_worker_resets_operate_and_removes_only_finite_worker_jobs() {
+        let mut queue = WorkQueue(vec![
+            test_work_entry(-1, 7, WorkType::Operate, WorkStatus::InProgress),
+            test_work_entry(10, 7, WorkType::Craft, WorkStatus::InProgress),
+            test_work_entry(11, 8, WorkType::Refine, WorkStatus::InProgress),
+        ]);
+
+        assert!(queue.unassign_worker_preserving_operate_workspaces(7));
+        let operate = queue
+            .0
+            .iter()
+            .find(|entry| entry.entry_id == -1)
+            .expect("Operate workspace remains present");
+        assert_eq!(operate.worker_id, -1);
+        assert_eq!(operate.work_status, WorkStatus::Idle);
+        assert!(!queue.0.iter().any(|entry| entry.entry_id == 10));
+        assert!(queue
+            .0
+            .iter()
+            .any(|entry| entry.entry_id == 11 && entry.worker_id == 8));
+    }
 
     fn collect_blocker_ids(
         query: Query<(Entity, &Id, &PlayerId, &Position, &Class, &Subclass, &Stats)>,
@@ -1678,6 +1887,7 @@ mod tests {
             (ActiveTask::Timberworking, "Timberworking"),
             (ActiveTask::Stonecutting, "Stonecutting"),
             (ActiveTask::Refining, "Refining"),
+            (ActiveTask::Skinning, "Skinning"),
             (ActiveTask::Crafting, "Crafting"),
             (ActiveTask::Experimenting, "Experimenting"),
             (ActiveTask::Exploring, "Prospecting"),
@@ -1712,6 +1922,26 @@ mod tests {
         );
         assert_eq!(ActiveTask::Logging.to_string(), "Logging");
         assert_eq!(ActiveTask::Timberworking.to_string(), "Timberworking");
+    }
+
+    #[test]
+    fn animal_refining_uses_the_skinning_activity() {
+        assert_eq!(
+            ActiveTask::for_refining_item_class(crate::constants::GAME_ANIMAL),
+            ActiveTask::Skinning
+        );
+        assert_eq!(
+            ActiveTask::for_refining_item_class("Carcass"),
+            ActiveTask::Skinning
+        );
+        assert_eq!(
+            ActiveTask::for_refining_item_class("Log"),
+            ActiveTask::Refining
+        );
+        assert_eq!(
+            ActiveTask::get_activity_from_string("Skinning".to_string()),
+            ActiveTask::Skinning
+        );
     }
 
     #[test]

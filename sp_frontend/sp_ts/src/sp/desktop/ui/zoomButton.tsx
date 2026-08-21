@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
-import { desktopCameraZoom } from "../../core/config";
+import { desktopCameraZoom, desktopZoomControl } from "../../core/config";
 
 interface State {
   zoom: number;
@@ -25,12 +25,16 @@ export default class ZoomButton extends React.Component<{}, State> {
   };
 
   handleClick = () => {
-    const next = this.state.zoom >= 2 ? 1 : 2;
-    this.setState({ zoom: next });
-    Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, { zoom: next });
+    const control = desktopZoomControl(this.state.zoom);
+    this.setState({ zoom: control.nextZoom });
+    Global.gameEmitter.emit(GameEvent.CAMERA_ZOOM, {
+      zoom: control.nextZoom,
+      source: 'user',
+    });
   };
 
   render() {
+    const control = desktopZoomControl(this.state.zoom);
     const buttonStyle: React.CSSProperties = {
       position: 'fixed',
       bottom: '160px',
@@ -42,16 +46,23 @@ export default class ZoomButton extends React.Component<{}, State> {
       borderRadius: '4px',
       color: '#c9aa71',
       fontFamily: 'Verdana',
-      fontSize: '12px',
+      fontSize: '22px',
       fontWeight: 'bold',
+      lineHeight: '1',
       cursor: 'pointer',
       zIndex: 50,
       pointerEvents: 'auto',
     };
 
     return (
-      <button type="button" style={buttonStyle} onClick={this.handleClick} title="Toggle zoom">
-        {this.state.zoom >= 2 ? '1×' : '2×'}
+      <button
+        type="button"
+        style={buttonStyle}
+        onClick={this.handleClick}
+        title={control.title}
+        aria-label={control.title}
+      >
+        {control.label}
       </button>
     );
   }

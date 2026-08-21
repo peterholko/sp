@@ -6,61 +6,20 @@ import {
   MobileSummaryCard,
   isLandscapeMobile,
 } from "./mobilePanelLayout";
+import WorkQueueProgressBar from "../../core/workQueueProgressBar";
 
 interface WorkQueueEntryPanelProps {
   workQueueEntryData,
 }
 
 export default class WorkQueueEntryPanel extends React.Component<WorkQueueEntryPanelProps, any> {
-  private timer;
-
-  constructor(props) {
-    super(props);
-
-    this.state = {
-      maxProgress: this.props.workQueueEntryData.work_time,
-      progress: this.props.workQueueEntryData.progress,
-    };
-
-    this.startTimer = this.startTimer.bind(this)
-    this.stopTimer = this.stopTimer.bind(this)
-  }
-
-  componentDidMount() {
-    this.startTimer();
-  }
-
-  componentWillUnmount() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-  }
-
-  startTimer() {
-    console.log('Start Timer Work Queue Entry Panel');
-    this.timer = setInterval(() => {
-      console.log("progress: " + this.state.progress);
-      console.log("maxProgress: " + this.state.maxProgress);
-
-      if (this.state.progress >= this.state.maxProgress) {
-        console.log('progress >>> maxProgress');
-        this.stopTimer();
-      } else {
-        this.setState({ progress: this.state.progress + 1 });
-      }
-    }, 1000);
-  }
-
-  stopTimer() {
-    console.log('Stop Timer Work Queue Entry Panel');
-    clearInterval(this.timer)
-    this.timer = null;
-  }
-
   render() {
     const landscape = isLandscapeMobile();
-    const progress = <progress max={this.state.maxProgress} value={this.state.progress}>{this.state.progress}</progress>;
+    const progress = <WorkQueueProgressBar
+      action_id={this.props.workQueueEntryData.action_id}
+      action_duration_ms={this.props.workQueueEntryData.action_duration_ms}
+      action_elapsed_ms={this.props.workQueueEntryData.action_elapsed_ms}
+      label={this.props.workQueueEntryData.item_name + ' progress'} />;
 
     return (
       <MobilePanelScreen
@@ -85,5 +44,4 @@ export default class WorkQueueEntryPanel extends React.Component<WorkQueueEntryP
     );
   }
 }
-
 

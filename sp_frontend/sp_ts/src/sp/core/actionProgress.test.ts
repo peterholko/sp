@@ -1,4 +1,7 @@
-import { anchorActionProgress } from './actionProgress';
+import {
+  anchorActionProgress,
+  requiresAuthoritativeActionProgress,
+} from './actionProgress';
 
 describe('server-authoritative action progress', () => {
   test('anchors a new 30-second gather cycle at its server elapsed time', () => {
@@ -34,5 +37,10 @@ describe('server-authoritative action progress', () => {
       action_duration_ms: 30000,
       action_elapsed_ms: 45000,
     }, 50000)?.elapsedMs).toBe(30000);
+  });
+
+  test('prospecting cannot fall back to a client-owned duration', () => {
+    expect(requiresAuthoritativeActionProgress('prospecting')).toBe(true);
+    expect(requiresAuthoritativeActionProgress('gathering')).toBe(false);
   });
 });

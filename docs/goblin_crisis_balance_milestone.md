@@ -257,7 +257,7 @@ healing 10 are recovered manually from the Shipwreck. That potion value
 intentionally differs from the generic item-template healing value of 50. The
 older balance artifacts retain their then-current “starting item” terminology.
 
-`Human Villager` currently has 500 HP, 10,000 stamina, zero base damage, zero
+`Human Villager` currently has 80 HP, 10,000 stamina, zero base damage, zero
 damage span, zero defence, zero speed, vision two, and base work 25. A villager
 is counted as combat-capable only when its current base damage is positive or it
 has an equipped weapon. Merely being alive does not imply it can kill an
@@ -909,8 +909,10 @@ optional `preparation_options` field with at most four fixed-order,
 server-authoritative rows: Defences, Defenders, Equipment, and Recovery. Each
 row reports `ready`, `needs_attention`, or `unavailable` with factual detail and
 an action hint. It is owner exact, read only, present only in Preparing and
-AssaultReady, deduplicated by the existing successful-delivery cache, and shown
-inside the desktop crisis card. Active assault and all other phases omit it.
+AssaultReady, and deduplicated by the existing successful-delivery cache. The
+current client intentionally does not render these rows; the former verbose
+desktop preparation checklist has been removed. Active assault and all other
+phases omit the payload as before.
 
 Opt-in telemetry now records deduplicated repair/build starts and completions,
 healing carried/used before launch, combat-capable villagers at launch, first

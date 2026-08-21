@@ -9,6 +9,8 @@
 					"repeat": -1,
 					"speed": 1000
 			},
+			"crafting": [12],
+			"refining": [12],
 			"attack": {
 					"frames": [6,7,8,9],
 					"repeat": 0,

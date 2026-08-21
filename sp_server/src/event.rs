@@ -554,6 +554,10 @@ pub enum GameEventType {
         pos: Position,
         player_id: i32,
     },
+    RescuedVillagerBurrowReminder {
+        villager_id: i32,
+        player_id: i32,
+    },
     RemoveEntity {
         entity: Entity,
     },

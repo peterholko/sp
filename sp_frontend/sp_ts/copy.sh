@@ -15,18 +15,32 @@ cp dist/sp2.mobile.js "$axum_root/"
 
 mkdir -p "$axum_root/static/art"
 mkdir -p "$axum_root/static/art/ui/activity"
+mkdir -p "$axum_root/static/art/ui/resource_categories"
 mkdir -p "$axum_root/static/art/portraits/heroes"
 mkdir -p "$axum_root/static/art/portraits/villagers"
 mkdir -p "$server_tileset"
 
 cp "$frontend_static/art/ui/activity/"*.png "$axum_root/static/art/ui/activity/"
+cp "$frontend_static/art/ui/resource_categories/"*.png "$axum_root/static/art/ui/resource_categories/"
 cp "$frontend_static/art/portraits/heroes/"*.png "$axum_root/static/art/portraits/heroes/"
 cp "$frontend_static/art/portraits/villagers/"*.png "$axum_root/static/art/portraits/villagers/"
 
+for ui_art_file in \
+  intro_01_new_lands.png \
+  intro_02_shipwreck.png \
+  intro_03_ashore.png \
+  terrainfeaturebutton.png \
+  terrainfeaturebutton_click.png
+do
+  cp "$frontend_static/art/ui/$ui_art_file" "$axum_root/static/art/ui/"
+done
+
 mkdir -p "$axum_root/static/art/items"
 for item_art_file in \
+  bones.png \
   crudehatchet.png \
   fishingrod.png \
+  foragingkit.png \
   copperfishingrod.png \
   ironfishingrod.png \
   mithrilfishingrod.png \
@@ -47,16 +61,32 @@ for item_art_file in \
   fruitfulhuntinggroundswater.png \
   fruitfulhuntinggroundswoodland.png \
   humancorpse.png \
+  resintorch.png \
+  litresintorch.png \
+  torch.png \
+  littorch.png \
   trainingstonecutterhammer.png
 do
   cp "$frontend_static/art/items/$item_art_file" "$axum_root/static/art/items/"
 done
 
 for art_file in \
+  blacksmith.png \
+  burrow.png \
   cache.png \
   cache.json \
+  craftingtent.png \
+  farm.png \
+  foundation.png \
+  lumbercamp.png \
+  mine.png \
+  quarry.png \
+  stockade.png \
+  trapper.png \
   warehouse.png \
   warehouse.json \
+  watchtower.png \
+  workshop.png \
   supplycache.png \
   supplycache.json \
   washedashore.png \
@@ -64,7 +94,9 @@ for art_file in \
   novicewarrior.png \
   novicewarrior.json \
   droppedbag.png \
-  droppedbag.json
+  droppedbag.json \
+  wellstructure.png \
+  wellstructure.json
 do
   cp "$frontend_static/art/$art_file" "$axum_root/static/art/"
 

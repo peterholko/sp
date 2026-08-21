@@ -156,6 +156,7 @@ impl AttrKey {
             "Planting" => AttrKey::Planting,
             "Tending" => AttrKey::Tending,
             "Harvesting" => AttrKey::Harvesting,
+            "Foraging" => AttrKey::Foraging,
             "Repairing" => AttrKey::Repairing,
             "Butchery" => AttrKey::Butchery,
             "Cooking" => AttrKey::Cooking,
@@ -383,6 +384,8 @@ pub const HIDE: &str = "Hide";
 pub const FUEL: &str = "Fuel";
 pub const FIREWOOD: &str = "Firewood";
 pub const CHARCOAL: &str = "Charcoal";
+pub const TATTERED_SHIRT: &str = "Tattered Shirt";
+pub const TATTERED_PANTS: &str = "Tattered Pants";
 
 pub const INGOT: &str = "Ingot";
 pub const DUST: &str = "Dust";
@@ -414,15 +417,26 @@ pub fn req_matches_build(
     req_matches(req_type, item_name, item_class, item_subclass)
 }
 
-pub fn required_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
+/// Attribute used by a tool that improves this gathering category. Some
+/// categories, such as Forage, have an optional tool even though the action
+/// remains available by hand.
+pub fn gather_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
     match res_type {
         ORE => Some(AttrKey::Mining),
         LOG => Some(AttrKey::Logging),
         STONE => Some(AttrKey::Stonecutting),
         constants::FISH => Some(AttrKey::Fishing),
         constants::FOOD => Some(AttrKey::Farming),
+        constants::FORAGE | constants::PLANT => Some(AttrKey::Foraging),
         constants::GAME_ANIMAL => Some(AttrKey::Hunting),
         _ => None,
+    }
+}
+
+pub fn required_tool_attr_for_res_type(res_type: &str) -> Option<AttrKey> {
+    match res_type {
+        constants::FORAGE | constants::PLANT => None,
+        _ => gather_tool_attr_for_res_type(res_type),
     }
 }
 
@@ -438,7 +452,7 @@ pub fn gather_resource_type_for_tool(item: &Item) -> Option<&'static str> {
     } else if item.is_gather_tool_for_attr(&AttrKey::Farming) {
         Some(constants::FOOD)
     } else if item.is_gather_tool_for_attr(&AttrKey::Foraging) {
-        Some(constants::PLANT)
+        Some(constants::FORAGE)
     } else if item.is_gather_tool_for_attr(&AttrKey::Hunting) {
         Some(constants::GAME_ANIMAL)
     } else {
@@ -450,6 +464,22 @@ pub fn gather_duration_ticks(base_seconds: i32, tool_rating: f32) -> i32 {
     let rating = tool_rating.max(1.0);
     let speed_multiplier = (1.0 - 0.20 * (rating - 1.0)).max(0.40);
     ((base_seconds * TICKS_PER_SEC) as f32 * speed_multiplier).round() as i32
+}
+
+pub const FORAGING_TOOL_GATHER_TIME_SEC: i32 = 8;
+
+pub fn gather_duration_ticks_for_res_type(
+    base_seconds: i32,
+    res_type: &str,
+    tool_rating: Option<f32>,
+) -> i32 {
+    match tool_rating {
+        Some(_) if matches!(res_type, constants::FORAGE | constants::PLANT) => {
+            FORAGING_TOOL_GATHER_TIME_SEC * TICKS_PER_SEC
+        }
+        Some(rating) => gather_duration_ticks(base_seconds, rating),
+        None => base_seconds * TICKS_PER_SEC,
+    }
 }
 
 pub fn harvest_tool_break_chance(current_durability: i32, max_durability: i32) -> f32 {
@@ -656,6 +686,21 @@ pub fn produced_item_packets(
 }
 
 impl Inventory {
+    /// Give a newly-created person the shared starter clothing loadout.
+    /// Each piece is created separately and equipped into its template slot.
+    pub fn add_equipped_tattered_clothing(
+        &mut self,
+        shirt_item_id: i32,
+        pants_item_id: i32,
+        item_templates: &Vec<ItemTemplate>,
+    ) {
+        let shirt = self.new(shirt_item_id, TATTERED_SHIRT.to_string(), 1, item_templates);
+        let pants = self.new(pants_item_id, TATTERED_PANTS.to_string(), 1, item_templates);
+
+        self.equip(shirt.id, shirt.slot);
+        self.equip(pants.id, pants.slot);
+    }
+
     pub fn transfer(
         item_id: i32,
         source_inventory: &mut Inventory,
@@ -667,6 +712,11 @@ impl Inventory {
             .position(|item| item.id == item_id)
         {
             let mut item_to_transfer = source_inventory.items[transfer_index].clone();
+            // Items always arrive unequipped. Normalize that state before
+            // looking for a destination stack so an equipped stack can never
+            // absorb a transferred item.
+            item_to_transfer.owner = target_inventory.owner;
+            item_to_transfer.equipped = false;
 
             if Item::can_merge_by_class(item_to_transfer.class.clone()) {
                 if let Some(merged_index) = target_inventory
@@ -679,10 +729,6 @@ impl Inventory {
 
                     source_inventory.items.swap_remove(transfer_index);
                 } else {
-                    // Update item owner
-                    item_to_transfer.owner = target_inventory.owner;
-                    item_to_transfer.equipped = false;
-
                     target_inventory.items.push(item_to_transfer);
                     source_inventory.items.swap_remove(transfer_index);
                 }
@@ -692,13 +738,72 @@ impl Inventory {
                 // the use_item / equip / etc. flows will reject the item with
                 // "Item not owned by player" because they look up the obj
                 // entity by `item.owner`.
-                item_to_transfer.owner = target_inventory.owner;
-                item_to_transfer.equipped = false;
-
                 target_inventory.items.push(item_to_transfer);
                 source_inventory.items.swap_remove(transfer_index);
             }
         }
+    }
+
+    /// Transfer exactly one unit while preserving the source item's current
+    /// durability and generated attributes. `new_item_id` is used only when
+    /// the source is a stack and therefore has to be split.
+    pub fn transfer_one(
+        item_id: i32,
+        new_item_id: i32,
+        source_inventory: &mut Inventory,
+        target_inventory: &mut Inventory,
+    ) -> bool {
+        let Some(transfer_index) = source_inventory
+            .items
+            .iter()
+            .position(|item| item.id == item_id)
+        else {
+            return false;
+        };
+
+        match source_inventory.items[transfer_index].quantity {
+            quantity if quantity <= 0 => false,
+            1 => {
+                Inventory::transfer(item_id, source_inventory, target_inventory);
+                true
+            }
+            _ => {
+                let Some((item_to_transfer, _source_item)) =
+                    source_inventory.split_instance_stack(item_id, new_item_id, 1)
+                else {
+                    return false;
+                };
+
+                Inventory::transfer(item_to_transfer.id, source_inventory, target_inventory);
+                true
+            }
+        }
+    }
+
+    /// Split part of an existing stack without rebuilding it from its template.
+    /// This preserves durability and generated attributes while ensuring the
+    /// separated quantity is unequipped. It is primarily a repair path for
+    /// legacy equipment stacks where one entry represented multiple tools.
+    pub fn split_instance_stack(
+        &mut self,
+        item_id: i32,
+        new_item_id: i32,
+        quantity: i32,
+    ) -> Option<(Item, Item)> {
+        let index = self.items.iter().position(|item| item.id == item_id)?;
+        if quantity <= 0 || self.items[index].quantity <= quantity {
+            return None;
+        }
+
+        self.items[index].quantity -= quantity;
+        let source_item = self.items[index].clone();
+        let mut split_item = source_item.clone();
+        split_item.id = new_item_id;
+        split_item.quantity = quantity;
+        split_item.equipped = false;
+        self.items.push(split_item.clone());
+
+        Some((split_item, source_item))
     }
 
     pub fn transfer_quantity(
@@ -869,7 +974,6 @@ impl Inventory {
                         num_to_transfer,
                         &item_templates,
                     );
-                    target_total_weight += (item_weight * num_to_transfer as f32) as i32;
                 }
                 // Receiver is now full, stop transferring
                 break;
@@ -986,34 +1090,36 @@ impl Inventory {
         }
         debug!("Item new attrs: {:?}", attrs);
 
-        if let Some(merged_index) = self.mergeable(name.clone(), attrs.clone()) {
-            let merged_item = &mut self.items[merged_index];
-            merged_item.quantity += quantity;
-            return merged_item.clone();
-        } else {
-            let new_item = Item {
-                id: item_id,
-                owner: self.owner,
-                name: name,
-                quantity: quantity,
-                durability: durability,
-                class: class,
-                subclass: subclass,
-                slot: slot,
-                image: image,
-                weight: weight,
-                equipped: false,
-                experiment: None,
-                start_time: 0,
-                attrs: attrs,
-                produces: produces,
-            };
-
-            self.items.push(new_item.clone());
-            debug!("New Item by new(): {:?}", new_item);
-
-            return new_item;
+        if Item::can_merge_by_class(class.clone()) {
+            if let Some(merged_index) = self.mergeable(name.clone(), attrs.clone(), false) {
+                let merged_item = &mut self.items[merged_index];
+                merged_item.quantity += quantity;
+                return merged_item.clone();
+            }
         }
+
+        let new_item = Item {
+            id: item_id,
+            owner: self.owner,
+            name,
+            quantity,
+            durability,
+            class,
+            subclass,
+            slot,
+            image,
+            weight,
+            equipped: false,
+            experiment: None,
+            start_time: 0,
+            attrs,
+            produces,
+        };
+
+        self.items.push(new_item.clone());
+        debug!("New Item by new(): {:?}", new_item);
+
+        new_item
     }
 
     pub fn new_with_attrs(
@@ -1072,7 +1178,7 @@ impl Inventory {
 
         // Can new item be merged into existing
         if Item::can_merge_by_class(class.clone()) {
-            if let Some(merged_index) = self.mergeable(name.clone(), attrs.clone()) {
+            if let Some(merged_index) = self.mergeable(name.clone(), attrs.clone(), false) {
                 info!("Merged index: {:?}", merged_index);
                 let merged_item = &mut self.items[merged_index];
                 info!("Merged item: {:?}", merged_item);
@@ -1155,7 +1261,11 @@ impl Inventory {
 
         // Can new item be merged into existing
         if Item::can_merge_by_class(class) {
-            if let Some(merged_index) = self.items.iter().position(|item| item.name == name) {
+            if let Some(merged_index) = self
+                .items
+                .iter()
+                .position(|item| item.name == name && !item.equipped)
+            {
                 let merged_item = &mut self.items[merged_index];
                 merged_item.quantity += quantity;
 
@@ -1308,7 +1418,7 @@ impl Inventory {
         };
 
         // Check if any other items are mergeable
-        if let Some(merged_index) = self.mergeable(name.clone(), item_attrs.clone()) {
+        if let Some(merged_index) = self.mergeable(name.clone(), item_attrs.clone(), false) {
             let merged_item = &mut self.items[merged_index];
             merged_item.quantity += quantity;
 
@@ -1619,12 +1729,19 @@ impl Inventory {
         }
     }
 
-    pub fn mergeable(&self, name: String, attrs: HashMap<AttrKey, AttrVal>) -> Option<usize> {
-        // Check owner, name and attrs if they match any existing item
+    pub fn mergeable(
+        &self,
+        name: String,
+        attrs: HashMap<AttrKey, AttrVal>,
+        equipped: bool,
+    ) -> Option<usize> {
+        // Equipped state belongs to the whole stack. A newly created
+        // unequipped item must never inherit equipment state by merging into
+        // the stack currently occupying a character slot.
         if let Some(merged_index) = self
             .items
             .iter()
-            .position(|item| item.name == name && item.attrs == attrs)
+            .position(|item| item.name == name && item.attrs == attrs && item.equipped == equipped)
         {
             return Some(merged_index);
         }
@@ -2375,7 +2492,7 @@ impl Inventory {
     }
 
     pub fn get_equipped_tool_for_res_type(&self, res_type: &str) -> Option<Item> {
-        required_tool_attr_for_res_type(res_type)
+        gather_tool_attr_for_res_type(res_type)
             .and_then(|attr| self.get_equipped_tool_for_attr(&attr))
     }
 
@@ -2411,7 +2528,7 @@ impl Inventory {
     }
 
     pub fn auto_equip_best_tool_for_res_type(&mut self, res_type: &str) -> Vec<Item> {
-        let Some(attr) = required_tool_attr_for_res_type(res_type) else {
+        let Some(attr) = gather_tool_attr_for_res_type(res_type) else {
             return Vec::new();
         };
 
@@ -2431,7 +2548,7 @@ impl Inventory {
             return Vec::new();
         }
 
-        let required_gather_attr = gather_res_type.and_then(required_tool_attr_for_res_type);
+        let required_gather_attr = gather_res_type.and_then(gather_tool_attr_for_res_type);
 
         if let Some(required_attr) = required_gather_attr {
             if self.should_equip_for_attr(&item, &required_attr) {
@@ -3350,6 +3467,7 @@ impl Item {
             && self.attrs == other.attrs
             && self.durability == other.durability
             && self.experiment == other.experiment
+            && self.equipped == other.equipped
     }
 
     pub fn attr_num(&self, attr: &AttrKey) -> f32 {
@@ -3367,7 +3485,7 @@ impl Item {
     }
 
     pub fn is_gather_tool_for_res_type(&self, res_type: &str) -> bool {
-        required_tool_attr_for_res_type(res_type)
+        gather_tool_attr_for_res_type(res_type)
             .map(|attr| self.is_gather_tool_for_attr(&attr))
             .unwrap_or(false)
     }
@@ -3615,6 +3733,18 @@ mod tests {
     }
 
     #[test]
+    fn foraging_is_unassisted_at_base_speed_and_eight_seconds_with_a_kit() {
+        assert_eq!(
+            gather_duration_ticks_for_res_type(15, constants::FORAGE, None),
+            150
+        );
+        assert_eq!(
+            gather_duration_ticks_for_res_type(15, constants::FORAGE, Some(2.0)),
+            80
+        );
+    }
+
+    #[test]
     fn harvesting_tools_only_risk_breaking_in_low_durability_band() {
         assert_eq!(harvest_tool_break_chance(7, 30), 0.0);
         assert_eq!(harvest_tool_break_chance(6, 30), 0.10);
@@ -3663,6 +3793,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn splitting_legacy_equipment_stack_preserves_one_equipped_item() {
+        let mut stacked_hatchet = test_item(
+            20,
+            WEAPON,
+            Some(Slot::MainHand),
+            true,
+            vec![(AttrKey::Logging, 1.0)],
+        );
+        stacked_hatchet.name = "Crude Hatchet".to_string();
+        stacked_hatchet.quantity = 2;
+        stacked_hatchet.durability = Some(7);
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![stacked_hatchet],
+        };
+
+        let (spare, equipped) = inventory
+            .split_instance_stack(20, 21, 1)
+            .expect("legacy Hatchet stack should split");
+
+        assert_eq!(equipped.id, 20);
+        assert_eq!(equipped.quantity, 1);
+        assert!(equipped.equipped);
+        assert_eq!(equipped.durability, Some(7));
+        assert_eq!(spare.id, 21);
+        assert_eq!(spare.quantity, 1);
+        assert!(!spare.equipped);
+        assert_eq!(spare.durability, Some(7));
+        assert_eq!(spare.attrs, equipped.attrs);
+    }
+
     fn test_item(
         id: i32,
         class: &str,
@@ -3708,7 +3870,12 @@ mod tests {
             required_tool_attr_for_res_type(constants::FOOD),
             Some(AttrKey::Farming)
         );
+        assert_eq!(required_tool_attr_for_res_type(constants::FORAGE), None);
         assert_eq!(required_tool_attr_for_res_type(constants::PLANT), None);
+        assert_eq!(
+            gather_tool_attr_for_res_type(constants::FORAGE),
+            Some(AttrKey::Foraging)
+        );
         assert_eq!(
             required_tool_attr_for_res_type(constants::GAME_ANIMAL),
             Some(AttrKey::Hunting)
@@ -5280,6 +5447,33 @@ mod tests {
     }
 
     #[test]
+    fn transferred_item_does_not_merge_into_an_equipped_stack() {
+        let incoming = production_test_item(2, "Crude Torch", TORCH, "Torch", 1, 1.0);
+        let mut equipped_torch = incoming.clone();
+        equipped_torch.id = 1;
+        equipped_torch.owner = 2;
+        equipped_torch.equipped = true;
+
+        let mut source = Inventory {
+            owner: 1,
+            items: vec![incoming],
+        };
+        let mut target = Inventory {
+            owner: 2,
+            items: vec![equipped_torch],
+        };
+
+        Inventory::transfer(2, &mut source, &mut target);
+
+        assert!(source.items.is_empty());
+        assert_eq!(target.items.len(), 2);
+        assert!(target.get_by_id(1).unwrap().equipped);
+        assert_eq!(target.get_by_id(1).unwrap().quantity, 1);
+        assert!(!target.get_by_id(2).unwrap().equipped);
+        assert_eq!(target.get_by_id(2).unwrap().owner, 2);
+    }
+
+    #[test]
     fn craft_amount_is_deterministic_and_weight_is_per_unit() {
         let mut inventory = Inventory {
             owner: 1,
@@ -5294,6 +5488,62 @@ mod tests {
         assert_eq!(crafted.quantity, 5);
         assert_eq!(crafted.weight, 2.0);
         assert_eq!(inventory.get_total_weight(), 10);
+    }
+
+    #[test]
+    fn crafted_item_does_not_merge_into_an_equipped_stack() {
+        let mut equipped_stick =
+            production_test_item(1, "Sharpened Stick", WEAPON, "Spear", 1, 10.0);
+        equipped_stick.slot = Some(Slot::MainHand);
+        equipped_stick.durability = Some(25);
+        equipped_stick.equipped = true;
+
+        let mut inventory = Inventory {
+            owner: 1,
+            items: vec![equipped_stick],
+        };
+        let mut recipe = production_test_recipe(1, 10.0, Vec::new());
+        recipe.class = WEAPON.to_string();
+        recipe.subclass = "Spear".to_string();
+        recipe.slot = Some(Slot::MainHand);
+        recipe.durability = Some(25);
+
+        inventory
+            .try_craft(
+                2,
+                1,
+                "Sharpened Stick".to_string(),
+                &recipe,
+                None,
+                None,
+                100,
+            )
+            .expect("a second Sharpened Stick should fit");
+
+        assert_eq!(inventory.items.len(), 2);
+        assert_eq!(inventory.get_by_id(1).unwrap().quantity, 1);
+        assert!(inventory.get_by_id(1).unwrap().equipped);
+        assert_eq!(inventory.get_by_id(2).unwrap().quantity, 1);
+        assert!(!inventory.get_by_id(2).unwrap().equipped);
+
+        // Matching unequipped output can still join the unequipped stack.
+        inventory
+            .try_craft(
+                3,
+                1,
+                "Sharpened Stick".to_string(),
+                &recipe,
+                None,
+                None,
+                100,
+            )
+            .expect("a third Sharpened Stick should fit");
+
+        assert_eq!(inventory.items.len(), 2);
+        assert_eq!(inventory.get_by_id(1).unwrap().quantity, 1);
+        assert!(inventory.get_by_id(1).unwrap().equipped);
+        assert_eq!(inventory.get_by_id(2).unwrap().quantity, 2);
+        assert!(!inventory.get_by_id(2).unwrap().equipped);
     }
 
     #[test]

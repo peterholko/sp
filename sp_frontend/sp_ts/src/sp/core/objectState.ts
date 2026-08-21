@@ -22,6 +22,11 @@ export interface ObjectState {
     work_done?: number;
     total_work?: number;
     work_per_sec?: number;
+    work_done_milliunits?: number;
+    total_work_milliunits?: number;
+    work_per_sec_milliunits?: number;
+    construction_action_id?: number;
+    construction_updated_at_ms?: number;
     action_id?: number;
     action_duration_ms?: number;
     action_elapsed_ms?: number;

@@ -31,8 +31,10 @@ The Goblin sequence enters `Preparing` at 45 pressure after the existing
 ordered phase gates. From that point, a fixed 1,800-tick / 180-online-second
 preparation window is the only requirement for `AssaultReady`; later pressure
 changes cannot shorten it. Offline time still does not advance the window.
-Readiness guidance is visible from `Signs` through `AssaultReady`, and the
-Defences row reports the live bound-sanctuary level alongside wall state.
+Readiness facts remain server-authoritative and available to telemetry, but the
+client no longer renders the verbose Defences, Defenders, Equipment, and
+Recovery preparation breakdown. The compact crisis card retains phase,
+pressure, countdown, warning, and active-assault information.
 
 Once the assault launches, it remains active in the persistent world and
 continues if the player disconnects.
@@ -54,6 +56,23 @@ The default runtime uses `SurvivalDirectorMode::PersonalCrisis`. The legacy
 automatic rat, wolf, Goblin, Undead, Pillager, nightly, and legendary systems
 remain compiled behind `SurvivalDirectorMode::Legacy`; they are not a second
 authority in the default mode.
+
+The PersonalCrisis introduction rolls a normal-path target of three to five
+bounded nuisance waves before the first fortification: one wilderness nuisance
+after the Shipwreck survivor is rescued and the first Burrow is completed,
+followed by repeatable scavenger waves after a Lumbercamp is completed.
+Completing the first Stockade arms one final group of one or two weak Goblin
+Scouts that approaches to inspect the new fortification once the nuisance
+sequence is resolved. An unusually fast Stockade does not skip or stack the
+remaining nuisance waves. Contents, group size, placement, and a short
+online-only delay are randomized. Only one wave may be active at once;
+spawning waits while the hero is below 60% health, combat-locked, offline, or
+already near another reachable hostile. Units spawn on reachable tiles outside
+every sanctuary and away from another player's settlement. Pending or
+surviving minor encounters are retired when Preparing begins, so they cannot
+stack with the assault. These waves do not contribute pressure, including the
+fortification inspection. The historical
+boar/crab-to-Spider introduction chain remains available in Legacy mode.
 
 ## Checkpoint 4 implementation record
 
@@ -239,10 +258,11 @@ survives completion of all objectives.
 The card displays server title, human phase, summary, action hint, clamped
 server-pressure value and bar, ready countdown, active remaining/total attacker
 count, resolution state, and the visible sentence `The assault continues while
-disconnected.` The compact collapsed header prioritizes imminent or active
-crisis state. `Preparing`, `AssaultReady`, and `AssaultActive` each auto-expand
-once on entry; a duplicate same-phase packet respects a player's later manual
-collapse.
+disconnected.` It deliberately ignores the optional detailed preparation rows,
+so the former **Prepare your settlement** checklist is not shown. The compact
+collapsed header prioritizes imminent or active crisis state. `Preparing`,
+`AssaultReady`, and `AssaultActive` each auto-expand once on entry; a duplicate
+same-phase packet respects a player's later manual collapse.
 
 The wide and compact desktop layouts continue sharing the existing panel and
 pointer-event behavior. The card uses a labelled region, phase text in addition

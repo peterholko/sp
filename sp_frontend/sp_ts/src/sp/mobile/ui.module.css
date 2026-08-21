@@ -97,6 +97,30 @@
   image-rendering: pixelated;
 }
 
+.activeGatherButton {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 50px;
+  height: 49px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  pointer-events: none;
+  z-index: 2;
+  animation: activeGatherBorderPulse 1.15s ease-in-out infinite;
+}
+
+@keyframes activeGatherBorderPulse {
+  0%, 100% {
+    opacity: 0.78;
+    filter: drop-shadow(0 0 1px rgba(232, 173, 47, 0.65));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 5px rgba(255, 211, 79, 0.95));
+  }
+}
+
 @media (orientation: landscape) {
   .mobileActionGrid {
     left: 3px;
@@ -325,8 +349,8 @@ progress::-moz-progress-bar {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tutorialItemHighlightCell {
+  .tutorialItemHighlightCell,
+  .activeGatherButton {
     animation: none;
-    border-color: #ffd45a !important;
   }
 }

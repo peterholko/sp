@@ -6,7 +6,6 @@
 import { Util } from '../util';
 import { Global } from '../global';
 import { Tile } from '../objects/tile';
-import { Resource } from '../objects/resource';
 import { GameSprite } from '../objects/gameSprite';
 import { GameEvent } from '../gameEvent';
 import { NetworkEvent } from '../networkEvent';
@@ -14,6 +13,13 @@ import { ObjectState } from '../objectState';
 import { TileState } from '../tileState';
 import { desktopCameraZoom } from '../config';
 import { MAP_RENDER_EVENTS } from '../mapRenderEvents';
+import {
+  groupScoutedResourceCategories,
+  resourceLayerToggleAction,
+  SCOUT_CATEGORY_ICON_KEYS,
+  SCOUT_CATEGORY_ICON_SIZE,
+  scoutCategoryIconOffset,
+} from '../scoutResourceCategories';
 
 export class MapScene extends Phaser.Scene {
 
@@ -107,7 +113,13 @@ export class MapScene extends Phaser.Scene {
     //this.load.image('alphamask', './static/art/alphamask.png');
 
 
-    this.load.image('ore', './static/art/items/valleyruncopperore.png');
+    this.load.image('scout-resource-ore', './static/art/ui/resource_categories/ore.png');
+    this.load.image('scout-resource-stone', './static/art/ui/resource_categories/stone.png');
+    this.load.image('scout-resource-timber', './static/art/ui/resource_categories/timber.png');
+    this.load.image('scout-resource-forage', './static/art/ui/resource_categories/forage.png');
+    this.load.image('scout-resource-water', './static/art/ui/resource_categories/water.png');
+    this.load.image('scout-resource-fish', './static/art/ui/resource_categories/fish.png');
+    this.load.image('scout-resource-game', './static/art/ui/resource_categories/game.png');
 
     this.load.json('tileset', './static/tileset.json');
     this.load.on('filecomplete-json-tileset', this.tilesetComplete, this)
@@ -134,7 +146,7 @@ export class MapScene extends Phaser.Scene {
       Global.gameEmitter.on(event, this.setRender, this);
     }
     Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.processNearbyResources, this);
-    Global.gameEmitter.on(GameEvent.RESOURCE_LAYER_CLICK, this.hideResourceLayer, this);
+    Global.gameEmitter.on(GameEvent.RESOURCE_LAYER_CLICK, this.toggleResourceLayer, this);
     Global.gameEmitter.on(GameEvent.SELECTED_OBJ_MOVED, this.selectedObjMoved, this);
     
     
@@ -194,103 +206,48 @@ export class MapScene extends Phaser.Scene {
     }
   }
 
-  processNearbyResources(message) : void {    
-    console.log(message);
+  processNearbyResources(message) : void {
+    const groups = groupScoutedResourceCategories(
+      Array.isArray(message?.data) ? message.data : [],
+    );
 
-    Global.resourceLayerVisible = true;
-
-    if(this.resources.visible === false) {
-      this.resources.visible = true;
-    }
-
-    var data = message.data;
-    var resourceImages = [];
-    var resourcePerTile = {};
-    var bestResourceOnTile = {};
-
-    let loader = new Phaser.Loader.LoaderPlugin(this);
-
-    loader.on(Phaser.Loader.Events.FILE_COMPLETE, (key, type, data) => {
-      var resourceImage = resourceImages[key];
-      resourceImage.setTexture(key);  
-    });
-
-    for(var i = 0; i < data.length; i++) {
-      var resourceData = data[i];
-      var pixel = Util.hex_to_pixel(resourceData.x, resourceData.y);
-      var key = pixel.x + '_' + pixel.y;
-
-      if(key in bestResourceOnTile) {
-        if(resourceData.color > bestResourceOnTile[key].color) {
-          bestResourceOnTile[key] = resourceData;
-        }
-      } else {
-        bestResourceOnTile[key] = resourceData;
-      }
-    }
-
-    for(var key in bestResourceOnTile) {
-      var resourceData = bestResourceOnTile[key];
-      var imageName = (resourceData.image || resourceData.name).replace(/\s/g,'').toLowerCase();
-      var pixel = Util.hex_to_pixel(resourceData.x, resourceData.y);
-      /*var key = pixel.x + '_' + pixel.y;
-
-      if(key in resourcePerTile) {
-        resourcePerTile[key] = resourcePerTile[key] + 1;
-      } else {
-        resourcePerTile[key] = 1;
-      }
-
-      var offsetX = 0;
-      var offsetY = 0;
-
-      if(resourcePerTile[key] == 2) {
-        offsetX = 25;
-        offsetY = 0;
-      } else if(resourcePerTile[key] == 3) {
-        offsetX = 0;
-        offsetY = 25;
-      } else if(resourcePerTile[key] == 4) {
-        offsetX = 25;
-        offsetY = 25;
-      }*/
-
-      var resource = new Resource({
-        scene: this,
-        x: pixel.x + 12,
-        y: pixel.y + 12,
-        imageName: imageName,            
-        hexX: resourceData.x,
-        hexY: resourceData.y
-      });     
-      
-      resource.setScale(0.90);
-
-      if(resourceData.color === 4) {
-        resource.postFX.addGlow(0x0070dd, 2, 0, false);
-      } else if(resourceData.color === 5) {
-        resource.postFX.addGlow(0xa335ee, 3, 0, false);
-      } else if(resourceData.color === 6) {
-        resource.postFX.addGlow(0xff8000, 3, 0, false);
-      } else if(resourceData.color === 7) {
-        resource.postFX.addGlow(0xe6cc80, 3, 0, false); 
-      }
-        
-      loader.image(imageName, `./static/art/items/${imageName}.png`);
-
-      resourceImages[imageName] = resource;
-
-      this.resources.add(resource);         
-    }
-    
-    loader.start(); 
-  }
-
-  hideResourceLayer() : void {
-    this.resources.visible = false;
     this.resources.removeAll(true);
 
-    Global.resourceLayerVisible = false;
+    for (const group of groups) {
+      const pixel = Util.hex_to_pixel(group.x, group.y);
+      group.categories.forEach((category, index) => {
+        const offset = scoutCategoryIconOffset(index, group.categories.length);
+        const icon = this.add.image(
+          pixel.x + 36 + offset.x,
+          pixel.y + 12 + offset.y,
+          SCOUT_CATEGORY_ICON_KEYS[category],
+        );
+        icon
+          .setOrigin(0.5)
+          .setDisplaySize(SCOUT_CATEGORY_ICON_SIZE, SCOUT_CATEGORY_ICON_SIZE);
+        this.resources.add(icon);
+      });
+    }
+
+    const hasScoutedResources = this.resources.length > 0;
+    this.resources.visible = hasScoutedResources;
+    Global.resourceLayerVisible = hasScoutedResources;
+  }
+
+  toggleResourceLayer() : void {
+    const action = resourceLayerToggleAction(
+      Global.resourceLayerVisible,
+      this.resources.length > 0,
+    );
+
+    if (action === 'request') {
+      Global.network.sendNearbyResources();
+      return;
+    }
+
+    const visible = action === 'show';
+    this.resources.visible = visible;
+    Global.resourceLayerVisible = visible;
   }
 
   // This event handler is required to move the tile select asset

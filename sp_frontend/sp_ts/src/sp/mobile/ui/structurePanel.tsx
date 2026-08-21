@@ -1,5 +1,6 @@
 import * as React from "react";
 import {
+  canAssignWorkersToStructure,
   isCampfireStation,
   isShelterStructure,
   isUnlitCampfireStation,
@@ -9,8 +10,9 @@ import { Global } from "../../core/global";
 import rightarrow from "ui_comp/rightarrow.png";
 import '../ui.module.css';
 import { FOUNDED, STALLED, NONE, CRAFT, UPGRADING, PLANNING_UPGRADE, RESOURCE, BUILDING } from "../../core/config";
-import { NetworkEvent } from "../../core/networkEvent";
 import { GameEvent } from "../../core/gameEvent";
+import ConstructionProgressBar from '../../core/constructionProgressBar';
+import { structureUpgradeProgressImageName } from '../../core/structureUpgradePresentation';
 import {
   MobileCard,
   MobilePanelActions,
@@ -26,8 +28,6 @@ interface StructurePanelProps {
 }
 
 export default class StructurePanel extends React.Component<StructurePanelProps, any> {
-  private timer;
-
   constructor(props) {
     super(props);
 
@@ -47,28 +47,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       refineButtonSelected = true;
     }
 
-    var workDone = 0;
-    var workPerSecond = 0;
-    var buildUpgradeCost = 0;
-
-    if ('work_done' in this.props.structureData) {
-      workDone = this.props.structureData.work_done;
-    }
-
-    if ('work_per_sec' in this.props.structureData) {
-      workPerSecond = this.props.structureData.work_per_sec;
-    }
-
-    if (this.props.structureData.state == PLANNING_UPGRADE || this.props.structureData.state == UPGRADING) {
-      buildUpgradeCost = this.props.structureData.upgrade_cost;
-    } else {
-      buildUpgradeCost = this.props.structureData.build_cost;
-    }
-
     this.state = {
-      buildUpgradeCost: buildUpgradeCost,
-      workDone: workDone,
-      workPerSecond: workPerSecond,
       structureData: this.props.structureData,
       refineButtonSelected: refineButtonSelected
     };
@@ -82,34 +61,19 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     this.handleDeleteClick = this.handleDeleteClick.bind(this);
     this.handleExperimentClick = this.handleExperimentClick.bind(this);
     this.handleStartUpgradeClick = this.handleStartUpgradeClick.bind(this);
+    this.handleUpgradeClick = this.handleUpgradeClick.bind(this);
     this.handlePlantClick = this.handlePlantClick.bind(this);
     this.handleTendClick = this.handleTendClick.bind(this);
     this.handleHarvestClick = this.handleHarvestClick.bind(this);
     this.handleSendDelete = this.handleSendDelete.bind(this);
-    this.handleResponseUpgrade = this.handleResponseUpgrade.bind(this);
     this.handleCampfireClick = this.handleCampfireClick.bind(this);
     this.handleSleepClick = this.handleSleepClick.bind(this);
 
-    this.startTimer = this.startTimer.bind(this)
-    this.stopTimer = this.stopTimer.bind(this)
-
-    Global.gameEmitter.on(NetworkEvent.WORK_UPDATE, this.handleNetworkWorkUpdate, this);
-    Global.gameEmitter.on(NetworkEvent.UPGRADE, this.handleResponseUpgrade, this);
     Global.gameEmitter.on(GameEvent.CONFIRM_OK_CLICK, this.handleSendDelete, this);
   }
 
   componentWillUnmount() {
-    this.stopTimer();
-    Global.gameEmitter.removeListener(NetworkEvent.WORK_UPDATE, this.handleNetworkWorkUpdate);
-    Global.gameEmitter.removeListener(NetworkEvent.UPGRADE, this.handleResponseUpgrade);
     Global.gameEmitter.removeListener(GameEvent.CONFIRM_OK_CLICK, this.handleSendDelete);
-  }
-
-  componentDidMount() {
-    if (this.props.structureData.state == BUILDING ||
-      this.props.structureData.state == UPGRADING) {
-      this.startTimer();
-    }
   }
 
   componentDidUpdate() {
@@ -199,47 +163,6 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     Global.gameEmitter.emit(GameEvent.CONFIRMATION, event);
   }
 
-  handleNetworkWorkUpdate(message) {
-    console.log('Network work update');
-
-    this.setState({ workDone: message.work_done, workPerSecond: message.work_per_sec });
-    this.startTimer();
-  }
-
-  handleResponseUpgrade(message) {
-    console.log('Response Upgrade');
-    const upgradeTimeSeconds = Math.floor(message.upgrade_time);
-
-    this.setState({
-      progress: 0,
-      maxProgress: upgradeTimeSeconds / 10
-    });
-    this.startTimer();
-  }
-
-  startTimer = () => {
-    if (this.timer) return; // prevent duplicates
-
-    this.timer = setInterval(() => {
-      this.setState(prevState => {
-        if (prevState.workDone >= prevState.buildUpgradeCost) {
-          this.stopTimer();
-          Global.network.sendInfoObj(prevState.structureData.id);
-          return null;
-        }
-
-        return {
-          workDone: prevState.workDone + prevState.workPerSecond
-        };
-      });
-    }, 1000);
-  };
-
-  stopTimer() {
-    clearInterval(this.timer);
-    this.timer = null;
-  }
-
   render() {
     //console.log('Rendering Structure Panel...');
     //console.log(this.props.structureData);
@@ -276,7 +199,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       this.props.structureData.state == STALLED ||
       this.props.structureData.state == UPGRADING)
 
-    const showAssignButton = true;
+    const showAssignButton = canAssignWorkersToStructure(this.props.structureData);
     const showStartUpgradeButton = this.props.structureData.state == NONE && this.props.structureData.upgradeable;
 
     const showPlantButton = (this.props.structureData.state == NONE && isFarm);
@@ -290,6 +213,10 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     const isFinished = this.props.structureData.state == NONE;
 
     const isUpgrading = this.props.structureData.state == PLANNING_UPGRADE || this.props.structureData.state == UPGRADING;
+    const buildUpgradeCost = this.props.structureData.total_work ??
+      (isUpgrading
+        ? this.props.structureData.upgrade_cost
+        : this.props.structureData.build_cost);
 
     let progressLabel = "Build";
 
@@ -304,7 +231,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     }
 
     var imageName = '';
-    var upgradeToImageName = '';
+    let upgradeToImageName: string | null = null;
 
     if (this.props.structureData.props == 'founded') {
       imageName = 'foundation.png'
@@ -313,12 +240,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
     }
 
     if (isUpgrading) {
-
-      if (this.props.structureData.selected_upgrade) {
-        upgradeToImageName = this.props.structureData.selected_upgrade.toLowerCase().replace(/\s/g, '') + '.png';
-      } else {
-        upgradeToImageName = Global.selectedUpgrade.toLowerCase().replace(/\s/g, '') + '.png';
-      }
+      upgradeToImageName = structureUpgradeProgressImageName(this.props.structureData);
     }
 
     const reqs = [];
@@ -355,14 +277,13 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       }
     }
 
-    console.log("buildUpgradeCost: " + this.state.buildUpgradeCost);
-    console.log("workDone: " + this.state.workDone);
-    console.log("workPerSecond: " + this.state.workPerSecond);
-
     const landscape = isLandscapeMobile();
     const panelTitle = isUpgrading ? `Upgrading to ${this.props.structureData.selected_upgrade || Global.selectedUpgrade}` : `${this.props.structureData.name} Level ${this.props.structureData.level}`;
     const activeRequirements = isUpgrading ? upgradeReqs : reqs;
-    const progress = <progress max={this.state.buildUpgradeCost} value={this.state.workDone}>{this.state.workDone}</progress>;
+    const progress = <ConstructionProgressBar
+      structureId={this.props.structureData.id}
+      fallbackWorkDone={this.props.structureData.work_done}
+      fallbackTotalWork={buildUpgradeCost} />;
     const iconPath = (name: string) => name.indexOf('.') != -1 ? `/static/art/ui/${name}` : `/static/art/ui/${name}.png`;
     const actions = [
       showQueueButton && { key: 'queue', label: 'Queue', icon: iconPath('queuebutton'), onClick: this.handleQueueClick },
@@ -372,7 +293,14 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
       showCraftButton && { key: 'craft', label: 'Craft', icon: iconPath('craftbutton'), onClick: this.handleCraftClick },
       showRefineButton && { key: 'refine', label: 'Refine', icon: iconPath('refinebutton'), onClick: this.handleRefineClick, selected: this.state.refineButtonSelected },
       showBuildButton && { key: 'build', label: 'Build', icon: iconPath('buildbutton'), onClick: this.handleBuildClick },
-      showUpgradeButton && { key: 'upgrade', label: 'Upgrade', icon: iconPath('upgradebutton'), onClick: this.handleStartUpgradeClick },
+      showUpgradeButton && {
+        key: 'upgrade',
+        label: this.props.structureData.state == UPGRADING ? 'Continue upgrade' : 'Upgrade',
+        icon: iconPath('upgradebutton'),
+        onClick: this.props.structureData.state == UPGRADING
+          ? this.handleUpgradeClick
+          : this.handleStartUpgradeClick
+      },
       showAssignButton && { key: 'assign', label: 'Assign', icon: iconPath('assignbutton'), onClick: this.handleAssignClick },
       showPlantButton && { key: 'plant', label: 'Plant', icon: iconPath('plant.png'), onClick: this.handlePlantClick },
       showTendButton && { key: 'tend', label: 'Tend', icon: iconPath('plant.png'), onClick: this.handleTendClick },
@@ -416,7 +344,8 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
                   <div style={upgradeVisualStyle}>
                     <img src={'/static/art/' + imageName} style={smallImageStyle} />
                     <img src={rightarrow} style={arrowStyle} />
-                    <img src={'/static/art/' + upgradeToImageName} style={smallImageStyle} />
+                    {upgradeToImageName &&
+                      <img src={'/static/art/' + upgradeToImageName} style={smallImageStyle} />}
                   </div>
                 </MobileCard>
                 : <MobileSummaryCard imageSrc={'/static/art/' + imageName} title={panelTitle} imageSize={landscape ? 58 : 82} />}
@@ -426,7 +355,7 @@ export default class StructurePanel extends React.Component<StructurePanelProps,
                 { label: 'HP', value: `${this.props.structureData.hp} / ${this.props.structureData.base_hp}`, hidden: !isFinished },
                 { label: 'Defense', value: this.props.structureData.base_def, hidden: !isFinished },
                 { label: 'Residents', value: `${this.props.structureData.residents} / ${this.props.structureData.max_residents}`, hidden: !(isFinished && isShelter) },
-                { label: `${progressLabel} Cost`, value: this.state.buildUpgradeCost, hidden: isFinished },
+                { label: `${progressLabel} Cost`, value: buildUpgradeCost, hidden: isFinished },
                 { label: `${progressLabel} Progress`, value: progress, hidden: !showProgress },
                 { label: 'Crop Type', value: this.props.structureData.crop_type, hidden: !(isFinished && isFarm) },
                 { label: 'Crop Qty', value: this.props.structureData.crop_quantity, hidden: !(isFinished && isFarm) },

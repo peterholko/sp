@@ -40,6 +40,10 @@ panel.setState = (update) => {
   const next = typeof update === 'function' ? update(panel.state, panel.props) : update;
   panel.state = { ...panel.state, ...next };
 };
+assert.ok(
+  panel.legacyObjectives().every((objective) => objective.id !== 'survive_5_nights'),
+  'the legacy fallback must not restore the retired five-night tutorial task',
+);
 panel.state.objectiveState = {
   packet: 'objective_state',
   version: 1,
