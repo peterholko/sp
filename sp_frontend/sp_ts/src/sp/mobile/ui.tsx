@@ -78,7 +78,6 @@ import WantedItemPanel from './ui/wantedItemPanel';
 import WorkQueuePanel from './ui/workQueuePanel';
 import WorkQueueEntryPanel from './ui/workQueueEntryPanel';
 import ObjPanel from './ui/objPanel';
-import WorldPanel from './ui/worldPanel';
 import IntroPanel from './ui/introPanel';
 import LoadingPanel from './ui/loadingPanel';
 import TrueDeathPanel from './ui/trueDeathPanel';
@@ -87,6 +86,12 @@ import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
 import ObjectivesPanel from './ui/objectivesPanel';
 import CooldownButton from './ui/cooldownButton';
+import AttacksPanel from './ui/attacksPanel';
+import {
+  compassDirection,
+  mobileViewport,
+  shouldShowCombatControls,
+} from './mobileHudLayout';
 
 interface NoticeNotification {
   id: number,
@@ -201,6 +206,9 @@ interface UIState {
   infoRefineItemTriggered: boolean,
   combatState: any,
   heroGatheringActive: boolean,
+  actionsOpen: boolean,
+  viewportWidth: number,
+  viewportHeight: number,
 }
 
 export default class UI extends React.Component<any, UIState> {
@@ -318,6 +326,9 @@ export default class UI extends React.Component<any, UIState> {
       infoRefineItemTriggered: false,
       combatState: null,
       heroGatheringActive: false,
+      actionsOpen: false,
+      viewportWidth: typeof window === 'undefined' ? 390 : window.innerWidth,
+      viewportHeight: typeof window === 'undefined' ? 844 : window.innerHeight,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -446,6 +457,29 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.handleNearbyResources, this);
   }
 
+  componentDidMount() {
+    window.addEventListener('resize', this.handleViewportChange);
+    window.addEventListener('orientationchange', this.handleViewportChange);
+    window.visualViewport?.addEventListener('resize', this.handleViewportChange);
+    this.handleViewportChange();
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener('resize', this.handleViewportChange);
+    window.removeEventListener('orientationchange', this.handleViewportChange);
+    window.visualViewport?.removeEventListener('resize', this.handleViewportChange);
+  }
+
+  handleViewportChange = () => {
+    const width = window.visualViewport?.width || window.innerWidth;
+    const height = window.visualViewport?.height || window.innerHeight;
+    const viewport = mobileViewport(width, height);
+    this.setState({
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+    });
+  };
+
   handleImageDefinitionReady() {
     this.forceUpdate();
   }
@@ -458,13 +492,11 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({ showMoveCompassClick: true });
     setTimeout(this.hideMoveCompassClick, 100);
 
-    const compass = this.compassRef.current!;
+    const compass = this.compassRef.current;
+    if (!compass) return;
 
-    var pocX = event.nativeEvent.offsetX - compass.naturalWidth / 2;
-    var pocY = event.nativeEvent.offsetY - compass.naturalHeight / 2;
-
-    var angleRads = Math.atan2(pocX, pocY);
-    var angleDegrees = ((angleRads * 180) / Math.PI) + 180;
+    const rect = compass.getBoundingClientRect();
+    const direction = compassDirection(event.clientX, event.clientY, rect);
 
     console.log(Global.objectStates);
     console.log(Global.heroId);
@@ -472,21 +504,6 @@ export default class UI extends React.Component<any, UIState> {
 
     if (!heroObj) {
       return;
-    }
-
-    var direction;
-    if (angleDegrees < 30 || angleDegrees >= 330) {
-      direction = 'N';
-    } else if (angleDegrees < 90 && angleDegrees >= 30) {
-      direction = 'NW';
-    } else if (angleDegrees < 150 && angleDegrees >= 90) {
-      direction = 'SW';
-    } else if (angleDegrees < 210 && angleDegrees >= 150) {
-      direction = 'S';
-    } else if (angleDegrees < 270 && angleDegrees >= 210) {
-      direction = 'SE';
-    } else if (angleDegrees < 330 && angleDegrees >= 270) {
-      direction = 'NE';
     }
 
     if (!direction) {
@@ -774,7 +791,7 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleTargetActionPanelClick(event: React.MouseEvent) {
-    //this.setState({ hideTargetActionPanel: true });
+    this.setState({ hideTargetActionPanel: true });
   }
 
   handleVillagerGatherClick(event: React.MouseEvent) {
@@ -874,8 +891,16 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleBrace() {
-    Global.network.sendBlock(Global.heroId);
+    Global.network.sendBlock(Global.heroId, 'brace');
   }
+
+  handleParry = () => {
+    Global.network.sendBlock(Global.heroId, 'parry');
+  };
+
+  handleDodge = () => {
+    Global.network.sendBlock(Global.heroId, 'dodge');
+  };
 
   handleAbilityClick(abilityId: string) {
     const targetId = Global.selectedKey && Global.selectedKey.id !== undefined
@@ -1922,8 +1947,13 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   render() {
-    console.log("styles", styles);
     const abilityHints = this.getAbilityHints();
+    const showCombatControls = shouldShowCombatControls(
+      this.state.selectedKey,
+      Global.objectStates,
+      this.state.combatState,
+    );
+    const viewport = mobileViewport(this.state.viewportWidth, this.state.viewportHeight);
     const mobileActionButton = (
       imageName: string,
       title: string,
@@ -1937,7 +1967,10 @@ export default class UI extends React.Component<any, UIState> {
         title={active ? activeTitle : title}
         aria-label={active ? activeTitle : title}
         aria-pressed={active}
-        onClick={handler}
+        onClick={(event) => {
+          handler(event);
+          this.setState({ actionsOpen: false });
+        }}
       >
         <img src={'/static/art/ui/' + imageName + '.png'} />
         {active &&
@@ -1946,83 +1979,109 @@ export default class UI extends React.Component<any, UIState> {
             className={styles.activeGatherButton}
             alt=""
             aria-hidden="true" />}
+        <span>{title}</span>
       </button>
     );
     const mobileCooldownButton = (imageName: string, imageButton: any, title: string, handler: any, cooldownEvent: string, timeKey: string) => (
       <CooldownButton
         imageName={imageName}
         imageButton={imageButton}
-        handler={handler}
+        handler={() => {
+          handler();
+          this.setState({ actionsOpen: false });
+        }}
         className={styles.mobileActionIconButton}
         cooldownEvent={cooldownEvent}
         timeKey={timeKey}
         title={title} />
     );
     return (
-      <div id="ui" className={styles.ui}>
+      <div
+        id="ui"
+        className={styles.ui}
+        data-orientation={viewport.portrait ? 'portrait' : 'landscape'}
+        data-compact={viewport.compact ? 'true' : 'false'}
+      >
 
         {!this.state.hideLoadingPanel &&
           <LoadingPanel errmsg={Global.accountName ? `Loading ${Global.accountName}...` : "Loading..."} />}
 
-        <div className={styles.mobileActionGrid}>
-          {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
-          {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
-          {mobileCooldownButton('surveybutton', explorebutton, 'Scout (daytime only)', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
-          {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick, this.state.heroGatheringActive)}
-          {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
-          {mobileActionButton('resourcesbutton', 'Nearby Resources', this.handleHeroSleepClick, this.state.resourcesIconBorder, 'Nearby Resources — hide category icons')}
-          {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
-          {mobileActionButton('craftbutton', 'Handcraft', this.handleHeroCraftClick)}
-        </div>
-
-        <button type="button" className={`${styles.combobutton} ${this.state.combatState?.available_finisher ? styles.combobuttonReady : ''}`} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
-          <img src="/static/art/ui/combobutton.png" />
+        <button
+          type="button"
+          className={`${styles.mobileActionsToggle} ${showCombatControls ? styles.mobileActionsToggleCombat : ''}`}
+          onClick={() => this.setState((state) => ({ actionsOpen: !state.actionsOpen }))}
+          aria-expanded={this.state.actionsOpen}
+          aria-controls="mobile-action-drawer"
+        >
+          {this.state.actionsOpen ? 'Close' : 'Actions'}
         </button>
 
-        <ActionButton type={QUICK}
-          handler={this.handleQuickAttack} />
-
-        <ActionButton type={PRECISE}
-          handler={this.handlePreciseAttack} />
-
-        <ActionButton type={FIERCE}
-          handler={this.handleFierceAttack} />
-
-        {abilityHints.length > 0 &&
-          <div className={styles.abilitybar}>
-            {abilityHints.map((ability) => {
-              const disabled = Boolean(ability.disabled_reason);
-              const title = ability.disabled_reason
-                ? `${ability.label}: ${ability.disabled_reason}`
-                : `${ability.label}: ${ability.hint} (${ability.cost} ${ability.cost_type})`;
-              return (
-                <button
-                  key={ability.id}
-                  type="button"
-                  className={styles.abilitybutton}
-                  disabled={disabled}
-                  title={title}
-                  onClick={() => this.handleAbilityClick(ability.id)}
-                >
-                  {ability.label}
-                </button>
-              );
-            })}
-          </div>
+        {this.state.actionsOpen &&
+          <section
+            id="mobile-action-drawer"
+            className={`${styles.mobileActionDrawer} ${showCombatControls ? styles.mobileActionDrawerCombat : ''}`}
+            aria-label="Hero actions"
+          >
+            <div className={styles.mobileActionDrawerTitle}>
+              <span>Hero Actions</span>
+              <span>{viewport.portrait ? 'Portrait' : 'Landscape'}</span>
+            </div>
+            <div className={styles.mobileActionGrid}>
+              {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
+              {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
+              {mobileCooldownButton('surveybutton', explorebutton, 'Scout', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
+              {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick, this.state.heroGatheringActive)}
+              {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
+              {mobileActionButton('resourcesbutton', 'Resources', this.handleHeroSleepClick, this.state.resourcesIconBorder, 'Nearby Resources — hide category icons')}
+              {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
+              {mobileActionButton('craftbutton', 'Handcraft', this.handleHeroCraftClick)}
+            </div>
+          </section>
         }
 
-        <img src={bracebutton}
-          id="bracebutton"
-          className={styles.bracebutton}
-          onClick={this.handleBrace} />
+        {showCombatControls &&
+          <div aria-label="Combat controls">
+            {this.state.combatState?.available_finisher &&
+              <button type="button" className={`${styles.combobutton} ${styles.combobuttonReady}`} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
+                <img src="/static/art/ui/combobutton.png" />
+              </button>}
 
-        <img src={parrybutton}
-          id="parrybutton"
-          className={styles.parrybutton} />
+            <ActionButton type={QUICK} handler={this.handleQuickAttack} />
+            <ActionButton type={PRECISE} handler={this.handlePreciseAttack} />
+            <ActionButton type={FIERCE} handler={this.handleFierceAttack} />
 
-        <img src={dodgebutton}
-          id="dodgebutton"
-          className={styles.dodgebutton} />
+            {abilityHints.length > 0 &&
+              <div className={styles.abilitybar}>
+                {abilityHints.map((ability) => {
+                  const disabled = Boolean(ability.disabled_reason);
+                  const title = ability.disabled_reason
+                    ? `${ability.label}: ${ability.disabled_reason}`
+                    : `${ability.label}: ${ability.hint} (${ability.cost} ${ability.cost_type})`;
+                  return (
+                    <button
+                      key={ability.id}
+                      type="button"
+                      className={styles.abilitybutton}
+                      disabled={disabled}
+                      title={title}
+                      onClick={() => this.handleAbilityClick(ability.id)}
+                    >
+                      {ability.label}
+                    </button>
+                  );
+                })}
+              </div>}
+
+            <img src={bracebutton} id="bracebutton" className={styles.bracebutton}
+              title="Brace" alt="Brace" onClick={this.handleBrace} />
+            <img src={parrybutton} id="parrybutton" className={styles.parrybutton}
+              title="Parry" alt="Parry" onClick={this.handleParry} />
+            <img src={dodgebutton} id="dodgebutton" className={styles.dodgebutton}
+              title="Dodge" alt="Dodge" onClick={this.handleDodge} />
+          </div>}
+
+        {showCombatControls && !this.state.hideAttacksPanel &&
+          <AttacksPanel attacks={Global.attacks} combatState={this.state.combatState} />}
 
         <img src={movecompass}
           id="movecompass"
@@ -2033,9 +2092,13 @@ export default class UI extends React.Component<any, UIState> {
         {this.state.showMoveCompassClick &&
           <img id="movecompassclick" src={movecompass_click} className={styles.movecompassclick} />}
 
-        <HeroFrame heroStats={this.state.heroStats} hungerStatus={this.state.hungerStatus} thirstStatus={this.state.thirstStatus} fatigueStatus={this.state.fatigueStatus}></HeroFrame>
-
-        <WorldPanel worldData={this.state.worldData} />
+        <HeroFrame
+          heroStats={this.state.heroStats}
+          hungerStatus={this.state.hungerStatus}
+          thirstStatus={this.state.thirstStatus}
+          fatigueStatus={this.state.fatigueStatus}
+          worldData={this.state.worldData}
+        />
 
         <ObjectivesPanel />
 

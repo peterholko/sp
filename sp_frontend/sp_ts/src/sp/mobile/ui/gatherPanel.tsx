@@ -29,6 +29,7 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
     this.handleStoneClick = this.handleStoneClick.bind(this)
     this.handleFishClick = this.handleFishClick.bind(this)
     this.handleGameClick = this.handleGameClick.bind(this)
+    this.handleClose = this.handleClose.bind(this)
   }
 
   handleOreClick(event: React.MouseEvent) {
@@ -91,6 +92,10 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
     Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
   }
 
+  handleClose() {
+    Global.gameEmitter.emit(GameEvent.RESOURCE_GATHER_CLICK, {});
+  }
+
   render() {
     var hideOreButton = false;
     var hideLogButton = false;
@@ -103,7 +108,7 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
     const gatherStyle = {
       top: '50%',
       left: '50%',
-      width: '333px',
+      width: 'min(333px, calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)))',
       height: '119px',
       transform: 'translate(-50%, -50%)',
       position: 'fixed',
@@ -113,8 +118,8 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
     const panelStyle = {
       position: 'absolute',
       inset: 0,
-      width: '333px',
-      height: '119px',
+      width: '100%',
+      height: '100%',
       pointerEvents: 'none'
     } as React.CSSProperties
 
@@ -146,9 +151,25 @@ export default class GatherPanel extends React.Component<GatherProps, any> {
       cursor: 'help'
     } as React.CSSProperties
 
+    const closeStyle = {
+      position: 'absolute',
+      top: '4px',
+      right: '6px',
+      zIndex: 2,
+      width: '28px',
+      height: '28px',
+      border: '1px solid rgba(201,170,113,.6)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      fontSize: '18px',
+      lineHeight: '24px',
+    } as React.CSSProperties
+
     return (
       <div style={gatherStyle} >
         <img src={gatherpanel} style={panelStyle} />
+        <button type="button" style={closeStyle} onClick={this.handleClose} aria-label="Close gather actions">×</button>
         <div style={buttonRowsStyle}>
           <div style={buttonRowStyle}>
             {!hideOreButton &&

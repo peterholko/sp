@@ -1,9 +1,4 @@
-
 import * as React from "react";
-import targetactionpanel from "ui_comp/buttonsframe.png"
-import { Network } from "../../core/network";
-import { Global } from "../../core/global";
-
 import inventorybutton from "ui_comp/inventorybutton.png";
 import transferbutton from "ui_comp/transferbutton.png";
 import explorebutton from "ui_comp/explorebutton.png";
@@ -11,312 +6,155 @@ import gatherbutton from "ui_comp/gatherbutton.png";
 import followbutton from "ui_comp/followbutton.png";
 import infobutton from "ui_comp/infobutton.png";
 import merchantbutton from "ui_comp/merchantbutton.png";
-import repairbutton from "ui_comp/repairbutton.png";
-
+import repairbutton from "ui_comp/buildbutton.png";
+import { Global } from "../../core/global";
 import { Util } from "../../core/util";
-import { VILLAGER, DEAD, OBJ, TILE, FOUNDED, BUTTON_WIDTH } from "../../core/config";
+import { VILLAGER, DEAD, OBJ, TILE, FOUNDED } from "../../core/config";
 import { GameEvent } from "../../core/gameEvent";
 import { canOfferItemTransfer } from "../../core/shipwreckTransferPolicy";
-import SmallButton from "./smallButton";
+import styles from "./../ui.module.css";
 
 interface TAProps {
   selectedBoxPos: integer,
-  selectedKey: any
+  selectedKey: any,
+}
+
+interface TargetAction {
+  label: string,
+  image: string,
+  handler: (event: React.MouseEvent) => void,
 }
 
 export default class TargetActionPanel extends React.Component<TAProps, any> {
-  constructor(props) {
-    super(props);
-
-    this.state = {
-    };
-
-    this.handleInventoryClick = this.handleInventoryClick.bind(this)
-    this.handleTransferClick = this.handleTransferClick.bind(this)
-    this.handleExploreClick = this.handleExploreClick.bind(this)
-    this.handleGatherClick = this.handleGatherClick.bind(this)
-    this.handleFollowClick = this.handleFollowClick.bind(this)
-    this.handleInfoClick = this.handleInfoClick.bind(this)
-    this.handleInfoTileResourceClick = this.handleInfoTileResourceClick.bind(this)
-    this.handleMerchantClick = this.handleMerchantClick.bind(this)
-    this.handleRepairClick = this.handleRepairClick.bind(this)
-  }
-
-  handleInventoryClick(event: React.MouseEvent) {
-    console.log('Inventory Click');
-    Global.network.sendInfoInventory(this.props.selectedKey.id);
+  closeTray() {
     Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
   }
 
-  handleTransferClick(event: React.MouseEvent) {
-    console.log('Transfer Click');
+  handleInventoryClick = (event: React.MouseEvent) => {
+    Global.network.sendInfoInventory(this.props.selectedKey.id);
+    this.closeTray();
+  };
+
+  handleTransferClick = (event: React.MouseEvent) => {
     Global.infoItemTransferAction = 'transfer';
     Global.network.sendInfoItemTransfer(Global.heroId, this.props.selectedKey.id);
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
+    this.closeTray();
+  };
 
-  handleStatsClick(event: React.MouseEvent) {
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
-
-  handleExploreClick(event: React.MouseEvent) {
+  handleExploreClick = (event: React.MouseEvent) => {
     if (this.props.selectedKey.type == OBJ) {
-      if (Util.isPlayerObj(this.props.selectedKey.id) &&
-          Util.isSubclass(this.props.selectedKey.id, VILLAGER)) {
+      if (Util.isPlayerObj(this.props.selectedKey.id)
+          && Util.isSubclass(this.props.selectedKey.id, VILLAGER)) {
         Global.network.sendOrderProspect(this.props.selectedKey.id);
-      } else if (Util.isSubclass(this.props.selectedKey.id, "poi") ||
-                 Util.isSubclass(this.props.selectedKey.id, "monolith")) {
+      } else if (Util.isSubclass(this.props.selectedKey.id, 'poi')
+          || Util.isSubclass(this.props.selectedKey.id, 'monolith')) {
         Global.network.sendInvestigate(this.props.selectedKey.id);
       }
     }
+    this.closeTray();
+  };
 
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
-
-  handleGatherClick(event: React.MouseEvent) {
+  handleGatherClick = (event: React.MouseEvent) => {
     Global.gameEmitter.emit(GameEvent.VILLAGER_GATHER_CLICK, this.props.selectedKey);
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
+    this.closeTray();
+  };
 
-  handleFollowClick(event: React.MouseEvent) {
+  handleFollowClick = (event: React.MouseEvent) => {
     Global.network.sendFollow(this.props.selectedKey.id);
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
+    this.closeTray();
+  };
 
-  handleRepairClick(event: React.MouseEvent) {
+  handleRepairClick = (event: React.MouseEvent) => {
     Global.network.sendOrderRepair(this.props.selectedKey.id);
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
+    this.closeTray();
+  };
 
-  handleInfoClick(event: React.MouseEvent) {
+  handleInfoClick = (event: React.MouseEvent) => {
     if (this.props.selectedKey.type == OBJ) {
-      console.log('handleInfoClick');
       Global.network.sendInfoObj(this.props.selectedKey.id);
     } else if (this.props.selectedKey.type == TILE) {
-      Global.network.sendInfoTile(this.props.selectedKey.x,
-        this.props.selectedKey.y);
+      Global.network.sendInfoTile(this.props.selectedKey.x, this.props.selectedKey.y);
     }
+    this.closeTray();
+  };
 
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
-
-  handleInfoTileResourceClick(event: React.MouseEvent) {
-    Global.network.sendInfoTileResources(this.props.selectedKey.x,
-      this.props.selectedKey.y);
-
-    Global.gameEmitter.emit(GameEvent.TAP_CLICK, {});
-  }
-
-  handleMerchantClick() {
+  handleMerchantClick = (event: React.MouseEvent) => {
     Global.infoItemTransferAction = 'merchant';
-    //Network.sendInfoItemTransfer(Global.heroId, this.props.selectedKey.id);
-    Global.network.sendInfoMerchant(Global.heroId, this.props.selectedKey.id,);
+    Global.network.sendInfoMerchant(Global.heroId, this.props.selectedKey.id);
     Global.gameEmitter.emit(GameEvent.MERCHANT_CLICK, this.props.selectedKey.id);
-  }
+    this.closeTray();
+  };
 
   render() {
-    const selectedObjectState = this.props.selectedKey.type == OBJ
-      ? Global.objectStates[this.props.selectedKey.id]
-      : undefined;
-
-    var hideInfoButton = true;
-    var hideInfoTileResourceButton = true;
-    var hideInventoryButton = true;
-    var hideTranferButton = true;
-    var hideExploreButton = true;
-    var hideGatherButton = true;
-    var hideFollowButton = true;
-    var hideMerchantButton = true;
-    var hideRepairButton = true;
-    var exploreActionLabel = "Prospect";
-
-    var buttonOrder = {
-      info: 0,
-      inventory: 1,
-      transfer: 2,
-      explore: 3,
-      gather: 4,
-      follow: 5,
-      repair: 6
+    const key = this.props.selectedKey;
+    const selectedObjectState = key.type == OBJ ? Global.objectStates[key.id] : undefined;
+    const actions: TargetAction[] = [];
+    const add = (label: string, image: string, handler: (event: React.MouseEvent) => void) => {
+      actions.push({ label, image, handler });
     };
 
-    var numButtons = 1;
-
-    if (this.props.selectedKey.type == OBJ) {
-      if (Util.isPlayerObj(this.props.selectedKey.id)) {
-        if (Util.isSubclass(this.props.selectedKey.id, VILLAGER)) {
-          hideInfoButton = false;
-          hideInventoryButton = false;
-          hideTranferButton = false;
-          hideExploreButton = false;
-          hideGatherButton = false;
-          hideFollowButton = false;
-          hideRepairButton = false;
-          exploreActionLabel = "Prospect";
-          numButtons = 3; //Shortcut because the explore, gather, follow are stacked below
-
-        } else if (Util.isState(this.props.selectedKey.id, FOUNDED)) {
-          hideInfoButton = false;
-          hideTranferButton = false;
-          numButtons = 2;
+    if (key.type == TILE) {
+      add('Information', infobutton, this.handleInfoClick);
+    } else if (key.type == OBJ) {
+      if (Util.isPlayerObj(key.id)) {
+        if (Util.isSubclass(key.id, VILLAGER)) {
+          add('Information', infobutton, this.handleInfoClick);
+          add('Inventory', inventorybutton, this.handleInventoryClick);
+          add('Transfer', transferbutton, this.handleTransferClick);
+          add('Prospect', explorebutton, this.handleExploreClick);
+          add('Gather', gatherbutton, this.handleGatherClick);
+          add('Follow', followbutton, this.handleFollowClick);
+          add('Repair', repairbutton, this.handleRepairClick);
+        } else if (Util.isState(key.id, FOUNDED)) {
+          add('Information', infobutton, this.handleInfoClick);
+          add('Transfer', transferbutton, this.handleTransferClick);
         } else {
-          hideInfoButton = false;
-          hideInventoryButton = false;
-          hideTranferButton = false;
-          numButtons = 3;
+          add('Information', infobutton, this.handleInfoClick);
+          add('Inventory', inventorybutton, this.handleInventoryClick);
+          add('Transfer', transferbutton, this.handleTransferClick);
         }
+      } else if (Util.isState(key.id, DEAD)) {
+        add('Information', infobutton, this.handleInfoClick);
+        add('Loot', transferbutton, this.handleTransferClick);
+      } else if (Util.isSubclass(key.id, 'monolith')) {
+        add('Information', infobutton, this.handleInfoClick);
+        add('Transfer', transferbutton, this.handleTransferClick);
+        add('Investigate', explorebutton, this.handleExploreClick);
+      } else if (Util.isSubclass(key.id, 'poi')) {
+        add('Information', infobutton, this.handleInfoClick);
+        if (canOfferItemTransfer(selectedObjectState, Global.shipwreckSearched)) {
+          add('Transfer', transferbutton, this.handleTransferClick);
+        }
+        add('Investigate', explorebutton, this.handleExploreClick);
+      } else if (Util.isSubclass(key.id, 'merchant')) {
+        add('Information', infobutton, this.handleInfoClick);
+        add('Trade', merchantbutton, this.handleMerchantClick);
+      } else if (Util.hasGroup(key.id, 'Tax Collector')) {
+        add('Information', infobutton, this.handleInfoClick);
+        add('Transfer', transferbutton, this.handleTransferClick);
       } else {
-        if (Util.isState(this.props.selectedKey.id, DEAD)) {
-          hideInfoButton = false;
-          hideTranferButton = false;
-          numButtons = 2;
-        }
-        else if (Util.isSubclass(this.props.selectedKey.id, "monolith")) {
-          hideTranferButton = false;
-          hideInfoButton = false;
-          hideExploreButton = false;
-          exploreActionLabel = "Investigate";
-          numButtons = 2;
-        } else if (Util.isSubclass(this.props.selectedKey.id, "poi")) {
-          hideTranferButton = !canOfferItemTransfer(
-            selectedObjectState,
-            Global.shipwreckSearched,
-          );
-          hideInfoButton = false;
-          hideExploreButton = false;
-          exploreActionLabel = "Investigate";
-          numButtons = hideTranferButton ? 1 : 2;
-        }
-        else if (Util.isSubclass(this.props.selectedKey.id, "merchant")) {
-          hideMerchantButton = false;
-          hideInfoButton = false;
-        }
-        else if (Util.hasGroup(this.props.selectedKey.id, "Tax Collector")) {
-          hideTranferButton = false;
-          hideInfoButton = false;
-        } else {
-          hideInfoButton = false;
-        }
+        add('Information', infobutton, this.handleInfoClick);
       }
-    } else if (this.props.selectedKey.type == TILE) {
-      hideInfoButton = false;
-      //hideInfoTileResourceButton = false;
-      //numButtons = 2;
     }
 
-    var panelWidth = numButtons * BUTTON_WIDTH;
-    var panelPos = ((this.props.selectedBoxPos + 1) * 74) + 35 - 37 + panelWidth / 2;
-
-    const targetActionPanelStyle = {
-      top: '82px',
-      right: panelPos + 'px',
-      position: 'fixed',
-      zIndex: 6
-    } as React.CSSProperties
-
-    const tapStyle = {
-      position: 'fixed',
-      width: '67px',
-      height: '67px'
-    } as React.CSSProperties
-
-    const infoStyle = {
-      transform: 'translate(0px, 0px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const infoTileResourcesStyle = {
-      transform: 'translate(50px, 0px)',
-      position: 'fixed'
-    } as React.CSSProperties    
-
-    const inventoryStyle = {
-      transform: 'translate(100px, 0px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const transferStyle = {
-      transform: 'translate(50px, 0px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const merchantStyle = {
-      transform: 'translate(50px, 0px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const exploreStyle = {
-      transform: 'translate(0px, 50px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const gatherStyle = {
-      transform: 'translate(50px, 50px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const followStyle = {
-      transform: 'translate(100px, 50px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const repairStyle = {
-      transform: 'translate(0px, 100px)',
-      position: 'fixed'
-    } as React.CSSProperties    
+    if (actions.length === 0) return null;
 
     return (
-      <div style={targetActionPanelStyle} >
-
-        {!hideInfoButton &&
-          <SmallButton handler={this.handleInfoClick}
-            imageName="infobutton"
-            style={infoStyle} />}
-
-        {!hideInfoTileResourceButton &&
-          <SmallButton handler={this.handleInfoTileResourceClick}
-            imageName="resourcesbutton"
-            style={infoTileResourcesStyle} />}             
-
-        {!hideInventoryButton &&
-          <SmallButton handler={this.handleInventoryClick}
-            imageName="inventorybutton"
-            style={inventoryStyle} />}
-
-        {!hideTranferButton &&
-          <SmallButton handler={this.handleTransferClick}
-            imageName="transferbutton"
-            style={transferStyle} />}
-
-        {!hideExploreButton &&
-          <img src={explorebutton}
-            style={exploreStyle}
-            title={exploreActionLabel}
-            alt={exploreActionLabel}
-            aria-label={exploreActionLabel}
-            onClick={this.handleExploreClick} />}
-
-        {!hideGatherButton &&
-          <img src={gatherbutton}
-            style={gatherStyle}
-            onClick={this.handleGatherClick} />}
-
-        {!hideFollowButton &&
-          <SmallButton handler={this.handleFollowClick}
-            imageName="followbutton"
-            style={followStyle} />}
-
-        {!hideMerchantButton &&
-          <SmallButton handler={this.handleMerchantClick}
-            imageName="merchantbutton"
-            style={merchantStyle} />}
-
-        {!hideRepairButton &&
-          <SmallButton handler={this.handleRepairClick}
-            imageName="repairbutton"
-            style={repairStyle} />}             
-
-      </div>
+      <nav className={styles.targetActionTray} aria-label="Selected target actions">
+        {actions.map((action) => (
+          <button
+            type="button"
+            key={action.label}
+            className={styles.targetActionButton}
+            onClick={action.handler}
+            title={action.label}
+            aria-label={action.label}
+          >
+            <img src={action.image} alt="" aria-hidden="true" />
+            <span>{action.label}</span>
+          </button>
+        ))}
+      </nav>
     );
   }
 }

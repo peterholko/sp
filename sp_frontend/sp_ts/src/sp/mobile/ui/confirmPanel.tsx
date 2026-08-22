@@ -46,36 +46,45 @@ export default class ConfirmPanel extends React.Component<ConfirmProps, any> {
     const confirmStyle = {
       top: '50%',
       left: '50%',
-      width: '333px',
-      height: '119px',
-      marginTop: '-59px',
-      marginLeft: '-166px',
+      width: 'min(333px, calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)))',
+      minHeight: '132px',
+      transform: 'translate(-50%, -50%)',
       position: 'fixed',
       zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const confirmPanelStyle = {
-      position: 'fixed'
+      position: 'absolute',
+      inset: 0,
+      width: '100%',
+      height: '100%',
+      objectFit: 'fill',
     } as React.CSSProperties
 
     const spanNameStyle = {
-      transform: 'translate(15px, 20px)',
-      position: 'fixed',
+      top: '24px',
+      left: '14px',
+      right: '14px',
+      position: 'absolute',
       textAlign: 'center',
       color: 'white',
       fontFamily: 'Verdana',
       fontSize: '14px',
-      width: '300px'
+      lineHeight: 1.25,
+      overflowWrap: 'anywhere',
     } as React.CSSProperties
 
     const okButtonStyle = {
-      transform: 'translate(141px, 90px)',
-      position: 'fixed'
+      left: '50%',
+      bottom: '3px',
+      transform: 'translateX(-50%)',
+      position: 'absolute',
     } as React.CSSProperties
 
     const exitButtonStyle = {
-      transform: 'translate(285px, 0px)',
-      position: 'fixed'
+      top: 0,
+      right: 0,
+      position: 'absolute',
     } as React.CSSProperties
 
     return (

@@ -47,8 +47,8 @@ class NoticeToast extends React.Component<NoticeToastProps, any> {
 
   render() {
     const noticeStyle = {
-      width: '315px',
-      height: '67px',
+      width: '100%',
+      minHeight: '67px',
       marginBottom: '6px',
       position: 'relative',
       cursor: 'pointer',
@@ -56,20 +56,24 @@ class NoticeToast extends React.Component<NoticeToastProps, any> {
     } as React.CSSProperties
 
     const noticePanelStyle = {
-      top: '0px',
-      left: '0px',
-      position: 'absolute'
+      inset: 0,
+      width: '100%',
+      height: '67px',
+      position: 'absolute',
+      objectFit: 'fill',
     } as React.CSSProperties
 
     const spanNameStyle = {
       top: '10px',
-      left: '7px',
+      left: '10px',
+      right: '10px',
       position: 'absolute',
       textAlign: 'center',
       color: 'white',
       fontFamily: 'Verdana',
       fontSize: '12px',
-      width: '300px'
+      lineHeight: 1.25,
+      overflowWrap: 'anywhere',
     } as React.CSSProperties
 
     return (
@@ -92,10 +96,10 @@ export default class NoticeStack extends React.Component<NoticeStackProps, any> 
     const overflowCount = Math.max(0, orderedNotifications.length - MAX_VISIBLE_NOTICES);
 
     const stackStyle = {
-      top: 'calc(20px + env(safe-area-inset-top, 0px))',
+      top: 'calc(132px + env(safe-area-inset-top, 0px))',
       left: '50%',
-      width: '315px',
-      marginLeft: '-158px',
+      width: 'min(315px, calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)))',
+      transform: 'translateX(-50%)',
       position: 'fixed',
       zIndex: MOBILE_NOTICE_Z,
       pointerEvents: 'none',
@@ -108,7 +112,7 @@ export default class NoticeStack extends React.Component<NoticeStackProps, any> 
       lineHeight: '18px',
       textAlign: 'center',
       textShadow: '1px 1px 2px black',
-      width: '315px',
+      width: '100%',
     } as React.CSSProperties
 
     return (

@@ -1,9 +1,6 @@
 import * as React from "react";
-import halfpanel from "ui_comp/halfpanel.png";
-import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
-import { GameEvent } from "../../core/gameEvent";
-import { MOBILE_DIALOG_Z } from "./mobileLayers";
+import MobilePanelScreen from "./mobilePanelScreen";
 
 interface TrueDeathPanelProps {
   heroName: string,
@@ -20,116 +17,59 @@ interface TrueDeathPanelProps {
 }
 
 export default class TrueDeathPanel extends React.Component<TrueDeathPanelProps, any> {
-  constructor(props) {
-    super(props);
-
-    this.state = {
-    };
-       
-    this.handleOkClick = this.handleOkClick.bind(this);
-  }
-
-  handleOkClick() {
+  handleOkClick = () => {
     Global.network.sendRecreateHero();
     window.location.reload();
-  }
+  };
 
   render() {
-    let imageName = this.props.heroRank.toLowerCase().replace(/\s/g, '');
-    let imagePath = '/static/art/' + imageName + '_single.png';
+    const imageName = this.props.heroRank.toLowerCase().replace(/\s/g, '');
+    const rows = [
+      ['Final Score', (this.props.scoreTotal || this.props.totalXp).toLocaleString()],
+      ['Total XP Earned', this.props.totalXp],
+      ['Days Survived', this.props.daysSurvived || 0],
+      ['Waves Survived', this.props.wavesSurvived || 0],
+      ['Legendary Kills', this.props.legendaryKills || 0],
+      ['Fate', this.props.fate],
+    ];
+    if (this.props.scoreBreakdown) {
+      rows.push(
+        ['Survival score', this.props.scoreBreakdown.survival || 0],
+        ['Progression score', this.props.scoreBreakdown.progression || 0],
+        ['Valor / combat score', this.props.scoreBreakdown.valor || 0],
+      );
+    }
 
-    var halfPanelStyle = {
-      top: '50%',
-      left: '50%',
-      width: '323px',
-      height: '430px',
-      marginTop: '-215px',
-      marginLeft: '-161px',
-      position: 'fixed',
-      zIndex: MOBILE_DIALOG_Z
-    } as React.CSSProperties
-
-    const heroStyle = {
-      transform: 'translate(-195px, 25px)',
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const spanNameStyle = {
-      transform: 'translate(-323px, 90px)',
-      position: 'fixed',
-      textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      width: '323px'
-    } as React.CSSProperties
-
-    const tableStyle = {
-      transform: 'translate(20px, -240px)',
-      position: 'fixed',
-      color: 'white',
-      fontFamily: 'Verdana',
-      fontSize: '12px',
-      borderCollapse: 'separate',
-      borderSpacing: '10px 0'
-    } as React.CSSProperties
-
-
-    const okButtonStyle = {
-      transform: 'translate(-186px, 290px)',
-      position: 'fixed'
-    } as React.CSSProperties
+    const footer = (
+      <button type="button" onClick={this.handleOkClick} style={{
+        width: '100%', minHeight: '46px', border: '1px solid #8f754e', borderRadius: '5px',
+        background: '#25282b', color: '#f2e7cf', fontFamily: 'Cinzel, Verdana, serif', fontWeight: 700,
+      }}>
+        Begin a New Legend
+      </button>
+    );
 
     return (
-      <div style={halfPanelStyle}>
-        <img src={halfpanel} />
-        <img src={imagePath} style={heroStyle} />
-        <span style={spanNameStyle}>The legend of {this.props.heroName} has ended.</span>
-        <table style={tableStyle}>
-          <tbody>
-            <tr>
-              <td>Final Score: </td>
-              <td>{(this.props.scoreTotal || this.props.totalXp).toLocaleString()}</td>
-            </tr>
-            <tr>
-              <td>Total Xp Earned: </td>
-              <td>{this.props.totalXp}</td>
-            </tr>
-            <tr>
-              <td>Days Survived: </td>
-              <td>{this.props.daysSurvived || 0}</td>
-            </tr>
-            <tr>
-              <td>Waves Survived: </td>
-              <td>{this.props.wavesSurvived || 0}</td>
-            </tr>
-            <tr>
-              <td>Legendary Kills: </td>
-              <td>{this.props.legendaryKills || 0}</td>
-            </tr>
-            <tr>
-              <td>Fate: </td>
-              <td>{this.props.fate}</td>
-            </tr>
-            {this.props.scoreBreakdown &&
-              <React.Fragment>
-                <tr>
-                  <td>Survival score: </td>
-                  <td>{this.props.scoreBreakdown.survival || 0}</td>
-                </tr>
-                <tr>
-                  <td>Progression score: </td>
-                  <td>{this.props.scoreBreakdown.progression || 0}</td>
-                </tr>
-                <tr>
-                  <td>Valor/combat score: </td>
-                  <td>{this.props.scoreBreakdown.valor || 0}</td>
-                </tr>
-              </React.Fragment>}
-          </tbody>
-        </table>
-        <img src={okbutton} style={okButtonStyle} onClick={this.handleOkClick}/>
-      </div>
+      <MobilePanelScreen panelType="true_death" title="Your Legend Has Ended" hideExitButton footer={footer}>
+        <div style={{ textAlign: 'center' }}>
+          <img src={`/static/art/${imageName}_single.png`} alt={this.props.heroName}
+            style={{ width: '112px', height: '112px', objectFit: 'contain', imageRendering: 'pixelated' }} />
+          <p style={{ color: '#f2e7cf', fontSize: '14px', margin: '4px 0 14px' }}>
+            The legend of {this.props.heroName} has ended.
+          </p>
+          <dl style={{ margin: 0, textAlign: 'left' }}>
+            {rows.map(([label, value]) => (
+              <div key={String(label)} style={{
+                display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '7px 3px',
+                borderBottom: '1px solid rgba(255,255,255,.1)', fontSize: '12px',
+              }}>
+                <dt style={{ color: '#aaa' }}>{label}</dt>
+                <dd style={{ margin: 0, color: '#f2e7cf', textAlign: 'right' }}>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      </MobilePanelScreen>
     );
   }
 }
