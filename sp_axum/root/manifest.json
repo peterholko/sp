@@ -3,7 +3,7 @@
   "name": "Survive Perilous RPG",
   "icons": [
     {
-      "src": "/perilouslogo-180x180.png",
+      "src": "/perilouslogo-180x180.png?v=20260821-stockade",
       "sizes": "180x180",
       "type": "image/png"
     }
