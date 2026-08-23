@@ -114,7 +114,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
   }
 
   toggleExpanded() {
-    this.setState({ expanded: !this.state.expanded });
+    this.setState(state => ({ expanded: !state.expanded }));
   }
 
   componentDidMount() {
@@ -184,7 +184,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       ...receiveSafeLogoutStatus(message),
       safeLogoutRequestInFlight: keepRequestLocked,
       safeLogoutCancelInFlight: keepCancelLocked,
-      expanded: Boolean(view && (view.pending || view.protected || view.reason)) || this.state.expanded,
     });
   }
 
@@ -236,6 +235,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       threatState: null,
       discoveryEvent: null,
       crisisStatus: null,
+      expanded: false,
       ...clearSafeLogoutStatus(),
     });
   }
