@@ -397,10 +397,10 @@
 }
 
 .combobutton {
-  bottom: calc(110px + env(safe-area-inset-bottom, 0px));
-  right: calc(61px + env(safe-area-inset-right, 0px));
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
+  right: calc(163px + env(safe-area-inset-right, 0px));
   position: fixed;
-  z-index: 4;
+  z-index: 6;
   width: 50px;
   height: 49px;
   padding: 0;
