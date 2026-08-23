@@ -1,4 +1,5 @@
 import * as React from "react";
+import { mobileCombatHints } from "../mobileCombatHints";
 
 const MAX_ATTACKS = 6;
 
@@ -16,6 +17,7 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
     const targetEffects = Array.isArray(combatState.target_effects) ? combatState.target_effects : [];
     const counterHint = combatState.counter_hint;
     const enemyIntent = combatState.enemy_intent;
+    const compactHints = mobileCombatHints(enemyIntent, counterHint);
 
     if (!history.length && !combos.length && !availableFinisher
         && !targetEffects.length && !counterHint && !enemyIntent) {
@@ -60,13 +62,30 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
       color: '#ffd6d6',
       fontWeight: 700,
     };
+    const hintRowStyle: React.CSSProperties = {
+      ...rowStyle,
+      alignItems: 'stretch',
+      flexDirection: 'column',
+      gap: '1px',
+      lineHeight: 1.15,
+      width: '100%',
+    };
+    const intentStyle: React.CSSProperties = {
+      color: '#e6d7bd',
+      fontWeight: 700,
+    };
+    const counterStyle: React.CSSProperties = {
+      color: '#f2d27a',
+    };
 
     return (
       <aside style={panelStyle} aria-label="Combat information">
-        {(enemyIntent || counterHint) &&
-          <div style={rowStyle}>
-            {enemyIntent && <span>Enemy: <strong>{enemyIntent}</strong></span>}
-            {counterHint && <span style={{ color: '#f2d27a' }}>Counter: {counterHint}</span>}
+        {(compactHints.intent || compactHints.counter) &&
+          <div style={hintRowStyle} aria-label="Enemy combat hints">
+            {compactHints.intent &&
+              <span style={intentStyle} title={enemyIntent}>⚔ {compactHints.intent}</span>}
+            {compactHints.counter &&
+              <span style={counterStyle} title={counterHint}>Try: {compactHints.counter}</span>}
           </div>}
 
         {history.length > 0 &&
@@ -78,7 +97,7 @@ export default class AttacksPanel extends React.Component<AttacksProp, any> {
 
         {(availableFinisher || combos.length > 0) &&
           <div style={rowStyle}>
-            {availableFinisher && <strong style={{ color: '#ffd45a' }}>Combo ready: {availableFinisher}</strong>}
+            {availableFinisher && <strong style={{ color: '#ffd45a' }}>Ready: {availableFinisher}</strong>}
             {!availableFinisher && combos.slice(0, 1).map((combo, index) => (
               <span key={index}>
                 Next: {(combo.remaining_attacks || []).join(' + ')} → {combo.name}
