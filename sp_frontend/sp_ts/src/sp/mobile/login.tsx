@@ -964,9 +964,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   render() {
-    const logoStyle = {
-    }
-
     const totalPages = Math.ceil(this.state.leaderboardEntries.length / this.leaderboardPageSize);
     const currentPage = Math.min(this.state.leaderboardPage, Math.max(totalPages - 1, 0));
     const paginatedEntries = this.state.leaderboardEntries.slice(
@@ -1097,7 +1094,7 @@ export default class LoginControl extends React.Component<any, any> {
       <div>
         {!this.state.hideLandingPage && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <div className={`server-status ${serverStatusClass}`} role="status" aria-live="polite">
                 <span className="server-status__indicator" aria-hidden="true"></span>
@@ -1172,7 +1169,7 @@ export default class LoginControl extends React.Component<any, any> {
 
         {this.state.showLoginPanel && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <div className={`server-status ${serverStatusClass}`} role="status" aria-live="polite">
                 <span className="server-status__indicator" aria-hidden="true"></span>
@@ -1218,7 +1215,7 @@ export default class LoginControl extends React.Component<any, any> {
 
         {this.state.showResetPanel && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <form onSubmit={this.handleResetSubmit}>
                 <p style={{ textAlign: 'center' }}>Choose a new password</p>
