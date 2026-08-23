@@ -15,6 +15,8 @@ import { GameEvent } from "../../core/gameEvent";
 import { Global } from "../../core/global";
 import { TRIGGER_PLAYER_SELLING_ITEM, TRIGGER_INVENTORY, TRIGGER_PLAYER_BUYING_ITEM, TRIGGER_REFINING_ITEM, TRIGGER_STRUCTURE_REFINING_ITEM } from "../../core/config";
 import { canUseInventoryItem } from "../../core/itemUsePolicy";
+import WorkQueueProgressBar from "../../core/workQueueProgressBar";
+import { refiningProgressForItem } from "../../core/refiningProgress";
 import {
   MobileCard,
   MobilePanelActions,
@@ -27,6 +29,7 @@ import {
 interface ItemPanelProps {
   triggerAction,
   itemData,
+  activeRefineItemId?: number | null,
 }
 
 export default class ItemPanel extends React.Component<ItemPanelProps, any> {
@@ -86,6 +89,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
 
   handleRefineClick() {
     Global.isStructureRefining = false;
+    Global.gameEmitter.emit(GameEvent.REFINE_CLICK, { itemId: this.props.itemData.id });
     Global.network.sendRefine(this.props.itemData.id);
   }
 
@@ -144,6 +148,15 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
 
     const hasEquipable = (this.props.itemData.attrs && this.props.itemData.attrs.hasOwnProperty('Equipable'));
     const hasPrice = this.props.itemData.hasOwnProperty('price');
+    const hero = Global.objectStates[Global.heroId];
+    const refiningProgress = refiningProgressForItem(
+      hero,
+      this.props.itemData.id,
+      this.props.activeRefineItemId,
+    );
+    const butchering = this.props.itemData.class == 'Game Animal' ||
+      this.props.itemData.class == 'Carcass';
+    const progressLabel = butchering ? 'Butchering' : 'Refining';
 
     var hasDurability = false;
     var hasProduces = false;
@@ -243,7 +256,13 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
     }
 
     if (hasProduces) {
-      actionButtons.push({ key: 'refine', label: 'Refine', icon: refineItemIcon, onClick: this.handleRefineClick });
+      actionButtons.push({
+        key: 'refine',
+        label: 'Refine',
+        icon: refineItemIcon,
+        onClick: this.handleRefineClick,
+        selected: Boolean(refiningProgress),
+      });
     }
 
     if (showDeleteButton) {
@@ -261,6 +280,16 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
       { label: 'Equipped', value: this.props.itemData.equipped ? 'Yes' : 'No', hidden: !hasEquipable },
       { label: 'Durability', value: this.props.itemData.durability, hidden: !hasDurability },
       { label: 'Price', value: this.props.itemData.price, hidden: !hasPrice },
+      {
+        label: progressLabel,
+        value: refiningProgress
+          ? <WorkQueueProgressBar
+              {...refiningProgress}
+              style={{ width: '120px' }}
+              label={`${progressLabel} progress`} />
+          : null,
+        hidden: !refiningProgress,
+      },
     ];
 
     const sectionTitleStyle: React.CSSProperties = {

@@ -16,7 +16,7 @@ export interface AnchoredActionProgress {
  * can vary independently of the presentation and must survive reconnects.
  */
 export function requiresAuthoritativeActionProgress(state: string): boolean {
-  return state === 'prospecting';
+  return state === 'prospecting' || state === 'refining';
 }
 
 /**

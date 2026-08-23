@@ -39,8 +39,9 @@ describe('server-authoritative action progress', () => {
     }, 50000)?.elapsedMs).toBe(30000);
   });
 
-  test('prospecting cannot fall back to a client-owned duration', () => {
+  test('prospecting and refining cannot fall back to client-owned durations', () => {
     expect(requiresAuthoritativeActionProgress('prospecting')).toBe(true);
+    expect(requiresAuthoritativeActionProgress('refining')).toBe(true);
     expect(requiresAuthoritativeActionProgress('gathering')).toBe(false);
   });
 });

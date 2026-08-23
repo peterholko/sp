@@ -206,6 +206,7 @@ interface UIState {
   infoRefineItemTriggered: boolean,
   combatState: any,
   heroGatheringActive: boolean,
+  activeRefineItemId: number | null,
   actionsOpen: boolean,
   viewportWidth: number,
   viewportHeight: number,
@@ -326,6 +327,7 @@ export default class UI extends React.Component<any, UIState> {
       infoRefineItemTriggered: false,
       combatState: null,
       heroGatheringActive: false,
+      activeRefineItemId: null,
       actionsOpen: false,
       viewportWidth: typeof window === 'undefined' ? 390 : window.innerWidth,
       viewportHeight: typeof window === 'undefined' ? 844 : window.innerHeight,
@@ -730,7 +732,10 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleRefineClick(eventData) {
-
+    const itemId = Number(eventData?.itemId);
+    this.setState({
+      activeRefineItemId: Number.isFinite(itemId) ? itemId : null,
+    });
   }
 
   handleGetRecipesClick(crafter) {
@@ -1143,6 +1148,7 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({
       selectedKey: { type: OBJ, id: Global.heroId },
       heroGatheringActive: Global.objectStates[Global.heroId]?.state === GATHERING,
+      activeRefineItemId: null,
     });
   }
 
@@ -1385,6 +1391,11 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoItem(message) {
     console.log('UI handleInfoItem');
+
+    const hero = Global.objectStates[Global.heroId];
+    if (hero?.state === 'refining' && Array.isArray(message.produces) && message.produces.length > 0) {
+      Global.network.sendInfoRefine(Global.heroId);
+    }
 
     this.setState({
       hideItemPanel: false,
@@ -1703,7 +1714,12 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoTrueDeath(message) {
     console.log("UI handleInfoTrueDeath");
-    this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
+    this.setState({
+      hideTrueDeathPanel: false,
+      trueDeathData: message,
+      heroDeathData: null,
+      activeRefineItemId: null,
+    });
   }
 
   handleItemTransfer(message) {
@@ -1764,7 +1780,14 @@ export default class UI extends React.Component<any, UIState> {
     var newInventoryData = { ...this.state.inventoryData };
     newInventoryData.items = message.refiner_items;
 
-    this.setState({ inventoryData: newInventoryData, producedItemData: producedItemData });
+    this.setState({
+      inventoryData: newInventoryData,
+      producedItemData: producedItemData,
+      refineData: message,
+      // The server response is authoritative for reconnects and for a panel
+      // reopened after the action was started.
+      activeRefineItemId: message.refining_item ? Number(message.refining_item.id) : null,
+    });
   }
 
   handleInfoStructureRefine(message) {
@@ -1790,7 +1813,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleCancelRefineClick() {
     console.log('UI handleCancelRefineClick');
-    this.setState({ hideRefinePanel: true, });
+    this.setState({ hideRefinePanel: true, activeRefineItemId: null });
   }
 
   handleCancelStructureRefine() {
@@ -1800,7 +1823,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleRefineOkClick() {
     console.log('UI handleRefineOkClick');
-    this.setState({ hideRefinePanel: true, });
+    this.setState({ hideRefinePanel: true, activeRefineItemId: null });
   }
 
 
@@ -2150,6 +2173,7 @@ export default class UI extends React.Component<any, UIState> {
         {!this.state.hideItemPanel &&
           <ItemPanel itemData={this.state.itemData}
             triggerAction={this.state.infoItemAction}
+            activeRefineItemId={this.state.activeRefineItemId}
           />}
 
         {!this.state.hideRefinePanel &&
