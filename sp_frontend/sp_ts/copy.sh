@@ -18,12 +18,14 @@ mkdir -p "$axum_root/static/art/ui/activity"
 mkdir -p "$axum_root/static/art/ui/resource_categories"
 mkdir -p "$axum_root/static/art/portraits/heroes"
 mkdir -p "$axum_root/static/art/portraits/villagers"
+mkdir -p "$axum_root/static/art/social"
 mkdir -p "$server_tileset"
 
 cp "$frontend_static/art/ui/activity/"*.png "$axum_root/static/art/ui/activity/"
 cp "$frontend_static/art/ui/resource_categories/"*.png "$axum_root/static/art/ui/resource_categories/"
 cp "$frontend_static/art/portraits/heroes/"*.png "$axum_root/static/art/portraits/heroes/"
 cp "$frontend_static/art/portraits/villagers/"*.png "$axum_root/static/art/portraits/villagers/"
+cp "$frontend_static/art/social/perilous-discord-embed.png" "$axum_root/static/art/social/"
 
 for ui_art_file in \
   intro_01_new_lands.png \

@@ -59,3 +59,14 @@ The three 1672x941 narrative masters are in `intro/`:
 
 Their optimized 800x450 runtime images live in
 `sp_frontend/priv/static/art/ui/`.
+
+## Social preview source
+
+The generated Discord/Open Graph banner master is stored at:
+
+- `social/perilous-discord-embed-source.png`
+- `social/perilous-discord-embed-prompt.md` records the exact generation prompt
+
+Its optimized 1200x630 runtime image lives at
+`sp_frontend/priv/static/art/social/perilous-discord-embed.png` and is copied
+to the Axum static root by the frontend UX rebuild script.
