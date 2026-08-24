@@ -257,19 +257,9 @@ export class MapScene extends Phaser.Scene {
     console.log('selectedObjMoved - pixel: ' + pixel.x + ',' + pixel.y);
     this.selectHex.x = pixel.x;
     this.selectHex.y = pixel.y;
-
-    var all_tiles = this.base.getAll();
-    var new_selected_tile;
-
-    for(var i = 0; i < all_tiles.length; i++) {
-      var tile = all_tiles[i] as Tile;
-
-      if(tile.hexX == objMovedEvent.hexX && tile.hexY == objMovedEvent.hexY) {
-        new_selected_tile = tile;
-
-        Global.gameEmitter.emit(GameEvent.TILE_CLICK, new_selected_tile);
-      }
-    }
+    // This is selection-follow bookkeeping, not a player tile interaction.
+    // Emitting TILE_CLICK here would request tile information whenever the
+    // resource-category overlay is visible.
   }
 
   setRender() : void {

@@ -24,6 +24,7 @@ import dodgebutton from "ui/dodgebutton.png";
 
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
+import { selectedObjectMovementPresentation } from '../core/selectedObjectMovement';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
 import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
@@ -1459,12 +1460,13 @@ export default class UI extends React.Component<any, UIState> {
 
         // Check if moving obj is selected
         if (Global.selectedKey.id == objId) {
-          var objMovedEvent = {
-            hexX: Global.objectStates[objId].x,
-            hexY: Global.objectStates[objId].y
-          }
+          const hexX = Global.objectStates[objId].x;
+          const hexY = Global.objectStates[objId].y;
+          const objIdsOnTile = Obj.getObjsAt(hexX, hexY);
+          var objMovedEvent = { hexX, hexY };
           console.log(objMovedEvent);
           Global.gameEmitter.emit(GameEvent.SELECTED_OBJ_MOVED, objMovedEvent);
+          this.setState(selectedObjectMovementPresentation(objId, hexX, hexY, objIdsOnTile));
         } else {
           this.setState({ objIdsOnTile: Obj.getObjsAt(this.state.selectedTile.hexX, this.state.selectedTile.hexY) });
         }
