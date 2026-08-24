@@ -4682,12 +4682,11 @@ pub(crate) const RESCUED_VILLAGER_BURROW_REMINDER_DELAY_TICKS: i32 = 60 * TICKS_
 pub(crate) const RESCUED_VILLAGER_BURROW_REMINDER_SPEECH: &str =
     "Use that Burrow Deed—we need somewhere safe for the Shipwreck supplies.";
 pub(crate) const BURROW_DEED_REMARK_DELAY_TICKS: i32 = 20 * TICKS_PER_SEC;
-pub(crate) const VILLAGER_DEED_TIRED_THRESHOLD: f32 = 60.0;
 pub(crate) const BURROW_DEED_REMARK: &str = "A Burrow Deed! Apparently even holes need paperwork.";
 pub(crate) const LUMBERCAMP_DEED_REMARK: &str =
     "A Lumbercamp Deed. Even trees come with paperwork.";
 pub(crate) const SHELTER_TENT_DEED_REMARK: &str =
-    "I'm tired. I sketched a roof. Call it a Shelter Tent Deed.";
+    "Water sorted! I sketched a roof. Call it a Shelter Tent Deed.";
 pub(crate) const STOCKADE_DEED_REMARK: &str =
     "Day five already? Here's a Stockade Deed. Make the Logs pointy.";
 
@@ -4698,11 +4697,9 @@ pub struct RescuedVillagerDeedProgress {
     lumbercamp_deed_granted: bool,
     shelter_tent_deed_granted: bool,
     stockade_deed_granted: bool,
+    // Retained so existing development snapshots deserialize. Shelter Tent
+    // progression is now driven by the preceding tutorial objective instead.
     was_tired: bool,
-}
-
-fn villager_is_tired(tired: &Tired) -> bool {
-    tired.tired >= VILLAGER_DEED_TIRED_THRESHOLD
 }
 
 fn deed_or_plan_known(
@@ -4767,6 +4764,7 @@ fn rescued_villager_deed_system(
     templates: Res<Templates>,
     mut ids: ResMut<Ids>,
     plans: Res<Plans>,
+    objectives: Res<Objectives>,
     player_intro_state: Res<PlayerIntroState>,
     presence: Res<PlayerWorldPresenceState>,
     mut map_events: ResMut<MapEvents>,
@@ -4775,7 +4773,6 @@ fn rescued_villager_deed_system(
             &Id,
             &PlayerId,
             &State,
-            &Tired,
             Option<&Order>,
             &mut RescuedVillagerDeedProgress,
         ),
@@ -4786,7 +4783,7 @@ fn rescued_villager_deed_system(
         (With<SubclassHero>, Without<StateDead>, Without<TrueDeath>),
     >,
 ) {
-    for (villager_id, player_id, state, tired, order, mut progress) in villager_query.iter_mut() {
+    for (villager_id, player_id, state, order, mut progress) in villager_query.iter_mut() {
         if !state.is_alive()
             || !clients.is_player_online(player_id.0)
             || is_owner_offline_protected(player_id, &presence)
@@ -4800,8 +4797,6 @@ fn rescued_villager_deed_system(
         else {
             continue;
         };
-
-        let tired_now = villager_is_tired(tired);
 
         if !progress.burrow_deed_granted {
             if !deed_or_plan_known(
@@ -4831,7 +4826,6 @@ fn rescued_villager_deed_system(
             progress.burrow_deed_granted = true;
         }
 
-        let mut lumbercamp_granted_now = false;
         if !progress.lumbercamp_deed_granted && is_logging_order(order) {
             if !deed_or_plan_known(
                 &plans,
@@ -4853,10 +4847,8 @@ fn rescued_villager_deed_system(
                     &mut map_events,
                     game_tick.0,
                 );
-                lumbercamp_granted_now = true;
             }
             progress.lumbercamp_deed_granted = true;
-            progress.was_tired = tired_now;
         }
 
         if progress.lumbercamp_deed_granted && !progress.shelter_tent_deed_granted {
@@ -4868,7 +4860,10 @@ fn rescued_villager_deed_system(
                 "Shelter Tent Deed",
             ) {
                 progress.shelter_tent_deed_granted = true;
-            } else if !lumbercamp_granted_now && !progress.was_tired && tired_now {
+            } else if objectives
+                .get(&player_id.0)
+                .is_some_and(|objectives| objectives.fill_empty_waterskin)
+            {
                 grant_villager_deed(
                     player_id.0,
                     villager_id.0,
@@ -4913,7 +4908,9 @@ fn rescued_villager_deed_system(
             }
         }
 
-        progress.was_tired = tired_now;
+        if progress.was_tired {
+            progress.was_tired = false;
+        }
     }
 }
 
@@ -5758,6 +5755,7 @@ impl Plugin for GamePlugin {
                 rescued_villager_deed_system
                     .after(update_game_tick)
                     .after(game_event_system)
+                    .after(use_item_system)
                     .before(perception_system)
                     .run_if(in_state(AppState::Running)),
             )
@@ -23107,7 +23105,7 @@ fn build_objective_state_packet(
             "Settlement",
             Some("Shelter Tent"),
             "Use the Shelter Tent Deed from the hero Inventory, select the completed Campfire, choose Upgrade, supply five Logs or Timber and three Hide, then complete the upgrade.",
-            "After taking the Logging job, the rescued settler drafts this deed the next time he becomes Tired.",
+            "Filling a Waterskin proves the settlement has renewable water; the rescued settler then drafts the Shelter Tent Deed needed for this upgrade.",
             shelter_tent_blocker,
             "A one-resident shelter with a built-in campfire.",
             Some(i32::from(obj.build_campfire)),

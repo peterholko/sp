@@ -12372,8 +12372,8 @@ mod tests {
                 .expect("rescued villager")
         };
 
-        // Being tired when the Logging order arrives grants only the
-        // Lumbercamp deed. The Shelter Tent waits for a later tired transition.
+        // Tiredness no longer grants the Shelter Tent deed. It remains locked
+        // until the immediately preceding waterskin objective is complete.
         {
             let world = game.app.world_mut();
             world
@@ -12392,7 +12392,7 @@ mod tests {
         assert_eq!(
             hero_item_quantity(&game, player_id, "Shelter Tent Deed"),
             0,
-            "an already-tired villager must not collapse two milestones into one tick"
+            "tiredness must not bypass the preceding waterskin objective"
         );
 
         let campfire_id = {
@@ -12429,18 +12429,67 @@ mod tests {
                 if errmsg == "You have not learned how to upgrade to a Shelter Tent. Use its deed first."
         )));
 
-        game.app
-            .world_mut()
-            .get_mut::<Tired>(villager_entity)
-            .expect("rescued villager recovered tiredness")
-            .tired = 50.0;
-        game.tick(1);
-        game.app
-            .world_mut()
-            .get_mut::<Tired>(villager_entity)
-            .expect("rescued villager next tiredness")
-            .tired = crate::game::VILLAGER_DEED_TIRED_THRESHOLD;
-        game.tick(1);
+        let empty_waterskin_id = {
+            let world = game.app.world_mut();
+            let hero_entity = world
+                .resource::<EntityObjMap>()
+                .get_entity(hero_id)
+                .expect("Shelter Tent deed owner hero");
+            let spring_pos = *world
+                .get::<Position>(hero_entity)
+                .expect("hero position for tutorial spring");
+            let empty_waterskin_id = world.resource_mut::<Ids>().new_item_id();
+            world.resource_scope(|world, templates: Mut<Templates>| {
+                world
+                    .get_mut::<Inventory>(hero_entity)
+                    .expect("hero inventory for tutorial waterskin")
+                    .new(
+                        empty_waterskin_id,
+                        crate::constants::WATERSKIN_EMPTY.to_string(),
+                        1,
+                        &templates.item_templates,
+                    );
+            });
+
+            let spring_name = "Shelter Deed Test Spring Water".to_string();
+            Resource::create(
+                spring_name.clone(),
+                SPRING_WATER.to_string(),
+                "moonlitspringwater".to_string(),
+                1,
+                1.0,
+                1,
+                10,
+                spring_pos,
+                Vec::new(),
+                None,
+                &mut world.resource_mut::<Resources>(),
+            );
+            world.resource_mut::<ResourceDiscoveries>().discover(
+                player_id,
+                spring_pos,
+                spring_name,
+            );
+            world
+                .resource_mut::<Objectives>()
+                .entry(player_id)
+                .or_default()
+                .prospect_water_spring = true;
+
+            empty_waterskin_id
+        };
+
+        game.inject(PlayerEvent::Use {
+            player_id,
+            obj_id: hero_id,
+            item_id: empty_waterskin_id,
+        });
+        game.tick(4);
+        assert!(game
+            .world()
+            .resource::<Objectives>()
+            .get(&player_id)
+            .is_some_and(|objectives| objectives.fill_empty_waterskin));
         assert_eq!(hero_item_quantity(&game, player_id, "Shelter Tent Deed"), 1);
 
         let shelter_deed_id = {
@@ -12455,7 +12504,7 @@ mod tests {
                 .items
                 .iter()
                 .find(|item| item.name == "Shelter Tent Deed")
-                .expect("tiredness milestone Shelter Tent deed")
+                .expect("waterskin objective Shelter Tent deed")
                 .id
         };
         game.inject(PlayerEvent::Use {
