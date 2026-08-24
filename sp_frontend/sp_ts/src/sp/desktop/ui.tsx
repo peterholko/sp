@@ -25,6 +25,10 @@ import dodgebutton from "ui/dodgebutton.png";
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
 import { selectedObjectMovementPresentation } from '../core/selectedObjectMovement';
+import {
+  NO_LEARNED_STRUCTURE_UPGRADES,
+  structureUpgradeOptions,
+} from '../core/structureUpgradePresentation';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
 import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
@@ -1842,6 +1846,16 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoUpgrade(message) {
     console.log('UI handleInfoUpgrade');
+
+    if (structureUpgradeOptions(message).length == 0) {
+      this.setState({
+        hideStructureUpgradePanel: true,
+        hideErrorPanel: false,
+        errmsg: NO_LEARNED_STRUCTURE_UPGRADES,
+      });
+      return;
+    }
+
     this.setState({ hideStructureUpgradePanel: false, structureUpgradeData: message });
   }
 

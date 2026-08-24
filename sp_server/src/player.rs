@@ -6921,6 +6921,19 @@ fn info_upgrade_system(
                     upgrade_template_list.push(upgrade_template);
                 }
 
+                if upgrade_template_list.is_empty() {
+                    let errmsg = match upgrade_to_list.as_slice() {
+                        [upgrade] => format!(
+                            "You have not learned how to upgrade to a {}. Use its deed first.",
+                            upgrade
+                        ),
+                        _ => "No learned upgrades are available for this structure. Use the required deed first."
+                            .to_string(),
+                    };
+                    send_to_client(*player_id, ResponsePacket::Error { errmsg }, &clients);
+                    continue;
+                }
+
                 let upgrade_packet = ResponsePacket::InfoUpgrade {
                     id: structure.id.0,
                     upgrade_list: upgrade_template_list,

@@ -8,7 +8,11 @@ import { Network } from "../../core/network";
 import { NetworkEvent } from "../../core/networkEvent";
 import ResourceItem from "./resourceItem";
 import { GameEvent } from "../../core/gameEvent";
-import { structureUpgradePreviewImageName } from "../../core/structureUpgradePresentation";
+import {
+  NO_LEARNED_STRUCTURE_UPGRADES,
+  structureUpgradeOptions,
+  structureUpgradePreviewImageName,
+} from "../../core/structureUpgradePresentation";
 
 interface SUPProps {
   upgradeData,
@@ -19,7 +23,6 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
     super(props);
 
     this.state = {
-      upgradeStructure: this.props.upgradeData.upgrade_list[0],
       index: 0
     };
 
@@ -33,45 +36,65 @@ export default class StructureUpgradePanel extends React.Component<SUPProps, any
     if (this.state.index != 0) {
       const newIndex = this.state.index - 1;
       this.setState({
-        upgradeStructure: this.props.upgradeData.upgrade_list[newIndex],
         index: newIndex
       })
     }
   }
 
   handleRightClick(event) {
-    if (this.state.index != (this.props.upgradeData.upgrade_list.length - 1)) {
+    const upgrades = structureUpgradeOptions(this.props.upgradeData);
+    if (this.state.index < (upgrades.length - 1)) {
       const newIndex = this.state.index + 1;
       this.setState({
-        upgradeStructure: this.props.upgradeData.upgrade_list[newIndex],
         index: newIndex
       })
     }
   }
 
   handleUpgradeClick() {
-    Global.network.sendStartUpgrade(this.props.upgradeData.id, this.state.upgradeStructure.name);
+    const upgrades = structureUpgradeOptions(this.props.upgradeData);
+    const upgradeStructure = upgrades[this.state.index];
+    if (!upgradeStructure?.name) {
+      return;
+    }
+
+    Global.network.sendStartUpgrade(this.props.upgradeData.id, upgradeStructure.name);
     Global.gameEmitter.emit(GameEvent.START_UPGRADE_CLICK, {});
 
-    Global.selectedUpgrade = this.state.upgradeStructure.name;
+    Global.selectedUpgrade = upgradeStructure.name;
   }
 
   render() {
     console.log(this.state);
 
-    const structureImageName = structureUpgradePreviewImageName(this.state.upgradeStructure);
+    const upgrades = structureUpgradeOptions(this.props.upgradeData);
+    const index = Math.min(this.state.index, Math.max(0, upgrades.length - 1));
+    const structure = upgrades[index];
+
+    if (!structure) {
+      return (
+        <HalfPanel left={false}
+          panelType={'upgrade'}
+          hideExitButton={false}>
+          <div style={{ color: 'white', fontFamily: 'Verdana', padding: '24px' }}>
+            {NO_LEARNED_STRUCTURE_UPGRADES}
+          </div>
+        </HalfPanel>
+      );
+    }
+
+    const structureImageName = structureUpgradePreviewImageName(structure);
     const structureImagePath = structureImageName
       ? '/static/art/' + structureImageName
       : null;
 
-    let nextStructureName = this.state.upgradeStructure.name;
+    let nextStructureName = structure.name || 'Upgrade';
 
     const reqs = [];
 
-    let structure = this.props.upgradeData.upgrade_list[this.state.index];
-
-    for (var i = 0; i < structure.req.length; i++) {
-      var req = structure.req[i];
+    const requirements = structure.req || [];
+    for (var i = 0; i < requirements.length; i++) {
+      var req = requirements[i];
       var resourceImage = req.type.toLowerCase().replace(/\s/g, '');
 
       reqs.push(

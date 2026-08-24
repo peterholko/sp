@@ -12413,8 +12413,8 @@ mod tests {
         game.tick(3);
         assert!(game.finish_packet_capture().iter().any(|packet| matches!(
             packet,
-            ResponsePacket::InfoUpgrade { id, upgrade_list }
-                if *id == campfire_id && upgrade_list.is_empty()
+            ResponsePacket::Error { errmsg }
+                if errmsg == "You have not learned how to upgrade to a Shelter Tent. Use its deed first."
         )));
         game.start_packet_capture();
         game.inject(PlayerEvent::StartUpgrade {

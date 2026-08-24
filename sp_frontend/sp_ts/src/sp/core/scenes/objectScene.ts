@@ -55,6 +55,10 @@ import {
   objectStateText,
   repeatingObjectStateText,
 } from '../objectStateText';
+import {
+  combatFloatingTextPresentation,
+  shouldAnnounceCombo,
+} from '../combatFloatingTextPresentation';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -155,6 +159,7 @@ export class ObjectScene extends Phaser.Scene {
 
   private lastVillagerActivity: Record<string, string> = {};
   private lastFinisherShakeAt = 0;
+  private comboAnnouncementTimes = new Map<string, number>();
 
   constructor() {
     super({
@@ -1716,6 +1721,74 @@ export class ObjectScene extends Phaser.Scene {
     mapScene?.cameras?.main?.shake(180, 0.008);
   }
 
+  private showComboAnnouncement(
+    sourceId: number,
+    source: RenderObject,
+    comboText?: string,
+  ): void {
+    if (
+      !comboText
+      || !shouldAnnounceCombo(
+        this.comboAnnouncementTimes,
+        sourceId,
+        comboText,
+        Date.now(),
+      )
+    ) {
+      return;
+    }
+
+    this.shakeForFinisher();
+    const text = this.add.text(source.x + 36, source.y - 5, comboText, {
+      fontFamily: 'Verdana',
+      fontSize: 30,
+      fontStyle: 'bold',
+      align: 'center',
+      color: '#FFD45A',
+      stroke: '#000000',
+      strokeThickness: 6,
+    });
+    text.setDepth(10);
+    text.setOrigin(0.5, 0.5);
+
+    this.tweens.add({
+      targets: text,
+      y: source.y - 50,
+      alpha: 0,
+      ease: 'Power1',
+      duration: 5000,
+      onComplete: this.onDmgTextComplete,
+    }).play();
+  }
+
+  private showTargetDamage(
+    targetId: number,
+    target: RenderObject,
+    targetText: string,
+    compact = false,
+  ): void {
+    const text = this.add.text(target.x + 36, target.y - 5, targetText, {
+      fontFamily: 'Verdana',
+      fontSize: compact ? 20 : 22,
+      fontStyle: 'normal',
+      align: 'center',
+      color: this.getDamageTextColor(targetId),
+      stroke: '#000000',
+      strokeThickness: compact ? 3 : 4,
+    });
+    text.setDepth(10);
+    text.setOrigin(0.5, 0.5);
+
+    this.tweens.add({
+      targets: text,
+      y: target.y - 50,
+      alpha: 0,
+      ease: 'Power1',
+      duration: 5000,
+      onComplete: this.onDmgTextComplete,
+    }).play();
+  }
+
   private playSpriteAction(source: RenderObject, action: string): void {
     if (!(source instanceof GameSprite)) {
       return;
@@ -1735,6 +1808,7 @@ export class ObjectScene extends Phaser.Scene {
 
   processDmgMessage(message) {
     console.log('Dmg Message: ' + message.source_id + ' -> ' + message.target_id);
+    const floatingText = combatFloatingTextPresentation(message);
     if (message.source_id in Global.objectStates && message.target_id in Global.objectStates) {
       if (message.source_id in this.objectList &&
         message.target_id in this.objectList) {
@@ -1808,41 +1882,8 @@ export class ObjectScene extends Phaser.Scene {
           tween.play();
         }
 
-        var dmgMsg = ''
-        if (message.missed) {
-          dmgMsg = 'Miss';
-        } else if (message.combo) {
-          dmgMsg = message.combo + '\n' + message.dmg + '!';
-        } else {
-          dmgMsg = message.dmg;
-        }
-
-        const isFinisher = Boolean(message.combo);
-        if (isFinisher) {
-          this.shakeForFinisher();
-        }
-        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
-          fontFamily: 'Verdana',
-          fontSize: isFinisher ? 30 : 22,
-          fontStyle: isFinisher ? 'bold' : 'normal',
-          align: 'center',
-          color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
-          stroke: '#000000',
-          strokeThickness: isFinisher ? 6 : 4,
-        });
-        dmgText.setDepth(10);
-        dmgText.setOrigin(0.5, 0.5);
-
-        var textTween = this.tweens.add({
-          targets: dmgText,
-          y: target.y - 50,
-          alpha: 0,
-          ease: 'Power1',
-          duration: 5000,
-          onComplete: this.onDmgTextComplete
-        });
-
-        textTween.play();
+        this.showComboAnnouncement(message.source_id, source, floatingText.sourceText);
+        this.showTargetDamage(message.target_id, target, floatingText.targetText);
       }
     } else if (message.target_id in Global.objectStates) {
       var targetObjectState = Global.objectStates[message.target_id];
@@ -1889,39 +1930,7 @@ export class ObjectScene extends Phaser.Scene {
 
       tween.play();
 
-      var dmgMsg = ''
-      if (message.combo) {
-        dmgMsg = message.combo + '\n' + message.dmg + '!';
-      } else {
-        dmgMsg = message.dmg;
-      }
-
-      const isFinisher = Boolean(message.combo);
-      if (isFinisher) {
-        this.shakeForFinisher();
-      }
-      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
-        fontFamily: 'Verdana',
-        fontSize: isFinisher ? 28 : 20,
-        fontStyle: isFinisher ? 'bold' : 'normal',
-        align: 'center',
-        color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
-        stroke: '#000000',
-        strokeThickness: isFinisher ? 6 : 3,
-      });
-      dmgText.setDepth(10);
-      dmgText.setOrigin(0.5, 0.5);
-
-      var textTween = this.tweens.add({
-        targets: dmgText,
-        y: target.y - 50,
-        alpha: 0,
-        ease: 'Power1',
-        duration: 5000,
-        onComplete: this.onDmgTextComplete
-      });
-
-      textTween.play();
+      this.showTargetDamage(message.target_id, target, floatingText.targetText, true);
     }
   }
 

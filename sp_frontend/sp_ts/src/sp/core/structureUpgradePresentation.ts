@@ -2,6 +2,25 @@ export interface StructureUpgradePreviewSource {
   image?: string;
 }
 
+export interface StructureUpgradeOption extends StructureUpgradePreviewSource {
+  name?: string;
+  req?: any[];
+}
+
+export interface StructureUpgradeListSource {
+  upgrade_list?: StructureUpgradeOption[];
+}
+
+export const NO_LEARNED_STRUCTURE_UPGRADES =
+  'No learned upgrades are available for this structure. Use the required deed first.';
+
+/** Normalizes an upgrade response before a panel tries to select its first option. */
+export function structureUpgradeOptions(
+  source?: StructureUpgradeListSource | null,
+): StructureUpgradeOption[] {
+  return Array.isArray(source?.upgrade_list) ? source.upgrade_list : [];
+}
+
 export interface StructureUpgradeProgressSource {
   selected_upgrade_image?: string;
 }
