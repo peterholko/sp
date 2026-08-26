@@ -1338,6 +1338,29 @@ export default class LoginControl extends React.Component<any, any> {
                     ))}
                   </tbody>
                 </table>
+                <ol className="leaderboard-mobile-list" aria-label="Hall of Heroes entries">
+                  {paginatedEntries.map(entry => (
+                    <li className="leaderboard-mobile-entry" key={entry.id}>
+                      <div className="leaderboard-mobile-entry-header">
+                        <div className="leaderboard-mobile-identity">
+                          <span className="leaderboard-mobile-name">{entry.heroName}</span>
+                          <span className="leaderboard-mobile-rank">{entry.heroRank}</span>
+                        </div>
+                        <div className="leaderboard-mobile-score">
+                          <span className="leaderboard-mobile-label">Score</span>
+                          <span>{entry.totalScore}</span>
+                        </div>
+                      </div>
+                      <div className="leaderboard-mobile-meta">
+                        <span>Day {entry.daysSurvived}</span>
+                        <span>{entry.legendaryKills} {entry.legendaryKills === 1 ? 'Legend' : 'Legends'}</span>
+                      </div>
+                      {entry.fate && (
+                        <div className="leaderboard-mobile-fate">{entry.fate}</div>
+                      )}
+                    </li>
+                  ))}
+                </ol>
                 <div className="leaderboard-pagination">
 
                   <button
@@ -1345,6 +1368,7 @@ export default class LoginControl extends React.Component<any, any> {
                     className="leaderboard-arrow-button"
                     onClick={this.handleLeaderboardPrevious}
                     aria-label="Show previous leaderboard page"
+                    disabled={currentPage === 0}
                   >
                     <img src={leftArrowButton} alt="Previous page" />
                   </button>
@@ -1355,6 +1379,7 @@ export default class LoginControl extends React.Component<any, any> {
                     className="leaderboard-arrow-button"
                     onClick={this.handleLeaderboardNext}
                     aria-label="Show next leaderboard page"
+                    disabled={totalPages === 0 || currentPage >= totalPages - 1}
                   >
                     <img src={rightArrowButton} alt="Next page" />
                   </button>
