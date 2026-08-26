@@ -25,6 +25,7 @@ import {
   hasSafeLogoutReconnectSuppression,
 } from "../core/safeLogoutStatus";
 import { shouldShowAccountSetupPrompt } from "../core/accountSetupPrompt";
+import { sessionLaunchDestination } from "../core/sessionLaunchPolicy";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
@@ -339,9 +340,22 @@ export default class LoginControl extends React.Component<any, any> {
             Global.accountName = result.account_name;
           }
 
-        Global.network = new Network();
-        Global.network.connect();
-        Global.connected = true;
+        const destination = sessionLaunchDestination(result.needs_hero, false);
+        if (destination === 'landing') {
+          this.setState({
+            hideLandingPage: false,
+            hideSelectClass: true,
+            hideIntro: true,
+            hideGame: true,
+            hideError: true,
+            showEnterWorld: true,
+            preConnectionSelect: false,
+          });
+        } else {
+          Global.network = new Network();
+          Global.network.connect();
+          Global.connected = true;
+        }
       }
     } catch (error) {
       console.error('Error checking session:', error);
@@ -404,12 +418,28 @@ export default class LoginControl extends React.Component<any, any> {
           Global.accountName = result.account_name;
         }
 
-        if (result.needsHero || result.newPlayer) {
+        const destination = sessionLaunchDestination(
+          result.needsHero || result.newPlayer,
+          createGuest,
+        );
+
+        if (destination === 'hero-creation') {
           // New player: show hero selection before connecting to game server
           this.setState({
             hideLandingPage: true,
             hideSelectClass: false,
             preConnectionSelect: true,
+          });
+        } else if (destination === 'landing') {
+          // Restored incomplete account: wait for an explicit Enter World click.
+          this.setState({
+            hideLandingPage: false,
+            hideSelectClass: true,
+            hideIntro: true,
+            hideGame: true,
+            hideError: true,
+            showEnterWorld: true,
+            preConnectionSelect: false,
           });
         } else {
           // Returning player: connect to game server directly
