@@ -42,11 +42,10 @@ impl Ids {
     }
 
     pub fn is_hero(&self, obj_id: i32) -> bool {
-        if let Some(player_id) = self.obj_player_map.get(&obj_id) {
-            return self.player_hero_map.contains_key(player_id);
-        }
-
-        return false;
+        self.obj_player_map
+            .get(&obj_id)
+            .and_then(|player_id| self.player_hero_map.get(player_id))
+            .is_some_and(|hero_id| *hero_id == obj_id)
     }
 
     /*pub fn get_entity(&self, obj_id: i32) -> Option<Entity> {

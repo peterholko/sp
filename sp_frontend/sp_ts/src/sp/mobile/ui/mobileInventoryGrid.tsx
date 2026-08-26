@@ -91,8 +91,12 @@ export default class MobileInventoryGrid extends React.Component<MobileInventory
           const imageStyle: React.CSSProperties = {
             width: '48px',
             height: '48px',
+            maxWidth: '48px',
+            maxHeight: '48px',
             objectFit: 'contain',
+            objectPosition: 'center',
             imageRendering: 'pixelated',
+            display: 'block',
           };
 
           const quantityStyle: React.CSSProperties = {

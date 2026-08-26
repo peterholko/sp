@@ -184,7 +184,7 @@ Tattered Shirt and Tattered Pants. The run-owned Shipwreck contains:
 
 There is no starter Burrow, Mine Deed, or Yurt Deed. The normal Burrow costs
 five Logs and is the first construction target. The starter Campfire is already
-lit and contains 20 Firewood.
+lit and contains 30 Firewood.
 
 ## Required bot architecture
 

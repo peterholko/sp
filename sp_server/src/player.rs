@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::{reload, EnvFilter, Registry};
 use uuid::Uuid;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::common::{Destination, Heat, Hunger, Idle, Thirst, Tired, Transport};
 use crate::constants::*;
@@ -25,19 +25,22 @@ use crate::event::{
 use crate::farm::Crops;
 use crate::ids::{EntityObjMap, Ids};
 
-use crate::combat::{AttackOptions, Combat, CombatEffectsChanged, CombatQuery, CombatQueryItem};
+use crate::combat::{
+    AttackOptions, Combat, CombatEffectsChanged, CombatQuery, CombatQueryItem,
+    TRANSFERABLE_COMBO_TARGET_ID,
+};
 use crate::effect::{ControlEffectDiminishingReturns, Effect, Effects};
 use crate::experiment::{self, Experiment, ExperimentState, Experiments};
 use crate::game::{
     burrow_supply_type_count, farm_harvest_duration_ticks, is_loot_poi, is_pos_empty,
-    sanctuary_radius, sanctuary_upgrade_cost, survey_status_for_tile, BoundMonolith,
-    CampfireVisibilityState, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase, DamageRecord,
-    DebugObjs, EventInProgress, GameTick, InitialEncounterState, IntroEncounterState,
+    sanctuary_radius, sanctuary_upgrade_cost, scouting_allowed_at, survey_status_for_tile,
+    BoundMonolith, CampfireVisibilityState, Clients, CrisisAssaultUnit, CrisisKind, CrisisPhase,
+    DamageRecord, DebugObjs, EventInProgress, GameTick, InitialEncounterState, IntroEncounterState,
     InvestigatedPOIs, LogLevelOverrides, Merchant, Monolith, MonolithInvestigation,
     MonolithProgress, NetworkReceiver, ObjQuery, Objectives, PersonalCrisisHistory,
     PlayerIntroState, PlayerObjectives, PlayerRunScore, PlayerStat, PlayerStats, RunScoreState,
     SettlementCrisisState, SpawnPositions, SurveyHistory, BANDAGE_USE_TICKS, BURROW_SUPPLY_GOAL,
-    SANCTUARY_MAX_LEVEL,
+    OPENING_RAT_AMBUSH_DELAY_TICKS, SANCTUARY_MAX_LEVEL,
 };
 use crate::item::{self, AttrKey, AttrVal, Inventory, Item};
 use crate::map::Map;
@@ -75,8 +78,8 @@ use crate::{player_setup, AppState};
 #[derive(Resource, Deref, DerefMut)]
 pub struct Player(pub HashMap<i32, PlayerEvent>);
 
-#[derive(Resource, Deref, DerefMut)]
-pub struct PlayerEvents(pub HashMap<i32, PlayerEvent>);
+#[derive(Resource, Deref, DerefMut, Default)]
+pub struct PlayerEvents(pub BTreeMap<i32, PlayerEvent>);
 
 #[derive(EntityEvent)]
 pub struct InfoHeroEvent {
@@ -164,6 +167,7 @@ pub enum PlayerEvent {
     },
     Gather {
         player_id: i32,
+        res_type: String,
     },
     Operate {
         player_id: i32,
@@ -548,7 +552,7 @@ impl PlayerEvent {
             | Self::Ability { player_id, .. }
             | Self::Combo { player_id, .. }
             | Self::Block { player_id, .. }
-            | Self::Gather { player_id }
+            | Self::Gather { player_id, .. }
             | Self::Operate { player_id, .. }
             | Self::Plant { player_id, .. }
             | Self::Tend { player_id, .. }
@@ -835,7 +839,7 @@ pub enum ActiveInfoType {
     StructureQueue,
 }
 
-#[derive(Debug, Resource, Deref, DerefMut)]
+#[derive(Debug, Resource, Deref, DerefMut, Default)]
 pub struct ActiveInfos(pub HashMap<(ActiveInfoObjId, ActiveInfoType), HashSet<ActiveInfoPlayerId>>);
 
 impl ActiveInfos {
@@ -852,6 +856,77 @@ impl ActiveInfos {
             }
         }
     }
+
+    /// Remove every panel subscription owned by one player connection.
+    pub fn remove_player(&mut self, player_id: ActiveInfoPlayerId) {
+        self.0.retain(|_, players| {
+            players.remove(&player_id);
+            !players.is_empty()
+        });
+    }
+
+    /// Remove every panel subscription for an object that left the world.
+    pub fn remove_object(&mut self, obj_id: ActiveInfoObjId) {
+        self.0
+            .retain(|(active_obj_id, _), _| *active_obj_id != obj_id);
+    }
+
+    /// Remove one player's subscriptions of a given panel type across objects.
+    /// This is required for panels such as Item Transfer, which subscribe to
+    /// both their source and target while still representing one open panel.
+    pub fn remove_player_type(&mut self, player_id: ActiveInfoPlayerId, info_type: ActiveInfoType) {
+        self.0.retain(|(_, active_type), players| {
+            if *active_type == info_type {
+                players.remove(&player_id);
+            }
+            !players.is_empty()
+        });
+    }
+
+    fn player_ids(&self) -> HashSet<ActiveInfoPlayerId> {
+        self.0
+            .values()
+            .flat_map(|players| players.iter().copied())
+            .collect()
+    }
+}
+
+fn active_infos_disconnect_cleanup_system(
+    clients: Res<Clients>,
+    mut active_infos: ResMut<ActiveInfos>,
+) {
+    for player_id in active_infos.player_ids() {
+        if !clients.is_player_online(player_id) {
+            active_infos.remove_player(player_id);
+        }
+    }
+}
+
+fn remove_active_info_panel(
+    active_infos: &mut ActiveInfos,
+    player_id: ActiveInfoPlayerId,
+    obj_id: ActiveInfoObjId,
+    panel_type: &str,
+) {
+    let info_type = match panel_type {
+        "structure" => ActiveInfoType::Structure,
+        "inventory" => ActiveInfoType::Inventory,
+        "refine" => ActiveInfoType::Refine,
+        "equip" => ActiveInfoType::Equip,
+        "craft" => ActiveInfoType::Craft,
+        "structure_refine" => ActiveInfoType::StructureRefine,
+        "structure_craft" => ActiveInfoType::StructureCraft,
+        "structure_queue" => ActiveInfoType::StructureQueue,
+        "villager" => ActiveInfoType::Obj,
+        "experiment" => ActiveInfoType::Experiment,
+        "item_transfer" => {
+            active_infos.remove_player_type(player_id, ActiveInfoType::ItemTransfer);
+            return;
+        }
+        _ => return,
+    };
+
+    active_infos.remove((obj_id, info_type), player_id);
 }
 
 #[derive(QueryData)]
@@ -974,10 +1049,40 @@ fn is_restricted_cooking_storage(template: &str) -> bool {
 }
 
 fn accepts_completed_storage_item(template: &str, item_name: &str, item_subclass: &str) -> bool {
-    !is_restricted_cooking_storage(template)
-        || item_name == item::FIREWOOD
-        || item_name == item::CHARCOAL
-        || matches!(item_subclass, "Raw Meat" | "Cooked Meat")
+    template != structure::WELL
+        && (!is_restricted_cooking_storage(template)
+            || item_name == item::FIREWOOD
+            || item_name == item::CHARCOAL
+            || matches!(item_subclass, "Raw Meat" | "Cooked Meat"))
+}
+
+fn completed_storage_rejection_message(template: &str) -> &'static str {
+    if template == structure::WELL {
+        "A completed Well cannot store items."
+    } else {
+        "Only Firewood, Charcoal, Raw Meat, and Cooked Meat can be stored here."
+    }
+}
+
+fn structure_placement_error(
+    structure_template: &str,
+    player_id: i32,
+    pos: Position,
+    resources: &Resources,
+    discoveries: &ResourceDiscoveries,
+) -> Option<String> {
+    let required_resource = Structure::placement_resource(structure_template)?;
+
+    (!Resource::is_valid_type_for_player(
+        required_resource.to_string(),
+        pos,
+        resources,
+        discoveries,
+        player_id,
+    ))
+    .then(|| {
+        format!("A {structure_template} must be built on a revealed {required_resource} resource.")
+    })
 }
 
 fn send_shipwreck_search_error(player_id: i32, clients: &Res<Clients>) {
@@ -1030,6 +1135,27 @@ fn transfer_loot_that_fits(
     }
 
     transferred
+}
+
+/// Return the largest whole quantity from an item stack that can fit in the
+/// target inventory. Item transfer is capacity-limited rather than
+/// all-or-nothing so a heavy stack can be moved over multiple trips.
+fn stack_quantity_that_fits(item: &Item, target_weight: i32, target_capacity: i32) -> i32 {
+    let available_quantity = item.quantity.max(0);
+    if available_quantity == 0 {
+        return 0;
+    }
+
+    if item.weight <= 0.0 {
+        return available_quantity;
+    }
+
+    let remaining_capacity = target_capacity.saturating_sub(target_weight);
+    if remaining_capacity <= 0 {
+        return 0;
+    }
+
+    ((remaining_capacity as f32 / item.weight).floor() as i32).clamp(0, available_quantity)
 }
 
 #[derive(QueryData)]
@@ -1392,15 +1518,20 @@ struct VillagerQuery {
 enum PlayerInputSet {
     Collect,
     ProtectionGuard,
+    SessionLifecycle,
     Handle,
 }
+
+// At ten simulation updates per second this accepts up to 640 commands/sec,
+// while still bounding the amount of network-input work performed in one tick.
+const MAX_PLAYER_EVENTS_PER_TICK: usize = 64;
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         // Initialize events
-        let player_events: PlayerEvents = PlayerEvents(HashMap::new());
+        let player_events = PlayerEvents::default();
         let active_infos: ActiveInfos = ActiveInfos(HashMap::new());
 
         let start_file =
@@ -1415,6 +1546,7 @@ impl Plugin for PlayerPlugin {
             (
                 PlayerInputSet::Collect,
                 PlayerInputSet::ProtectionGuard,
+                PlayerInputSet::SessionLifecycle,
                 PlayerInputSet::Handle,
             )
                 .chain(),
@@ -1427,8 +1559,30 @@ impl Plugin for PlayerPlugin {
         )
         .add_systems(
             Update,
-            protected_player_event_guard_system
+            (
+                protected_player_event_guard_system,
+                active_infos_disconnect_cleanup_system,
+            )
                 .in_set(PlayerInputSet::ProtectionGuard)
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            login_system
+                .in_set(PlayerInputSet::SessionLifecycle)
+                .run_if(in_state(AppState::Running)),
+        )
+        .add_systems(
+            Update,
+            (
+                reconcile_resource_structure_workspaces_system,
+                reconcile_completed_workplace_builders_system,
+            )
+                .chain()
+                .in_set(PlayerInputSet::Handle)
+                .before(assign_system)
+                .before(structure_queue_system)
+                .before(info_structure_queue_system)
                 .run_if(in_state(AppState::Running)),
         )
         .add_systems(
@@ -1436,7 +1590,6 @@ impl Plugin for PlayerPlugin {
             (
                 safe_logout_command_bridge_system,
                 new_player_system,
-                login_system,
                 move_system,
                 combo_tracker_timeout_system.before(attack_system),
                 attack_system,
@@ -1555,17 +1708,146 @@ impl Plugin for PlayerPlugin {
     }
 }
 
+fn reconcile_resource_structure_workspaces_system(
+    templates: Res<Templates>,
+    mut query: Query<(&Subclass, &Template, &State, &mut WorkQueue), With<ClassStructure>>,
+) {
+    for (subclass, template, state, mut work_queue) in query.iter_mut() {
+        if *subclass != Subclass::Resource || !Structure::is_built(*state) {
+            continue;
+        }
+
+        let configured_workspaces = templates
+            .obj_templates
+            .get(template.0.clone())
+            .workspaces
+            .unwrap_or(0);
+        let restored = work_queue.reconcile_operate_workspaces(configured_workspaces);
+        if restored > 0 {
+            info!(
+                "Restored {restored} missing Operate workspace(s) for {}",
+                template.0
+            );
+        }
+    }
+}
+
+/// Finish the construction action retained by a villager when its assigned
+/// structure has become an active workplace. Construction assignments persist
+/// so the same villager can begin working there, but the old Build action must
+/// receive its completion signal before BigBrain can select WorkQueue work.
+///
+/// This also repairs already-stuck runtime state after a reconnect or server
+/// restart, including a villager whose order was changed to WorkQueue while its
+/// state was still Building.
+fn reconcile_completed_workplace_builders_system(
+    mut commands: Commands,
+    game_tick: Res<GameTick>,
+    entity_map: Res<EntityObjMap>,
+    templates: Res<Templates>,
+    presence: Res<PlayerWorldPresenceState>,
+    structure_query: Query<(&Subclass, &Template, &State), With<ClassStructure>>,
+    villager_query: Query<(Entity, &PlayerId, &Assignment, &Order, &State), With<SubclassVillager>>,
+) {
+    for (villager_entity, player_id, assignment, order, state) in villager_query.iter() {
+        if is_owner_offline_protected(player_id, &presence) {
+            continue;
+        }
+
+        let Some(structure_entity) = entity_map.get_entity(assignment.structure_id) else {
+            continue;
+        };
+        let Ok((subclass, template, structure_state)) = structure_query.get(structure_entity)
+        else {
+            continue;
+        };
+
+        if !Structure::is_built(*structure_state) {
+            continue;
+        }
+
+        let configured_workspaces = templates
+            .obj_templates
+            .get(template.0.clone())
+            .workspaces
+            .unwrap_or(0);
+        let is_workplace =
+            configured_workspaces > 0 || matches!(*subclass, Subclass::Craft | Subclass::Resource);
+        if !is_workplace {
+            continue;
+        }
+
+        let stale_build_order = *order == Order::Build;
+        let stale_build_state = matches!(*state, State::Building | State::Upgrading);
+        if !stale_build_order && !stale_build_state {
+            continue;
+        }
+
+        if stale_build_state {
+            commands.trigger(StateChange {
+                entity: villager_entity,
+                new_state: State::None,
+            });
+        }
+
+        commands
+            .entity(villager_entity)
+            .insert((
+                Order::WorkQueue,
+                EventCompleted {
+                    event_id: Uuid::new_v4(),
+                    event_type: "construction_complete".to_string(),
+                    at_tick: game_tick.0,
+                    success: true,
+                },
+            ))
+            .remove::<ActionProgress>();
+    }
+}
+
+fn structure_accepts_worker_assignment(
+    state: State,
+    subclass: Subclass,
+    configured_workspaces: Option<i32>,
+) -> bool {
+    let has_workplace = configured_workspaces.is_some_and(|count| count > 0)
+        || matches!(subclass, Subclass::Craft | Subclass::Resource);
+
+    state != State::Dead && (!Structure::is_built(state) || has_workplace)
+}
+
+const NO_STRUCTURE_WORKPLACES_ERROR: &str =
+    "Workers can only be assigned during construction or to a completed structure with worker positions.";
+
+fn is_legacy_noop_player_event(event: &PlayerEvent) -> bool {
+    matches!(
+        event,
+        PlayerEvent::Tend { .. } | PlayerEvent::OrderRefine { .. } | PlayerEvent::OrderCraft { .. }
+    )
+}
+
 fn message_broker_system(
     client_to_game_receiver: Res<NetworkReceiver>,
     mut player_events: ResMut<PlayerEvents>,
     mut ids: ResMut<Ids>,
 ) {
-    if let Ok(evt) = client_to_game_receiver.try_recv() {
-        if env::var("NETWORK_DEBUG").is_ok() {
+    let network_debug = env::var("NETWORK_DEBUG").is_ok();
+    for evt in client_to_game_receiver
+        .try_iter()
+        .take(MAX_PLAYER_EVENTS_PER_TICK)
+    {
+        if network_debug {
             println!("{:?}", evt);
         }
 
-        player_events.insert(ids.player_event, evt.clone());
+        // These legacy commands are still acknowledged by the network layer,
+        // but no gameplay system consumes them. Do not retain them in the
+        // shared event map where every input system would rescan them forever.
+        if is_legacy_noop_player_event(&evt) {
+            continue;
+        }
+
+        player_events.insert(ids.player_event, evt);
 
         ids.player_event += 1;
     }
@@ -1852,6 +2134,7 @@ fn new_player_system(
 
 fn login_system(
     clients: Res<Clients>,
+    mut active_infos: ResMut<ActiveInfos>,
     mut events: ResMut<PlayerEvents>,
     game_tick: ResMut<GameTick>,
     mut game_events: ResMut<GameEvents>,
@@ -1900,6 +2183,11 @@ fn login_system(
                 ) {
                     continue;
                 }
+
+                // A Login is the authoritative session boundary. Subscriptions
+                // belong to the prior browser connection and must never resume
+                // sending panel deltas to the replacement socket.
+                active_infos.remove_player(*player_id);
 
                 let event_type = GameEventType::Login {
                     player_id: *player_id,
@@ -1984,6 +2272,25 @@ fn move_system(
                     send_to_client(*player_id, error, &clients);
                     continue;
                 }
+
+                // A successful move is the player's explicit stop signal for
+                // continuous hero gathering. Remove the scheduled cycle now;
+                // otherwise it would remain queued until its original due tick.
+                let gather_events_to_remove = game_events
+                    .iter()
+                    .filter_map(|(event_id, event)| match &event.event_type {
+                        GameEventType::GatherEvent { gatherer_id, .. }
+                            if *gatherer_id == hero_id =>
+                        {
+                            Some(*event_id)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                for event_id in gather_events_to_remove {
+                    game_events.remove(&event_id);
+                }
+                commands.entity(hero_entity).remove::<ActionProgress>();
 
                 // Remove events that are cancellable
                 let mut events_to_remove = Vec::new();
@@ -2094,10 +2401,36 @@ fn live_combo_history_for_target(
     target_id: i32,
     game_tick: i32,
 ) -> Vec<String> {
-    Combat::live_combo_attacks_before_append(tracker, target_id, game_tick)
+    Combat::live_combo_attacks_for_finisher(tracker, target_id, game_tick)
         .into_iter()
         .map(|attack| attack.to_str())
         .collect()
+}
+
+fn make_ready_finisher_transferable_after_kill(
+    tracker: Option<&mut crate::combat::ComboTracker>,
+    defeated_target_id: i32,
+    target_is_dead: bool,
+    attack_history: &Vec<String>,
+    templates: &Templates,
+) -> bool {
+    if !target_is_dead
+        || combo_hints_for_history(attack_history, templates)
+            .1
+            .is_none()
+    {
+        return false;
+    }
+
+    let Some(tracker) = tracker else {
+        return false;
+    };
+    if tracker.target_id != defeated_target_id || tracker.attacks.is_empty() {
+        return false;
+    }
+
+    tracker.target_id = TRANSFERABLE_COMBO_TARGET_ID;
+    true
 }
 
 pub(crate) fn combo_chain_cooldown_ticks(chain_length: usize) -> i32 {
@@ -2237,12 +2570,13 @@ fn combo_tracker_timeout_system(
             send_to_client(
                 player_id.0,
                 ResponsePacket::CombatState {
-                    version: 2,
+                    version: 3,
                     target_id,
                     enemy_intent,
                     attack_history: Vec::new(),
                     matching_combos: Vec::new(),
                     available_finisher: None,
+                    finisher_transferable: false,
                     target_effects,
                     stamina_costs: network::StaminaCosts {
                         quick: 5,
@@ -2874,6 +3208,11 @@ fn send_combat_state(
     clients: &Res<Clients>,
 ) {
     let (matching_combos, available_finisher) = combo_hints_for_history(&attack_history, templates);
+    let finisher_transferable = available_finisher.is_some()
+        && actor
+            .combo_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.target_id == TRANSFERABLE_COMBO_TARGET_ID);
     let mut target_effects = target
         .effects
         .0
@@ -2883,12 +3222,13 @@ fn send_combat_state(
         .collect::<Vec<_>>();
     target_effects.sort();
     let packet = ResponsePacket::CombatState {
-        version: 2,
+        version: 3,
         target_id,
         enemy_intent: enemy_intent_for_template(&target_template, target.crisis_assault.is_some()),
         attack_history: attack_history.clone(),
         matching_combos,
         available_finisher,
+        finisher_transferable,
         target_effects,
         stamina_costs: network::StaminaCosts {
             quick: 5,
@@ -3205,6 +3545,16 @@ fn attack_system(
                 if countered.is_some() {
                     live_attacks.clear();
                     attack_history.clear();
+                }
+
+                if *attacker.subclass == Subclass::Hero {
+                    make_ready_finisher_transferable_after_kill(
+                        attacker.combo_tracker.as_deref_mut(),
+                        target.id.0,
+                        *target.state == State::Dead,
+                        &attack_history,
+                        &templates,
+                    );
                 }
 
                 // Add visible damage event to broadcast to everyone nearby
@@ -4096,7 +4446,7 @@ fn gather_system(
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     campfire_visibility: Res<CampfireVisibilityState>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     mut game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
@@ -4114,7 +4464,10 @@ fn gather_system(
 
     for (event_id, event) in events.iter() {
         match event {
-            PlayerEvent::Gather { player_id } => {
+            PlayerEvent::Gather {
+                player_id,
+                res_type,
+            } => {
                 debug!("PlayerEvent::Gather");
                 events_to_remove.push(*event_id);
 
@@ -4149,6 +4502,24 @@ fn gather_system(
                     continue;
                 }
 
+                let gather_cycle_already_queued = game_events.values().any(|event| {
+                    matches!(
+                        &event.event_type,
+                        GameEventType::GatherEvent { gatherer_id, .. }
+                            if *gatherer_id == hero_id
+                    )
+                });
+                if *hero_state == State::Gathering || gather_cycle_already_queued {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "You are already gathering. Move to stop.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 if !has_sufficient_work_visibility(hero_viewshed, *player_id, &campfire_visibility)
                 {
                     send_insufficient_work_visibility_notice(*player_id, &clients);
@@ -4160,63 +4531,64 @@ fn gather_system(
                     continue;
                 }
 
-                // Map equipped main-hand tool to its preferred resource type. The tool
-                // gets priority *if* its resource is actually on the tile; otherwise we
-                // fall through to plant-picking / forage so the player isn't forced to
-                // unequip just to grab grapes or berries with a sword in hand.
-                let tool_resource_type = hero_inventory.get_equipped_main_hand().and_then(|tool| {
-                    item::gather_resource_type_for_tool(&tool).map(str::to_string)
-                });
-                let hunting_tool_equipped =
-                    hero_inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting);
-
-                // Decide what to do, in priority order:
-                //   1. Tool's preferred resource is on the tile -> gather that.
-                //   2. A Plant resource (grapes, berries) is on the tile -> pick it.
-                //   3. Nothing specific -> terrain-based forage.
-                let event_type = if let Some(rt) = tool_resource_type.filter(|rt| {
-                    Resource::is_valid_type_for_player(
-                        rt.clone(),
-                        *hero_pos,
-                        &resources,
-                        &discoveries,
-                        *player_id,
-                    )
-                }) {
-                    GameEventType::GatherEvent {
-                        gatherer_id: hero_id,
-                        res_type: rt,
-                    }
-                } else if Resource::is_valid_type_for_player(
-                    PLANT.to_string(),
+                // The action selected by the player is authoritative. Equipment can
+                // satisfy a requirement or improve its speed, but it must never
+                // silently redirect a Forage click into Logging, Hunting, or Mining.
+                let res_type = canonical_gather_resource_type(res_type).to_string();
+                if !Resource::is_valid_type_for_player(
+                    res_type.clone(),
                     *hero_pos,
                     &resources,
                     &discoveries,
                     *player_id,
                 ) {
-                    GameEventType::GatherEvent {
-                        gatherer_id: hero_id,
-                        res_type: PLANT.to_string(),
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: format!(
+                                "No revealed {} resources are available on this tile.",
+                                res_type
+                            ),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
+                if let Some(required_attr) = item::required_tool_attr_for_res_type(&res_type) {
+                    if !hero_inventory.has_equipped_tool_for_attr(&required_attr) {
+                        send_to_client(
+                            *player_id,
+                            ResponsePacket::Error {
+                                errmsg: format!(
+                                    "Equip a {} tool before gathering {}.",
+                                    item::tool_attr_label(&required_attr),
+                                    res_type
+                                ),
+                            },
+                            &clients,
+                        );
+                        continue;
                     }
-                } else {
-                    GameEventType::ForageEvent {
-                        forager_id: hero_id,
-                    }
+                }
+
+                let equipped_tool_rating = hero_inventory
+                    .get_equipped_tool_for_res_type(&res_type)
+                    .and_then(|tool| {
+                        item::gather_tool_attr_for_res_type(&res_type)
+                            .map(|attr| tool.attr_num(&attr))
+                    });
+                let gather_duration = item::gather_duration_ticks_for_res_type(
+                    GATHER_TIME_SEC,
+                    &res_type,
+                    equipped_tool_rating,
+                );
+                let event_type = GameEventType::GatherEvent {
+                    gatherer_id: hero_id,
+                    res_type,
                 };
 
-                let gather_duration = match &event_type {
-                    GameEventType::GatherEvent { res_type, .. } => hero_inventory
-                        .get_equipped_tool_for_res_type(res_type)
-                        .and_then(|tool| {
-                            item::required_tool_attr_for_res_type(res_type)
-                                .map(|attr| tool.attr_num(&attr))
-                        })
-                        .map(|rating| item::gather_duration_ticks(GATHER_TIME_SEC, rating))
-                        .unwrap_or(GATHER_TIME_SEC * TICKS_PER_SEC),
-                    _ => GATHER_TIME_SEC * TICKS_PER_SEC,
-                };
-
-                let gather_activity = gather_activity_for_event(&event_type, hunting_tool_equipped);
+                let gather_activity = gather_activity_for_event(&event_type);
                 if let Some(mut active_task) = hero_active_task {
                     ActiveTask::set_if_changed(&mut active_task, gather_activity.clone());
                 } else {
@@ -4245,8 +4617,30 @@ fn gather_system(
                     new_state: State::Gathering,
                 });
 
+                let action_id = ids.new_map_event_id();
+                commands.entity(hero_entity).insert(ActionProgress {
+                    action_id,
+                    start_tick: game_tick.0,
+                    end_tick: game_tick.0 + gather_duration,
+                });
+                visible_events.new(
+                    hero_id,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![
+                            ("state".to_string(), STATE_GATHERING.to_string()),
+                            ("action_id".to_string(), action_id.to_string()),
+                            (
+                                "action_duration_ms".to_string(),
+                                network::game_tick_to_millis(gather_duration).to_string(),
+                            ),
+                            ("action_elapsed_ms".to_string(), "0".to_string()),
+                        ],
+                    },
+                );
+
                 let event = GameEvent {
-                    event_id: ids.new_map_event_id(),
+                    event_id: action_id,
                     start_tick: game_tick.0,
                     run_tick: game_tick.0 + gather_duration,
                     event_type,
@@ -4255,7 +4649,7 @@ fn gather_system(
                 game_events.insert(event.event_id, event);
 
                 let packet = ResponsePacket::Gather {
-                    gather_time: GATHER_TIME_SEC,
+                    gather_time: gather_duration / TICKS_PER_SEC,
                 };
                 send_to_client(*player_id, packet, &clients);
             }
@@ -4268,11 +4662,8 @@ fn gather_system(
     }
 }
 
-fn gather_activity_for_event(
-    event_type: &GameEventType,
-    hunting_tool_equipped: bool,
-) -> ActiveTask {
-    let activity = match event_type {
+fn gather_activity_for_event(event_type: &GameEventType) -> ActiveTask {
+    match event_type {
         GameEventType::GatherEvent { res_type, .. } => {
             let task = ActiveTask::get_activity_from_res_type(res_type.clone());
             if task == ActiveTask::Unknown {
@@ -4281,17 +4672,8 @@ fn gather_activity_for_event(
                 task
             }
         }
-        GameEventType::ForageEvent { .. } => ActiveTask::Gathering,
+        GameEventType::ForageEvent { .. } => ActiveTask::Foraging,
         _ => ActiveTask::Gathering,
-    };
-
-    // A hunt can begin on a tile where no hunting ground is currently revealed.
-    // That uses the terrain-forage fallback internally, but it is still a hunt
-    // from the player's perspective while a Hunting tool is equipped.
-    if activity == ActiveTask::Gathering && hunting_tool_equipped {
-        ActiveTask::Hunting
-    } else {
-        activity
     }
 }
 
@@ -4306,6 +4688,7 @@ fn gather_farm_refine_craft_system(
     game_events: ResMut<GameEvents>,
     resources: Res<Resources>,
     discoveries: Res<ResourceDiscoveries>,
+    survey_history: Res<SurveyHistory>,
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     active_infos: ResMut<ActiveInfos>,
@@ -4337,8 +4720,12 @@ fn gather_farm_refine_craft_system(
                     continue;
                 };
 
-                let nearby_resources =
-                    Resource::get_nearby_resources(*hero.pos, &resources, &discoveries, *player_id);
+                let nearby_resources = nearby_scouted_resource_categories(
+                    *player_id,
+                    *hero.pos,
+                    &survey_history,
+                    &resources,
+                );
 
                 let nearby_resources_packet = ResponsePacket::NearbyResources {
                     data: nearby_resources,
@@ -4629,7 +5016,7 @@ fn refine_system(
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
     mut visible_events: ResMut<VisibleEvents>,
     templates: Res<Templates>,
@@ -4700,6 +5087,7 @@ fn refine_system(
                     error!("Cannot find item for {:?}", item_id);
                     continue;
                 };
+                let refine_activity = ActiveTask::for_refining_item_class(&item.class);
 
                 if *hero_state == State::Refining {
                     let packet = ResponsePacket::Error {
@@ -4744,6 +5132,26 @@ fn refine_system(
                     entity: hero_entity,
                     new_state: State::Refining,
                 });
+                commands
+                    .entity(hero_entity)
+                    .try_insert(refine_activity.clone());
+
+                let activity = refine_activity.to_string();
+                visible_events.new(
+                    hero_id,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![("activity".to_string(), activity.clone())],
+                    },
+                );
+                send_to_client(
+                    *player_id,
+                    ResponsePacket::InfoActivityUpdate {
+                        id: hero_id,
+                        activity,
+                    },
+                    &clients,
+                );
 
                 let action_id = ids.new_map_event_id();
                 commands.entity(hero_entity).insert(ActionProgress {
@@ -4918,8 +5326,9 @@ fn structure_refine_system(
     mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
+    mut visible_events: ResMut<VisibleEvents>,
     templates: Res<Templates>,
     recipes: Res<Recipes>,
     mut active_infos: ResMut<ActiveInfos>,
@@ -5032,6 +5441,7 @@ fn structure_refine_system(
                     error!("Cannot find item for {:?}", item_id);
                     continue;
                 };
+                let refine_activity = ActiveTask::for_refining_item_class(&item.class);
 
                 let Ok(structure_template) = template_query.get(structure_entity) else {
                     error!("Cannot find structure template for {:?}", structure_entity);
@@ -5096,6 +5506,26 @@ fn structure_refine_system(
                     entity: hero_entity,
                     new_state: State::Refining,
                 });
+                commands
+                    .entity(hero_entity)
+                    .try_insert(refine_activity.clone());
+
+                let activity = refine_activity.to_string();
+                visible_events.new(
+                    hero_id,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![("activity".to_string(), activity.clone())],
+                    },
+                );
+                send_to_client(
+                    *player_id,
+                    ResponsePacket::InfoActivityUpdate {
+                        id: hero_id,
+                        activity,
+                    },
+                    &clients,
+                );
 
                 // Add Refine Event
                 let event = GameEvent {
@@ -5324,14 +5754,6 @@ fn get_stats_system(
                     continue;
                 };
 
-                let mut thirst_str = None;
-                let mut hunger_str = None;
-                let mut tired_str = None;
-
-                thirst_str = Some(obj_thirst.num_to_string());
-                hunger_str = Some(obj_hunger.num_to_string());
-                tired_str = Some(obj_tired.num_to_string());
-
                 let packet = ResponsePacket::Stats {
                     data: StatsData {
                         id: *id,
@@ -5341,9 +5763,9 @@ fn get_stats_system(
                         base_stamina: obj_stats.base_stamina.unwrap_or(100),
                         mana: obj_stats.mana.unwrap_or(0),
                         base_mana: obj_stats.base_mana.unwrap_or(0),
-                        thirst: thirst_str,
-                        hunger: hunger_str,
-                        tiredness: tired_str,
+                        thirst: Some(obj_thirst.num_to_string()),
+                        hunger: Some(obj_hunger.num_to_string()),
+                        tiredness: Some(obj_tired.num_to_string()),
                         effects: Vec::new(),
                     },
                 };
@@ -5375,8 +5797,6 @@ fn info_hero_system(
     let items_packet = Some(obj.inventory.get_packet());
 
     let mut attributes: HashMap<String, i32> = HashMap::new();
-    let mut skills_packet = None;
-
     let total_weight = Some(obj.inventory.get_total_weight());
     let capacity = Some(Obj::get_capacity(
         &obj.template.0.to_string(),
@@ -5400,7 +5820,7 @@ fn info_hero_system(
     attributes.insert(STRENGTH.to_string(), attrs.strength);
     attributes.insert(TOUGHNESS.to_string(), attrs.toughness);
 
-    skills_packet = Some(skills.get_levels());
+    let skills_packet = Some(skills.get_levels());
 
     let effects = obj.effects.get_info_list(&templates.effect_templates);
 
@@ -5575,6 +5995,33 @@ fn info_villager_system(
         ));
     }
 
+    let is_dead = *obj.state == State::Dead;
+    if is_dead {
+        // Need-based deaths intentionally retain their final need values and
+        // may retain pre-death HP. Those values are useful for simulation
+        // history but must not be presented as the corpse's current status.
+        activity = Some("Dead".to_string());
+        order = Some("Dead".to_string());
+        hp = Some(0);
+        base_speed = Some(0);
+    }
+
+    let thirst_status = if is_dead {
+        "Dead".to_string()
+    } else {
+        thirst.num_to_string()
+    };
+    let hunger_status = if is_dead {
+        "Dead".to_string()
+    } else {
+        hunger.num_to_string()
+    };
+    let tiredness_status = if is_dead {
+        "Dead".to_string()
+    } else {
+        tired.num_to_string()
+    };
+
     let response_packet = ResponsePacket::InfoVillager {
         id: obj.id.0,
         name: obj.name.0.to_string(),
@@ -5590,9 +6037,9 @@ fn info_villager_system(
         attributes: Some(attributes),
         effects: effects,
         need: "".to_string(),
-        thirst: thirst.num_to_string(),
-        hunger: hunger.num_to_string(),
-        tiredness: tired.num_to_string(),
+        thirst: thirst_status,
+        hunger: hunger_status,
+        tiredness: tiredness_status,
         hp: hp,
         stamina: stamina,
         base_hp: base_hp,
@@ -5616,6 +6063,7 @@ fn info_villager_system(
             .map(|p| p.to_str().to_string()),
     };
 
+    active_infos.remove_player_type(info_villager_event.player_id, ActiveInfoType::Obj);
     active_infos.add(
         (obj.id.0, ActiveInfoType::Obj),
         info_villager_event.player_id,
@@ -5659,9 +6107,12 @@ fn info_structure_system(
     let mut base_def = None;
 
     let mut work_done = None;
+    let mut total_work = None;
     let mut work_per_sec = None;
+    let mut construction_action_id = None;
+    let mut construction_updated_at_ms = None;
     let mut selected_upgrade_name = None;
-    let mut upgrade_req = Vec::new();
+    let mut selected_upgrade_image = None;
     let mut upgrade_cost = None;
     let mut residents = None;
 
@@ -5671,10 +6122,20 @@ fn info_structure_system(
         base_def = Some(stats.base_def);
     }
 
-    if *obj.state == State::Building || *obj.state == State::Upgrading {
+    if matches!(
+        *obj.state,
+        State::Building | State::Upgrading | State::Stalled
+    ) {
         if let Ok(build_state) = build_state_query.get(obj.entity) {
             work_done = Some(build_state.work_done);
+            total_work = Some(build_state.build_upgrade_cost);
             work_per_sec = Some(build_state.work_per_sec);
+            if build_state.action_id > 0 {
+                construction_action_id = Some(build_state.action_id);
+                construction_updated_at_ms = Some(network::game_tick_to_timestamp_millis(
+                    build_state.progress_updated_at_tick,
+                ));
+            }
         }
     }
 
@@ -5683,18 +6144,12 @@ fn info_structure_system(
             selected_upgrade_name = Some(selected_upgrade.0.clone());
 
             let upgrade_structure_template =
-                Structure::get_template(selected_upgrade.0.clone(), &templates.obj_templates);
-
-            upgrade_req = upgrade_structure_template
-                .clone()
-                .expect("Cannot find upgrade structure template")
-                .upgrade_req
-                .unwrap_or(vec![]);
+                Structure::get_template(selected_upgrade.0.clone(), &templates.obj_templates)
+                    .expect("Cannot find upgrade structure template");
+            selected_upgrade_image = Some(upgrade_structure_template.image.clone());
 
             upgrade_cost = Some(
                 upgrade_structure_template
-                    .clone()
-                    .expect("Cannot find upgrade structure template")
                     .upgrade_cost
                     .unwrap_or(MAX_BUILD_UPGRADE_COST) as f32,
             );
@@ -5762,16 +6217,24 @@ fn info_structure_system(
         ),
         upgrade_cost: upgrade_cost,
         work_done: work_done,
+        total_work: total_work,
         work_per_sec: work_per_sec,
+        work_done_milliunits: work_done.map(network::work_to_milliunits),
+        total_work_milliunits: total_work.map(network::work_to_milliunits),
+        work_per_sec_milliunits: work_per_sec.map(network::work_to_milliunits),
+        construction_action_id,
+        construction_updated_at_ms,
         req: Some(req_items.clone()),
         upgrade_req: Some(req_items.clone()),
         selected_upgrade: selected_upgrade_name,
+        selected_upgrade_image,
         crop_type: crop_type,
         crop_quantity: crop_quantity,
         crop_stage: crop_stage,
         upgradeable: upgradeable,
     };
 
+    active_infos.remove_player_type(info_structure_event.player_id, ActiveInfoType::Structure);
     active_infos.add(
         (obj.id.0, ActiveInfoType::Structure),
         info_structure_event.player_id,
@@ -6234,7 +6697,7 @@ fn info_advance_system(
     game_tick: Res<GameTick>,
     entity_map: ResMut<EntityObjMap>,
     clients: Res<Clients>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
     mut query: Query<(
         &PlayerId,
@@ -6385,6 +6848,7 @@ fn info_upgrade_system(
     _game_tick: Res<GameTick>,
     entity_map: ResMut<EntityObjMap>,
     clients: Res<Clients>,
+    plans: Res<Plans>,
     structure_query: Query<StructureQuery, With<ClassStructure>>,
     templates: Res<Templates>,
 ) {
@@ -6435,6 +6899,9 @@ fn info_upgrade_system(
                 let mut upgrade_template_list = Vec::new();
                 debug!("upgrade_to_list {:?}", upgrade_to_list);
                 for upgrade_to_structure in upgrade_to_list.iter() {
+                    if !plans.contains(*player_id, upgrade_to_structure) {
+                        continue;
+                    }
                     let upgrade_structure_template = templates
                         .obj_templates
                         .get(upgrade_to_structure.to_string());
@@ -6454,11 +6921,16 @@ fn info_upgrade_system(
                     upgrade_template_list.push(upgrade_template);
                 }
 
-                if upgrade_template_list.len() == 0 {
-                    error!(
-                        "Cannot build upgrade template list for {:?}",
-                        structure.name.0.clone()
-                    );
+                if upgrade_template_list.is_empty() {
+                    let errmsg = match upgrade_to_list.as_slice() {
+                        [upgrade] => format!(
+                            "You have not learned how to upgrade to a {}. Use its deed first.",
+                            upgrade
+                        ),
+                        _ => "No learned upgrades are available for this structure. Use the required deed first."
+                            .to_string(),
+                    };
+                    send_to_client(*player_id, ResponsePacket::Error { errmsg }, &clients);
                     continue;
                 }
 
@@ -6496,6 +6968,20 @@ fn info_tile_system(
             PlayerEvent::InfoTile { player_id, x, y } => {
                 debug!("PlayerEvent::InfoTile x: {:?} y: {:?}", *x, *y);
                 events_to_remove.push(*event_id);
+
+                // Network ingress rejects this already, but the ECS boundary
+                // must remain safe if another producer enqueues a malformed
+                // event directly.
+                if !Map::is_valid_pos((*x, *y)) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Invalid tile coordinates.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
 
                 let tile_type = Map::tile_type(*x, *y, &map);
                 let mut sanctuary = "None".to_string();
@@ -6545,6 +7031,17 @@ fn info_tile_system(
             PlayerEvent::InfoTileResources { player_id, x, y } => {
                 debug!("PlayerEvent::InfoTileResources x: {:?} y: {:?}", *x, *y);
                 events_to_remove.push(*event_id);
+
+                if !Map::is_valid_pos((*x, *y)) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "Invalid tile coordinates.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
 
                 let tile_type = Map::tile_type(*x, *y, &map);
 
@@ -6626,6 +7123,7 @@ fn info_item_system(
                     items: inventory_items,
                 };
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::Inventory);
                 active_infos.add((*id, ActiveInfoType::Inventory), *player_id);
 
                 send_to_client(*player_id, info_inventory_packet, &clients);
@@ -6672,6 +7170,7 @@ fn info_item_system(
                     items: inventory_items,
                 };
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::Equip);
                 active_infos.add((*id, ActiveInfoType::Equip), *player_id);
 
                 send_to_client(*player_id, info_equip_packet, &clients);
@@ -6929,30 +7428,7 @@ fn info_item_system(
                 );
                 events_to_remove.push(*event_id);
 
-                match panel_type.as_str() {
-                    "inventory" => {
-                        active_infos.remove((*id, ActiveInfoType::Inventory), *player_id);
-                    }
-                    "equip" => {
-                        active_infos.remove((*id, ActiveInfoType::Equip), *player_id);
-                    }
-                    "craft" => {
-                        active_infos.remove((*id, ActiveInfoType::Craft), *player_id);
-                    }
-                    "structure_refine" => {
-                        active_infos.remove((*id, ActiveInfoType::StructureRefine), *player_id);
-                    }
-                    "structure_craft" => {
-                        active_infos.remove((*id, ActiveInfoType::StructureCraft), *player_id);
-                    }
-                    "structure_queue" => {
-                        active_infos.remove((*id, ActiveInfoType::StructureQueue), *player_id);
-                    }
-                    "villager" => {
-                        active_infos.remove((*id, ActiveInfoType::Obj), *player_id);
-                    }
-                    _ => {}
-                }
+                remove_active_info_panel(&mut active_infos, *player_id, *id, panel_type);
             }
             _ => {}
         }
@@ -7224,7 +7700,7 @@ fn item_transfer_system(
                     continue;
                 }
 
-                let Some(item) = owner.inventory.get_by_id(*item_id) else {
+                let Some(mut item) = owner.inventory.get_by_id(*item_id) else {
                     error!("Cannot find item for {:?}", item_id);
                     continue;
                 };
@@ -7299,9 +7775,7 @@ fn item_transfer_system(
                     )
                 {
                     let packet = ResponsePacket::Error {
-                        errmsg:
-                            "Only Firewood, Charcoal, Raw Meat, and Cooked Meat can be stored here."
-                                .to_string(),
+                        errmsg: completed_storage_rejection_message(&target.template.0).to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -7315,6 +7789,33 @@ fn item_transfer_system(
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
+                }
+
+                // A legacy quantity stack can contain one equipped tool plus
+                // spare units. Keep exactly one equipped and separate only the
+                // surplus for transfer. A sole equipped item remains protected.
+                if item.equipped
+                    && *owner.state != State::Dead
+                    && (owner.subclass.is_hero() || owner.subclass.is_villager())
+                {
+                    if item.quantity <= 1 {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Unequip the item before transferring it.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+
+                    let spare_quantity = item.quantity - 1;
+                    let Some((spare_item, _equipped_item)) = owner.inventory.split_instance_stack(
+                        item.id,
+                        ids.new_item_id(),
+                        spare_quantity,
+                    ) else {
+                        error!("Cannot separate equipped item surplus for {:?}", item.id);
+                        continue;
+                    };
+                    item = spare_item;
                 }
 
                 // Transfer target does not have enough capacity
@@ -7617,7 +8118,9 @@ fn item_transfer_system(
                         &clients,
                     );
                 } else {
-                    if target_total_weight + transfer_item_weight > target_capacity {
+                    let num_to_transfer =
+                        stack_quantity_that_fits(&item, target_total_weight, target_capacity);
+                    if num_to_transfer <= 0 {
                         let packet = ResponsePacket::Error {
                             errmsg: "Target does not have enough capacity".to_string(),
                         };
@@ -7625,10 +8128,26 @@ fn item_transfer_system(
                         continue;
                     }
 
+                    let partial_transfer = num_to_transfer < item.quantity;
+                    let transferred_item_id = if partial_transfer {
+                        let split_item_id = ids.new_item_id();
+                        Inventory::transfer_quantity(
+                            item.id,
+                            split_item_id,
+                            &mut owner.inventory,
+                            &mut target.inventory,
+                            num_to_transfer,
+                            &templates.item_templates,
+                        );
+                        split_item_id
+                    } else {
+                        Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
+                        item.id
+                    };
+
                     info!("Transfering item from owner to target");
                     info!("Owner inventory: {:?}", owner.inventory);
                     info!("Target inventory: {:?}", target.inventory);
-                    Inventory::transfer(item.id, &mut owner.inventory, &mut target.inventory);
 
                     if let Some(fixed_expires_at) = target_dropped_bag_expiry {
                         if let Some(dropped_bag) = target.dropped_bag.as_deref_mut() {
@@ -7667,17 +8186,42 @@ fn item_transfer_system(
                         });
                         let gather_res_type = gather_context.map(|(res_type, _pos)| res_type);
 
+                        // Auto-equip exactly one unit. This also repairs a
+                        // transferred legacy equipment stack so the remaining
+                        // Hatchet stays unequipped and can be transferred back.
+                        let auto_equip_item_id = target
+                            .inventory
+                            .get_by_id(transferred_item_id)
+                            .and_then(|transferred_item| {
+                                if transferred_item.quantity > 1 {
+                                    target
+                                        .inventory
+                                        .split_instance_stack(
+                                            transferred_item.id,
+                                            ids.new_item_id(),
+                                            1,
+                                        )
+                                        .map(|(single_item, _source_item)| single_item.id)
+                                } else {
+                                    Some(transferred_item.id)
+                                }
+                            })
+                            .unwrap_or(transferred_item_id);
+
                         target_items_updated = target
                             .inventory
-                            .auto_equip_item_for_context(item.id, gather_res_type);
+                            .auto_equip_item_for_context(auto_equip_item_id, gather_res_type);
 
                         let transferred_item_satisfies_block = gather_res_type
                             .and_then(item::required_tool_attr_for_res_type)
                             .and_then(|required_attr| {
-                                target.inventory.get_by_id(item.id).map(|transferred_item| {
-                                    transferred_item.equipped
-                                        && transferred_item.is_gather_tool_for_attr(&required_attr)
-                                })
+                                target.inventory.get_by_id(auto_equip_item_id).map(
+                                    |transferred_item| {
+                                        transferred_item.equipped
+                                            && transferred_item
+                                                .is_gather_tool_for_attr(&required_attr)
+                                    },
+                                )
                             })
                             .unwrap_or(false);
 
@@ -7731,12 +8275,16 @@ fn item_transfer_system(
                     let target_inventory = network::Inventory {
                         id: *target_id,
                         cap: target_capacity,
-                        tw: target_total_weight + transfer_item_weight,
+                        tw: target.inventory.get_total_weight(),
                         items: target.inventory.get_packet().clone(),
                     };
 
                     let item_transfer_packet: ResponsePacket = ResponsePacket::ItemTransfer {
-                        result: "success".to_string(),
+                        result: if partial_transfer {
+                            "partial".to_string()
+                        } else {
+                            "success".to_string()
+                        },
                         source_id: owner.id.0,
                         sourceitems: source_inventory,
                         target_id: *target_id,
@@ -7939,6 +8487,7 @@ fn item_transfer_system(
 
                 send_to_client(*player_id, info_item_transfer_packet, &clients);
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::ItemTransfer);
                 active_infos.add((*source_id, ActiveInfoType::ItemTransfer), *player_id);
                 active_infos.add((*target_id, ActiveInfoType::ItemTransfer), *player_id);
             }
@@ -8120,6 +8669,7 @@ fn info_experiment_system(
                     };
                 }
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::Experiment);
                 active_infos.add((*structure_id, ActiveInfoType::Experiment), *player_id);
 
                 send_to_client(*player_id, info_experiment, &clients);
@@ -8335,6 +8885,7 @@ fn order_follow_system(
     mut events: ResMut<PlayerEvents>,
     mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
+    mut objectives: ResMut<Objectives>,
     query: Query<ObjQuery>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
@@ -8383,6 +8934,7 @@ fn order_follow_system(
                 // This is a final ownership boundary because source_id is
                 // supplied by the client.
                 let mut ordered = false;
+                let mut ordered_living_villager = false;
                 for q in &query {
                     if q.id.0 == *source_id {
                         if q.player_id.0 != *player_id
@@ -8394,11 +8946,19 @@ fn order_follow_system(
                             target: hero_entity,
                         });
                         ordered = true;
+                        ordered_living_villager = q.subclass.is_villager() && q.state.is_alive();
                     }
                 }
 
                 if !ordered {
                     continue;
+                }
+
+                if ordered_living_villager {
+                    objectives
+                        .entry(*player_id)
+                        .or_insert_with(PlayerObjectives::default)
+                        .record_tutorial_follow_order(*event_id);
                 }
 
                 Obj::add_speech_event(
@@ -8428,6 +8988,7 @@ fn order_gather_system(
     resources: Res<Resources>,
     discoveries: Res<ResourceDiscoveries>,
     templates: Res<Templates>,
+    mut objectives: ResMut<Objectives>,
     query: Query<CoreQuery>,
     structure_query: Query<
         (&Id, &PlayerId, &Position, &Subclass, &Template, &Inventory),
@@ -8484,6 +9045,12 @@ fn order_gather_system(
                     continue;
                 }
 
+                // The gather panel historically used the short UI label
+                // "Game", while hunting-ground resources are authoritatively
+                // typed "Game Animal". Normalize the legacy wire value so
+                // cached clients and current resource data agree.
+                let res_type = canonical_order_gather_resource_type(res_type);
+
                 if !Resource::is_valid_type_for_player(
                     res_type.to_string(),
                     *hero.pos,
@@ -8525,6 +9092,13 @@ fn order_gather_system(
                     storage_id: storage_structure_id.clone(),
                 });
 
+                if villager.subclass.is_villager() && villager.state.is_alive() && res_type == LOG {
+                    objectives
+                        .entry(*player_id)
+                        .or_insert_with(PlayerObjectives::default)
+                        .record_tutorial_log_order(*event_id);
+                }
+
                 Obj::add_speech_event(
                     game_tick.0,
                     VillagerUtil::order_to_speech(&Order::Gather {
@@ -8543,6 +9117,18 @@ fn order_gather_system(
 
     for event_id in events_to_remove.iter() {
         events.remove(event_id);
+    }
+}
+
+fn canonical_order_gather_resource_type(res_type: &str) -> &str {
+    canonical_gather_resource_type(res_type)
+}
+
+fn canonical_gather_resource_type(res_type: &str) -> &str {
+    match res_type {
+        "Game" => GAME_ANIMAL,
+        PLANT => FORAGE,
+        _ => res_type,
     }
 }
 
@@ -8601,13 +9187,15 @@ fn create_foundation_system(
     mut commands: Commands,
     game_tick: ResMut<GameTick>,
     clients: Res<Clients>,
+    plans: Res<Plans>,
     mut ids: ResMut<Ids>,
     mut entity_map: ResMut<EntityObjMap>,
-    mut map_events: ResMut<MapEvents>,
     templates: Res<Templates>,
     campfire_visibility: Res<CampfireVisibilityState>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
     structure_query: Query<(&Position, &Subclass), With<ClassStructure>>,
+    resources: Res<Resources>,
+    resource_discoveries: Res<ResourceDiscoveries>,
     presence: Res<PlayerWorldPresenceState>,
     crisis_state: Option<Res<SettlementCrisisState>>,
     mut balance_telemetry_state: Option<ResMut<CrisisBalanceTelemetryState>>,
@@ -8659,6 +9247,20 @@ fn create_foundation_system(
                     continue;
                 }
 
+                if !plans.contains(*player_id, structure_name) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: format!(
+                                "You have not learned how to build a {}. Use its deed first.",
+                                structure_name
+                            ),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 // Get structure template
                 let Some(structure_template) = Structure::get_template_by_name(
                     structure_name.clone(),
@@ -8670,6 +9272,17 @@ fn create_foundation_system(
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 };
+
+                if let Some(errmsg) = structure_placement_error(
+                    &structure_template.template,
+                    *player_id,
+                    *hero.pos,
+                    &resources,
+                    &resource_discoveries,
+                ) {
+                    send_to_client(*player_id, ResponsePacket::Error { errmsg }, &clients);
+                    continue;
+                }
 
                 // Check if structure or wall already exists on the tile
                 let mut structure_on_tile = false;
@@ -8745,7 +9358,9 @@ fn create_foundation_system(
                     build_upgrade_cost: structure_template.build_cost.unwrap_or(100) as f32,
                     work_done: 0.0,
                     work_per_sec: 0.0,
+                    progress_updated_at_tick: 0,
                     start_time: 0,
+                    action_id: 0,
                 };
 
                 let assignments = Assignments(Vec::new());
@@ -8794,7 +9409,7 @@ fn create_foundation_system(
                     result: "success".to_string(),
                 };
 
-                send_to_client(*player_id, packet, &clients)
+                send_to_client(*player_id, packet, &clients);
             }
             _ => {}
         }
@@ -8970,6 +9585,7 @@ fn start_upgrade_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
+    plans: Res<Plans>,
     ids: Res<Ids>,
     game_tick: ResMut<GameTick>,
     entity_map: Res<EntityObjMap>,
@@ -9068,6 +9684,20 @@ fn start_upgrade_system(
                     continue;
                 }
 
+                if !plans.contains(*player_id, selected_upgrade) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: format!(
+                                "You have not learned how to upgrade to a {}. Use its deed first.",
+                                selected_upgrade
+                            ),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 // Get upgrade template from templates
                 let upgrade_template = templates.obj_templates.get(selected_upgrade.clone());
 
@@ -9078,7 +9708,9 @@ fn start_upgrade_system(
                         as f32,
                     work_done: 0.0,
                     work_per_sec: 0.0,
+                    progress_updated_at_tick: 0,
                     start_time: 0,
+                    action_id: 0,
                 };
 
                 // Insert selected upgrade into structure
@@ -9105,6 +9737,39 @@ fn start_upgrade_system(
 
     for event_id in events_to_remove.iter() {
         events.remove(event_id);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpgradeRequestMode {
+    Start,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpgradeRequestError {
+    InvalidStructureState,
+    BuilderBusy,
+}
+
+/// Classifies an upgrade request before any materials are committed.
+///
+/// Starting an upgrade requires an idle builder. Once an upgrade has started,
+/// the same request becomes an idempotent resume operation: an idle builder
+/// can rejoin it, while a builder already upgrading may safely repeat the
+/// request without consuming materials again.
+pub(crate) fn classify_upgrade_request(
+    structure_state: State,
+    builder_state: State,
+) -> Result<UpgradeRequestMode, UpgradeRequestError> {
+    match structure_state {
+        State::PlanningUpgrade if builder_state == State::None => Ok(UpgradeRequestMode::Start),
+        State::PlanningUpgrade => Err(UpgradeRequestError::BuilderBusy),
+        State::Upgrading if matches!(builder_state, State::None | State::Upgrading) => {
+            Ok(UpgradeRequestMode::Resume)
+        }
+        State::Upgrading => Err(UpgradeRequestError::BuilderBusy),
+        _ => Err(UpgradeRequestError::InvalidStructureState),
     }
 }
 
@@ -9230,33 +9895,48 @@ fn upgrade_system(
                     continue;
                 };
 
-                let selected_upgrade_structure_template =
-                    templates.obj_templates.get(selected_upgrade.0.clone());
+                let upgrade_mode = match classify_upgrade_request(*structure_state, *builder_state)
+                {
+                    Ok(mode) => mode,
+                    Err(UpgradeRequestError::BuilderBusy) => {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Builder must finish the current action before upgrading."
+                                .to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+                    Err(UpgradeRequestError::InvalidStructureState) => {
+                        error!(
+                            "Structure is not in an upgradeable state {:?}",
+                            *structure_id
+                        );
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Structure cannot be upgraded in this state.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
+                };
 
-                let structure_upgrade_req = selected_upgrade_structure_template
-                    .upgrade_req
-                    .expect("Template should have upgrade_req field");
+                // Materials are required only for the initial transition out
+                // of PlanningUpgrade. An Upgrading structure has already
+                // committed them and must be resumable without paying twice.
+                if upgrade_mode == UpgradeRequestMode::Start {
+                    let selected_upgrade_structure_template =
+                        templates.obj_templates.get(selected_upgrade.0.clone());
 
-                // Check if structure is missing required items
-                if !structure_inventory.has_reqs_for_build(structure_upgrade_req.clone()) {
-                    let packet = ResponsePacket::Error {
-                        errmsg: "Structure is missing required items to upgrade.".to_string(),
-                    };
-                    send_to_client(*player_id, packet, &clients);
-                    continue;
-                }
+                    let structure_upgrade_req = selected_upgrade_structure_template
+                        .upgrade_req
+                        .expect("Template should have upgrade_req field");
 
-                info!("Structure state: {:?}", *structure_state);
-                if *structure_state != State::PlanningUpgrade {
-                    error!(
-                        "Structure is not in Planning Upgrade state {:?}",
-                        *structure_id
-                    );
-                    let packet = ResponsePacket::Error {
-                        errmsg: "Structure cannot be upgraded in this state.".to_string(),
-                    };
-                    send_to_client(*player_id, packet, &clients);
-                    continue;
+                    if !structure_inventory.has_reqs_for_build(structure_upgrade_req) {
+                        let packet = ResponsePacket::Error {
+                            errmsg: "Structure is missing required items to upgrade.".to_string(),
+                        };
+                        send_to_client(*player_id, packet, &clients);
+                        continue;
+                    }
                 }
 
                 if builder_pos != structure_pos {
@@ -9600,6 +10280,25 @@ fn activate_system(
     }
 }
 
+fn nearby_scouted_resource_categories(
+    player_id: i32,
+    center: Position,
+    survey_history: &SurveyHistory,
+    resources: &Resources,
+) -> Vec<network::ScoutedResourceCategory> {
+    let scouted_positions = survey_history
+        .get(&player_id)
+        .into_iter()
+        .flat_map(|positions| positions.iter())
+        .copied()
+        .filter(|position| Map::dist(center, *position) <= 5)
+        .collect::<Vec<_>>();
+
+    Resource::get_scouted_resource_categories(scouted_positions, resources)
+}
+
+const SCOUT_DURATION_TICKS: i32 = 2 * TICKS_PER_SEC;
+
 fn survey_system(
     mut commands: Commands,
     mut events: ResMut<PlayerEvents>,
@@ -9637,7 +10336,7 @@ fn survey_system(
 
                 if *source_id != hero_id {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Can only survey with your hero.".to_string(),
+                        errmsg: "Can only scout with your hero.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -9645,15 +10344,26 @@ fn survey_system(
 
                 if Obj::is_dead(&hero.state) {
                     let packet = ResponsePacket::Error {
-                        errmsg: "The dead cannot survey.".to_string(),
+                        errmsg: "The dead cannot scout.".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
                 }
 
+                if !scouting_allowed_at(game_tick.0) {
+                    send_to_client(
+                        *player_id,
+                        ResponsePacket::Error {
+                            errmsg: "It is too dark to scout. Wait for daylight.".to_string(),
+                        },
+                        &clients,
+                    );
+                    continue;
+                }
+
                 if is_discovery_action_state(hero.state) {
                     let packet = ResponsePacket::Error {
-                        errmsg: "Already surveying, prospecting, or investigating".to_string(),
+                        errmsg: "Already scouting, prospecting, or investigating".to_string(),
                     };
                     send_to_client(*player_id, packet, &clients);
                     continue;
@@ -9664,9 +10374,15 @@ fn survey_system(
                     new_state: State::Surveying,
                 });
 
-                map_events.new(hero.id.0, game_tick.0 + 20, VisibleEvent::SurveyEvent);
+                map_events.new(
+                    hero.id.0,
+                    game_tick.0 + SCOUT_DURATION_TICKS,
+                    VisibleEvent::SurveyEvent,
+                );
 
-                let packet = ResponsePacket::Survey { survey_time: 20 };
+                let packet = ResponsePacket::Survey {
+                    survey_time: SCOUT_DURATION_TICKS / TICKS_PER_SEC,
+                };
                 send_to_client(*player_id, packet, &clients);
             }
             _ => {}
@@ -9683,9 +10399,10 @@ fn prospect_system(
     mut events: ResMut<PlayerEvents>,
     clients: Res<Clients>,
     game_tick: Res<GameTick>,
-    ids: Res<Ids>,
+    mut ids: ResMut<Ids>,
     entity_map: Res<EntityObjMap>,
     mut map_events: ResMut<MapEvents>,
+    mut visible_events: ResMut<VisibleEvents>,
     hero_query: Query<CoreQuery, With<SubclassHero>>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -9732,6 +10449,27 @@ fn prospect_system(
                 });
 
                 let prospect_time = 5 * TICKS_PER_SEC;
+                let action_id = ids.new_map_event_id();
+                commands.entity(hero_entity).insert(ActionProgress {
+                    action_id,
+                    start_tick: game_tick.0,
+                    end_tick: game_tick.0 + prospect_time,
+                });
+                visible_events.new(
+                    hero.id.0,
+                    game_tick.0,
+                    VisibleEvent::UpdateObjEvent {
+                        attrs: vec![
+                            ("state".to_string(), STATE_PROSPECTING.to_string()),
+                            ("action_id".to_string(), action_id.to_string()),
+                            (
+                                "action_duration_ms".to_string(),
+                                network::game_tick_to_millis(prospect_time).to_string(),
+                            ),
+                            ("action_elapsed_ms".to_string(), "0".to_string()),
+                        ],
+                    },
+                );
                 map_events.new(
                     hero.id.0,
                     game_tick.0 + prospect_time,
@@ -9758,6 +10496,7 @@ fn investigate_system(
     ids: Res<Ids>,
     entity_map: Res<EntityObjMap>,
     run_spawned_objs: Res<RunSpawnedObjs>,
+    mut initial_encounter_state: ResMut<InitialEncounterState>,
     mut map_events: ResMut<MapEvents>,
     query: Query<CoreQuery>,
 ) {
@@ -9843,6 +10582,23 @@ fn investigate_system(
                     continue;
                 }
 
+                if target.template.0 == "Shipwreck" {
+                    if let Some(entry) = initial_encounter_state.get_mut(player_id) {
+                        if !entry.opening_rat_ambush_armed
+                            && entry.opening_enemy_spawned.iter().all(|spawned| !spawned)
+                        {
+                            entry.opening_rat_ambush_armed = true;
+                            entry.opening_rat_spawn_tick =
+                                game_tick.0 + OPENING_RAT_AMBUSH_DELAY_TICKS;
+                        }
+                    } else {
+                        warn!(
+                            "Missing initial encounter while investigating Shipwreck for player {}",
+                            player_id
+                        );
+                    }
+                }
+
                 commands.trigger(StateChange {
                     entity: hero_entity,
                     new_state: State::Investigating,
@@ -9875,6 +10631,7 @@ fn info_assign_system(
     ids: Res<Ids>,
     clients: Res<Clients>,
     entity_map: Res<EntityObjMap>,
+    templates: Res<Templates>,
     villager_query: Query<(
         Entity,
         &PlayerId,
@@ -9889,6 +10646,8 @@ fn info_assign_system(
             &PlayerId,
             &Name,
             &Position,
+            &Template,
+            &Subclass,
             &State,
             &Assignments,
             &WorkQueue,
@@ -9916,6 +10675,8 @@ fn info_assign_system(
                     structure_player_id,
                     structure_name,
                     structure_pos,
+                    structure_template,
+                    structure_subclass,
                     structure_state,
                     structure_assignments,
                     structure_work_queue,
@@ -9934,8 +10695,24 @@ fn info_assign_system(
                     continue;
                 }
 
+                let configured_workspaces = templates
+                    .obj_templates
+                    .get(structure_template.0.clone())
+                    .workspaces;
+                if !structure_accepts_worker_assignment(
+                    *structure_state,
+                    *structure_subclass,
+                    configured_workspaces,
+                ) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: NO_STRUCTURE_WORKPLACES_ERROR.to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Hero can be assigned to structures under construction
-                let hero_assignable = *structure_state != State::None;
+                let hero_assignable = !Structure::is_built(*structure_state);
 
                 let mut assignments_packet = Vec::new();
 
@@ -10006,13 +10783,15 @@ fn assign_system(
     ids: ResMut<Ids>,
     mut events: ResMut<PlayerEvents>,
     entity_map: Res<EntityObjMap>,
-    game_events: ResMut<GameEvents>,
+    templates: Res<Templates>,
+    mut game_events: ResMut<GameEvents>,
     worker_query: Query<(&PlayerId, &Name, &Subclass, &Misc)>,
     mut structure_query: Query<
         (
             &PlayerId,
             &Name,
             &Position,
+            &Template,
             &Subclass,
             &State,
             &mut Assignments,
@@ -10065,6 +10844,7 @@ fn assign_system(
                     structure_player_id,
                     structure_name,
                     structure_pos,
+                    structure_template,
                     structure_subclass,
                     structure_state,
                     mut structure_assignments,
@@ -10093,8 +10873,24 @@ fn assign_system(
                     continue;
                 }
 
+                let configured_workspaces = templates
+                    .obj_templates
+                    .get(structure_template.0.clone())
+                    .workspaces;
+                if !structure_accepts_worker_assignment(
+                    *structure_state,
+                    *structure_subclass,
+                    configured_workspaces,
+                ) {
+                    let packet = ResponsePacket::Error {
+                        errmsg: NO_STRUCTURE_WORKPLACES_ERROR.to_string(),
+                    };
+                    send_to_client(*player_id, packet, &clients);
+                    continue;
+                }
+
                 // Hero can be assigned to structures under construction
-                let hero_assignable = *structure_state != State::None;
+                let hero_assignable = !Structure::is_built(*structure_state);
 
                 let mut assignments_packet = Vec::new();
 
@@ -10109,9 +10905,10 @@ fn assign_system(
                         structure_pos: *structure_pos,
                     });
 
-                    // If structure state is not None, add Build order to worker
+                    // Unfinished structures need builders; completed
+                    // workplaces execute their configured work queues.
                     info!("Structure state: {:?}", structure_state);
-                    if *structure_state != State::None {
+                    if !Structure::is_built(*structure_state) {
                         info!("Adding Build order to worker {:?}", worker_entity);
                         commands.entity(worker_entity).insert(Order::Build);
                     } else {
@@ -10205,6 +11002,7 @@ fn assign_system(
                     structure_player_id,
                     structure_name,
                     structure_pos,
+                    _structure_template,
                     _structure_subclass,
                     structure_state,
                     mut structure_assignments,
@@ -10232,16 +11030,43 @@ fn assign_system(
                     continue;
                 }
 
+                let assigned_entries = structure_work_queue
+                    .0
+                    .iter()
+                    .filter(|entry| entry.worker_id == *worker_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for work_entry in assigned_entries.iter() {
+                    cancel_timed_events_for_work_entry(&mut game_events, *structure_id, work_entry);
+                }
+
+                if assigned_entries
+                    .iter()
+                    .any(|entry| entry.work_status == WorkStatus::InProgress)
+                {
+                    commands.trigger(StateChange {
+                        entity: worker_entity,
+                        new_state: State::None,
+                    });
+                    commands
+                        .entity(worker_entity)
+                        .remove::<EventInProgress>()
+                        .remove::<ActionProgress>();
+                    commands.entity(worker_entity).insert(EventCompleted {
+                        event_id: Uuid::new_v4(),
+                        event_type: "work_queue_unassigned".to_string(),
+                        at_tick: game_tick.0,
+                        success: false,
+                    });
+                }
+
                 // Remove worker from structure assignments
                 structure_assignments.0.retain(|id| id != worker_id);
 
                 // Remove assignment component from worker
                 commands.entity(worker_entity).remove::<Assignment>();
 
-                // Remove worker from work queue
-                structure_work_queue
-                    .0
-                    .retain(|entry| entry.worker_id != *worker_id);
+                structure_work_queue.unassign_worker_preserving_operate_workspaces(*worker_id);
 
                 let hero_assignable = *structure_state != State::None;
 
@@ -10310,7 +11135,7 @@ fn equip_system(
     game_tick: Res<GameTick>,
     mut ids: ResMut<Ids>,
     mut events: ResMut<PlayerEvents>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
     templates: Res<Templates>,
@@ -10645,6 +11470,7 @@ fn info_craft_system(
                     });
                 }
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::Craft);
                 active_infos.add((*crafter_id, ActiveInfoType::Craft), *player_id);
 
                 let packet = ResponsePacket::InfoCraft {
@@ -10758,6 +11584,9 @@ fn info_structure_craft_system(
                         refine_item_class: work_entry.refine_item_class.clone(),
                         work_time: -1,
                         progress: 0,
+                        action_id: None,
+                        action_duration_ms: None,
+                        action_elapsed_ms: None,
                     })
                     .collect::<Vec<network::WorkEntry>>();
 
@@ -10782,6 +11611,7 @@ fn info_structure_craft_system(
 
                 send_to_client(*player_id, packet, &clients);
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::StructureCraft);
                 active_infos.add((*structure_id, ActiveInfoType::StructureCraft), *player_id);
             }
             _ => {}
@@ -10840,6 +11670,8 @@ fn info_structure_queue_system(
                 for work_entry in structure_work_queue.0.iter() {
                     let mut work_time = -1;
                     let mut progress = 0;
+                    let (mut action_id, mut action_duration_ms, mut action_elapsed_ms) =
+                        (None, None, None);
 
                     // Get progress of work entry
                     if work_entry.work_type == WorkType::Craft {
@@ -10855,6 +11687,13 @@ fn info_structure_queue_system(
 
                             progress = (game_tick.0 - crafting_event.start_tick) / TICKS_PER_SEC;
                             work_time = recipe.crafting_time.unwrap_or(100) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    crafting_event.event_id,
+                                    crafting_event.start_tick,
+                                    crafting_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     } else if work_entry.work_type == WorkType::Refine {
                         if let Some(refine_event) =
@@ -10871,6 +11710,13 @@ fn info_structure_queue_system(
 
                             work_time = item_template.get_refine_time() / TICKS_PER_SEC;
                             progress = (game_tick.0 - refine_event.start_tick) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    refine_event.event_id,
+                                    refine_event.start_tick,
+                                    refine_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     } else if work_entry.work_type == WorkType::Operate {
                         if let Some(operate_event) =
@@ -10879,6 +11725,13 @@ fn info_structure_queue_system(
                             progress = (game_tick.0 - operate_event.start_tick) / TICKS_PER_SEC;
                             work_time =
                                 (operate_event.run_tick - operate_event.start_tick) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    operate_event.event_id,
+                                    operate_event.start_tick,
+                                    operate_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     }
 
@@ -10893,6 +11746,9 @@ fn info_structure_queue_system(
                         refine_item_class: work_entry.refine_item_class.clone(),
                         work_time: work_time,
                         progress: progress,
+                        action_id,
+                        action_duration_ms,
+                        action_elapsed_ms,
                     });
                 }
 
@@ -10903,6 +11759,7 @@ fn info_structure_queue_system(
 
                 send_to_client(*player_id, packet, &clients);
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::StructureQueue);
                 active_infos.add((*structure_id, ActiveInfoType::StructureQueue), *player_id);
             }
             _ => {}
@@ -11004,6 +11861,7 @@ fn info_refine_system(
                     refining_item_data = None;
                 }
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::Refine);
                 active_infos.add((*refiner_id, ActiveInfoType::Refine), *player_id);
 
                 let packet = ResponsePacket::InfoRefine {
@@ -11071,6 +11929,7 @@ fn info_structure_refine_system(
                     continue;
                 }
 
+                active_infos.remove_player_type(*player_id, ActiveInfoType::StructureRefine);
                 active_infos.add((*structure_id, ActiveInfoType::StructureRefine), *player_id);
 
                 let structure_inventory_packet = network::Inventory {
@@ -11188,6 +12047,46 @@ fn order_operate_system(
     for event_id in events_to_remove.iter() {
         events.remove(event_id);
     }
+}
+
+fn timed_event_belongs_to_work_entry(
+    game_event: &GameEvent,
+    structure_id: i32,
+    work_entry: &WorkEntry,
+) -> bool {
+    if game_event.event_type.work_entry_id() == Some(work_entry.entry_id) {
+        return true;
+    }
+
+    work_entry.work_type == WorkType::Operate
+        && work_entry.worker_id != -1
+        && matches!(
+            &game_event.event_type,
+            GameEventType::StructureOperateEvent {
+                operator_id,
+                structure_id: event_structure_id,
+            } if *operator_id == work_entry.worker_id && *event_structure_id == structure_id
+        )
+}
+
+fn cancel_timed_events_for_work_entry(
+    game_events: &mut GameEvents,
+    structure_id: i32,
+    work_entry: &WorkEntry,
+) -> usize {
+    let event_ids = game_events
+        .iter()
+        .filter_map(|(event_id, game_event)| {
+            timed_event_belongs_to_work_entry(game_event, structure_id, work_entry)
+                .then_some(*event_id)
+        })
+        .collect::<Vec<_>>();
+
+    for event_id in event_ids.iter() {
+        game_events.remove(event_id);
+    }
+
+    event_ids.len()
 }
 
 fn queued_craft_inputs_available(
@@ -11359,6 +12258,8 @@ fn structure_queue_system(
                     for work_entry in structure.work_queue.0.iter() {
                         let mut work_time = -1;
                         let mut progress = 0;
+                        let (mut action_id, mut action_duration_ms, mut action_elapsed_ms) =
+                            (None, None, None);
 
                         // Get progress of work entry
                         if work_entry.work_type == WorkType::Craft {
@@ -11378,6 +12279,13 @@ fn structure_queue_system(
                                 progress =
                                     (game_tick.0 - crafting_event.start_tick) / TICKS_PER_SEC;
                                 work_time = recipe.crafting_time.unwrap_or(100) / TICKS_PER_SEC;
+                                (action_id, action_duration_ms, action_elapsed_ms) =
+                                    network::timed_action_progress_fields(
+                                        crafting_event.event_id,
+                                        crafting_event.start_tick,
+                                        crafting_event.run_tick,
+                                        game_tick.0,
+                                    );
                             }
                         } else if work_entry.work_type == WorkType::Refine {
                             if let Some(refine_event) =
@@ -11397,6 +12305,13 @@ fn structure_queue_system(
 
                                 work_time = item_template.get_refine_time() / TICKS_PER_SEC;
                                 progress = (game_tick.0 - refine_event.start_tick) / TICKS_PER_SEC;
+                                (action_id, action_duration_ms, action_elapsed_ms) =
+                                    network::timed_action_progress_fields(
+                                        refine_event.event_id,
+                                        refine_event.start_tick,
+                                        refine_event.run_tick,
+                                        game_tick.0,
+                                    );
                             }
                         }
 
@@ -11411,6 +12326,9 @@ fn structure_queue_system(
                             refine_item_class: work_entry.refine_item_class.clone(),
                             work_time: work_time,
                             progress: progress,
+                            action_id,
+                            action_duration_ms,
+                            action_elapsed_ms,
                         });
                     }
 
@@ -11542,6 +12460,8 @@ fn structure_queue_system(
                 for work_entry in structure.work_queue.0.iter() {
                     let mut work_time = -1;
                     let mut progress = 0;
+                    let (mut action_id, mut action_duration_ms, mut action_elapsed_ms) =
+                        (None, None, None);
 
                     // Get progress of work entry
                     if work_entry.work_type == WorkType::Craft {
@@ -11557,6 +12477,13 @@ fn structure_queue_system(
 
                             progress = (game_tick.0 - crafting_event.start_tick) / TICKS_PER_SEC;
                             work_time = recipe.crafting_time.unwrap_or(100) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    crafting_event.event_id,
+                                    crafting_event.start_tick,
+                                    crafting_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     } else if work_entry.work_type == WorkType::Refine {
                         if let Some(refine_event) =
@@ -11573,6 +12500,13 @@ fn structure_queue_system(
 
                             work_time = item_template.get_refine_time() / TICKS_PER_SEC;
                             progress = (game_tick.0 - refine_event.start_tick) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    refine_event.event_id,
+                                    refine_event.start_tick,
+                                    refine_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     }
 
@@ -11587,6 +12521,9 @@ fn structure_queue_system(
                         refine_item_class: work_entry.refine_item_class.clone(),
                         work_time: work_time,
                         progress: progress,
+                        action_id,
+                        action_duration_ms,
+                        action_elapsed_ms,
                     });
                 }
 
@@ -11644,16 +12581,7 @@ fn structure_queue_system(
                     continue;
                 };
 
-                let timed_events = game_events
-                    .iter()
-                    .filter_map(|(event_id, event)| {
-                        (event.event_type.work_entry_id() == Some(work_entry.entry_id))
-                            .then_some(*event_id)
-                    })
-                    .collect::<Vec<_>>();
-                for event_id in timed_events {
-                    game_events.remove(&event_id);
-                }
+                cancel_timed_events_for_work_entry(&mut game_events, *structure_id, &work_entry);
 
                 if work_entry.worker_id != -1 {
                     if let Some(worker_entity) = entity_map.get_entity(work_entry.worker_id) {
@@ -11661,7 +12589,10 @@ fn structure_queue_system(
                             entity: worker_entity,
                             new_state: State::None,
                         });
-                        commands.entity(worker_entity).remove::<EventInProgress>();
+                        commands
+                            .entity(worker_entity)
+                            .remove::<EventInProgress>()
+                            .remove::<ActionProgress>();
                         commands.entity(worker_entity).insert(EventCompleted {
                             event_id: Uuid::new_v4(),
                             event_type: "work_queue_cancelled".to_string(),
@@ -11673,14 +12604,15 @@ fn structure_queue_system(
 
                 structure
                     .work_queue
-                    .0
-                    .retain(|entry| entry.entry_id != work_entry.entry_id);
+                    .cancel_entry_preserving_operate_workspace(work_entry.entry_id);
 
                 let mut work_queue_packet = Vec::new();
 
                 for work_entry in structure.work_queue.0.iter() {
                     let mut work_time = -1;
                     let mut progress = 0;
+                    let (mut action_id, mut action_duration_ms, mut action_elapsed_ms) =
+                        (None, None, None);
 
                     // Get progress of work entry
                     if work_entry.work_type == WorkType::Craft {
@@ -11696,6 +12628,13 @@ fn structure_queue_system(
 
                             progress = (game_tick.0 - crafting_event.start_tick) / TICKS_PER_SEC;
                             work_time = recipe.crafting_time.unwrap_or(100) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    crafting_event.event_id,
+                                    crafting_event.start_tick,
+                                    crafting_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     } else if work_entry.work_type == WorkType::Refine {
                         if let Some(refine_event) =
@@ -11712,6 +12651,13 @@ fn structure_queue_system(
 
                             work_time = item_template.get_refine_time() / TICKS_PER_SEC;
                             progress = (game_tick.0 - refine_event.start_tick) / TICKS_PER_SEC;
+                            (action_id, action_duration_ms, action_elapsed_ms) =
+                                network::timed_action_progress_fields(
+                                    refine_event.event_id,
+                                    refine_event.start_tick,
+                                    refine_event.run_tick,
+                                    game_tick.0,
+                                );
                         }
                     }
 
@@ -11726,6 +12672,9 @@ fn structure_queue_system(
                         refine_item_class: work_entry.refine_item_class.clone(),
                         work_time: work_time,
                         progress: progress,
+                        action_id,
+                        action_duration_ms,
+                        action_elapsed_ms,
                     });
                 }
 
@@ -11782,6 +12731,13 @@ fn structure_queue_system(
                         let progress = (game_tick.0 - crafting_event.start_tick) / TICKS_PER_SEC;
                         let work_time = recipe.crafting_time.unwrap_or(100) / TICKS_PER_SEC;
                         let amount = recipe.amount.unwrap_or(1);
+                        let (action_id, action_duration_ms, action_elapsed_ms) =
+                            network::timed_action_progress_fields(
+                                crafting_event.event_id,
+                                crafting_event.start_tick,
+                                crafting_event.run_tick,
+                                game_tick.0,
+                            );
 
                         let packet = ResponsePacket::InfoWorkQueueEntry {
                             structure_id: *structure_id,
@@ -11793,6 +12749,9 @@ fn structure_queue_system(
                             item_quantity: amount,
                             work_time: work_time,
                             progress: progress,
+                            action_id,
+                            action_duration_ms,
+                            action_elapsed_ms,
                         };
 
                         send_to_client(*player_id, packet, &clients);
@@ -11815,6 +12774,13 @@ fn structure_queue_system(
 
                         let work_time = item_template.get_refine_time() / TICKS_PER_SEC;
                         let progress = (game_tick.0 - refine_event.start_tick) / TICKS_PER_SEC;
+                        let (action_id, action_duration_ms, action_elapsed_ms) =
+                            network::timed_action_progress_fields(
+                                refine_event.event_id,
+                                refine_event.start_tick,
+                                refine_event.run_tick,
+                                game_tick.0,
+                            );
 
                         let packet = ResponsePacket::InfoWorkQueueEntry {
                             structure_id: *structure_id,
@@ -11826,6 +12792,9 @@ fn structure_queue_system(
                             item_quantity: 1,
                             work_time: work_time,
                             progress: progress,
+                            action_id,
+                            action_duration_ms,
+                            action_elapsed_ms,
                         };
 
                         send_to_client(*player_id, packet, &clients);
@@ -12562,7 +13531,7 @@ fn remove_system(
     game_tick: Res<GameTick>,
     entity_map: Res<EntityObjMap>,
     clients: Res<Clients>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     query: Query<ObjQuery>,
     presence: Res<PlayerWorldPresenceState>,
 ) {
@@ -13417,7 +14386,7 @@ fn cancel_action_system(
     game_tick: Res<GameTick>,
     mut events: ResMut<PlayerEvents>,
     entity_map: Res<EntityObjMap>,
-    mut map_events: ResMut<MapEvents>,
+    map_events: ResMut<MapEvents>,
     mut game_events: ResMut<GameEvents>,
 ) {
     let mut events_to_remove: Vec<i32> = Vec::new();
@@ -13697,7 +14666,7 @@ mod tests {
     use crate::game::{Client, Fortified, SettlementCrisis};
     use crate::item::Slot;
     use crate::safe_logout::{PlayerPresenceRecord, PlayerWorldPresence};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fs::File;
 
     fn load_obj_templates() -> Vec<ObjTemplate> {
@@ -13711,6 +14680,624 @@ mod tests {
             .into_iter()
             .find(|template| template.template == name)
             .unwrap_or_else(|| panic!("Missing template {}", name))
+    }
+
+    #[test]
+    fn scouting_is_disabled_only_during_the_global_night_phase() {
+        assert!(!scouting_allowed_at(0));
+        assert!(!scouting_allowed_at(NIGHT));
+        assert!(!scouting_allowed_at(GAME_TICKS_PER_DAY - 1));
+
+        assert!(scouting_allowed_at(FIRST_LIGHT));
+        assert!(scouting_allowed_at(DAWN));
+        assert!(scouting_allowed_at(DUSK));
+    }
+
+    fn register_same_tick_test_panel(mut active_infos: ResMut<ActiveInfos>) {
+        active_infos.add((702, ActiveInfoType::Structure), 23);
+    }
+
+    #[test]
+    fn active_infos_lifecycle_helpers_prune_memberships_and_empty_keys() {
+        let mut active_infos = ActiveInfos::default();
+        active_infos.add((10, ActiveInfoType::Structure), 1);
+        active_infos.add((10, ActiveInfoType::Structure), 2);
+        active_infos.add((10, ActiveInfoType::Inventory), 1);
+        active_infos.add((11, ActiveInfoType::Refine), 1);
+        active_infos.add((12, ActiveInfoType::Refine), 2);
+        active_infos.add((13, ActiveInfoType::Experiment), 3);
+
+        active_infos.remove_player_type(1, ActiveInfoType::Refine);
+        assert!(!active_infos.contains_key(&(11, ActiveInfoType::Refine)));
+        assert_eq!(
+            active_infos.get(&(12, ActiveInfoType::Refine)),
+            Some(&HashSet::from([2]))
+        );
+        assert_eq!(
+            active_infos.get(&(10, ActiveInfoType::Structure)),
+            Some(&HashSet::from([1, 2]))
+        );
+
+        active_infos.remove_object(10);
+        assert!(active_infos.keys().all(|(obj_id, _)| *obj_id != 10));
+
+        active_infos.remove_player(2);
+        assert!(!active_infos.contains_key(&(12, ActiveInfoType::Refine)));
+        assert_eq!(active_infos.player_ids(), HashSet::from([3]));
+    }
+
+    #[test]
+    fn active_infos_disconnect_cleanup_retains_only_online_players() {
+        let online_player = 41;
+        let offline_player = 42;
+        let connection_id = Uuid::new_v4();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let clients = Clients::default();
+        clients.activate(Client::new(connection_id, online_player, sender));
+
+        let mut active_infos = ActiveInfos::default();
+        active_infos.add((100, ActiveInfoType::Structure), online_player);
+        active_infos.add((101, ActiveInfoType::Inventory), offline_player);
+
+        let mut app = App::new();
+        app.insert_resource(clients)
+            .insert_resource(active_infos)
+            .add_systems(Update, active_infos_disconnect_cleanup_system);
+        app.update();
+
+        let active_infos = app.world().resource::<ActiveInfos>();
+        assert_eq!(active_infos.player_ids(), HashSet::from([online_player]));
+        assert!(!active_infos
+            .values()
+            .any(|players| players.contains(&offline_player)));
+    }
+
+    #[test]
+    fn info_exit_cleans_structure_refine_experiment_and_both_transfer_sides() {
+        let player_id = 7;
+        let other_player = 8;
+        let mut active_infos = ActiveInfos::default();
+        for (obj_id, info_type) in [
+            (10, ActiveInfoType::Structure),
+            (11, ActiveInfoType::Refine),
+            (12, ActiveInfoType::Experiment),
+            (13, ActiveInfoType::ItemTransfer),
+            (14, ActiveInfoType::ItemTransfer),
+        ] {
+            active_infos.add((obj_id, info_type), player_id);
+            active_infos.add((obj_id, info_type), other_player);
+        }
+
+        remove_active_info_panel(&mut active_infos, player_id, 10, "structure");
+        remove_active_info_panel(&mut active_infos, player_id, 11, "refine");
+        remove_active_info_panel(&mut active_infos, player_id, 12, "experiment");
+        remove_active_info_panel(&mut active_infos, player_id, 13, "item_transfer");
+
+        assert!(!active_infos
+            .values()
+            .any(|players| players.contains(&player_id)));
+        assert!(active_infos
+            .values()
+            .all(|players| players == &HashSet::from([other_player])));
+    }
+
+    #[test]
+    fn message_broker_drains_bounded_fifo_batches_and_recovers_backlog() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let total_events = MAX_PLAYER_EVENTS_PER_TICK + 5;
+        for sequence in 0..total_events {
+            sender
+                .send(PlayerEvent::InfoTile {
+                    player_id: 1,
+                    x: sequence as i32,
+                    y: 0,
+                })
+                .expect("test network receiver should remain connected");
+        }
+
+        let mut app = App::new();
+        app.insert_resource(NetworkReceiver::new(receiver))
+            .insert_resource(PlayerEvents::default())
+            .insert_resource(Ids::default())
+            .add_systems(Update, message_broker_system);
+
+        app.update();
+
+        {
+            let events = app.world().resource::<PlayerEvents>();
+            assert_eq!(events.len(), MAX_PLAYER_EVENTS_PER_TICK);
+            for (sequence, (event_id, event)) in events.iter().enumerate() {
+                let PlayerEvent::InfoTile { x, .. } = event else {
+                    panic!("unexpected brokered event: {event:?}");
+                };
+                assert_eq!(*event_id, sequence as i32);
+                assert_eq!(*x, sequence as i32);
+            }
+        }
+        assert_eq!(
+            app.world().resource::<NetworkReceiver>().len(),
+            total_events - MAX_PLAYER_EVENTS_PER_TICK,
+            "the per-tick cap must leave excess commands queued"
+        );
+        assert_eq!(
+            app.world().resource::<Ids>().player_event,
+            MAX_PLAYER_EVENTS_PER_TICK as i32
+        );
+
+        app.world_mut().resource_mut::<PlayerEvents>().clear();
+        app.update();
+
+        let events = app.world().resource::<PlayerEvents>();
+        assert_eq!(events.len(), total_events - MAX_PLAYER_EVENTS_PER_TICK);
+        for (offset, (event_id, event)) in events.iter().enumerate() {
+            let expected_sequence = MAX_PLAYER_EVENTS_PER_TICK + offset;
+            let PlayerEvent::InfoTile { x, .. } = event else {
+                panic!("unexpected brokered event: {event:?}");
+            };
+            assert_eq!(*event_id, expected_sequence as i32);
+            assert_eq!(*x, expected_sequence as i32);
+        }
+        assert!(app.world().resource::<NetworkReceiver>().is_empty());
+        assert_eq!(
+            app.world().resource::<Ids>().player_event,
+            total_events as i32
+        );
+    }
+
+    #[test]
+    fn message_broker_discards_unhandled_legacy_noops_before_insertion() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let events = [
+            PlayerEvent::InfoTile {
+                player_id: 1,
+                x: 10,
+                y: 0,
+            },
+            PlayerEvent::Tend {
+                player_id: 1,
+                structure_id: 100,
+            },
+            PlayerEvent::InfoTile {
+                player_id: 1,
+                x: 20,
+                y: 0,
+            },
+            PlayerEvent::OrderRefine {
+                player_id: 1,
+                villager_id: 2,
+                structure_id: 100,
+            },
+            PlayerEvent::OrderCraft {
+                player_id: 1,
+                villager_id: 2,
+                structure_id: 100,
+            },
+            PlayerEvent::InfoTile {
+                player_id: 1,
+                x: 30,
+                y: 0,
+            },
+        ];
+        for event in events {
+            sender
+                .send(event)
+                .expect("test network receiver should remain connected");
+        }
+
+        let mut app = App::new();
+        app.insert_resource(NetworkReceiver::new(receiver))
+            .insert_resource(PlayerEvents::default())
+            .insert_resource(Ids::default())
+            .add_systems(Update, message_broker_system);
+
+        app.update();
+
+        let player_events = app.world().resource::<PlayerEvents>();
+        assert_eq!(player_events.len(), 3);
+        for (expected_id, expected_x) in [(0, 10), (1, 20), (2, 30)] {
+            let Some(PlayerEvent::InfoTile { x, .. }) = player_events.get(&expected_id) else {
+                panic!("missing retained event {expected_id}");
+            };
+            assert_eq!(*x, expected_x);
+        }
+        assert!(app.world().resource::<NetworkReceiver>().is_empty());
+        assert_eq!(app.world().resource::<Ids>().player_event, 3);
+    }
+
+    fn queue_test_entry(
+        entry_id: i32,
+        worker_id: i32,
+        work_type: WorkType,
+        work_status: WorkStatus,
+    ) -> WorkEntry {
+        WorkEntry {
+            entry_id,
+            worker_id,
+            work_type,
+            work_status,
+            recipe_name: None,
+            recipe_image: None,
+            refine_item_id: None,
+            refine_item_image: None,
+            refine_item_class: None,
+        }
+    }
+
+    #[test]
+    fn completed_resource_structures_reconcile_missing_operate_workspaces() {
+        let mut app = App::new();
+        app.insert_resource(Templates::from_obj_templates(load_obj_templates()))
+            .add_systems(Update, reconcile_resource_structure_workspaces_system);
+
+        let broken_lumbercamp = app
+            .world_mut()
+            .spawn((
+                ClassStructure,
+                Subclass::Resource,
+                Template(structure::LUMBERCAMP.to_string()),
+                State::None,
+                WorkQueue(Vec::new()),
+            ))
+            .id();
+        let unfinished_lumbercamp = app
+            .world_mut()
+            .spawn((
+                ClassStructure,
+                Subclass::Resource,
+                Template(structure::LUMBERCAMP.to_string()),
+                State::Building,
+                WorkQueue(Vec::new()),
+            ))
+            .id();
+        let crafting_tent = app
+            .world_mut()
+            .spawn((
+                ClassStructure,
+                Subclass::Craft,
+                Template("Crafting Tent".to_string()),
+                State::None,
+                WorkQueue(Vec::new()),
+            ))
+            .id();
+
+        app.update();
+
+        let queue = app
+            .world()
+            .entity(broken_lumbercamp)
+            .get::<WorkQueue>()
+            .expect("Lumbercamp queue");
+        assert_eq!(queue.0.len(), 1);
+        assert_eq!(queue.0[0].work_type, WorkType::Operate);
+        assert_eq!(queue.0[0].worker_id, -1);
+        assert_eq!(queue.0[0].work_status, WorkStatus::Idle);
+        assert!(app
+            .world()
+            .entity(unfinished_lumbercamp)
+            .get::<WorkQueue>()
+            .expect("unfinished queue")
+            .0
+            .is_empty());
+        assert!(app
+            .world()
+            .entity(crafting_tent)
+            .get::<WorkQueue>()
+            .expect("crafting queue")
+            .0
+            .is_empty());
+
+        app.world_mut()
+            .entity_mut(broken_lumbercamp)
+            .get_mut::<WorkQueue>()
+            .expect("mutable Lumbercamp queue")
+            .0
+            .clear();
+        app.update();
+        assert_eq!(
+            app.world()
+                .entity(broken_lumbercamp)
+                .get::<WorkQueue>()
+                .expect("repaired Lumbercamp queue")
+                .0
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn completed_lumbercamp_releases_stale_builder_into_logging_work() {
+        fn apply_state_change(event: On<StateChange>, mut query: Query<&mut State>) {
+            if let Ok(mut state) = query.get_mut(event.entity) {
+                *state = event.new_state;
+            }
+        }
+
+        let player_id = 7;
+        let villager_id = 70;
+        let structure_id = 71;
+        let structure_pos = Position { x: 4, y: 5 };
+        let mut app = App::new();
+        app.insert_resource(Templates::from_obj_templates(load_obj_templates()))
+            .insert_resource(GameTick(500))
+            .insert_resource(PlayerWorldPresenceState::default())
+            .add_observer(apply_state_change)
+            .add_systems(
+                Update,
+                (
+                    reconcile_resource_structure_workspaces_system,
+                    reconcile_completed_workplace_builders_system,
+                )
+                    .chain(),
+            );
+
+        let structure_entity = app
+            .world_mut()
+            .spawn((
+                ClassStructure,
+                Subclass::Resource,
+                Template(structure::LUMBERCAMP.to_string()),
+                State::None,
+                WorkQueue(Vec::new()),
+            ))
+            .id();
+        let villager_entity = app
+            .world_mut()
+            .spawn((
+                SubclassVillager,
+                PlayerId(player_id),
+                Assignment {
+                    structure_id,
+                    structure_name: structure::LUMBERCAMP.to_string(),
+                    structure_pos,
+                },
+                Order::Build,
+                State::Building,
+                ActionProgress {
+                    action_id: 42,
+                    start_tick: 450,
+                    end_tick: 550,
+                },
+            ))
+            .id();
+        app.insert_resource(EntityObjMap(HashMap::from([
+            (structure_id, structure_entity),
+            (villager_id, villager_entity),
+        ])));
+
+        app.update();
+
+        let queue = app
+            .world()
+            .get::<WorkQueue>(structure_entity)
+            .expect("completed Lumbercamp work queue");
+        assert_eq!(queue.0.len(), 1);
+        assert_eq!(queue.0[0].work_type, WorkType::Operate);
+        assert_eq!(queue.0[0].work_status, WorkStatus::Idle);
+        assert_eq!(queue.0[0].worker_id, -1);
+
+        assert_eq!(
+            app.world().get::<Order>(villager_entity),
+            Some(&Order::WorkQueue)
+        );
+        assert_eq!(
+            app.world().get::<State>(villager_entity),
+            Some(&State::None)
+        );
+        assert!(app.world().get::<ActionProgress>(villager_entity).is_none());
+
+        let completion_id = {
+            let completion = app
+                .world()
+                .get::<EventCompleted>(villager_entity)
+                .expect("construction completion signal");
+            assert_eq!(completion.event_type, "construction_complete");
+            assert_eq!(completion.at_tick, 500);
+            assert!(completion.success);
+            completion.event_id
+        };
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<EventCompleted>(villager_entity)
+                .expect("idempotent completion signal")
+                .event_id,
+            completion_id,
+            "an already-repaired villager must not be completed again",
+        );
+    }
+
+    #[test]
+    fn completed_non_workplaces_reject_worker_assignments() {
+        assert!(!structure_accepts_worker_assignment(
+            State::None,
+            Subclass::Shelter,
+            None
+        ));
+        assert!(!structure_accepts_worker_assignment(
+            State::Burning,
+            Subclass::Campfire,
+            Some(0)
+        ));
+        assert!(!structure_accepts_worker_assignment(
+            State::Dead,
+            Subclass::Resource,
+            Some(1)
+        ));
+    }
+
+    #[test]
+    fn construction_and_completed_workplaces_accept_worker_assignments() {
+        assert!(structure_accepts_worker_assignment(
+            State::Founded,
+            Subclass::Shelter,
+            None
+        ));
+        assert!(structure_accepts_worker_assignment(
+            State::Building,
+            Subclass::Storage,
+            Some(0)
+        ));
+        assert!(structure_accepts_worker_assignment(
+            State::Upgrading,
+            Subclass::Shelter,
+            None
+        ));
+        assert!(structure_accepts_worker_assignment(
+            State::None,
+            Subclass::Resource,
+            Some(1)
+        ));
+        assert!(structure_accepts_worker_assignment(
+            State::Operating,
+            Subclass::Craft,
+            Some(2)
+        ));
+        assert!(structure_accepts_worker_assignment(
+            State::None,
+            Subclass::Craft,
+            None
+        ));
+    }
+
+    #[test]
+    fn assign_system_rejects_a_completed_shelter_without_workplaces() {
+        let player_id = 7;
+        let worker_id = 70;
+        let structure_id = 71;
+        let (clients, mut receiver) = connected_test_client(player_id);
+        let mut app = App::new();
+
+        let worker_entity = app
+            .world_mut()
+            .spawn((
+                PlayerId(player_id),
+                Id(worker_id),
+                Name("Settler".to_string()),
+                Subclass::Villager,
+                Misc {
+                    image: "humanvillager1".to_string(),
+                    hsl: Vec::new(),
+                    groups: Vec::new(),
+                },
+            ))
+            .id();
+        let structure_entity = app
+            .world_mut()
+            .spawn((
+                ClassStructure,
+                PlayerId(player_id),
+                Name("Shelter Tent".to_string()),
+                Position { x: 1, y: 1 },
+                Template(templates::SHELTER_TENT_TEMPLATE.to_string()),
+                Subclass::Shelter,
+                State::None,
+                Assignments(Vec::new()),
+                WorkQueue(Vec::new()),
+            ))
+            .id();
+
+        let mut ids = Ids::default();
+        ids.player_hero_map.insert(player_id, 700);
+        app.insert_resource(ids)
+            .insert_resource(PlayerEvents(BTreeMap::from([(
+                1,
+                PlayerEvent::Assign {
+                    player_id,
+                    worker_id,
+                    structure_id,
+                },
+            )])))
+            .insert_resource(EntityObjMap(HashMap::from([
+                (worker_id, worker_entity),
+                (structure_id, structure_entity),
+            ])))
+            .insert_resource(Templates::from_obj_templates(load_obj_templates()))
+            .insert_resource(clients)
+            .insert_resource(GameTick(1))
+            .insert_resource(GameEvents::default())
+            .insert_resource(PlayerWorldPresenceState::default())
+            .add_systems(Update, assign_system);
+
+        app.update();
+
+        assert!(app.world().get::<Assignment>(worker_entity).is_none());
+        assert!(app
+            .world()
+            .get::<Assignments>(structure_entity)
+            .expect("shelter assignments")
+            .0
+            .is_empty());
+        let packet: ResponsePacket = serde_json::from_str(
+            &receiver
+                .try_recv()
+                .expect("completed non-workplace rejection"),
+        )
+        .unwrap();
+        assert!(matches!(
+            packet,
+            ResponsePacket::Error { errmsg } if errmsg == NO_STRUCTURE_WORKPLACES_ERROR
+        ));
+    }
+
+    #[test]
+    fn timed_event_cancellation_matches_operate_by_worker_and_structure() {
+        let operate_entry = queue_test_entry(-1, 7, WorkType::Operate, WorkStatus::InProgress);
+        let craft_entry = queue_test_entry(25, 7, WorkType::Craft, WorkStatus::InProgress);
+        let mut game_events = GameEvents::default();
+        game_events.insert(
+            1,
+            GameEvent {
+                event_id: 1,
+                start_tick: 10,
+                run_tick: 20,
+                event_type: GameEventType::StructureOperateEvent {
+                    operator_id: 7,
+                    structure_id: 42,
+                },
+            },
+        );
+        game_events.insert(
+            2,
+            GameEvent {
+                event_id: 2,
+                start_tick: 10,
+                run_tick: 20,
+                event_type: GameEventType::StructureOperateEvent {
+                    operator_id: 7,
+                    structure_id: 43,
+                },
+            },
+        );
+        game_events.insert(
+            3,
+            GameEvent {
+                event_id: 3,
+                start_tick: 10,
+                run_tick: 20,
+                event_type: GameEventType::StructureCraftEvent {
+                    crafter_id: 7,
+                    structure_id: 42,
+                    recipe_name: "Test".to_string(),
+                    signature_item_id: None,
+                    work_entry_id: Some(25),
+                },
+            },
+        );
+
+        assert_eq!(
+            cancel_timed_events_for_work_entry(&mut game_events, 42, &operate_entry),
+            1
+        );
+        assert!(!game_events.contains_key(&1));
+        assert!(game_events.contains_key(&2));
+        assert!(game_events.contains_key(&3));
+
+        assert_eq!(
+            cancel_timed_events_for_work_entry(&mut game_events, 42, &craft_entry),
+            1
+        );
+        assert!(!game_events.contains_key(&3));
     }
 
     fn base_test_stats() -> Stats {
@@ -13830,6 +15417,22 @@ mod tests {
         assert_eq!(target.get_total_weight(), 5);
     }
 
+    #[test]
+    fn regular_stack_transfer_uses_the_largest_quantity_that_fits() {
+        let mut logs = loot_test_item(1, 20, 10.0);
+        logs.name = "Springbranch Maple Log".to_string();
+        logs.class = item::LOG.to_string();
+        logs.subclass = "Maple Log".to_string();
+        logs.quantity = 5;
+
+        assert_eq!(stack_quantity_that_fits(&logs, 53, 100), 4);
+        assert_eq!(stack_quantity_that_fits(&logs, 50, 100), 5);
+        assert_eq!(stack_quantity_that_fits(&logs, 100, 100), 0);
+
+        logs.weight = 0.0;
+        assert_eq!(stack_quantity_that_fits(&logs, 100, 100), 5);
+    }
+
     #[derive(Component)]
     struct TestAbilityActor;
 
@@ -13897,11 +15500,7 @@ mod tests {
         let clients = Clients::default();
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let client_id = Uuid::new_v4();
-        clients.activate(Client {
-            id: client_id,
-            player_id,
-            sender,
-        });
+        clients.activate(Client::new(client_id, player_id, sender));
         (clients, receiver)
     }
 
@@ -13959,57 +15558,46 @@ mod tests {
     }
 
     #[test]
-    fn hero_gathering_uses_resource_or_equipped_hunting_activity() {
+    fn hero_gathering_uses_the_explicit_resource_activity() {
         let forage_event = GameEventType::ForageEvent { forager_id: 7 };
 
         assert_eq!(
-            gather_activity_for_event(
-                &GameEventType::GatherEvent {
-                    gatherer_id: 7,
-                    res_type: LOG.to_string(),
-                },
-                false
-            ),
+            gather_activity_for_event(&GameEventType::GatherEvent {
+                gatherer_id: 7,
+                res_type: LOG.to_string(),
+            }),
             ActiveTask::Logging
         );
         assert_eq!(
-            gather_activity_for_event(
-                &GameEventType::GatherEvent {
-                    gatherer_id: 7,
-                    res_type: GAME_ANIMAL.to_string(),
-                },
-                false,
-            ),
+            gather_activity_for_event(&GameEventType::GatherEvent {
+                gatherer_id: 7,
+                res_type: GAME_ANIMAL.to_string(),
+            }),
             ActiveTask::Hunting
         );
         assert_eq!(
-            gather_activity_for_event(&forage_event, false),
-            ActiveTask::Gathering
+            gather_activity_for_event(&GameEventType::GatherEvent {
+                gatherer_id: 7,
+                res_type: FORAGE.to_string(),
+            }),
+            ActiveTask::Foraging
         );
         assert_eq!(
-            gather_activity_for_event(&forage_event, true),
-            ActiveTask::Hunting
+            gather_activity_for_event(&forage_event),
+            ActiveTask::Foraging
         );
+    }
 
-        let item_template_file =
-            File::open("templates/item_template.yaml").expect("Could not open item templates");
-        let item_templates: Vec<crate::templates::ItemTemplate> =
-            serde_yaml::from_reader(item_template_file).expect("Could not read item templates");
-        let mut inventory = Inventory {
-            owner: 7,
-            items: Vec::new(),
-        };
-        inventory.new(1, "Sharpened Stick".to_string(), 1, &item_templates);
-        inventory.equip(1, Some(Slot::MainHand));
-
-        assert!(inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting));
+    #[test]
+    fn villager_gather_order_normalizes_game_resource_alias() {
+        assert_eq!(canonical_order_gather_resource_type("Game"), GAME_ANIMAL);
         assert_eq!(
-            gather_activity_for_event(
-                &forage_event,
-                inventory.has_equipped_tool_for_attr(&item::AttrKey::Hunting),
-            ),
-            ActiveTask::Hunting
+            canonical_order_gather_resource_type(GAME_ANIMAL),
+            GAME_ANIMAL
         );
+        assert_eq!(canonical_order_gather_resource_type(LOG), LOG);
+        assert_eq!(canonical_order_gather_resource_type(PLANT), FORAGE);
+        assert_eq!(canonical_order_gather_resource_type(FORAGE), FORAGE);
     }
 
     fn equipped_test_weapon(name: &str, subclass: &str, range: i32, accuracy: i32) -> Item {
@@ -14088,7 +15676,7 @@ mod tests {
         );
         app.insert_resource(GameTick(100));
         app.insert_resource(ids);
-        app.insert_resource(PlayerEvents(HashMap::from([(
+        app.insert_resource(PlayerEvents(BTreeMap::from([(
             1,
             PlayerEvent::Equip {
                 player_id,
@@ -14220,6 +15808,34 @@ mod tests {
             &structure_class,
             &State::None
         ));
+    }
+
+    #[test]
+    fn upgrade_requests_distinguish_initial_commit_from_idempotent_resume() {
+        assert_eq!(
+            classify_upgrade_request(State::PlanningUpgrade, State::None),
+            Ok(UpgradeRequestMode::Start)
+        );
+        assert_eq!(
+            classify_upgrade_request(State::Upgrading, State::None),
+            Ok(UpgradeRequestMode::Resume)
+        );
+        assert_eq!(
+            classify_upgrade_request(State::Upgrading, State::Upgrading),
+            Ok(UpgradeRequestMode::Resume)
+        );
+        assert_eq!(
+            classify_upgrade_request(State::PlanningUpgrade, State::Gathering),
+            Err(UpgradeRequestError::BuilderBusy)
+        );
+        assert_eq!(
+            classify_upgrade_request(State::Upgrading, State::Moving),
+            Err(UpgradeRequestError::BuilderBusy)
+        );
+        assert_eq!(
+            classify_upgrade_request(State::None, State::None),
+            Err(UpgradeRequestError::InvalidStructureState)
+        );
     }
 
     #[test]
@@ -14386,6 +16002,97 @@ mod tests {
             "Sharpened Stick",
             "Spear"
         ));
+        assert!(!accepts_completed_storage_item(
+            structure::WELL,
+            item::FIREWOOD,
+            "Firewood"
+        ));
+        assert_eq!(
+            completed_storage_rejection_message(structure::WELL),
+            "A completed Well cannot store items."
+        );
+    }
+
+    #[test]
+    fn well_template_uses_stone_and_the_generated_structure_art() {
+        let well = template_by_name(structure::WELL);
+
+        assert_eq!(well.subclass, SUBCLASS_WELL);
+        assert_eq!(well.image, "wellstructure");
+        assert_eq!(well.capacity, Some(20));
+        assert_eq!(
+            well.req,
+            Some(vec![ResReq {
+                req_type: STONE.to_string(),
+                quantity: 10,
+                cquantity: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn well_placement_requires_the_players_revealed_spring_on_that_tile() {
+        let player_id = 7;
+        let spring_pos = Position { x: 12, y: 14 };
+        let other_pos = Position { x: 13, y: 14 };
+        let spring_name = "Test Moonlit Spring Water".to_string();
+        let mut resources = Resources::default();
+        Resource::create(
+            spring_name.clone(),
+            SPRING_WATER.to_string(),
+            "moonlitspringwater".to_string(),
+            1,
+            1.0,
+            1,
+            100,
+            spring_pos,
+            Vec::new(),
+            None,
+            &mut resources,
+        );
+        let mut discoveries = ResourceDiscoveries::default();
+
+        assert!(structure_placement_error(
+            structure::WELL,
+            player_id,
+            spring_pos,
+            &resources,
+            &discoveries,
+        )
+        .is_some());
+        assert!(structure_placement_error(
+            structure::WELL,
+            player_id,
+            other_pos,
+            &resources,
+            &discoveries,
+        )
+        .is_some());
+
+        discoveries.discover(player_id, spring_pos, spring_name);
+
+        assert_eq!(
+            structure_placement_error(
+                structure::WELL,
+                player_id,
+                spring_pos,
+                &resources,
+                &discoveries,
+            ),
+            None
+        );
+        assert!(structure_placement_error(
+            structure::WELL,
+            player_id + 1,
+            spring_pos,
+            &resources,
+            &discoveries,
+        )
+        .is_some());
+        assert_eq!(
+            structure_placement_error("Burrow", player_id, other_pos, &resources, &discoveries,),
+            None
+        );
     }
 
     #[test]
@@ -14470,7 +16177,7 @@ mod tests {
         app.insert_resource(VisibleEvents(Vec::new()));
         app.insert_resource(Recipes::from_recipes(Vec::new()));
         app.insert_resource(ActiveInfos(HashMap::new()));
-        app.insert_resource(PlayerEvents(HashMap::from([(
+        app.insert_resource(PlayerEvents(BTreeMap::from([(
             1,
             PlayerEvent::Refine {
                 player_id: PLAYER_ID,
@@ -14550,6 +16257,22 @@ mod tests {
         assert_eq!(template_by_name("Burrow").capacity, Some(300));
         assert_eq!(template_by_name("Cache").capacity, Some(500));
         assert_eq!(template_by_name("Warehouse").capacity, Some(1000));
+    }
+
+    #[test]
+    fn human_villager_health_matches_the_novice_hero_range() {
+        let villager_hp = template_by_name("Human Villager")
+            .base_hp
+            .expect("Human Villager should define base HP");
+        let novice_hero_health = ["Novice Warrior", "Novice Ranger", "Novice Mage"].map(|name| {
+            template_by_name(name)
+                .base_hp
+                .expect("novice heroes should define base HP")
+        });
+
+        assert_eq!(villager_hp, 80);
+        assert!(villager_hp >= *novice_hero_health.iter().min().unwrap());
+        assert!(villager_hp <= *novice_hero_health.iter().max().unwrap());
     }
 
     #[test]
@@ -14695,7 +16418,7 @@ mod tests {
     #[test]
     fn only_equipped_spear_subclass_weapons_gain_fortification_reach() {
         let spear_inventory =
-            inventory_with(equipped_test_weapon("Stone-Tipped Spear", "Spear", 1, 100));
+            inventory_with(equipped_test_weapon("Bone-Tipped Spear", "Spear", 1, 100));
         let axe_inventory = inventory_with(equipped_test_weapon("Copper Axe", "Axe", 1, 100));
         let throwing_spear_inventory =
             inventory_with(equipped_test_weapon("Throwing Spear", "Throwing", 2, 75));
@@ -14931,11 +16654,7 @@ mod tests {
         let mut client_receivers = Vec::new();
         for (player_id, connection_id) in [(11, request_connection), (12, cancel_connection)] {
             let (sender, receiver) = tokio::sync::mpsc::channel(1);
-            clients.activate(crate::game::Client {
-                id: connection_id,
-                player_id,
-                sender,
-            });
+            clients.activate(crate::game::Client::new(connection_id, player_id, sender));
             client_receivers.push(receiver);
         }
         let mut app = App::new();
@@ -14943,7 +16662,7 @@ mod tests {
             .add_message::<CancelSafeLogout>()
             .insert_resource(clients)
             .init_resource::<SafeLogoutTelemetryState>()
-            .insert_resource(PlayerEvents(HashMap::from([
+            .insert_resource(PlayerEvents(BTreeMap::from([
                 (
                     1,
                     PlayerEvent::RequestSafeLogout {
@@ -15028,15 +16747,15 @@ mod tests {
         let current_connection = Uuid::new_v4();
         let clients = Clients::default();
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(crate::game::Client {
-            id: current_connection,
+        clients.activate(crate::game::Client::new(
+            current_connection,
             player_id,
             sender,
-        });
+        ));
 
         let mut app = App::new();
         app.insert_resource(clients)
-            .insert_resource(PlayerEvents(HashMap::from([(
+            .insert_resource(PlayerEvents(BTreeMap::from([(
                 1,
                 PlayerEvent::Login {
                     player_id,
@@ -15046,9 +16765,13 @@ mod tests {
             .insert_resource(GameTick(100))
             .insert_resource(GameEvents::default())
             .insert_resource(Ids::default())
+            .insert_resource(ActiveInfos::default())
             .insert_resource(protected_presence(player_id))
             .init_resource::<SafeLogoutTelemetryState>()
             .add_systems(Update, login_system);
+        app.world_mut()
+            .resource_mut::<ActiveInfos>()
+            .add((700, ActiveInfoType::Structure), player_id);
 
         app.update();
 
@@ -15069,6 +16792,13 @@ mod tests {
                 .map(|telemetry| telemetry.stale_connection_events_rejected),
             Some(1)
         );
+        assert_eq!(
+            app.world()
+                .resource::<ActiveInfos>()
+                .get(&(700, ActiveInfoType::Structure)),
+            Some(&HashSet::from([player_id])),
+            "a stale socket must not clear the current connection's subscriptions"
+        );
     }
 
     #[test]
@@ -15077,15 +16807,11 @@ mod tests {
         let connection_id = Uuid::new_v4();
         let clients = Clients::default();
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(crate::game::Client {
-            id: connection_id,
-            player_id,
-            sender,
-        });
+        clients.activate(crate::game::Client::new(connection_id, player_id, sender));
 
         let mut app = App::new();
         app.insert_resource(clients)
-            .insert_resource(PlayerEvents(HashMap::from([(
+            .insert_resource(PlayerEvents(BTreeMap::from([(
                 1,
                 PlayerEvent::Login {
                     player_id,
@@ -15095,9 +16821,13 @@ mod tests {
             .insert_resource(GameTick(100))
             .insert_resource(GameEvents::default())
             .insert_resource(Ids::default())
+            .insert_resource(ActiveInfos::default())
             .insert_resource(PlayerWorldPresenceState::default())
             .init_resource::<SafeLogoutTelemetryState>()
             .add_systems(Update, login_system);
+        app.world_mut()
+            .resource_mut::<ActiveInfos>()
+            .add((701, ActiveInfoType::Structure), player_id);
 
         app.update();
 
@@ -15112,6 +16842,7 @@ mod tests {
         assert_eq!(record.state, PlayerWorldPresence::Online);
         assert!(record.client_connected);
         assert_eq!(record.last_login_connection_id, Some(connection_id));
+        assert!(app.world().resource::<ActiveInfos>().is_empty());
         let game_events = app.world().resource::<GameEvents>();
         assert_eq!(game_events.len(), 1);
         assert!(game_events.values().all(|event| matches!(
@@ -15140,16 +16871,61 @@ mod tests {
     }
 
     #[test]
+    fn accepted_login_clears_old_subscriptions_before_same_tick_panel_registration() {
+        let player_id = 23;
+        let connection_id = Uuid::new_v4();
+        let clients = Clients::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        clients.activate(Client::new(connection_id, player_id, sender));
+
+        let mut active_infos = ActiveInfos::default();
+        active_infos.add((701, ActiveInfoType::Structure), player_id);
+
+        let mut app = App::new();
+        app.configure_sets(
+            Update,
+            (PlayerInputSet::SessionLifecycle, PlayerInputSet::Handle).chain(),
+        )
+        .insert_resource(clients)
+        .insert_resource(PlayerEvents(BTreeMap::from([(
+            1,
+            PlayerEvent::Login {
+                player_id,
+                connection_id,
+            },
+        )])))
+        .insert_resource(GameTick(100))
+        .insert_resource(GameEvents::default())
+        .insert_resource(Ids::default())
+        .insert_resource(active_infos)
+        .insert_resource(PlayerWorldPresenceState::default())
+        .init_resource::<SafeLogoutTelemetryState>()
+        .add_systems(
+            Update,
+            login_system.in_set(PlayerInputSet::SessionLifecycle),
+        )
+        .add_systems(
+            Update,
+            register_same_tick_test_panel.in_set(PlayerInputSet::Handle),
+        );
+
+        app.update();
+
+        let active_infos = app.world().resource::<ActiveInfos>();
+        assert!(!active_infos.contains_key(&(701, ActiveInfoType::Structure)));
+        assert_eq!(
+            active_infos.get(&(702, ActiveInfoType::Structure)),
+            Some(&HashSet::from([player_id]))
+        );
+    }
+
+    #[test]
     fn checkpoint4_duplicate_login_event_schedules_one_connection_scoped_sync() {
         let player_id = 22;
         let connection_id = Uuid::new_v4();
         let clients = Clients::default();
         let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-        clients.activate(crate::game::Client {
-            id: connection_id,
-            player_id,
-            sender,
-        });
+        clients.activate(crate::game::Client::new(connection_id, player_id, sender));
         let mut presence = PlayerWorldPresenceState::default();
         presence
             .players
@@ -15157,7 +16933,7 @@ mod tests {
 
         let mut app = App::new();
         app.insert_resource(clients)
-            .insert_resource(PlayerEvents(HashMap::from([
+            .insert_resource(PlayerEvents(BTreeMap::from([
                 (
                     1,
                     PlayerEvent::Login {
@@ -15176,6 +16952,7 @@ mod tests {
             .insert_resource(GameTick(100))
             .insert_resource(GameEvents::default())
             .insert_resource(Ids::default())
+            .insert_resource(ActiveInfos::default())
             .insert_resource(presence)
             .init_resource::<SafeLogoutTelemetryState>()
             .add_systems(Update, login_system);
@@ -15205,7 +16982,7 @@ mod tests {
         ids.new_obj(protected_storage, protected_player);
         ids.new_obj(active_hero, active_player);
 
-        let events = PlayerEvents(HashMap::from([
+        let events = PlayerEvents(BTreeMap::from([
             (
                 1,
                 PlayerEvent::Move {
@@ -15443,6 +17220,66 @@ mod tests {
             combo_finisher_rejection(available_finisher.as_deref(), false),
             Some("No combo is ready.")
         );
+    }
+
+    #[test]
+    fn killing_a_target_with_a_ready_combo_carries_finisher_to_next_target() {
+        use crate::combat::{AttackType::Quick, ComboTracker, TRANSFERABLE_COMBO_TARGET_ID};
+
+        let templates = tempo_test_templates();
+        let history = vec!["quick".to_string(), "quick".to_string()];
+        let mut tracker = ComboTracker {
+            target_id: 9,
+            attacks: vec![Quick, Quick],
+            last_attack_tick: 100,
+        };
+
+        assert!(make_ready_finisher_transferable_after_kill(
+            Some(&mut tracker),
+            9,
+            true,
+            &history,
+            &templates,
+        ));
+        assert_eq!(tracker.target_id, TRANSFERABLE_COMBO_TARGET_ID);
+
+        let carried_history = live_combo_history_for_target(Some(&tracker), 10, 101);
+        let (_, available_finisher) = combo_hints_for_history(&carried_history, &templates);
+        assert_eq!(available_finisher.as_deref(), Some("Hamstring"));
+    }
+
+    #[test]
+    fn partial_combo_and_living_target_remain_target_bound() {
+        use crate::combat::{AttackType::Quick, ComboTracker};
+
+        let templates = tempo_test_templates();
+        let mut partial = ComboTracker {
+            target_id: 9,
+            attacks: vec![Quick],
+            last_attack_tick: 100,
+        };
+        assert!(!make_ready_finisher_transferable_after_kill(
+            Some(&mut partial),
+            9,
+            true,
+            &vec!["quick".to_string()],
+            &templates,
+        ));
+        assert_eq!(partial.target_id, 9);
+
+        let mut ready = ComboTracker {
+            target_id: 9,
+            attacks: vec![Quick, Quick],
+            last_attack_tick: 100,
+        };
+        assert!(!make_ready_finisher_transferable_after_kill(
+            Some(&mut ready),
+            9,
+            false,
+            &vec!["quick".to_string(), "quick".to_string()],
+            &templates,
+        ));
+        assert_eq!(ready.target_id, 9);
     }
 
     #[test]

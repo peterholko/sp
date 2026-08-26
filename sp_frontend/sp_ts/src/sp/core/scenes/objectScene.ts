@@ -16,7 +16,7 @@ import { MultiImage } from '../multiImage';
 import { Network } from '../network';
 import {
   HERO, DEAD, SPRITE, CONTAINER, IMAGE, WALL, UNIT, STRUCTURE,
-  VILLAGER, HARVESTING, CRAFTING, GATHERING, BUILDING, desktopCameraZoom,
+  VILLAGER, GATHERING, BUILDING, UPGRADING, desktopCameraZoom,
   isDesktop,
 } from '../config';
 import { GameImage } from '../objects/gameImage';
@@ -29,7 +29,14 @@ import {
   isVisibilitySource,
   needsZeroVisionShroud,
 } from '../visibilitySourcePolicy';
-import { anchorActionProgress } from '../actionProgress';
+import {
+  anchorActionProgress,
+  requiresAuthoritativeActionProgress,
+} from '../actionProgress';
+import {
+  ConstructionProgressSample,
+  constructionProgressTimeline,
+} from '../constructionProgress';
 import {
   VillagerActivityIcon,
   villagerActivityIcon,
@@ -44,6 +51,14 @@ import {
   isDroppedBagObject,
 } from '../droppedBagPresentation';
 import { usesFoundationGraphic } from '../structureConstructionPresentation';
+import {
+  objectStateText,
+  repeatingObjectStateText,
+} from '../objectStateText';
+import {
+  combatFloatingTextPresentation,
+  shouldAnnounceCombo,
+} from '../combatFloatingTextPresentation';
 
 type RenderObject = GameSprite | GameImage | GameContainer;
 
@@ -65,16 +80,15 @@ interface ActionProgressBar {
   authoritativeElapsedMs?: number;
 }
 
-interface StructureWorkProgress {
-  workDone: number;
-  totalWork: number;
-  workPerSec: number;
-  receivedAt: number;
-}
-
 interface VillagerActivityBadge {
   icon: Phaser.GameObjects.Image;
   outline: Phaser.GameObjects.Image;
+}
+
+interface StateTextTimer {
+  state: string;
+  value: string;
+  timer: ReturnType<typeof setInterval>;
 }
 
 const ACTION_PROGRESS_WIDTH = 34;
@@ -85,17 +99,20 @@ const ACTION_PROGRESS_FILL_COLOR = 0xffc857;
 const ACTION_PROGRESS_DEFAULT_DURATION_MS = 3000;
 const ACTION_PROGRESS_DURATIONS_MS: Record<string, number> = {
   building: 2500,
+  upgrading: 2500,
   gathering: 15000,
   exploring: 2000,
   surveying: 2000,
-  prospecting: 2000,
   investigating: 2000,
   refining: 30000,
   eating: 3000,
   drinking: 3000,
   healing: 2000
 };
-const ACTION_PROGRESS_STATES = new Set(Object.keys(ACTION_PROGRESS_DURATIONS_MS));
+const ACTION_PROGRESS_STATES = new Set([
+  ...Object.keys(ACTION_PROGRESS_DURATIONS_MS),
+  'prospecting',
+]);
 const VILLAGER_ACTIVITY_TEXTURE_PREFIX = 'villager-activity-';
 const VILLAGER_ACTIVITY_ICONS: VillagerActivityIcon[] = [
   'gathering',
@@ -134,15 +151,15 @@ export class ObjectScene extends Phaser.Scene {
 
   private multiImages: Record<string, Array<MultiImage>> = {};
 
-  private stateTimerList: Record<string, ReturnType<typeof setInterval>> = {};
+  private stateTimerList: Record<string, StateTextTimer> = {};
   private fireAnimationSprites: Record<string, Phaser.GameObjects.Sprite> = {};
   private activeMoveTweens: Record<string, Phaser.Tweens.Tween> = {};
   private actionProgressBars: Record<string, ActionProgressBar> = {};
   private villagerActivityBadges: Record<string, VillagerActivityBadge> = {};
-  private structureWorkProgress: Record<string, StructureWorkProgress> = {};
 
   private lastVillagerActivity: Record<string, string> = {};
   private lastFinisherShakeAt = 0;
+  private comboAnnouncementTimes = new Map<string, number>();
 
   constructor() {
     super({
@@ -243,8 +260,6 @@ export class ObjectScene extends Phaser.Scene {
     Global.gameEmitter.on(NetworkEvent.REDUCED_EFFECT, this.processReducedEffect, this);
     Global.gameEmitter.on(NetworkEvent.INCREASED_EFFECT, this.processIncreasedEffect, this);
     Global.gameEmitter.on(NetworkEvent.INFO_ACTIVITY_UPDATE, this.processActivityUpdate, this);
-    Global.gameEmitter.on(NetworkEvent.WORK_UPDATE, this.processWorkUpdate, this);
-
     this.load.on('filecomplete', this.fileLoadComplete, this);
     this.load.on('complete', this.loadComplete, this);
 
@@ -455,10 +470,7 @@ export class ObjectScene extends Phaser.Scene {
     this.destroyActionProgressBar(objectId);
     this.destroyVillagerActivityBadge(objectId);
 
-    if (objectId in this.stateTimerList) {
-      clearInterval(this.stateTimerList[objectId]);
-      delete this.stateTimerList[objectId];
-    }
+    this.clearStateTextTimer(objectId);
 
     if (this.fireAnimationSprites[objectId]) {
       this.fireAnimationSprites[objectId].destroy();
@@ -667,52 +679,28 @@ export class ObjectScene extends Phaser.Scene {
     return ACTION_PROGRESS_DURATIONS_MS[state] || ACTION_PROGRESS_DEFAULT_DURATION_MS;
   }
 
-  private processWorkUpdate(message): void {
-    if (message.structure_id == null || message.total_work == null) {
-      return;
-    }
+  private getStructureWorkProgress(structureId: string, structureState: ObjectState): ConstructionProgressSample | null {
+    constructionProgressTimeline.updateFromSource({
+      id: structureId,
+      work_done: structureState.work_done,
+      total_work: structureState.total_work,
+      work_per_sec: structureState.work_per_sec,
+      work_done_milliunits: structureState.work_done_milliunits,
+      total_work_milliunits: structureState.total_work_milliunits,
+      work_per_sec_milliunits: structureState.work_per_sec_milliunits,
+      construction_action_id: structureState.construction_action_id,
+      construction_updated_at_ms: structureState.construction_updated_at_ms,
+    });
 
-    this.structureWorkProgress[message.structure_id.toString()] = {
-      workDone: message.work_done || 0,
-      totalWork: message.total_work,
-      workPerSec: message.work_per_sec || 0,
-      receivedAt: this.time.now
-    };
-
-    this.updateActionProgressBars(this.time.now);
+    return constructionProgressTimeline.sample(structureId);
   }
 
-  private getStructureWorkProgress(structureId: string, structureState: ObjectState, time: number): StructureWorkProgress | null {
-    if (structureState.work_done != null && structureState.total_work != null) {
-      var workPerSec = structureState.work_per_sec || 0;
-      var progress = this.structureWorkProgress[structureId];
-
-      if (!progress ||
-          progress.workDone != structureState.work_done ||
-          progress.totalWork != structureState.total_work ||
-          progress.workPerSec != workPerSec) {
-        progress = {
-          workDone: structureState.work_done,
-          totalWork: structureState.total_work,
-          workPerSec: workPerSec,
-          receivedAt: time
-        };
-
-        this.structureWorkProgress[structureId] = progress;
-      }
-
-      return progress;
-    }
-
-    return this.structureWorkProgress[structureId] || null;
-  }
-
-  private getBuildingProgressForActor(objectState: ObjectState, time: number): number | null {
+  private getConstructionProgressForActor(objectState: ObjectState): number | null {
     for (var structureId in Global.objectStates) {
       var structureState = Global.objectStates[structureId];
 
-      if (!structureState || structureState.class != STRUCTURE || structureState.state != BUILDING) {
-        delete this.structureWorkProgress[structureId];
+      if (!structureState || structureState.class != STRUCTURE ||
+        (structureState.state != BUILDING && structureState.state != UPGRADING)) {
         continue;
       }
 
@@ -720,20 +708,13 @@ export class ObjectScene extends Phaser.Scene {
         continue;
       }
 
-      var progress = this.getStructureWorkProgress(structureId, structureState, time);
+      var progress = this.getStructureWorkProgress(structureId, structureState);
 
       if (!progress) {
         continue;
       }
 
-      if (progress.totalWork <= 0) {
-        return null;
-      }
-
-      var elapsedSeconds = Math.max(0, (time - progress.receivedAt) / 1000);
-      var estimatedWorkDone = progress.workDone + (elapsedSeconds * progress.workPerSec);
-
-      return Math.max(0, Math.min(1, estimatedWorkDone / progress.totalWork));
+      return progress.fraction;
     }
 
     return null;
@@ -762,6 +743,10 @@ export class ObjectScene extends Phaser.Scene {
     var progressBar = this.actionProgressBars[objectState.id];
     var now = this.time.now;
     var authoritative = anchorActionProgress(objectState, now);
+    if (!authoritative && requiresAuthoritativeActionProgress(objectState.state)) {
+      this.destroyActionProgressBar(objectState.id);
+      return;
+    }
     var durationMs = authoritative?.durationMs || this.getActionProgressDurationMs(objectState.state);
 
     if (!progressBar) {
@@ -831,8 +816,8 @@ export class ObjectScene extends Phaser.Scene {
     progressBar.graphics.lineStyle(1, 0x111111, 0.9);
     progressBar.graphics.strokeRect(left, top, ACTION_PROGRESS_WIDTH, ACTION_PROGRESS_HEIGHT);
 
-    var progress = objectState.state == BUILDING
-      ? this.getBuildingProgressForActor(objectState, time)
+    var progress = objectState.state == BUILDING || objectState.state == UPGRADING
+      ? this.getConstructionProgressForActor(objectState)
       : null;
     if (progress == null) {
       progress = Math.min(1, elapsed / progressBar.durationMs);
@@ -1273,11 +1258,13 @@ export class ObjectScene extends Phaser.Scene {
     }
 
     if (spriteReady && objectState.state == DEAD) {
+      this.clearStateTextTimer(objectState.id);
       this.updateDeadRenderState(objectState.id, sprite);
       return;
     }
 
     if (objectState.state == 'moving') {
+      this.syncStateTextTimer(objectState, sprite, 'moving', true);
       if (spriteReady) {
         sprite.play(objectState.image + '_moving');
         sprite.x = pixel.x;
@@ -1296,16 +1283,10 @@ export class ObjectScene extends Phaser.Scene {
       }
 
       anim = objectState.image + '_' + animState;
-
-      if (objectState.prevstate != objectState.state) {
-        if (objectState.id in this.stateTimerList) {
-          //Clear timer and remove from list
-          clearInterval(this.stateTimerList[objectState.id]);
-          delete this.stateTimerList[objectState.id];
-        }
-      }
+      const animationExists = this.anims.exists(anim);
+      this.syncStateTextTimer(objectState, sprite, animState, animationExists);
       console.log(this.anims);
-      if (this.anims.exists(anim)) {
+      if (animationExists) {
 
         console.log("Playing animation: " + anim);
         console.log(anim);
@@ -1313,20 +1294,6 @@ export class ObjectScene extends Phaser.Scene {
           console.log(typeof sprite);
           console.log(sprite)
           sprite.play(anim);
-
-          if (objectState.state == CRAFTING || objectState.state == GATHERING || objectState.state == HARVESTING) {
-            if (!(objectState.id in this.stateTimerList)) {
-              this.processTextState(sprite, animState);
-
-              //TODO reconsider if sprite isn't available yet
-              // Repeat this every 3 seconds
-              var timer = setInterval(() => {
-                this.processTextState(sprite, animState)
-              }, 3000);
-
-              this.stateTimerList[objectState.id] = timer;
-            }
-          }
         } else {
           console.log("Error in animations for sprite for obj: " + objectState.id);
         }
@@ -1335,17 +1302,6 @@ export class ObjectScene extends Phaser.Scene {
         if (objectState.state == DEAD && spriteReady) {
           sprite.setTexture('gravestone');
           sprite.setDepth(2);
-        }
-        else if (spriteReady && !(objectState.id in this.stateTimerList)) {
-          this.processTextState(sprite, animState);
-
-          //TODO reconsider if sprite isn't available yet
-          // Repeat this every 3 seconds 
-          var timer = setInterval(() => {
-            this.processTextState(sprite, animState)
-          }, 3000);
-
-          this.stateTimerList[objectState.id] = timer;
         }
       }
 
@@ -1765,6 +1721,74 @@ export class ObjectScene extends Phaser.Scene {
     mapScene?.cameras?.main?.shake(180, 0.008);
   }
 
+  private showComboAnnouncement(
+    sourceId: number,
+    source: RenderObject,
+    comboText?: string,
+  ): void {
+    if (
+      !comboText
+      || !shouldAnnounceCombo(
+        this.comboAnnouncementTimes,
+        sourceId,
+        comboText,
+        Date.now(),
+      )
+    ) {
+      return;
+    }
+
+    this.shakeForFinisher();
+    const text = this.add.text(source.x + 36, source.y - 5, comboText, {
+      fontFamily: 'Verdana',
+      fontSize: 30,
+      fontStyle: 'bold',
+      align: 'center',
+      color: '#FFD45A',
+      stroke: '#000000',
+      strokeThickness: 6,
+    });
+    text.setDepth(10);
+    text.setOrigin(0.5, 0.5);
+
+    this.tweens.add({
+      targets: text,
+      y: source.y - 50,
+      alpha: 0,
+      ease: 'Power1',
+      duration: 5000,
+      onComplete: this.onDmgTextComplete,
+    }).play();
+  }
+
+  private showTargetDamage(
+    targetId: number,
+    target: RenderObject,
+    targetText: string,
+    compact = false,
+  ): void {
+    const text = this.add.text(target.x + 36, target.y - 5, targetText, {
+      fontFamily: 'Verdana',
+      fontSize: compact ? 20 : 22,
+      fontStyle: 'normal',
+      align: 'center',
+      color: this.getDamageTextColor(targetId),
+      stroke: '#000000',
+      strokeThickness: compact ? 3 : 4,
+    });
+    text.setDepth(10);
+    text.setOrigin(0.5, 0.5);
+
+    this.tweens.add({
+      targets: text,
+      y: target.y - 50,
+      alpha: 0,
+      ease: 'Power1',
+      duration: 5000,
+      onComplete: this.onDmgTextComplete,
+    }).play();
+  }
+
   private playSpriteAction(source: RenderObject, action: string): void {
     if (!(source instanceof GameSprite)) {
       return;
@@ -1784,6 +1808,7 @@ export class ObjectScene extends Phaser.Scene {
 
   processDmgMessage(message) {
     console.log('Dmg Message: ' + message.source_id + ' -> ' + message.target_id);
+    const floatingText = combatFloatingTextPresentation(message);
     if (message.source_id in Global.objectStates && message.target_id in Global.objectStates) {
       if (message.source_id in this.objectList &&
         message.target_id in this.objectList) {
@@ -1857,41 +1882,8 @@ export class ObjectScene extends Phaser.Scene {
           tween.play();
         }
 
-        var dmgMsg = ''
-        if (message.missed) {
-          dmgMsg = 'Miss';
-        } else if (message.combo) {
-          dmgMsg = message.combo + '\n' + message.dmg + '!';
-        } else {
-          dmgMsg = message.dmg;
-        }
-
-        const isFinisher = Boolean(message.combo);
-        if (isFinisher) {
-          this.shakeForFinisher();
-        }
-        var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
-          fontFamily: 'Verdana',
-          fontSize: isFinisher ? 30 : 22,
-          fontStyle: isFinisher ? 'bold' : 'normal',
-          align: 'center',
-          color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
-          stroke: '#000000',
-          strokeThickness: isFinisher ? 6 : 4,
-        });
-        dmgText.setDepth(10);
-        dmgText.setOrigin(0.5, 0.5);
-
-        var textTween = this.tweens.add({
-          targets: dmgText,
-          y: target.y - 50,
-          alpha: 0,
-          ease: 'Power1',
-          duration: 5000,
-          onComplete: this.onDmgTextComplete
-        });
-
-        textTween.play();
+        this.showComboAnnouncement(message.source_id, source, floatingText.sourceText);
+        this.showTargetDamage(message.target_id, target, floatingText.targetText);
       }
     } else if (message.target_id in Global.objectStates) {
       var targetObjectState = Global.objectStates[message.target_id];
@@ -1938,39 +1930,7 @@ export class ObjectScene extends Phaser.Scene {
 
       tween.play();
 
-      var dmgMsg = ''
-      if (message.combo) {
-        dmgMsg = message.combo + '\n' + message.dmg + '!';
-      } else {
-        dmgMsg = message.dmg;
-      }
-
-      const isFinisher = Boolean(message.combo);
-      if (isFinisher) {
-        this.shakeForFinisher();
-      }
-      var dmgText = this.add.text(target.x + 36, target.y - 5, dmgMsg, {
-        fontFamily: 'Verdana',
-        fontSize: isFinisher ? 28 : 20,
-        fontStyle: isFinisher ? 'bold' : 'normal',
-        align: 'center',
-        color: isFinisher ? '#FFD45A' : this.getDamageTextColor(message.target_id),
-        stroke: '#000000',
-        strokeThickness: isFinisher ? 6 : 3,
-      });
-      dmgText.setDepth(10);
-      dmgText.setOrigin(0.5, 0.5);
-
-      var textTween = this.tweens.add({
-        targets: dmgText,
-        y: target.y - 50,
-        alpha: 0,
-        ease: 'Power1',
-        duration: 5000,
-        onComplete: this.onDmgTextComplete
-      });
-
-      textTween.play();
+      this.showTargetDamage(message.target_id, target, floatingText.targetText, true);
     }
   }
 
@@ -2248,12 +2208,28 @@ export class ObjectScene extends Phaser.Scene {
     this.lastVillagerActivity[message.id] = message.activity;
 
     var objectState = Global.objectStates[message.id];
-    if (objectState?.subclass === VILLAGER) {
+    if (objectState) {
       objectState.activity = message.activity;
 
       var renderObject = this.getRenderedObject(message.id);
-      if (renderObject) {
+      if (objectState.subclass === VILLAGER && renderObject) {
         this.syncVillagerActivityBadge(objectState, renderObject);
+      }
+
+      if (
+        (objectState.subclass === HERO || objectState.subclass === VILLAGER)
+        && (objectState.state === GATHERING || objectState.state === 'refining')
+        && renderObject instanceof GameSprite
+      ) {
+        const animationExists = this.anims.exists(
+          objectState.image + '_' + objectState.state,
+        );
+        this.syncStateTextTimer(
+          objectState,
+          renderObject,
+          objectState.state,
+          animationExists,
+        );
       }
     }
 
@@ -2552,17 +2528,11 @@ export class ObjectScene extends Phaser.Scene {
     Global.effectTextOffsetY = 0;
   }
 
-  processTextState(sprite, state) {
+  processTextState(sprite, state, activity?: string) {
     if (sprite == null || sprite.scene == null)
       return;
 
-    var value = '';
-
-    if (state == 'sleeping') {
-      value = '...zzzZZZ';
-    } else {
-      value = '* ' + state + ' *';
-    }
+    var value = objectStateText(state, activity);
 
     var stateText = this.add.text(sprite.x + 36, sprite.y - 5, value, { fontFamily: 'Verdana', fontSize: 14, color: '#00d2ff' });
     stateText.setDepth(10);
@@ -2583,6 +2553,71 @@ export class ObjectScene extends Phaser.Scene {
     targets[0].destroy();
   }
 
+  private clearStateTextTimer(objectId: string): void {
+    const stateTimer = this.stateTimerList[objectId];
+    if (!stateTimer) {
+      return;
+    }
+
+    clearInterval(stateTimer.timer);
+    delete this.stateTimerList[objectId];
+  }
+
+  private syncStateTextTimer(
+    objectState: ObjectState,
+    sprite: GameSprite,
+    state: string,
+    animationExists: boolean,
+  ): void {
+    const activity = objectState.subclass === HERO || objectState.subclass === VILLAGER
+      ? objectState.activity
+      : undefined;
+    const value = repeatingObjectStateText(state, animationExists, activity);
+    const existing = this.stateTimerList[objectState.id];
+
+    if (existing && (
+      existing.state !== state
+      || existing.value !== value
+      || value === null
+    )) {
+      this.clearStateTextTimer(objectState.id);
+    }
+
+    if (value === null || sprite == null || sprite.scene == null) {
+      return;
+    }
+
+    if (this.stateTimerList[objectState.id]) {
+      return;
+    }
+
+    this.processTextState(sprite, state, activity);
+
+    const timer = setInterval(() => {
+      const liveState = Global.objectStates[objectState.id];
+      const liveSprite = this.getRenderedObject(objectState.id);
+      const liveActivity = liveState?.subclass === HERO || liveState?.subclass === VILLAGER
+        ? liveState.activity
+        : undefined;
+      const liveValue = liveState
+        ? repeatingObjectStateText(state, animationExists, liveActivity)
+        : null;
+      if (
+        !liveState
+        || liveState.state !== state
+        || liveValue !== value
+        || !(liveSprite instanceof GameSprite)
+      ) {
+        this.clearStateTextTimer(objectState.id);
+        return;
+      }
+
+      this.processTextState(liveSprite, state, liveActivity);
+    }, 3000);
+
+    this.stateTimerList[objectState.id] = { state, value, timer };
+  }
+
   replaceImageDefTask(objectState) {
     this.queueImageDefTask(objectState);
   }
@@ -2596,7 +2631,8 @@ export class ObjectScene extends Phaser.Scene {
         burningState,
         litCampfireAnimationEnabled,
       );
-      var baseRenderMissing = burningPresentation?.kind == 'lit-campfire'
+      var baseRenderMissing = burningPresentation != null
+        && burningPresentation.kind != 'burning-object'
         && !this.getRenderedObject(burningId);
 
       if (!burningPresentation || baseRenderMissing || !this.shouldRenderState(burningState)) {
@@ -2616,7 +2652,7 @@ export class ObjectScene extends Phaser.Scene {
         continue;
       }
 
-      if (presentation.kind == 'lit-campfire' && !this.getRenderedObject(objectId)) {
+      if (presentation.kind != 'burning-object' && !this.getRenderedObject(objectId)) {
         continue;
       }
 

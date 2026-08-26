@@ -13,6 +13,7 @@ import SingleInventoryPanel from './ui/singleInventoryPanel';
 import ItemPanel from './ui/itemPanel';
 
 import explorebutton from "ui/explorebutton.png";
+import smalliconborder from "ui/selectbordersmall.png";
 
 import movecompass from "ui/movecompass.png";
 import movecompass_click from "ui/movecompass_click.png"
@@ -23,7 +24,16 @@ import dodgebutton from "ui/dodgebutton.png";
 
 import { Obj } from '../core/obj';
 import { NetworkEvent } from '../core/networkEvent';
-import { chooseCombatAutoTarget } from '../core/combatAutoTarget';
+import { selectedObjectMovementPresentation } from '../core/selectedObjectMovement';
+import {
+  NO_LEARNED_STRUCTURE_UPGRADES,
+  structureUpgradeOptions,
+} from '../core/structureUpgradePresentation';
+import {
+  carryTransferableFinisherAfterKill,
+  chooseCombatAutoTarget,
+  retargetTransferableFinisher,
+} from '../core/combatAutoTarget';
 import HeroDeathOverlay from '../core/heroDeathOverlay';
 import SpeechBubbleLayer from '../core/speechBubbleLayer';
 import {
@@ -36,7 +46,8 @@ import {
   PRECISE,
   FIERCE,
   OBJ,
-  TILE
+  TILE,
+  GATHERING,
 } from '../core/config';
 import TargetActionPanel from './ui/targetActionPanel';
 import ItemTransferPanel from './ui/itemTransferPanel';
@@ -72,7 +83,6 @@ import WantedItemPanel from './ui/wantedItemPanel';
 import WorkQueuePanel from './ui/workQueuePanel';
 import WorkQueueEntryPanel from './ui/workQueueEntryPanel';
 import ObjPanel from './ui/objPanel';
-import WorldPanel from './ui/worldPanel';
 import IntroPanel from './ui/introPanel';
 import LoadingPanel from './ui/loadingPanel';
 import TrueDeathPanel from './ui/trueDeathPanel';
@@ -81,6 +91,12 @@ import StructureRefinePanel from './ui/structureRefinePanel';
 import CraftPanel from './ui/craftPanel';
 import ObjectivesPanel from './ui/objectivesPanel';
 import CooldownButton from './ui/cooldownButton';
+import AttacksPanel from './ui/attacksPanel';
+import {
+  compassDirection,
+  mobileViewport,
+  shouldShowCombatControls,
+} from './mobileHudLayout';
 
 interface NoticeNotification {
   id: number,
@@ -194,6 +210,11 @@ interface UIState {
   fatigueStatus: string
   infoRefineItemTriggered: boolean,
   combatState: any,
+  heroGatheringActive: boolean,
+  activeRefineItemId: number | null,
+  actionsOpen: boolean,
+  viewportWidth: number,
+  viewportHeight: number,
 }
 
 export default class UI extends React.Component<any, UIState> {
@@ -310,6 +331,11 @@ export default class UI extends React.Component<any, UIState> {
       fatigueStatus: '',
       infoRefineItemTriggered: false,
       combatState: null,
+      heroGatheringActive: false,
+      activeRefineItemId: null,
+      actionsOpen: false,
+      viewportWidth: typeof window === 'undefined' ? 390 : window.innerWidth,
+      viewportHeight: typeof window === 'undefined' ? 844 : window.innerHeight,
     }
 
     this.handleMoveClick = this.handleMoveClick.bind(this);
@@ -363,6 +389,7 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(GameEvent.CONFIRMATION, this.handleConfirmation, this);
     Global.gameEmitter.on(GameEvent.CONFIRM_OK_CLICK, this.handleConfirmOkClick, this);
     Global.gameEmitter.on(GameEvent.RESOURCE_BUTTON_CLICK, this.handleResourceButtonClick, this);
+    Global.gameEmitter.on(GameEvent.TERRAIN_FEATURE_BUTTON_CLICK, this.handleTerrainFeatureButtonClick, this);
     Global.gameEmitter.on(GameEvent.OBJ_CREATED, this.handleObjCreated, this);
     Global.gameEmitter.on(GameEvent.OBJ_DELETED, this.handleObjDeleted, this);
     Global.gameEmitter.on(GameEvent.OBJ_MOVED, this.handleObjMoved, this);
@@ -379,6 +406,7 @@ export default class UI extends React.Component<any, UIState> {
 
     Global.gameEmitter.on(NetworkEvent.ERROR, this.handleError, this);
     Global.gameEmitter.on(NetworkEvent.NOTICE, this.handleNotice, this);
+    Global.gameEmitter.on(NetworkEvent.GATHER, this.handleGatherStarted, this);
     Global.gameEmitter.on(NetworkEvent.WORLD, this.handleWorld, this);
     Global.gameEmitter.on(NetworkEvent.HERO_INIT, this.handleHeroInit, this);
     Global.gameEmitter.on(NetworkEvent.INFO_HERO, this.handleInfoHero, this);
@@ -433,23 +461,49 @@ export default class UI extends React.Component<any, UIState> {
     Global.gameEmitter.on(NetworkEvent.NEW_ITEMS, this.handleNewItems, this);
     Global.gameEmitter.on(NetworkEvent.DMG, this.handleDamage, this);
     Global.gameEmitter.on(NetworkEvent.STATS, this.handleStats, this);
+    Global.gameEmitter.on(NetworkEvent.NEARBY_RESOURCES, this.handleNearbyResources, this);
   }
+
+  componentDidMount() {
+    window.addEventListener('resize', this.handleViewportChange);
+    window.addEventListener('orientationchange', this.handleViewportChange);
+    window.visualViewport?.addEventListener('resize', this.handleViewportChange);
+    this.handleViewportChange();
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener('resize', this.handleViewportChange);
+    window.removeEventListener('orientationchange', this.handleViewportChange);
+    window.visualViewport?.removeEventListener('resize', this.handleViewportChange);
+  }
+
+  handleViewportChange = () => {
+    const width = window.visualViewport?.width || window.innerWidth;
+    const height = window.visualViewport?.height || window.innerHeight;
+    const viewport = mobileViewport(width, height);
+    this.setState({
+      viewportWidth: viewport.width,
+      viewportHeight: viewport.height,
+    });
+  };
 
   handleImageDefinitionReady() {
     this.forceUpdate();
+  }
+
+  handleGatherStarted() {
+    this.setState({ heroGatheringActive: true });
   }
 
   handleMoveClick(event: React.MouseEvent) {
     this.setState({ showMoveCompassClick: true });
     setTimeout(this.hideMoveCompassClick, 100);
 
-    const compass = this.compassRef.current!;
+    const compass = this.compassRef.current;
+    if (!compass) return;
 
-    var pocX = event.nativeEvent.offsetX - compass.naturalWidth / 2;
-    var pocY = event.nativeEvent.offsetY - compass.naturalHeight / 2;
-
-    var angleRads = Math.atan2(pocX, pocY);
-    var angleDegrees = ((angleRads * 180) / Math.PI) + 180;
+    const rect = compass.getBoundingClientRect();
+    const direction = compassDirection(event.clientX, event.clientY, rect);
 
     console.log(Global.objectStates);
     console.log(Global.heroId);
@@ -457,21 +511,6 @@ export default class UI extends React.Component<any, UIState> {
 
     if (!heroObj) {
       return;
-    }
-
-    var direction;
-    if (angleDegrees < 30 || angleDegrees >= 330) {
-      direction = 'N';
-    } else if (angleDegrees < 90 && angleDegrees >= 30) {
-      direction = 'NW';
-    } else if (angleDegrees < 150 && angleDegrees >= 90) {
-      direction = 'SW';
-    } else if (angleDegrees < 210 && angleDegrees >= 150) {
-      direction = 'S';
-    } else if (angleDegrees < 270 && angleDegrees >= 210) {
-      direction = 'SE';
-    } else if (angleDegrees < 330 && angleDegrees >= 270) {
-      direction = 'NE';
     }
 
     if (!direction) {
@@ -612,7 +651,8 @@ export default class UI extends React.Component<any, UIState> {
       this.setState({ hideInventoryPanel: true });
       Global.network.sendInfoExit(this.state.inventoryData.id, "inventory");
     } else if (event.panelType == 'itemTransfer') {
-      this.setState({ hideItemTransferPanel: true })
+      this.setState({ hideItemTransferPanel: true });
+      Global.network.sendInfoExit(this.state.leftInventoryId, "item_transfer");
     } else if (event.panelType == 'merchant') {
       this.setState({ hideMerchantPanel: true })
     } else if (event.panelType == 'wanteditempanel') {
@@ -652,6 +692,7 @@ export default class UI extends React.Component<any, UIState> {
         hideStructurePanel: true,
         hideAssignPanel: true
       });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure");
     } else if (event.panelType == 'assign') {
       this.setState({ hideAssignPanel: true });
     } else if (event.panelType == 'refine') {
@@ -662,6 +703,7 @@ export default class UI extends React.Component<any, UIState> {
       Global.network.sendInfoExit(this.state.craftData.crafter_id, "craft");
     } else if (event.panelType == 'structure_craft') {
       this.setState({ hideStructureCraftPanel: true });
+      Global.network.sendInfoExit(this.state.structureData.id, "structure_craft");
     } else if (event.panelType == 'structure_refine') {
       this.setState({ hideStructureRefinePanel: true });
       Global.network.sendInfoExit(this.state.structureData.id, "structure_refine");
@@ -695,7 +737,10 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleRefineClick(eventData) {
-
+    const itemId = Number(eventData?.itemId);
+    this.setState({
+      activeRefineItemId: Number.isFinite(itemId) ? itemId : null,
+    });
   }
 
   handleGetRecipesClick(crafter) {
@@ -756,7 +801,7 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleTargetActionPanelClick(event: React.MouseEvent) {
-    //this.setState({ hideTargetActionPanel: true });
+    this.setState({ hideTargetActionPanel: true });
   }
 
   handleVillagerGatherClick(event: React.MouseEvent) {
@@ -796,23 +841,21 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroGatherClick(event: React.MouseEvent) {
-    /*this.setState({
+    this.setState({
       selectedKey: { type: OBJ, id: Global.heroId },
       hideGatherPanel: false
-    });*/
-    Global.network.sendGather();
+    });
   }
 
   handleHeroSleepClick(event: React.MouseEvent) {
-    //Network.sendRest(Global.heroId);
+    Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
+    this.setState({ resourcesIconBorder: Global.resourceLayerVisible });
+  }
 
-    if (!Global.resourceLayerVisible) {
-      Global.network.sendNearbyResources();
-      this.setState({ resourcesIconBorder: true });
-    } else {
-      Global.gameEmitter.emit(GameEvent.RESOURCE_LAYER_CLICK, {});
-      this.setState({ resourcesIconBorder: false });
-    }
+  handleNearbyResources(message) {
+    this.setState({
+      resourcesIconBorder: Array.isArray(message?.data) && message.data.length > 0,
+    });
   }
 
   handleHeroEquipClick(event: React.MouseEvent) {
@@ -831,9 +874,17 @@ export default class UI extends React.Component<any, UIState> {
       return;
     }
 
-    const targetId = combatState.target_id !== undefined
-      ? combatState.target_id
-      : Global.selectedKey.id;
+    const selectedTargetId = Global.selectedKey?.type === OBJ
+      ? Global.selectedKey.id
+      : undefined;
+    const targetId = combatState.finisher_transferable && selectedTargetId !== undefined
+      ? selectedTargetId
+      : combatState.target_id !== undefined
+        ? combatState.target_id
+        : selectedTargetId;
+    if (targetId === undefined) {
+      return;
+    }
     Global.network.sendCombo(Global.heroId, targetId, comboType);
   }
 
@@ -850,8 +901,16 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleBrace() {
-    Global.network.sendBlock(Global.heroId);
+    Global.network.sendBlock(Global.heroId, 'brace');
   }
+
+  handleParry = () => {
+    Global.network.sendBlock(Global.heroId, 'parry');
+  };
+
+  handleDodge = () => {
+    Global.network.sendBlock(Global.heroId, 'dodge');
+  };
 
   handleAbilityClick(abilityId: string) {
     const targetId = Global.selectedKey && Global.selectedKey.id !== undefined
@@ -869,7 +928,21 @@ export default class UI extends React.Component<any, UIState> {
       Global.objectStates,
     );
 
+    const carriedCombatState = carryTransferableFinisherAfterKill(
+      Global.combatState,
+      message,
+      Global.heroId,
+      nextTargetId,
+    );
+
     if (nextTargetId === null) {
+      if (carriedCombatState) {
+        Global.combatState = carriedCombatState;
+        this.setState({
+          combatState: carriedCombatState,
+          hideAttacksPanel: false,
+        });
+      }
       return;
     }
 
@@ -880,16 +953,16 @@ export default class UI extends React.Component<any, UIState> {
 
     Global.selectedKey = selectedKey;
     Global.attacks.length = 0;
-    Global.combatState = null;
+    Global.combatState = carriedCombatState;
 
     this.setState({
       objIdsOnTile,
       hideSelectPanel: false,
       hideTargetActionPanel: false,
-      hideAttacksPanel: true,
+      hideAttacksPanel: carriedCombatState === null,
       selectedBoxPos,
       selectedKey,
-      combatState: null,
+      combatState: carriedCombatState,
     });
   }
 
@@ -908,6 +981,19 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleCombatState(message) {
+    const stateTarget = message && Global.objectStates[message.target_id];
+    if (message?.finisher_transferable && stateTarget?.state === 'dead') {
+      const selectedId = Global.selectedKey?.type === OBJ
+        && Number(Global.selectedKey.id) !== Number(message.target_id)
+        && Global.objectStates[Global.selectedKey.id]?.state !== 'dead'
+          ? Global.selectedKey.id
+          : null;
+      if (selectedId !== null) {
+        message = retargetTransferableFinisher(message, selectedId) || message;
+      }
+      Global.combatState = message;
+    }
+
     const attackHistory = message && message.attack_history ? message.attack_history : [];
     const hasComboHint = message && ((message.matching_combos && message.matching_combos.length > 0) || message.available_finisher);
     const hasTargetEffects = message && Array.isArray(message.target_effects) && message.target_effects.length > 0;
@@ -1050,6 +1136,10 @@ export default class UI extends React.Component<any, UIState> {
     });
   }
 
+  handleTerrainFeatureButtonClick(event) {
+    this.setState({ hideTerrainFeaturePanel: false });
+  }
+
   handleServerOffline() {
     Global.serverOffline = true;
 
@@ -1060,7 +1150,11 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   handleHeroInit() {
-    this.setState({ selectedKey: { type: OBJ, id: Global.heroId } });
+    this.setState({
+      selectedKey: { type: OBJ, id: Global.heroId },
+      heroGatheringActive: Global.objectStates[Global.heroId]?.state === GATHERING,
+      activeRefineItemId: null,
+    });
   }
 
   handleHeroDead() {
@@ -1170,6 +1264,12 @@ export default class UI extends React.Component<any, UIState> {
 
   handleObjMoved(objId) {
     console.log('Obj Moved: ' + objId);
+    if (objId == Global.heroId) {
+      this.setState({
+        heroGatheringActive: Global.objectStates[objId].state === GATHERING,
+      });
+    }
+
     // Entering current selected tile
     if (this.state.selectedTile) {
       if (this.state.selectedTile.hexX == Global.objectStates[objId].x &&
@@ -1185,12 +1285,13 @@ export default class UI extends React.Component<any, UIState> {
 
         // Check if moving obj is selected
         if (Global.selectedKey.id == objId) {
-          var objMovedEvent = {
-            hexX: Global.objectStates[objId].x,
-            hexY: Global.objectStates[objId].y
-          }
+          const hexX = Global.objectStates[objId].x;
+          const hexY = Global.objectStates[objId].y;
+          const objIdsOnTile = Obj.getObjsAt(hexX, hexY);
+          var objMovedEvent = { hexX, hexY };
           console.log(objMovedEvent);
           Global.gameEmitter.emit(GameEvent.SELECTED_OBJ_MOVED, objMovedEvent);
+          this.setState(selectedObjectMovementPresentation(objId, hexX, hexY, objIdsOnTile));
         } else {
           this.setState({ objIdsOnTile: Obj.getObjsAt(this.state.selectedTile.hexX, this.state.selectedTile.hexY) });
         }
@@ -1204,14 +1305,15 @@ export default class UI extends React.Component<any, UIState> {
     if (objId == Global.heroId) {
       const activityData = { ...(this.state.activityData || {}) };
       activityData[objId] = Global.objectStates[objId].activity;
+      const heroGatheringActive = Global.objectStates[objId].state === GATHERING;
 
       if (this.state.hideHeroPanel == false && objId == this.state.heroDetailedData.id) {
         const newHeroData = { ...this.state.heroDetailedData };
         newHeroData.state = Global.objectStates[objId].state;
         newHeroData.activity = Global.objectStates[objId].activity;
-        this.setState({ heroDetailedData: newHeroData, activityData });
+        this.setState({ heroDetailedData: newHeroData, activityData, heroGatheringActive });
       } else {
-        this.setState({ activityData });
+        this.setState({ activityData, heroGatheringActive });
       }
     }
 
@@ -1283,7 +1385,7 @@ export default class UI extends React.Component<any, UIState> {
     this.setState({
       hideTilePanel: false,
       //hideTileResourcesPanel: false,
-      hideTerrainFeaturePanel: false,
+      hideTerrainFeaturePanel: true,
       tileData: message
     });
   }
@@ -1295,6 +1397,11 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoItem(message) {
     console.log('UI handleInfoItem');
+
+    const hero = Global.objectStates[Global.heroId];
+    if (hero?.state === 'refining' && Array.isArray(message.produces) && message.produces.length > 0) {
+      Global.network.sendInfoRefine(Global.heroId);
+    }
 
     this.setState({
       hideItemPanel: false,
@@ -1557,6 +1664,16 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoUpgrade(message) {
     console.log('UI handleInfoUpgrade');
+
+    if (structureUpgradeOptions(message).length == 0) {
+      this.setState({
+        hideStructureUpgradePanel: true,
+        hideErrorPanel: false,
+        errmsg: NO_LEARNED_STRUCTURE_UPGRADES,
+      });
+      return;
+    }
+
     this.setState({ hideStructureUpgradePanel: false, structureUpgradeData: message });
   }
 
@@ -1613,13 +1730,13 @@ export default class UI extends React.Component<any, UIState> {
 
   handleInfoTrueDeath(message) {
     console.log("UI handleInfoTrueDeath");
-    this.setState({ hideTrueDeathPanel: false, trueDeathData: message, heroDeathData: null });
+    this.setState({
+      hideTrueDeathPanel: false,
+      trueDeathData: message,
+      heroDeathData: null,
+      activeRefineItemId: null,
+    });
   }
-
-  /*handleNearbyResources(message) {
-    console.log("UI handleNearbyResources");
-    console.log(message);
-  }*/
 
   handleItemTransfer(message) {
     console.log('UI handleItemTransfer leftId: ' + this.state.leftInventoryId + ' rightId: ' +
@@ -1679,7 +1796,14 @@ export default class UI extends React.Component<any, UIState> {
     var newInventoryData = { ...this.state.inventoryData };
     newInventoryData.items = message.refiner_items;
 
-    this.setState({ inventoryData: newInventoryData, producedItemData: producedItemData });
+    this.setState({
+      inventoryData: newInventoryData,
+      producedItemData: producedItemData,
+      refineData: message,
+      // The server response is authoritative for reconnects and for a panel
+      // reopened after the action was started.
+      activeRefineItemId: message.refining_item ? Number(message.refining_item.id) : null,
+    });
   }
 
   handleInfoStructureRefine(message) {
@@ -1705,7 +1829,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleCancelRefineClick() {
     console.log('UI handleCancelRefineClick');
-    this.setState({ hideRefinePanel: true, });
+    this.setState({ hideRefinePanel: true, activeRefineItemId: null });
   }
 
   handleCancelStructureRefine() {
@@ -1715,7 +1839,7 @@ export default class UI extends React.Component<any, UIState> {
 
   handleRefineOkClick() {
     console.log('UI handleRefineOkClick');
-    this.setState({ hideRefinePanel: true, });
+    this.setState({ hideRefinePanel: true, activeRefineItemId: null });
   }
 
 
@@ -1862,94 +1986,141 @@ export default class UI extends React.Component<any, UIState> {
   }
 
   render() {
-    console.log("styles", styles);
     const abilityHints = this.getAbilityHints();
-    const mobileActionButton = (imageName: string, title: string, handler: any) => (
+    const showCombatControls = shouldShowCombatControls(
+      this.state.selectedKey,
+      Global.objectStates,
+      this.state.combatState,
+    );
+    const viewport = mobileViewport(this.state.viewportWidth, this.state.viewportHeight);
+    const mobileActionButton = (
+      imageName: string,
+      title: string,
+      handler: any,
+      active: boolean = false,
+      activeTitle: string = 'Gathering — move to stop',
+    ) => (
       <button
         type="button"
         className={styles.mobileActionIconButton}
-        title={title}
-        aria-label={title}
-        onClick={handler}
+        title={active ? activeTitle : title}
+        aria-label={active ? activeTitle : title}
+        aria-pressed={active}
+        onClick={(event) => {
+          handler(event);
+          this.setState({ actionsOpen: false });
+        }}
       >
         <img src={'/static/art/ui/' + imageName + '.png'} />
+        {active &&
+          <img
+            src={smalliconborder}
+            className={styles.activeGatherButton}
+            alt=""
+            aria-hidden="true" />}
+        <span>{title}</span>
       </button>
     );
     const mobileCooldownButton = (imageName: string, imageButton: any, title: string, handler: any, cooldownEvent: string, timeKey: string) => (
       <CooldownButton
         imageName={imageName}
         imageButton={imageButton}
-        handler={handler}
+        handler={() => {
+          handler();
+          this.setState({ actionsOpen: false });
+        }}
         className={styles.mobileActionIconButton}
         cooldownEvent={cooldownEvent}
         timeKey={timeKey}
         title={title} />
     );
     return (
-      <div id="ui" className={styles.ui}>
+      <div
+        id="ui"
+        className={styles.ui}
+        data-orientation={viewport.portrait ? 'portrait' : 'landscape'}
+        data-compact={viewport.compact ? 'true' : 'false'}
+      >
 
         {!this.state.hideLoadingPanel &&
           <LoadingPanel errmsg={Global.accountName ? `Loading ${Global.accountName}...` : "Loading..."} />}
 
-        <div className={styles.mobileActionGrid}>
-          {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
-          {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
-          {mobileCooldownButton('surveybutton', explorebutton, 'Survey', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
-          {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick)}
-          {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
-          {mobileActionButton('resourcesbutton', 'Nearby Resources', this.handleHeroSleepClick)}
-          {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
-          {mobileActionButton('craftbutton', 'Handcraft', this.handleHeroCraftClick)}
-        </div>
-
-        <button type="button" className={`${styles.combobutton} ${this.state.combatState?.available_finisher ? styles.combobuttonReady : ''}`} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
-          <img src="/static/art/ui/combobutton.png" />
+        <button
+          type="button"
+          className={`${styles.mobileActionsToggle} ${showCombatControls ? styles.mobileActionsToggleCombat : ''}`}
+          onClick={() => this.setState((state) => ({ actionsOpen: !state.actionsOpen }))}
+          aria-expanded={this.state.actionsOpen}
+          aria-controls="mobile-action-drawer"
+        >
+          {this.state.actionsOpen ? 'Close' : 'Actions'}
         </button>
 
-        <ActionButton type={QUICK}
-          handler={this.handleQuickAttack} />
-
-        <ActionButton type={PRECISE}
-          handler={this.handlePreciseAttack} />
-
-        <ActionButton type={FIERCE}
-          handler={this.handleFierceAttack} />
-
-        {abilityHints.length > 0 &&
-          <div className={styles.abilitybar}>
-            {abilityHints.map((ability) => {
-              const disabled = Boolean(ability.disabled_reason);
-              const title = ability.disabled_reason
-                ? `${ability.label}: ${ability.disabled_reason}`
-                : `${ability.label}: ${ability.hint} (${ability.cost} ${ability.cost_type})`;
-              return (
-                <button
-                  key={ability.id}
-                  type="button"
-                  className={styles.abilitybutton}
-                  disabled={disabled}
-                  title={title}
-                  onClick={() => this.handleAbilityClick(ability.id)}
-                >
-                  {ability.label}
-                </button>
-              );
-            })}
-          </div>
+        {this.state.actionsOpen &&
+          <section
+            id="mobile-action-drawer"
+            className={`${styles.mobileActionDrawer} ${showCombatControls ? styles.mobileActionDrawerCombat : ''}`}
+            aria-label="Hero actions"
+          >
+            <div className={styles.mobileActionDrawerTitle}>
+              <span>Hero Actions</span>
+              <span>{viewport.portrait ? 'Portrait' : 'Landscape'}</span>
+            </div>
+            <div className={styles.mobileActionGrid}>
+              {mobileActionButton('attrsbutton', 'Attributes', this.handleHeroAttrsClick)}
+              {mobileActionButton('inventorybutton', 'Inventory', this.handleHeroInventoryClick)}
+              {mobileCooldownButton('surveybutton', explorebutton, 'Scout', this.handleHeroSurveyClick, NetworkEvent.SURVEY, 'survey_time')}
+              {mobileActionButton('gatherbutton', 'Gather', this.handleHeroGatherClick, this.state.heroGatheringActive)}
+              {mobileActionButton('buildbutton', 'Build', this.handleHeroBuildClick)}
+              {mobileActionButton('resourcesbutton', 'Resources', this.handleHeroSleepClick, this.state.resourcesIconBorder, 'Nearby Resources — hide category icons')}
+              {mobileActionButton('equipbutton', 'Equip', this.handleHeroEquipClick)}
+              {mobileActionButton('craftbutton', 'Handcraft', this.handleHeroCraftClick)}
+            </div>
+          </section>
         }
 
-        <img src={bracebutton}
-          id="bracebutton"
-          className={styles.bracebutton}
-          onClick={this.handleBrace} />
+        {showCombatControls &&
+          <div aria-label="Combat controls">
+            {this.state.combatState?.available_finisher &&
+              <button type="button" className={`${styles.combobutton} ${styles.combobuttonReady}`} onClick={this.handleComboClick} title="Execute Combo" aria-label="Execute Combo">
+                <img src="/static/art/ui/combobutton.png" />
+              </button>}
 
-        <img src={parrybutton}
-          id="parrybutton"
-          className={styles.parrybutton} />
+            <ActionButton type={QUICK} handler={this.handleQuickAttack} />
+            <ActionButton type={PRECISE} handler={this.handlePreciseAttack} />
+            <ActionButton type={FIERCE} handler={this.handleFierceAttack} />
 
-        <img src={dodgebutton}
-          id="dodgebutton"
-          className={styles.dodgebutton} />
+            {abilityHints.length > 0 &&
+              <div className={styles.abilitybar}>
+                {abilityHints.map((ability) => {
+                  const disabled = Boolean(ability.disabled_reason);
+                  const title = ability.disabled_reason
+                    ? `${ability.label}: ${ability.disabled_reason}`
+                    : `${ability.label}: ${ability.hint} (${ability.cost} ${ability.cost_type})`;
+                  return (
+                    <button
+                      key={ability.id}
+                      type="button"
+                      className={styles.abilitybutton}
+                      disabled={disabled}
+                      title={title}
+                      onClick={() => this.handleAbilityClick(ability.id)}
+                    >
+                      {ability.label}
+                    </button>
+                  );
+                })}
+              </div>}
+
+            <img src={bracebutton} id="bracebutton" className={styles.bracebutton}
+              title="Brace" alt="Brace" onClick={this.handleBrace} />
+            <img src={parrybutton} id="parrybutton" className={styles.parrybutton}
+              title="Parry" alt="Parry" onClick={this.handleParry} />
+            <img src={dodgebutton} id="dodgebutton" className={styles.dodgebutton}
+              title="Dodge" alt="Dodge" onClick={this.handleDodge} />
+          </div>}
+
+        {showCombatControls && !this.state.hideAttacksPanel &&
+          <AttacksPanel attacks={Global.attacks} combatState={this.state.combatState} />}
 
         <img src={movecompass}
           id="movecompass"
@@ -1960,9 +2131,13 @@ export default class UI extends React.Component<any, UIState> {
         {this.state.showMoveCompassClick &&
           <img id="movecompassclick" src={movecompass_click} className={styles.movecompassclick} />}
 
-        <HeroFrame heroStats={this.state.heroStats} hungerStatus={this.state.hungerStatus} thirstStatus={this.state.thirstStatus} fatigueStatus={this.state.fatigueStatus}></HeroFrame>
-
-        <WorldPanel worldData={this.state.worldData} />
+        <HeroFrame
+          heroStats={this.state.heroStats}
+          hungerStatus={this.state.hungerStatus}
+          thirstStatus={this.state.thirstStatus}
+          fatigueStatus={this.state.fatigueStatus}
+          worldData={this.state.worldData}
+        />
 
         <ObjectivesPanel />
 
@@ -2014,6 +2189,7 @@ export default class UI extends React.Component<any, UIState> {
         {!this.state.hideItemPanel &&
           <ItemPanel itemData={this.state.itemData}
             triggerAction={this.state.infoItemAction}
+            activeRefineItemId={this.state.activeRefineItemId}
           />}
 
         {!this.state.hideRefinePanel &&

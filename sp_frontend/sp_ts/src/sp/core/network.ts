@@ -2,6 +2,8 @@
 import { Global } from './global'
 import { NetworkEvent } from './networkEvent';
 import { ObjectState } from './objectState';
+import { requiresAuthoritativeActionProgress } from './actionProgress';
+import { constructionProgressTimeline } from './constructionProgress';
 import { TileState } from './tileState';
 import { GameEvent } from './gameEvent';
 import { DEAD, GATHERING, NONE } from "./config";
@@ -37,6 +39,7 @@ import {
   markMapObjectOutsidePerception,
   markMapObjectPerceived,
 } from './mapObjectPresence';
+import type { ScoutedResourceCategory } from './scoutResourceCategories';
 
 export type { CrisisStatusPacket } from './crisisStatus';
 export type { SafeLogoutStatusPacket } from './safeLogoutStatus';
@@ -181,13 +184,13 @@ export type ResponsePacket =
   | { packet: 'info_experiment'; id: number; expitem: Item[]; expresources: Item[]; validresources: Item[]; expstate: string; recipe?: Recipe }
   | { packet: 'info_experiment_state'; id: number; expstate: string }
   | { packet: 'info_crop'; id: number; crop_type: string; crop_quantity: number; crop_stage: string }
-  | { packet: 'nearby_resources'; data: TileResourceWithPos[] }
+  | { packet: 'nearby_resources'; data: ScoutedResourceCategory[] }
   | { packet: 'structure_list'; result: Structure[] }
   | { packet: 'image_def'; name: string; data: unknown }
   | { packet: 'PlayerMoved'; player_id: number; x: number; y: number }
   | { packet: 'create_foundation'; result: string }
   | { packet: 'start_upgrade'; structure_id: number }
-  | { packet: 'work_update'; structure_id: number; work_done: number; total_work: number; work_per_sec: number }
+  | { packet: 'work_update'; structure_id: number; work_done: number; total_work: number; work_per_sec: number; work_done_milliunits: number; total_work_milliunits: number; work_per_sec_milliunits: number; construction_action_id: number; construction_updated_at_ms: number }
   | { packet: 'upgrade'; upgrade_time: number }
   | { packet: 'craft'; craft_time: number }
   | { packet: 'refine'; refine_time: number }
@@ -204,7 +207,7 @@ export type ResponsePacket =
   | { packet: 'info_craft'; crafter_id: number; structure_id?: number; items: Item[]; recipes: Recipe[]; crafting_item?: CraftingItem }
   | { packet: 'info_structure_craft'; structure_inventory: Inventory; recipes?: Recipe[]; queue: WorkEntry[]; crafting_item?: CraftingItem }
   | { packet: 'info_structure_queue'; structure_id: number; queue: WorkEntry[] }
-  | { packet: 'info_work_queue_entry'; structure_id: number; work_type: string; index: number; worker_id: number; item_name: string; item_image: string; item_quantity: number; work_time: number; progress: number }
+  | { packet: 'info_work_queue_entry'; structure_id: number; work_type: string; index: number; worker_id: number; item_name: string; item_image: string; item_quantity: number; work_time: number; progress: number; action_id?: number; action_duration_ms?: number; action_elapsed_ms?: number }
   | { packet: 'info_refine'; refiner_id: number; structure_id?: number; refiner_items: Item[]; structure_items?: Item[]; refining_item?: RefiningItem; produced_items: [number, number][] }
   | { packet: 'info_structure_refine'; structure_inventory: Inventory; refining_item?: RefiningItem; produced_items: [number, number][] }
   | { packet: 'info_refine_item'; id: number; name: string; image: string; class: string; subclass: string; quantity: number; produces: ProducedItem[]; refining_skill: string; refining_skill_req: number; refine_time: number; progress: number }
@@ -232,7 +235,7 @@ export type ResponsePacket =
   | CrisisStatusPacket
   | SafeLogoutStatusPacket
   | ProtectedSettlementsPacket
-  | { packet: 'combat_state'; version: number; target_id: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; target_effects?: string[]; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
+  | { packet: 'combat_state'; version: number; target_id?: number; enemy_intent: string; attack_history: string[]; matching_combos: ComboHint[]; available_finisher?: string; finisher_transferable?: boolean; target_effects?: string[]; stamina_costs: StaminaCosts; abilities?: AbilityHint[]; counter_hint: string }
   | { packet: 'discovery_event'; version: number; discovery_type: string; title: string; unlock_source: string; location?: string; result: string };
 
 export interface PerceptionData {
@@ -355,6 +358,11 @@ export interface MapObj {
   work_done?: number;
   total_work?: number;
   work_per_sec?: number;
+  work_done_milliunits?: number;
+  total_work_milliunits?: number;
+  work_per_sec_milliunits?: number;
+  construction_action_id?: number;
+  construction_updated_at_ms?: number;
   action_id?: number;
   action_duration_ms?: number;
   action_elapsed_ms?: number;
@@ -437,6 +445,7 @@ export interface Structure {
   build_time: number;
   req: ResReq[];
   upgrade_req: ResReq[];
+  placement_resource?: string;
 }
 
 export interface Assignment {
@@ -467,6 +476,7 @@ export interface Recipe {
 
 export interface WorkEntry {
   work_type: string;
+  work_status?: string;
   villager_id: number;
   recipe_name?: string;
   recipe_image?: string;
@@ -475,6 +485,9 @@ export interface WorkEntry {
   refine_item_class?: string;
   work_time: number;
   progress: number;
+  action_id?: number;
+  action_duration_ms?: number;
+  action_elapsed_ms?: number;
 }
 
 export interface Skill {
@@ -658,13 +671,31 @@ export interface InfoStructurePacket {
   effects?: string[];
   build_cost?: number;
   work_done?: number;
+  total_work?: number;
   work_per_sec?: number;
+  work_done_milliunits?: number;
+  total_work_milliunits?: number;
+  work_per_sec_milliunits?: number;
+  construction_action_id?: number;
+  construction_updated_at_ms?: number;
   req?: ResReq[];
   upgrade_req?: ResReq[];
   selected_upgrade?: string;
+  selected_upgrade_image?: string;
   crop_type?: string;
   crop_quantity?: number;
   crop_stage?: string;
+}
+
+export const NETWORK_RECONNECT_BASE_DELAY_MS = 500;
+export const NETWORK_RECONNECT_MAX_DELAY_MS = 8000;
+
+export function networkReconnectDelayMs(attempt: number): number {
+  const exponent = Math.max(0, Math.min(Math.floor(attempt), 30));
+  return Math.min(
+    NETWORK_RECONNECT_MAX_DELAY_MS,
+    NETWORK_RECONNECT_BASE_DELAY_MS * (2 ** exponent),
+  );
 }
 
 export class Network {
@@ -672,6 +703,8 @@ export class Network {
   private websocket;
   private networkErrorTimeoutId: number | null = null;
   private perceptionTimeoutId: number | null = null;
+  private reconnectTimeoutId: number | null = null;
+  private reconnectAttempt = 0;
   private readonly networkErrorGraceMs = 1500;
   private readonly safeLogoutCloseGuard = new SafeLogoutCloseGuard();
   private readonly safeLogoutSnapshotGuard = new SafeLogoutSnapshotGuard();
@@ -696,9 +729,17 @@ export class Network {
     }
   }
 
+  private clearReconnectTimeout() {
+    if (this.reconnectTimeoutId !== null) {
+      window.clearTimeout(this.reconnectTimeoutId);
+      this.reconnectTimeoutId = null;
+    }
+  }
+
   private clearLifecycleTimers() {
     this.clearNetworkErrorTimeout();
     this.clearPerceptionTimeout();
+    this.clearReconnectTimeout();
   }
 
   public getLatestSafeLogoutStatus(): SafeLogoutStatusPacket | null {
@@ -734,6 +775,7 @@ export class Network {
     this.safeLogoutSnapshotGuard.resetForLogin();
     this.latestSafeLogoutStatus = null;
     this.reloadAfterSafeLogoutClose = false;
+    this.reconnectAttempt = 0;
     this.websocket = null;
     Global.connected = false;
     this.clearProtectedSettlements();
@@ -803,6 +845,21 @@ export class Network {
 
       Global.gameEmitter.emit(NetworkEvent.SERVER_OFFLINE);
     }, this.networkErrorGraceMs);
+  }
+
+  private scheduleReconnect(socket) {
+    this.clearReconnectTimeout();
+    const delayMs = networkReconnectDelayMs(this.reconnectAttempt);
+    this.reconnectAttempt += 1;
+
+    this.reconnectTimeoutId = window.setTimeout(() => {
+      this.reconnectTimeoutId = null;
+      if (!this.isActiveSocket(socket)) {
+        return;
+      }
+
+      this.openConnection();
+    }, delayMs);
   }
 
   public sendMessage(message: String) {
@@ -1259,9 +1316,10 @@ export class Network {
     this.sendMessage(JSON.stringify(m));
   }
 
-  public sendGather() {
+  public sendGather(resType: string) {
     var m = {
       cmd: "gather",
+      res_type: resType,
     };
 
     this.sendMessage(JSON.stringify(m));
@@ -1785,6 +1843,7 @@ export class Network {
     this.clearLifecycleTimers();
     Global.connected = false;
     this.reloadAfterSafeLogoutClose = false;
+    this.reconnectAttempt = 0;
 
     try {
       rememberSafeLogoutCompletion(window.sessionStorage);
@@ -1805,6 +1864,11 @@ export class Network {
   constructor() { }
 
   public connect() {
+    this.reconnectAttempt = 0;
+    this.openConnection();
+  }
+
+  private openConnection() {
     const url: string = "wss://" + window.location.hostname + ":8443";
 
     this.clearLifecycleTimers();
@@ -1829,6 +1893,7 @@ export class Network {
       }
 
       this.clearNetworkErrorTimeout();
+      this.reconnectAttempt = 0;
       console.log('Opened websocket');
     };
 
@@ -1853,6 +1918,7 @@ export class Network {
         return;
       }
       this.scheduleServerOffline(websocket);
+      this.scheduleReconnect(websocket);
     }
 
     this.websocket.onerror = (evt) => {
@@ -1967,6 +2033,7 @@ export class Network {
         Global.gameEmitter.emit(NetworkEvent.INFO_VILLAGER, jsonData);
       } else if (jsonData.packet == "info_structure") {
         console.log('info_structure: ' + JSON.stringify(jsonData));
+        constructionProgressTimeline.updateFromSource(jsonData);
         Global.gameEmitter.emit(NetworkEvent.INFO_STRUCTURE, jsonData);
       } else if (jsonData.packet == "info_npc") {
         Global.gameEmitter.emit(NetworkEvent.INFO_NPC, jsonData);
@@ -2045,6 +2112,7 @@ export class Network {
       } else if (jsonData.packet == "structure_list") {
         Global.gameEmitter.emit(NetworkEvent.STRUCTURE_LIST, jsonData);
       } else if (jsonData.packet == 'work_update') {
+        constructionProgressTimeline.updateFromSource(jsonData);
         Global.gameEmitter.emit(NetworkEvent.WORK_UPDATE, jsonData);
       } else if (jsonData.packet == 'start_upgrade') {
         Global.gameEmitter.emit(NetworkEvent.START_UPGRADE, jsonData);
@@ -2205,6 +2273,11 @@ export class Network {
         work_done: obj.work_done,
         total_work: obj.total_work,
         work_per_sec: obj.work_per_sec,
+        work_done_milliunits: obj.work_done_milliunits,
+        total_work_milliunits: obj.total_work_milliunits,
+        work_per_sec_milliunits: obj.work_per_sec_milliunits,
+        construction_action_id: obj.construction_action_id,
+        construction_updated_at_ms: obj.construction_updated_at_ms,
         action_id: obj.action_id,
         action_duration_ms: obj.action_duration_ms,
         action_elapsed_ms: obj.action_elapsed_ms,
@@ -2270,6 +2343,11 @@ export class Network {
         Global.objectStates[observer.id].work_done = observer.work_done;
         Global.objectStates[observer.id].total_work = observer.total_work;
         Global.objectStates[observer.id].work_per_sec = observer.work_per_sec;
+        Global.objectStates[observer.id].work_done_milliunits = observer.work_done_milliunits;
+        Global.objectStates[observer.id].total_work_milliunits = observer.total_work_milliunits;
+        Global.objectStates[observer.id].work_per_sec_milliunits = observer.work_per_sec_milliunits;
+        Global.objectStates[observer.id].construction_action_id = observer.construction_action_id;
+        Global.objectStates[observer.id].construction_updated_at_ms = observer.construction_updated_at_ms;
         Global.objectStates[observer.id].action_id = observer.action_id;
         Global.objectStates[observer.id].action_duration_ms = observer.action_duration_ms;
         Global.objectStates[observer.id].action_elapsed_ms = observer.action_elapsed_ms;
@@ -2299,6 +2377,11 @@ export class Network {
           work_done: observer.work_done,
           total_work: observer.total_work,
           work_per_sec: observer.work_per_sec,
+          work_done_milliunits: observer.work_done_milliunits,
+          total_work_milliunits: observer.total_work_milliunits,
+          work_per_sec_milliunits: observer.work_per_sec_milliunits,
+          construction_action_id: observer.construction_action_id,
+          construction_updated_at_ms: observer.construction_updated_at_ms,
           action_id: observer.action_id,
           action_duration_ms: observer.action_duration_ms,
           action_elapsed_ms: observer.action_elapsed_ms,
@@ -2343,6 +2426,11 @@ export class Network {
         Global.objectStates[visibleObj.id].work_done = visibleObj.work_done;
         Global.objectStates[visibleObj.id].total_work = visibleObj.total_work;
         Global.objectStates[visibleObj.id].work_per_sec = visibleObj.work_per_sec;
+        Global.objectStates[visibleObj.id].work_done_milliunits = visibleObj.work_done_milliunits;
+        Global.objectStates[visibleObj.id].total_work_milliunits = visibleObj.total_work_milliunits;
+        Global.objectStates[visibleObj.id].work_per_sec_milliunits = visibleObj.work_per_sec_milliunits;
+        Global.objectStates[visibleObj.id].construction_action_id = visibleObj.construction_action_id;
+        Global.objectStates[visibleObj.id].construction_updated_at_ms = visibleObj.construction_updated_at_ms;
         Global.objectStates[visibleObj.id].action_id = visibleObj.action_id;
         Global.objectStates[visibleObj.id].action_duration_ms = visibleObj.action_duration_ms;
         Global.objectStates[visibleObj.id].action_elapsed_ms = visibleObj.action_elapsed_ms;
@@ -2372,6 +2460,11 @@ export class Network {
           work_done: visibleObj.work_done,
           total_work: visibleObj.total_work,
           work_per_sec: visibleObj.work_per_sec,
+          work_done_milliunits: visibleObj.work_done_milliunits,
+          total_work_milliunits: visibleObj.total_work_milliunits,
+          work_per_sec_milliunits: visibleObj.work_per_sec_milliunits,
+          construction_action_id: visibleObj.construction_action_id,
+          construction_updated_at_ms: visibleObj.construction_updated_at_ms,
           action_id: visibleObj.action_id,
           action_duration_ms: visibleObj.action_duration_ms,
           action_elapsed_ms: visibleObj.action_elapsed_ms,
@@ -2419,6 +2512,11 @@ export class Network {
         Global.objectStates[obj.id].work_done = obj.work_done;
         Global.objectStates[obj.id].total_work = obj.total_work;
         Global.objectStates[obj.id].work_per_sec = obj.work_per_sec;
+        Global.objectStates[obj.id].work_done_milliunits = obj.work_done_milliunits;
+        Global.objectStates[obj.id].total_work_milliunits = obj.total_work_milliunits;
+        Global.objectStates[obj.id].work_per_sec_milliunits = obj.work_per_sec_milliunits;
+        Global.objectStates[obj.id].construction_action_id = obj.construction_action_id;
+        Global.objectStates[obj.id].construction_updated_at_ms = obj.construction_updated_at_ms;
         Global.objectStates[obj.id].action_id = obj.action_id;
         Global.objectStates[obj.id].action_duration_ms = obj.action_duration_ms;
         Global.objectStates[obj.id].action_elapsed_ms = obj.action_elapsed_ms;
@@ -2490,7 +2588,11 @@ export class Network {
             Global.objectStates[obj_id].state = value;
             Global.objectStates[obj_id].updateAttr = 'state';
 
-            if (value != GATHERING) {
+            // State changes and their authoritative timing snapshot are sent as
+            // separate object updates. Their order inside a perception-change
+            // batch is not guaranteed, so entering an authoritative timed state
+            // must not erase timing that may already have arrived for that run.
+            if (value != GATHERING && !requiresAuthoritativeActionProgress(value)) {
               Global.objectStates[obj_id].action_id = undefined;
               Global.objectStates[obj_id].action_duration_ms = undefined;
               Global.objectStates[obj_id].action_elapsed_ms = undefined;

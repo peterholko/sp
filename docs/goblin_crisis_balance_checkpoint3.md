@@ -305,13 +305,12 @@ current complete vector. Legacy mode retains its no-crisis clear snapshot.
 
 The TypeScript client treats the field as optional, validates nonempty strings
 and the three stable states, rejects duplicate IDs/unknown states/malformed
-rows, and examines at most the first four input rows. The existing crisis card
-shows an in-card **Prepare your settlement** section only in Preparing/Ready.
-Each row communicates `Ready`, `Needs attention`, or `Unavailable` in literal
-text as well as color, followed by concise detail/action copy. Active assault
-continues to show attacker count and disconnect warning instead. Existing
-objective, compact expansion, accessibility, and Safe Logout state/control
-paths are unchanged.
+rows, and examines at most the first four input rows. Checkpoint 3 originally
+rendered those rows in an in-card **Prepare your settlement** section. The
+current client intentionally suppresses that verbose checklist while retaining
+the compact phase, pressure, countdown, warning, attacker count, and disconnect
+information. Existing objective, compact expansion, accessibility, and Safe
+Logout state/control paths are unchanged.
 
 ### Crisis-copy review
 

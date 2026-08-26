@@ -2,7 +2,11 @@ import * as React from "react";
 import MobilePanelScreen from "./mobilePanelScreen";
 import { Global } from "../../core/global";
 import { Util } from "../../core/util";
-import { operateWorkPresentation } from "../../core/workQueuePresentation";
+import {
+  operateWorkPresentation,
+  workQueueWorkerPresentation,
+} from "../../core/workQueuePresentation";
+import WorkQueueProgressBar from "../../core/workQueueProgressBar";
 import cancelbutton from "ui_comp/exitbutton.png";
 import {
   MobileCard,
@@ -61,9 +65,9 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
 
     const rowStyle: React.CSSProperties = {
       display: 'grid',
-      gridTemplateColumns: '28px 42px 1fr 70px',
+      gridTemplateColumns: '28px 42px minmax(0, 1fr) 38px 64px',
       alignItems: 'center',
-      gap: '8px',
+      gap: '6px',
       minHeight: '50px',
       borderBottom: '1px solid rgba(255,255,255,0.08)',
       paddingBottom: '6px',
@@ -96,8 +100,45 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       lineHeight: 1.2,
     };
 
+    const workerNameStyle: React.CSSProperties = {
+      color: '#9fa5aa',
+      fontFamily: 'Verdana',
+      fontSize: '9px',
+      lineHeight: 1.2,
+      marginTop: '2px',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    };
+
+    const workerFrameStyle: React.CSSProperties = {
+      width: '36px',
+      height: '36px',
+      border: '1px solid rgba(201, 170, 113, 0.42)',
+      borderRadius: '4px',
+      background: 'rgba(0, 0, 0, 0.28)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      overflow: 'hidden',
+      boxSizing: 'border-box',
+    };
+
+    const workerImageStyle: React.CSSProperties = {
+      width: '34px',
+      height: '34px',
+      objectFit: 'contain',
+      imageRendering: 'pixelated',
+    };
+
+    const workerFallbackStyle: React.CSSProperties = {
+      color: '#9fa5aa',
+      fontFamily: 'Verdana',
+      fontSize: '13px',
+    };
+
     const progressStyle: React.CSSProperties = {
-      width: '70px',
+      width: '64px',
     };
 
     const emptyStyle: React.CSSProperties = {
@@ -125,6 +166,13 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
                       const workType = entry.work_type;
                       let name = workType;
                       let imageName = 'recipe.png';
+                      const worker = workQueueWorkerPresentation(
+                        entry.villager_id,
+                        Global.objectStates,
+                      );
+                      const workerImageName = worker.image
+                        ? Util.getImagePreviewName(worker.image)
+                        : null;
 
                       if (workType == 'Craft') {
                         name = entry.recipe_name;
@@ -144,8 +192,22 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
                           <div>
                             <div style={nameStyle}>{name}</div>
                             <div style={metaStyle}>{workType}</div>
+                            <div style={workerNameStyle} title={worker.name}>{worker.name}</div>
                           </div>
-                          {entry.work_time > 0 && <progress max={entry.work_time} value={entry.progress} style={progressStyle}>{entry.progress}</progress>}
+                          <div style={workerFrameStyle} title={worker.name} aria-label={worker.name}>
+                            {workerImageName
+                              ? <img
+                                src={'/static/art/' + workerImageName}
+                                style={workerImageStyle}
+                                alt={worker.name} />
+                              : <span style={workerFallbackStyle}>{worker.assigned ? '?' : '—'}</span>}
+                          </div>
+                          <WorkQueueProgressBar
+                            action_id={entry.action_id}
+                            action_duration_ms={entry.action_duration_ms}
+                            action_elapsed_ms={entry.action_elapsed_ms}
+                            style={progressStyle}
+                            label={name + ' progress'} />
                         </div>
                       );
                     })}
@@ -156,4 +218,3 @@ export default class WorkQueuePanel extends React.Component<WorkQueuePanelProps,
       );
     }
   }
-

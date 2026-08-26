@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Perilous Admin</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #ede2c3;
+        --muted: #a99e85;
+        --panel: rgba(28, 25, 22, 0.94);
+        --panel-2: rgba(43, 37, 31, 0.9);
+        --line: #615643;
+        --gold: #d9ae58;
+        --green: #70c48f;
+        --amber: #e2b95c;
+        --blue: #72a7d6;
+        --red: #df7d70;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font: 15px/1.45 Georgia, "Times New Roman", serif;
+        background:
+          radial-gradient(circle at 15% 0%, rgba(130, 96, 49, 0.18), transparent 35rem),
+          #100f0e;
+      }
+
+      button, input { font: inherit; }
+      .shell { width: min(1500px, 100%); margin: 0 auto; padding: 28px; }
+      header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 22px;
+      }
+      h1 { margin: 0; color: var(--gold); font-size: clamp(28px, 4vw, 44px); letter-spacing: .04em; }
+      .subtitle { margin: 4px 0 0; color: var(--muted); }
+      .server-clock { text-align: right; }
+      .live-line { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(255,255,255,.04); }
+      .dot.live { background: var(--green); box-shadow: 0 0 12px rgba(112,196,143,.75); }
+      .dot.error { background: var(--red); }
+      .small { color: var(--muted); font-size: 13px; }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(150px, 1fr));
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+      .summary-card, .panel {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: linear-gradient(145deg, var(--panel-2), var(--panel));
+        box-shadow: 0 10px 30px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.035);
+      }
+      .summary-card { padding: 15px 17px; }
+      .summary-card .value { display: block; margin-top: 3px; font: 700 30px/1 system-ui, sans-serif; }
+      .summary-card .label { color: var(--muted); font-size: 12px; letter-spacing: .09em; text-transform: uppercase; }
+      .summary-card.connected .value { color: var(--green); }
+      .summary-card.pending .value { color: var(--amber); }
+      .summary-card.protected .value { color: var(--blue); }
+
+      .panel { overflow: hidden; }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 13px;
+        border-bottom: 1px solid var(--line);
+      }
+      .toolbar input[type="search"] {
+        min-width: 220px;
+        flex: 1;
+        padding: 9px 11px;
+        color: var(--ink);
+        background: #161411;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .toolbar label { display: flex; align-items: center; gap: 7px; color: var(--muted); white-space: nowrap; }
+      .button {
+        padding: 8px 13px;
+        color: var(--ink);
+        background: #3b3228;
+        border: 1px solid #766346;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .button:hover { border-color: var(--gold); }
+      .button:disabled { opacity: .55; cursor: wait; }
+
+      .error-banner { display: none; margin: 0; padding: 12px 14px; color: #ffd5cf; background: rgba(120,35,30,.45); border-bottom: 1px solid #8a4d45; }
+      .error-banner.visible { display: block; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { padding: 12px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid rgba(97,86,67,.55); }
+      th { color: var(--muted); font: 600 11px/1.2 system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; background: rgba(0,0,0,.14); }
+      tbody tr:hover { background: rgba(217,174,88,.045); }
+      .primary { font-weight: 700; color: #fff2d2; }
+      .secondary { color: var(--muted); font-size: 12px; margin-top: 2px; }
+      .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; font: 600 11px/1.4 system-ui, sans-serif; white-space: nowrap; }
+      .badge.online { color: #b8f1ca; border-color: #47765a; background: rgba(53,105,70,.25); }
+      .badge.safe_logout_pending { color: #ffe3a2; border-color: #8c7137; background: rgba(128,96,29,.25); }
+      .badge.offline_protected { color: #c8e4ff; border-color: #476d8c; background: rgba(43,84,118,.25); }
+      .badge.disconnected { color: #c3b9a6; }
+      .health { min-width: 96px; }
+      .health-track { width: 100%; height: 6px; margin-top: 5px; overflow: hidden; border-radius: 99px; background: #151311; }
+      .health-fill { height: 100%; background: var(--green); }
+      .mobile-list { display: none; }
+      .empty { padding: 30px; text-align: center; color: var(--muted); }
+
+      @media (max-width: 900px) {
+        .shell { padding: 16px; }
+        header { align-items: flex-start; }
+        .summary { grid-template-columns: repeat(2, 1fr); }
+        .toolbar { flex-wrap: wrap; }
+        .toolbar input[type="search"] { min-width: 100%; order: 3; }
+        .table-wrap { display: none; }
+        .mobile-list { display: grid; gap: 10px; padding: 10px; }
+        .player-card { padding: 13px; border: 1px solid rgba(97,86,67,.75); border-radius: 8px; background: rgba(0,0,0,.12); }
+        .player-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+        .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .card-field .label { color: var(--muted); font: 600 10px/1.2 system-ui, sans-serif; letter-spacing: .07em; text-transform: uppercase; }
+        .card-field .content { margin-top: 3px; }
+      }
+
+      @media (max-width: 560px) {
+        header { display: block; }
+        .server-clock { margin-top: 12px; text-align: left; }
+        .live-line { justify-content: flex-start; }
+        .summary { grid-template-columns: 1fr 1fr; }
+        .summary-card { padding: 12px; }
+        .summary-card .value { font-size: 25px; }
+        .card-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <h1>Perilous Admin</h1>
+          <p class="subtitle">Read-only live settlement operations</p>
+        </div>
+        <div class="server-clock">
+          <div class="live-line"><span id="statusDot" class="dot"></span><span id="serverState">Connecting…</span></div>
+          <div id="worldClock" class="small">Waiting for the game server</div>
+          <div id="updatedAt" class="small"></div>
+        </div>
+      </header>
+
+      <section class="summary" aria-label="Player summary">
+        <div class="summary-card connected"><span class="label">Connected</span><span id="connectedCount" class="value">—</span></div>
+        <div class="summary-card pending"><span class="label">Logout pending</span><span id="pendingCount" class="value">—</span></div>
+        <div class="summary-card protected"><span class="label">Safely protected</span><span id="protectedCount" class="value">—</span></div>
+        <div class="summary-card"><span class="label">Disconnected records</span><span id="disconnectedCount" class="value">—</span></div>
+      </section>
+
+      <section class="panel">
+        <div class="toolbar">
+          <label><input id="includeDisconnected" type="checkbox" /> Include ordinary disconnects</label>
+          <input id="search" type="search" placeholder="Search account, hero, or player ID" aria-label="Search players" />
+          <button id="refresh" class="button" type="button">Refresh</button>
+        </div>
+        <p id="errorBanner" class="error-banner" role="alert"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Player</th><th>Presence</th><th>Hero</th><th>Location</th><th>State / Activity</th><th>Health</th><th>Safe Logout</th><th>Crisis</th>
+              </tr>
+            </thead>
+            <tbody id="playerRows"></tbody>
+          </table>
+        </div>
+        <div id="mobileList" class="mobile-list"></div>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        const els = {
+          dot: document.getElementById('statusDot'), server: document.getElementById('serverState'),
+          world: document.getElementById('worldClock'), updated: document.getElementById('updatedAt'),
+          connected: document.getElementById('connectedCount'), pending: document.getElementById('pendingCount'),
+          protected: document.getElementById('protectedCount'), disconnected: document.getElementById('disconnectedCount'),
+          rows: document.getElementById('playerRows'), mobile: document.getElementById('mobileList'),
+          includeDisconnected: document.getElementById('includeDisconnected'), search: document.getElementById('search'),
+          refresh: document.getElementById('refresh'), error: document.getElementById('errorBanner')
+        };
+        let snapshot = null;
+        let loading = false;
+
+        const label = value => String(value || 'unknown').replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const duration = seconds => {
+          if (seconds == null) return '—';
+          if (seconds < 60) return `${seconds}s`;
+          const minutes = Math.floor(seconds / 60), remainder = seconds % 60;
+          return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+        };
+        const text = (tag, value, className) => {
+          const node = document.createElement(tag);
+          node.textContent = value;
+          if (className) node.className = className;
+          return node;
+        };
+        const detail = (primary, secondary) => {
+          const node = document.createElement('div');
+          node.append(text('div', primary, 'primary'));
+          if (secondary) node.append(text('div', secondary, 'secondary'));
+          return node;
+        };
+        const badge = presence => text('span', label(presence), `badge ${presence}`);
+        const cell = child => { const td = document.createElement('td'); td.append(child); return td; };
+
+        function safeLogoutText(player) {
+          const safe = player.safe_logout;
+          if (player.presence === 'safe_logout_pending') return `${safe.seconds_remaining ?? 0}s until protected`;
+          if (player.presence === 'offline_protected') return `Protected for ${duration(safe.protected_for_seconds)}`;
+          if (safe.rejection_reason) return `Last rejected: ${label(safe.rejection_reason)}`;
+          if (safe.cancel_reason) return `Last cancelled: ${label(safe.cancel_reason)}`;
+          return player.connected ? 'Not requested' : 'Not protected';
+        }
+
+        function playerName(player) {
+          return player.account_name || `Player ${player.player_id}`;
+        }
+
+        function matchingPlayers() {
+          if (!snapshot) return [];
+          const query = els.search.value.trim().toLowerCase();
+          return snapshot.players.filter(player => {
+            if (!els.includeDisconnected.checked && !player.connected && player.presence === 'disconnected') return false;
+            if (!query) return true;
+            const heroName = player.hero?.name || player.account_hero_name || '';
+            return `${player.player_id} ${player.account_name || ''} ${heroName}`.toLowerCase().includes(query);
+          }).sort((a, b) => {
+            const priority = p => p.connected ? 0 : p.presence === 'safe_logout_pending' ? 1 : p.presence === 'offline_protected' ? 2 : 3;
+            return priority(a) - priority(b) || a.player_id - b.player_id;
+          });
+        }
+
+        function renderTable(players) {
+          els.rows.replaceChildren();
+          if (!players.length) {
+            const tr = document.createElement('tr'), td = document.createElement('td');
+            td.colSpan = 8; td.className = 'empty'; td.textContent = 'No players match this view.';
+            tr.append(td); els.rows.append(tr); return;
+          }
+          for (const player of players) {
+            const hero = player.hero;
+            const crisis = player.crisis;
+            const tr = document.createElement('tr');
+            tr.append(
+              cell(detail(playerName(player), `ID ${player.player_id} · ${label(player.account_state || 'unknown')}`)),
+              cell(badge(player.presence)),
+              cell(detail(hero?.name || player.account_hero_name || 'No hero in world', hero ? `${hero.class} · object ${hero.id}` : '')),
+              cell(text('div', hero ? `${hero.position.x}, ${hero.position.y}` : '—')),
+              cell(detail(hero?.state || '—', hero?.activity || '')),
+              cell(healthNode(hero)),
+              cell(detail(safeLogoutText(player), player.connected ? 'Socket connected' : 'No live socket')),
+              cell(detail(crisis ? `${label(crisis.kind)} · ${label(crisis.phase)}` : 'No active crisis', crisis ? `Pressure ${crisis.pressure}` : ''))
+            );
+            els.rows.append(tr);
+          }
+        }
+
+        function healthNode(hero) {
+          if (!hero) return text('div', '—');
+          const node = document.createElement('div'); node.className = 'health';
+          node.append(text('div', `${hero.hp} / ${hero.max_hp}`));
+          const track = document.createElement('div'); track.className = 'health-track';
+          const fill = document.createElement('div'); fill.className = 'health-fill';
+          fill.style.width = `${Math.max(0, Math.min(100, hero.max_hp > 0 ? hero.hp / hero.max_hp * 100 : 0))}%`;
+          track.append(fill); node.append(track); return node;
+        }
+
+        function cardField(name, content) {
+          const field = document.createElement('div'); field.className = 'card-field';
+          field.append(text('div', name, 'label'));
+          const body = document.createElement('div'); body.className = 'content'; body.append(content); field.append(body);
+          return field;
+        }
+
+        function renderMobile(players) {
+          els.mobile.replaceChildren();
+          if (!players.length) { els.mobile.append(text('div', 'No players match this view.', 'empty')); return; }
+          for (const player of players) {
+            const hero = player.hero, crisis = player.crisis;
+            const card = document.createElement('article'); card.className = 'player-card';
+            const head = document.createElement('div'); head.className = 'player-card-head';
+            head.append(detail(playerName(player), `Player ${player.player_id}`), badge(player.presence));
+            const grid = document.createElement('div'); grid.className = 'card-grid';
+            grid.append(
+              cardField('Hero', detail(hero?.name || player.account_hero_name || 'No hero', hero ? hero.class : '')),
+              cardField('Location', text('div', hero ? `${hero.position.x}, ${hero.position.y}` : '—')),
+              cardField('State / Activity', detail(hero?.state || '—', hero?.activity || '')),
+              cardField('Health', healthNode(hero)),
+              cardField('Safe Logout', text('div', safeLogoutText(player))),
+              cardField('Crisis', detail(crisis ? `${label(crisis.kind)} · ${label(crisis.phase)}` : 'None', crisis ? `Pressure ${crisis.pressure}` : ''))
+            );
+            card.append(head, grid); els.mobile.append(card);
+          }
+        }
+
+        function render() {
+          if (!snapshot) return;
+          const summary = snapshot.summary;
+          els.connected.textContent = summary.connected;
+          els.pending.textContent = summary.safe_logout_pending;
+          els.protected.textContent = summary.offline_protected;
+          els.disconnected.textContent = summary.disconnected;
+          els.world.textContent = `Day ${snapshot.game_day} · ${snapshot.time_of_day} · tick ${snapshot.game_tick}`;
+          const age = Math.max(0, Date.now() - snapshot.generated_at_unix_ms);
+          els.updated.textContent = `Snapshot ${age < 2000 ? 'just now' : `${Math.round(age / 1000)}s old`}`;
+          const players = matchingPlayers(); renderTable(players); renderMobile(players);
+        }
+
+        async function load() {
+          if (loading) return;
+          loading = true;
+          els.refresh.disabled = true;
+          try {
+            const response = await fetch('/admin/api/status', { credentials: 'same-origin', cache: 'no-store' });
+            if (!response.ok) {
+              const body = await response.json().catch(() => ({}));
+              throw new Error(body.msg || `Status request failed (${response.status})`);
+            }
+            snapshot = await response.json();
+            els.dot.className = 'dot live'; els.server.textContent = 'Game server online';
+            els.error.className = 'error-banner'; els.error.textContent = '';
+            render();
+          } catch (error) {
+            els.dot.className = 'dot error'; els.server.textContent = 'Status unavailable';
+            els.error.textContent = error.message || 'Unable to load admin status.';
+            els.error.className = 'error-banner visible';
+          } finally { els.refresh.disabled = false; loading = false; }
+        }
+
+        els.refresh.addEventListener('click', load);
+        els.includeDisconnected.addEventListener('change', render);
+        els.search.addEventListener('input', render);
+        load();
+        setInterval(load, 5000);
+      })();
+    </script>
+  </body>
+</html>

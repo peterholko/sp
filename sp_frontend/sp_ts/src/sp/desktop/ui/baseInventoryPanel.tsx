@@ -11,6 +11,7 @@ import { Util } from "../../core/util";
 import ResourceItem from "./resourceItem";
 import { STRUCTURE, FOUNDED } from "../../core/config";
 import { shouldHighlightBurrowLogs } from "../../core/tutorialInventoryHighlight";
+import { inventoryItemTransferLocked } from "../../core/inventoryTransferPolicy";
 
 interface BaseInventoryProps {
   left: boolean,
@@ -99,7 +100,6 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
 
     var itemsData = (this.props.items || []);
     const ownerState = Global.objectStates[objId];
-    const ownerCanEquip = ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
 
     if (!this.props.showEquipped) {
       itemsData = itemsData.filter((item) => item.equipped == false);
@@ -161,7 +161,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
 
       var disabled = false;
 
-      if (ownerCanEquip && itemsData[itemIndex].equipped == true) {
+      if (inventoryItemTransferLocked(ownerState, itemsData[itemIndex])) {
         disabled = true;
       }
 

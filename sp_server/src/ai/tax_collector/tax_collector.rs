@@ -400,7 +400,7 @@ pub fn move_to_target_action_system(
 
                 let entities = [*actor, target_entity];
 
-                let Ok([mut npc, target]) = obj_query.get_many_mut(entities) else {
+                let Ok([npc, target]) = obj_query.get_many_mut(entities) else {
                     error!("Query failed to find entities {:?}", entities);
                     *state = ActionState::Failure;
                     continue;
@@ -587,7 +587,7 @@ pub fn move_to_pos_action_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok(mut npc) = npc_query.get_mut(*actor) else {
+                let Ok(npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     *state = ActionState::Failure;
                     continue;
@@ -704,7 +704,7 @@ pub fn move_to_empire_action_system(
                 *state = ActionState::Executing;
             }
             ActionState::Executing => {
-                let Ok(mut npc) = npc_query.get_mut(*actor) else {
+                let Ok(npc) = npc_query.get_mut(*actor) else {
                     error!("Query failed to find entity {:?}", *actor);
                     *state = ActionState::Failure;
                     continue;

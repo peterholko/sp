@@ -3,6 +3,7 @@ import { Global } from "../../core/global";
 import { Util } from "../../core/util";
 import MobilePanelScreen from "./mobilePanelScreen";
 import MobileInventoryGrid from "./mobileInventoryGrid";
+import { inventoryItemTransferLocked } from "../../core/inventoryTransferPolicy";
 
 interface BaseInventoryProps {
   left: boolean,
@@ -61,7 +62,6 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     let imageName = '';
     let name = '';
     const ownerState = Global.objectStates[objId];
-    const ownerCanEquip = ownerState && (ownerState.subclass == 'hero' || ownerState.subclass == 'villager');
 
     if (ownerState) {
       imageName = Util.getImagePreviewName(ownerState.image) || '';
@@ -87,7 +87,7 @@ export default class BaseInventoryPanel extends React.Component<BaseInventoryPro
     const disabledItems = this.props.disabledItems ? [...this.props.disabledItems] : [];
 
     pageItems.forEach(item => {
-      if (ownerCanEquip && item.equipped == true && !disabledItems.includes(item.id)) {
+      if (inventoryItemTransferLocked(ownerState, item) && !disabledItems.includes(item.id)) {
         disabledItems.push(item.id);
       }
     });

@@ -528,7 +528,7 @@ mod tests {
                 };
                 let source = inventory.new(
                     ids.new_item_id(),
-                    "Stone-Tipped Spear".to_string(),
+                    "Bone-Tipped Spear".to_string(),
                     1,
                     &templates.item_templates,
                 );

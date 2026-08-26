@@ -7,6 +7,7 @@ interface ToggleButtonProps {
   imageName: string,
   className: any,
   title?: string,
+  active?: boolean,
 }
 
 export default class ToggleButton extends React.Component<ToggleButtonProps, any> {
@@ -23,10 +24,13 @@ export default class ToggleButton extends React.Component<ToggleButtonProps, any
 
   handleClick = () => {
     this.props.handler();
-    this.setState({toggleIconBorder: !this.state.toggleIconBorder});
+    if (this.props.active === undefined) {
+      this.setState({toggleIconBorder: !this.state.toggleIconBorder});
+    }
   }
 
   render() {
+    const active = this.props.active ?? this.state.toggleIconBorder;
 
     return (
       <div onClick={this.handleClick}>
@@ -35,8 +39,9 @@ export default class ToggleButton extends React.Component<ToggleButtonProps, any
           className={this.props.className}
           title={this.props.title}
           alt={this.props.title}
-          aria-label={this.props.title} />
-        {this.state.toggleIconBorder && <img src={smalliconborder} className={this.props.className} />}
+          aria-label={this.props.title}
+          aria-pressed={active} />
+        {active && <img src={smalliconborder} className={this.props.className} alt="" aria-hidden="true" />}
       </div>
     );
   }

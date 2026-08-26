@@ -20,14 +20,15 @@ import {
   consumeSafeLogoutCompletion,
   hasSafeLogoutReconnectSuppression,
 } from "../core/safeLogoutStatus";
+import { shouldShowAccountSetupPrompt } from "../core/accountSetupPrompt";
 import HeroCreationPanel from "../core/heroCreationPanel";
 import { DEFAULT_HERO_PORTRAIT } from "../core/portraitCatalog";
+import { sessionLaunchDestination } from "../core/sessionLaunchPolicy";
 
 export default class LoginControl extends React.Component<any, any> {
   private readonly leaderboardPageSize = 5;
-  private readonly accountSetupDelay = 60000;
   private healthIntervalId?: number;
-  private accountSetupTimerId?: number;
+  private accountSetupPrompted = false;
   private readonly safeLogoutResumeNotice = new SafeLogoutResumeNoticeGuard();
 
   constructor(props) {
@@ -106,6 +107,7 @@ export default class LoginControl extends React.Component<any, any> {
     this.handleNetworkError = this.handleNetworkError.bind(this);
     this.handleSafeLogoutComplete = this.handleSafeLogoutComplete.bind(this);
     this.handleSafeLogoutResumed = this.handleSafeLogoutResumed.bind(this);
+    this.handleThreatState = this.handleThreatState.bind(this);
 
     Global.gameEmitter.on(GameEvent.INTRO_OK_CLICK, this.handleIntroOkClick, this);
     Global.gameEmitter.on(GameEvent.ERROR_OK_CLICK, this.handleErrorOkClick, this);
@@ -119,6 +121,7 @@ export default class LoginControl extends React.Component<any, any> {
     Global.gameEmitter.on(NetworkEvent.NETWORK_ERROR, this.handleNetworkError, this);
     Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
     Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
+    Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
 
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleInfoTrueDeath, this);
 
@@ -185,11 +188,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleSafeLogoutComplete(data?) {
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-      this.accountSetupTimerId = undefined;
-    }
-
     Global.connected = false;
     Global.networkError = false;
     Global.serverOffline = false;
@@ -339,9 +337,22 @@ export default class LoginControl extends React.Component<any, any> {
             Global.accountName = result.account_name;
           }
 
-        Global.network = new Network();
-        Global.network.connect();
-        Global.connected = true;
+        const destination = sessionLaunchDestination(result.needs_hero, false);
+        if (destination === 'landing') {
+          this.setState({
+            hideLandingPage: false,
+            hideSelectClass: true,
+            hideIntro: true,
+            hideGame: true,
+            hideError: true,
+            showEnterWorld: true,
+            preConnectionSelect: false,
+          });
+        } else {
+          Global.network = new Network();
+          Global.network.connect();
+          Global.connected = true;
+        }
       }
     } catch (error) {
       console.error('Error checking session:', error);
@@ -354,11 +365,9 @@ export default class LoginControl extends React.Component<any, any> {
   componentWillUnmount() {
     Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_COMPLETE, this.handleSafeLogoutComplete, this);
     Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_RESUMED, this.handleSafeLogoutResumed, this);
+    Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     if (this.healthIntervalId) {
       window.clearInterval(this.healthIntervalId);
-    }
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
     }
   }
 
@@ -406,12 +415,28 @@ export default class LoginControl extends React.Component<any, any> {
           Global.accountName = result.account_name;
         }
 
-        if (result.needsHero || result.newPlayer) {
+        const destination = sessionLaunchDestination(
+          result.needsHero || result.newPlayer,
+          createGuest,
+        );
+
+        if (destination === 'hero-creation') {
           // New player: show hero selection before connecting to game server
           this.setState({
             hideLandingPage: true,
             hideSelectClass: false,
             preConnectionSelect: true,
+          });
+        } else if (destination === 'landing') {
+          // Restored incomplete account: wait for an explicit Enter World click.
+          this.setState({
+            hideLandingPage: false,
+            hideSelectClass: true,
+            hideIntro: true,
+            hideGame: true,
+            hideError: true,
+            showEnterWorld: true,
+            preConnectionSelect: false,
           });
         } else {
           // Returning player: connect to game server directly
@@ -614,18 +639,18 @@ export default class LoginControl extends React.Component<any, any> {
     }
   }
 
-  startAccountSetupTimer() {
-    if (Global.accountSetupCompleted) {
+  handleThreatState(message) {
+    if (!shouldShowAccountSetupPrompt(
+      message?.day,
+      Global.accountSetupCompleted,
+      Global.heroDead,
+      this.accountSetupPrompted,
+    )) {
       return;
     }
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-    }
-    this.accountSetupTimerId = window.setTimeout(() => {
-      if (!Global.accountSetupCompleted && !Global.heroDead) {
-        this.setState({ hideAccountSetupPanel: false, accountSetupError: '' });
-      }
-    }, this.accountSetupDelay);
+
+    this.accountSetupPrompted = true;
+    this.setState({ hideAccountSetupPanel: false, accountSetupError: '' });
   }
 
   async handleAccountSetupSubmit(data) {
@@ -675,10 +700,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleHeroDead() {
-    if (this.accountSetupTimerId) {
-      window.clearTimeout(this.accountSetupTimerId);
-      this.accountSetupTimerId = undefined;
-    }
     this.setState({ hideAccountSetupPanel: true });
   }
 
@@ -742,11 +763,19 @@ export default class LoginControl extends React.Component<any, any> {
     }
 
     if (data.errmsg == 'Hero name is inappropriate') {
-      this.setState({ inappropiateName: true });
+      this.setState({
+        inappropiateName: true,
+        hideSelectClass: false,
+        hideIntro: true,
+      });
     }
 
     if (data.errmsg == 'Hero name is already taken') {
-      this.setState({ takenName: true });
+      this.setState({
+        takenName: true,
+        hideSelectClass: false,
+        hideIntro: true,
+      });
     }
   }
 
@@ -777,9 +806,24 @@ export default class LoginControl extends React.Component<any, any> {
 
   handleIntroOkClick() {
     this.setState({ hideIntro: true });
+
+    const heroName = this.state.heroName.trim();
+    if (this.state.preConnectionSelect) {
+      Global.pendingClassSelection = {
+        className: this.state.selectedClass,
+        heroName,
+        portrait: this.state.selectedPortrait,
+      };
+      Global.network = new Network();
+      Global.network.connect();
+      Global.connected = true;
+      this.setState({ hideSelectClass: true, preConnectionSelect: false });
+      return;
+    }
+
     Global.network.sendSelectedClass(
       this.state.selectedClass,
-      this.state.heroName,
+      heroName,
       this.state.selectedPortrait,
     );
   }
@@ -815,10 +859,12 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   handleFirstLogin() {
+    this.accountSetupPrompted = false;
     this.clearSafeLogoutSuppression();
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
+      hideIntro: true,
       hideTrueDeathPanel: true,
       hideGame: false,
       safeLogoutCompletionMessage: '',
@@ -837,13 +883,14 @@ export default class LoginControl extends React.Component<any, any> {
       }
     }).catch(() => {});
 
-    this.startAccountSetupTimer();
   }
 
   handleLoggedIn(data?) {
+    this.accountSetupPrompted = false;
     this.setState({
       hideLandingPage: true,
       hideSelectClass: true,
+      hideIntro: true,
       hideTrueDeathPanel: true,
       hideGame: false,
       safeLogoutCompletionMessage: '',
@@ -851,7 +898,6 @@ export default class LoginControl extends React.Component<any, any> {
     if (data && data.has_account) {
       Global.accountSetupCompleted = true;
     }
-    this.startAccountSetupTimer();
   }
 
   handleInfoTrueDeath(message) {
@@ -887,24 +933,7 @@ export default class LoginControl extends React.Component<any, any> {
       return;
     }
 
-    if (this.state.preConnectionSelect) {
-      // New player: store selection and connect to game server
-      Global.pendingClassSelection = {
-        className: this.state.selectedClass,
-        heroName,
-        portrait: this.state.selectedPortrait,
-      };
-      Global.network = new Network();
-      Global.network.connect();
-      Global.connected = true;
-      this.setState({ hideSelectClass: true, preConnectionSelect: false });
-    } else {
-      Global.network.sendSelectedClass(
-        this.state.selectedClass,
-        heroName,
-        this.state.selectedPortrait,
-      );
-    }
+    this.setState({ hideSelectClass: true, hideIntro: false });
   }
 
   handleWarriorSelect() {
@@ -965,9 +994,6 @@ export default class LoginControl extends React.Component<any, any> {
   }
 
   render() {
-    const logoStyle = {
-    }
-
     const totalPages = Math.ceil(this.state.leaderboardEntries.length / this.leaderboardPageSize);
     const currentPage = Math.min(this.state.leaderboardPage, Math.max(totalPages - 1, 0));
     const paginatedEntries = this.state.leaderboardEntries.slice(
@@ -1096,9 +1122,16 @@ export default class LoginControl extends React.Component<any, any> {
 
     return (
       <div>
+        {(!this.state.hideLandingPage || this.state.showLoginPanel || this.state.showResetPanel) && (
+          <div
+            className="login-background"
+            style={{ backgroundImage: "url('/static/art/ui/login_background.png')" }}
+            aria-hidden="true"
+          />
+        )}
         {!this.state.hideLandingPage && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <div className={`server-status ${serverStatusClass}`} role="status" aria-live="polite">
                 <span className="server-status__indicator" aria-hidden="true"></span>
@@ -1173,7 +1206,7 @@ export default class LoginControl extends React.Component<any, any> {
 
         {this.state.showLoginPanel && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <div className={`server-status ${serverStatusClass}`} role="status" aria-live="polite">
                 <span className="server-status__indicator" aria-hidden="true"></span>
@@ -1219,7 +1252,7 @@ export default class LoginControl extends React.Component<any, any> {
 
         {this.state.showResetPanel && (
           <div className="container">
-            <img src={logo} style={logoStyle} />
+            <img src={logo} className="perilous-title-logo" alt="Perilous" />
             <div id="login">
               <form onSubmit={this.handleResetSubmit}>
                 <p style={{ textAlign: 'center' }}>Choose a new password</p>
@@ -1312,6 +1345,29 @@ export default class LoginControl extends React.Component<any, any> {
                     ))}
                   </tbody>
                 </table>
+                <ol className="leaderboard-mobile-list" aria-label="Hall of Heroes entries">
+                  {paginatedEntries.map(entry => (
+                    <li className="leaderboard-mobile-entry" key={entry.id}>
+                      <div className="leaderboard-mobile-entry-header">
+                        <div className="leaderboard-mobile-identity">
+                          <span className="leaderboard-mobile-name">{entry.heroName}</span>
+                          <span className="leaderboard-mobile-rank">{entry.heroRank}</span>
+                        </div>
+                        <div className="leaderboard-mobile-score">
+                          <span className="leaderboard-mobile-label">Score</span>
+                          <span>{entry.totalScore}</span>
+                        </div>
+                      </div>
+                      <div className="leaderboard-mobile-meta">
+                        <span>Day {entry.daysSurvived}</span>
+                        <span>{entry.legendaryKills} {entry.legendaryKills === 1 ? 'Legend' : 'Legends'}</span>
+                      </div>
+                      {entry.fate && (
+                        <div className="leaderboard-mobile-fate">{entry.fate}</div>
+                      )}
+                    </li>
+                  ))}
+                </ol>
                 <div className="leaderboard-pagination">
 
                   <button
@@ -1319,6 +1375,7 @@ export default class LoginControl extends React.Component<any, any> {
                     className="leaderboard-arrow-button"
                     onClick={this.handleLeaderboardPrevious}
                     aria-label="Show previous leaderboard page"
+                    disabled={currentPage === 0}
                   >
                     <img src={leftArrowButton} alt="Previous page" />
                   </button>
@@ -1329,6 +1386,7 @@ export default class LoginControl extends React.Component<any, any> {
                     className="leaderboard-arrow-button"
                     onClick={this.handleLeaderboardNext}
                     aria-label="Show next leaderboard page"
+                    disabled={totalPages === 0 || currentPage >= totalPages - 1}
                   >
                     <img src={rightArrowButton} alt="Next page" />
                   </button>

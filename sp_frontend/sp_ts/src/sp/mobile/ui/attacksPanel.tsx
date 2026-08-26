@@ -1,6 +1,5 @@
-
 import * as React from "react";
-import attackspanel from "ui_comp/attacksframe.png"
+import { mobileCombatHints } from "../mobileCombatHints";
 
 const MAX_ATTACKS = 6;
 
@@ -10,172 +9,107 @@ interface AttacksProp {
 }
 
 export default class AttacksPanel extends React.Component<AttacksProp, any> {
-  constructor(props) {
-    super(props);
-  }
-
   render() {
-    var attacks = [];
-    var startingIndex = 0;
     const combatState = this.props.combatState || {};
-    const attackHistory = combatState.attack_history || this.props.attacks || [];
+    const history = (combatState.attack_history || this.props.attacks || []).slice(-MAX_ATTACKS);
     const combos = combatState.matching_combos || [];
     const availableFinisher = combatState.available_finisher;
     const targetEffects = Array.isArray(combatState.target_effects) ? combatState.target_effects : [];
     const counterHint = combatState.counter_hint;
     const enemyIntent = combatState.enemy_intent;
+    const compactHints = mobileCombatHints(enemyIntent, counterHint);
 
-    if (attackHistory.length > MAX_ATTACKS) {
-      startingIndex = attackHistory.length - MAX_ATTACKS;
+    if (!history.length && !combos.length && !availableFinisher
+        && !targetEffects.length && !counterHint && !enemyIntent) {
+      return null;
     }
 
-    var renderingIndex = 0;
-
-    for (var i = startingIndex; i < attackHistory.length; i++) {
-      var xPos = 3 + renderingIndex * 17;
-      renderingIndex++;
-
-      const style = {
-        transform: 'translate(' + xPos + 'px, ' + 3 + 'px)',
-        position: 'fixed',
-        width: '15px',
-        height: '15px',
-      } as React.CSSProperties
-
-      attacks.push(<img key={i} src={'/static/art/ui/small_' + attackHistory[i] + '.png'}
-        style={style} />)
-    }
-
-    const attacksStyle = {
-      bottom: '85px',
-      left: '50%',
-      marginLeft: '-130px',
+    const panelStyle: React.CSSProperties = {
       position: 'fixed',
-      zIndex: 6
-    } as React.CSSProperties
-
-    const panelStyle = {
-      position: 'fixed'
-    } as React.CSSProperties
-
-    const hintsStyle = {
-      position: 'fixed',
-      bottom: '110px',
       left: '50%',
+      bottom: 'calc(198px + env(safe-area-inset-bottom, 0px))',
       transform: 'translateX(-50%)',
-      maxWidth: 'calc(100vw - 16px)',
-      zIndex: 6,
+      zIndex: 14,
+      width: 'min(300px, calc(100vw - 16px))',
+      boxSizing: 'border-box',
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      gap: '2px',
-    } as React.CSSProperties
-
-    const intentStyle = {
-      ...hintsStyle,
-      bottom: '145px',
-    } as React.CSSProperties
-
-    const hintRowStyle = {
+      gap: '4px',
+      padding: '6px 8px',
+      border: '1px solid rgba(201, 170, 113, .45)',
+      borderRadius: '6px',
+      background: 'rgba(10, 12, 15, .92)',
+      boxShadow: '0 4px 14px rgba(0,0,0,.48)',
+      pointerEvents: 'none',
+    };
+    const rowStyle: React.CSSProperties = {
       display: 'flex',
       alignItems: 'center',
-      gap: '3px',
-      background: 'rgba(0,0,0,0.7)',
-      borderRadius: '3px',
-      padding: '2px 6px',
-      whiteSpace: 'nowrap',
-    } as React.CSSProperties
-
-    const hintNameStyle = {
-      color: '#ffd700',
-      fontFamily: 'Verdana',
-      fontSize: '11px',
-      userSelect: 'none',
-    } as React.CSSProperties
-
-    const hintLabelStyle = {
-      color: '#d4d4d4',
-      fontFamily: 'Verdana',
-      fontSize: '10px',
-      userSelect: 'none',
-    } as React.CSSProperties
-
-    const hintEffectStyle = {
-      color: '#ff6b6b',
-      fontFamily: 'Verdana',
-      fontSize: '10px',
-      fontStyle: 'italic',
-      userSelect: 'none',
-    } as React.CSSProperties
-
-    const arrowStyle = {
-      color: '#888',
-      fontFamily: 'Verdana',
-      fontSize: '10px',
-      userSelect: 'none',
-    } as React.CSSProperties
-
-    const nextPipStyle = {
-      width: '20px',
-      height: '20px',
-    } as React.CSSProperties
-
-    const debuffsStyle = {
-      ...hintsStyle,
-      bottom: '178px',
-      flexDirection: 'row',
+      justifyContent: 'center',
       flexWrap: 'wrap',
-    } as React.CSSProperties
-
-    const debuffBadgeStyle = {
-      color: '#ffd6d6',
+      gap: '4px',
+      color: '#d8d1c5',
       fontFamily: 'Verdana',
       fontSize: '10px',
+      textAlign: 'center',
+    };
+    const pipStyle: React.CSSProperties = { width: '20px', height: '20px', imageRendering: 'pixelated' };
+    const badgeStyle: React.CSSProperties = {
+      padding: '2px 6px',
+      borderRadius: '9px',
+      background: 'rgba(91,18,24,.9)',
+      color: '#ffd6d6',
       fontWeight: 700,
-      background: 'rgba(91, 18, 24, 0.9)',
-      border: '1px solid #e26c73',
-      borderRadius: '10px',
-      padding: '2px 7px',
-      whiteSpace: 'nowrap',
-    } as React.CSSProperties
+    };
+    const hintRowStyle: React.CSSProperties = {
+      ...rowStyle,
+      alignItems: 'stretch',
+      flexDirection: 'column',
+      gap: '1px',
+      lineHeight: 1.15,
+      width: '100%',
+    };
+    const intentStyle: React.CSSProperties = {
+      color: '#e6d7bd',
+      fontWeight: 700,
+    };
+    const counterStyle: React.CSSProperties = {
+      color: '#f2d27a',
+    };
 
     return (
-      <div>
-        {(combos.length > 0 || availableFinisher) &&
-          <div style={hintsStyle}>
-            {availableFinisher &&
-              <div style={hintRowStyle}>
-                <span style={hintNameStyle}>Combo ready</span>
-                <span style={arrowStyle}>=</span>
-                <span style={hintEffectStyle}>{availableFinisher}</span>
-              </div>}
-            {combos.map((combo, idx) => (
-              <div key={idx} style={hintRowStyle}>
-                <span style={arrowStyle}>-&gt;</span>
-                {(combo.remaining_attacks || []).map((atk, j) => (
-                  <img key={j} src={'/static/art/ui/small_' + atk + '.png'}
-                    style={nextPipStyle} title={'Next: ' + atk} />
-                ))}
-                <span style={arrowStyle}>=</span>
-                <span style={hintNameStyle}>{combo.name}</span>
-                {combo.effect &&
-                  <span style={hintEffectStyle}>({combo.effect})</span>}
-              </div>
+      <aside style={panelStyle} aria-label="Combat information">
+        {(compactHints.intent || compactHints.counter) &&
+          <div style={hintRowStyle} aria-label="Enemy combat hints">
+            {compactHints.intent &&
+              <span style={intentStyle} title={enemyIntent}>⚔ {compactHints.intent}</span>}
+            {compactHints.counter &&
+              <span style={counterStyle} title={counterHint}>Try: {compactHints.counter}</span>}
+          </div>}
+
+        {history.length > 0 &&
+          <div style={rowStyle} aria-label="Attack history">
+            {history.map((attack, index) =>
+              <img key={`${attack}-${index}`} src={`/static/art/ui/small_${attack}.png`}
+                style={pipStyle} alt={attack} />)}
+          </div>}
+
+        {(availableFinisher || combos.length > 0) &&
+          <div style={rowStyle}>
+            {availableFinisher && <strong style={{ color: '#ffd45a' }}>Ready: {availableFinisher}</strong>}
+            {!availableFinisher && combos.slice(0, 1).map((combo, index) => (
+              <span key={index}>
+                Next: {(combo.remaining_attacks || []).join(' + ')} → {combo.name}
+              </span>
             ))}
-          </div>
-        }
+          </div>}
+
         {targetEffects.length > 0 &&
-          <div style={debuffsStyle} aria-label="Target effects">
-            {targetEffects.map((effect) => (
-              <span key={effect} style={debuffBadgeStyle}>{effect}</span>
-            ))}
-          </div>
-        }
-        <div style={attacksStyle}>
-          <img src={attackspanel} style={panelStyle} />
-          {attacks}
-        </div>
-      </div>
+          <div style={rowStyle} aria-label="Target effects">
+            {targetEffects.map((effect) => <span key={effect} style={badgeStyle}>{effect}</span>)}
+          </div>}
+      </aside>
     );
   }
 }

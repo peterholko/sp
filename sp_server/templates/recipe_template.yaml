@@ -730,7 +730,7 @@
 - name: Resin Torch
   class: Torch
   subclass: Resin Torch
-  image: torch
+  image: resintorch
   slot: Off Hand
   weight: 5
   crafting_time: 60
@@ -990,7 +990,7 @@
     - type: Maple Timber
       quantity: 1
 
-- name: Stone-Tipped Spear
+- name: Bone-Tipped Spear
   class: Weapon
   subclass: Spear
   image: sharpenedstick
@@ -1005,7 +1005,7 @@
   req:
     - type: Stick
       quantity: 1
-    - type: Pebble
+    - type: bones
       quantity: 1
     - type: Twine
       quantity: 1

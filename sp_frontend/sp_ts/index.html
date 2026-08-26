@@ -1,49 +1,196 @@
-<html>
+<html lang="en">
 
 <head>
   <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=20260822-stockade-light">
+  <link rel="apple-touch-icon" sizes="180x180" href="/perilouslogo-180x180.png?v=20260822-stockade-light">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="canonical" href="https://surviveperilous.com/">
   <meta name="viewport" content="initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="Explore a persistent shared world, build a settlement, command villagers, and survive the dangers gathering beyond the firelight.">
+  <meta name="theme-color" content="#b75d24">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Perilous">
+  <meta property="og:title" content="Perilous — Survive. Build. Endure.">
+  <meta property="og:description" content="Explore a persistent shared world, build a settlement, command villagers, and survive the dangers gathering beyond the firelight.">
+  <meta property="og:url" content="https://surviveperilous.com/">
+  <meta property="og:image" content="https://surviveperilous.com/static/art/social/perilous-discord-embed.png?v=20260824">
+  <meta property="og:image:secure_url" content="https://surviveperilous.com/static/art/social/perilous-discord-embed.png?v=20260824">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="A shipwreck survivor guards a campfire and new stockade while creatures watch from a dark coastal forest.">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Perilous — Survive. Build. Endure.">
+  <meta name="twitter:description" content="Explore a persistent shared world, build a settlement, command villagers, and survive the dangers gathering beyond the firelight.">
+  <meta name="twitter:image" content="https://surviveperilous.com/static/art/social/perilous-discord-embed.png?v=20260824">
+  <meta name="twitter:image:alt" content="A shipwreck survivor guards a campfire and new stockade while creatures watch from a dark coastal forest.">
 
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <title>Perilous</title>
-  <script src="https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js"></script>
-  <script>
-    WebFont.load({
-      google: {
-        families: ['Alegreya']
-      }
-    });
+  <style>
+    html,
+    body {
+      background: #050403;
+      margin: 0;
+      min-height: 100%;
+    }
 
-    document.addEventListener('dragstart', function (e) {
-      e.preventDefault();
-    });
-  </script>
+    #sp-boot {
+      align-items: center;
+      background: radial-gradient(circle at center, #21160f 0, #050403 62%);
+      box-sizing: border-box;
+      color: #ead7aa;
+      display: flex;
+      flex-direction: column;
+      font-family: Georgia, serif;
+      inset: 0;
+      justify-content: center;
+      padding: max(28px, env(safe-area-inset-top)) max(28px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left));
+      position: fixed;
+      text-align: center;
+      z-index: 2147483647;
+    }
 
+    .sp-boot__icon {
+      height: 82px;
+      image-rendering: auto;
+      margin-bottom: 10px;
+      width: 82px;
+    }
+
+    .sp-boot__title {
+      color: #d59a4b;
+      font-size: 28px;
+      letter-spacing: 0.12em;
+      margin: 0 0 18px;
+      text-transform: uppercase;
+    }
+
+    .sp-boot__spinner {
+      animation: sp-boot-spin 1s steps(8, end) infinite;
+      border: 3px solid rgba(213, 154, 75, 0.24);
+      border-radius: 50%;
+      border-top-color: #d59a4b;
+      height: 24px;
+      margin-bottom: 14px;
+      width: 24px;
+    }
+
+    .sp-boot__message {
+      font-size: 16px;
+      line-height: 1.45;
+      margin: 0;
+      max-width: 360px;
+    }
+
+    #sp-boot-retry {
+      background: #6f3e22;
+      border: 1px solid #d59a4b;
+      border-radius: 5px;
+      color: #fff3d1;
+      cursor: pointer;
+      font: 600 16px Georgia, serif;
+      margin-top: 18px;
+      padding: 10px 22px;
+    }
+
+    #sp-boot-retry[hidden] {
+      display: none;
+    }
+
+    @keyframes sp-boot-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sp-boot__spinner { animation: none; }
+    }
+  </style>
 </head>
 
-<body style="background-color: black">
+<body>
+  <div id="sp-boot" role="status" aria-live="polite">
+    <img class="sp-boot__icon" src="/perilouslogo-180x180.png?v=20260822-stockade-light" alt="">
+    <h1 class="sp-boot__title">Perilous</h1>
+    <div class="sp-boot__spinner" aria-hidden="true"></div>
+    <p id="sp-boot-message" class="sp-boot__message">Loading the world…</p>
+    <button id="sp-boot-retry" type="button" hidden>Retry</button>
+  </div>
   <div id="root"></div>
+  <script>
+    (function () {
+      var boot = document.getElementById('sp-boot');
+      var message = document.getElementById('sp-boot-message');
+      var retry = document.getElementById('sp-boot-retry');
+      var bootActive = true;
+
+      function showBootFailure(text) {
+        if (!bootActive || !boot) return;
+        message.textContent = text || 'Perilous could not start. Check your connection and try again.';
+        retry.hidden = false;
+      }
+
+      var slowBootTimer = window.setTimeout(function () {
+        showBootFailure('The world is taking longer than expected to load.');
+      }, 15000);
+
+      window.__SP_BOOT_READY__ = function () {
+        if (!bootActive) return;
+        bootActive = false;
+        window.clearTimeout(slowBootTimer);
+        if (boot) boot.remove();
+      };
+
+      retry.addEventListener('click', function () {
+        window.location.reload();
+      });
+
+      window.addEventListener('error', function (event) {
+        if (event.error || (event.target && event.target.tagName === 'SCRIPT')) {
+          showBootFailure('Perilous could not finish loading.');
+        }
+      }, true);
+
+      window.addEventListener('unhandledrejection', function () {
+        showBootFailure('Perilous could not finish loading.');
+      });
+
+      document.addEventListener('dragstart', function (event) {
+        event.preventDefault();
+      });
+
+      var w = window.screen.width, h = window.screen.height;
+      // iPad Pro (1366x1024) keeps mobile bundle but uses scaled viewport.
+      var isIpadPro = (w === 1366 && h === 1024);
+      var isMobile = (w <= 1024) || isIpadPro;
+      if (!isMobile) window.__SP_DESKTOP__ = true;
+      if (isIpadPro) {
+        var v = document.querySelector("meta[name=viewport]");
+        v.setAttribute('content', 'width=device-width, initial-scale=1.333, minimum-scale=1.333, maximum-scale=1.333, user-scalable=0');
+      }
+      var s = document.createElement("script");
+      s.src = isMobile ? "/sp2.mobile.js" : "/sp2.desktop.js";
+      s.onerror = function () {
+        showBootFailure('The game files could not be downloaded.');
+      };
+      document.head.appendChild(s);
+
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/service-worker.js', { scope: '/' }).catch(function (error) {
+            console.warn('Unable to register the offline app shell', error);
+          });
+        });
+      }
+    })();
+  </script>
 </body>
-<script>
-  (function () {
-    var w = window.screen.width, h = window.screen.height;
-    // iPad Pro (1366x1024) keeps mobile bundle but uses scaled viewport.
-    var isIpadPro = (w === 1366 && h === 1024);
-    var isMobile = (w <= 1024) || isIpadPro;
-    if (!isMobile) window.__SP_DESKTOP__ = true;
-    if (isIpadPro) {
-      var v = document.querySelector("meta[name=viewport]");
-      v.setAttribute('content', 'width=device-width, initial-scale=1.333, minimum-scale=1.333, maximum-scale=1.333, user-scalable=0');
-    }
-    var assetVersion = String(Date.now());
-    var s = document.createElement("script");
-    s.src = (isMobile ? "/sp2.mobile.js" : "/sp2.desktop.js") + "?v=" + assetVersion;
-    document.head.appendChild(s);
-  })();
-</script>
 
 </html>

@@ -86,10 +86,9 @@ npm run dev
 ```
 
 `npm run dev` emits both development bundles. For a finite production build,
-use `npx webpack --mode production --stats=errors-warnings`; the package's
-historical `npm run build` command starts a production-mode development server
-after bundling. `./copy.sh` copies already-built bundles and the deploy-flow
-assets into `sp_axum/root/`.
+use `npm run build`; `npm run rebuild:ux` performs the supported checked
+production build-and-copy flow. `./copy.sh` copies already-built bundles and
+the deploy-flow assets into `sp_axum/root/`.
 
 `sp_axum` and the production game server require PostgreSQL and TLS environment
 configuration. `db_init.sql` documents the combined database schema, while

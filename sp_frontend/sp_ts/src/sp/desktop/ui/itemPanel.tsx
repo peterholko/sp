@@ -17,6 +17,7 @@ import { Global } from "../../core/global";
 import { TRIGGER_PLAYER_SELLING_ITEM, TRIGGER_INVENTORY, TRIGGER_PLAYER_BUYING_ITEM, FALSE, TRIGGER_EQUIP, TRIGGER_REFINING_ITEM, TRIGGER_STRUCTURE_REFINING_ITEM } from "../../core/config";
 import { Network } from "../../core/network";
 import { itemRarity, rarityColor, rarityDisplayName } from "../../core/itemRarity";
+import { canUseInventoryItem } from "../../core/itemUsePolicy";
 
 interface ItemPanelProps {
   triggerAction,
@@ -145,14 +146,7 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
       (this.props.triggerAction != TRIGGER_STRUCTURE_REFINING_ITEM) &&
       (this.props.triggerAction != TRIGGER_REFINING_ITEM);
 
-    const showUseButton = ((this.props.itemData.class == "Potion") ||
-      (this.props.itemData.class == "Deed") ||
-      (this.props.itemData.class == "Food") ||
-      (this.props.itemData.class == "Drink") ||
-      (this.props.itemData.subclass == "Bucket") ||
-      (this.props.itemData.subclass == "Fishing Rod") ||
-      (this.props.itemData.subclass == "Waterskin") ||
-      (this.props.itemData.subclass == "Bedroll")) &&
+    const showUseButton = canUseInventoryItem(this.props.itemData) &&
       (this.props.triggerAction == TRIGGER_INVENTORY) &&
       (this.props.triggerAction != TRIGGER_STRUCTURE_REFINING_ITEM) &&
       (this.props.triggerAction != TRIGGER_REFINING_ITEM);
@@ -256,7 +250,8 @@ export default class ItemPanel extends React.Component<ItemPanelProps, any> {
       refineItemIcon = refinewoodbutton;
     } else if (this.props.itemData.class == 'Stone') {
       refineItemIcon = refinestonebutton;
-    } else if (this.props.itemData.class == 'Game Animal') {
+    } else if (this.props.itemData.class == 'Game Animal' ||
+      this.props.itemData.class == 'Carcass') {
       refineItemIcon = refinegameanimalbutton;
     } else {
       refineItemIcon = refineorebutton;

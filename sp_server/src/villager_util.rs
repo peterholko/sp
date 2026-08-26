@@ -127,6 +127,7 @@ impl VillagerUtil {
             Order::Operate { .. } => "Yes sir, operating this structure!".to_string(),
             Order::Plant { .. } => "Yes sir, off to plant the crops".to_string(),
             Order::Harvest { .. } => "Yes sir, time to harvest".to_string(),
+            Order::Repair => "I'll take care of the repairs!".to_string(),
             _ => "I'm speechless for this type of order".to_string(),
         }
     }
@@ -149,5 +150,18 @@ impl VillagerUtil {
         };
 
         return activity;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_order_has_a_specific_acknowledgement() {
+        assert_eq!(
+            VillagerUtil::order_to_speech(&Order::Repair),
+            "I'll take care of the repairs!"
+        );
     }
 }

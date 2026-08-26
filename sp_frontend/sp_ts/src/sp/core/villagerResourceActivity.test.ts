@@ -4,6 +4,7 @@ import { villagerActivityIcon } from './villagerResourceActivity';
 
 const iconByState = {
   gathering: 'gathering',
+  foraging: 'gathering',
   harvesting: 'gathering',
   planting: 'gathering',
   tending: 'gathering',
@@ -85,6 +86,11 @@ assert.equal(
   villagerActivityIcon({ subclass: 'villager', state: 'gathering', activity: 'Stonecutting' }),
   'mining',
   'stonecutting uses the closest matching extraction icon',
+);
+assert.equal(
+  villagerActivityIcon({ subclass: 'villager', state: 'gathering', activity: 'Foraging' }),
+  'gathering',
+  'foraging keeps the general gathering icon while using an explicit activity label',
 );
 assert.equal(
   villagerActivityIcon({ subclass: 'villager', state: 'none', activity: 'Hunting' }),

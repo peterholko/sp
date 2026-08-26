@@ -11,7 +11,7 @@ use crate::crisis_balance::{
 };
 use crate::effect::{ControlEffectDiminishingReturns, ControlEffectDrEntry, Effect, Effects};
 use crate::event::{MapEvents, Spell, VisibleEvent};
-use crate::game::{CrisisAssaultUnit, Fortified, GameTick};
+use crate::game::{CrisisAssaultUnit, Fortified, GameTick, OPENING_RAT_TEMPLATE};
 use crate::ids::Ids;
 use crate::item::{self, AttrKey, Inventory, Item};
 use crate::map::Map;
@@ -31,9 +31,11 @@ pub const FIERCE: &str = "fierce";
 pub const HAMSTRING: &str = "Hamstring";
 pub const GOUGE: &str = "Gouge";
 pub const COMBO_CHAIN_TIMEOUT_TICKS: i32 = 150;
+pub const TRANSFERABLE_COMBO_TARGET_ID: i32 = -2;
 pub const CONTROL_EFFECT_DR_RESET_TICKS: i32 = 150;
 pub const MAX_EFFECT_STACKS: i32 = 5;
 pub const FORTIFICATION_REACH_WEAPON_SUBCLASS: &str = "Spear";
+pub const UNARMED_HERO_RAT_DAMAGE_CAP: i32 = 1;
 
 #[derive(Event, Debug, Clone, Copy)]
 pub struct CombatEffectsChanged {
@@ -1133,6 +1135,22 @@ impl Combat {
             .unwrap_or_default()
     }
 
+    pub(crate) fn live_combo_attacks_for_finisher(
+        tracker: Option<&ComboTracker>,
+        target_id: i32,
+        game_tick: i32,
+    ) -> Vec<AttackType> {
+        tracker
+            .filter(|tracker| {
+                (tracker.target_id == target_id
+                    || tracker.target_id == TRANSFERABLE_COMBO_TARGET_ID)
+                    && game_tick.saturating_sub(tracker.last_attack_tick)
+                        <= COMBO_CHAIN_TIMEOUT_TICKS
+            })
+            .map(|tracker| tracker.attacks.clone())
+            .unwrap_or_default()
+    }
+
     fn find_combo(
         _commands: &mut Commands,
         templates: &Res<Templates>,
@@ -1449,15 +1467,33 @@ impl Combat {
             Self::get_sanctuary_defense(target, templates),
             Self::get_armor_effects_mod(target, templates),
         );
-        (
+        let dealt_damage = Self::post_defense_damage(
             total_damage,
-            Self::post_defense_damage(
-                total_damage,
-                total_defense,
-                defend_stance_mod,
-                Self::get_terrain_defense(*target.pos, map),
-            ),
-        )
+            total_defense,
+            defend_stance_mod,
+            Self::get_terrain_defense(*target.pos, map),
+        );
+        let dealt_damage = Self::apply_unarmed_hero_rat_damage_cap(
+            *attacker.subclass == Subclass::Hero,
+            !attacker_weapons.is_empty(),
+            target.template.0 == OPENING_RAT_TEMPLATE,
+            dealt_damage,
+        );
+
+        (total_damage, dealt_damage)
+    }
+
+    fn apply_unarmed_hero_rat_damage_cap(
+        attacker_is_hero: bool,
+        has_equipped_weapon: bool,
+        target_is_giant_rat: bool,
+        dealt_damage: i32,
+    ) -> i32 {
+        if attacker_is_hero && !has_equipped_weapon && target_is_giant_rat {
+            dealt_damage.clamp(0, UNARMED_HERO_RAT_DAMAGE_CAP)
+        } else {
+            dealt_damage
+        }
     }
 
     fn outgoing_damage(
@@ -1947,6 +1983,33 @@ mod tests {
         let pre_defense = Combat::outgoing_damage(10.0, 0.0, 0, 1.0, 2.0, 1.5);
         assert_eq!(pre_defense, 30.0);
         assert_eq!(Combat::post_defense_damage(pre_defense, 50.0, 1.0, 1.0), 15);
+    }
+
+    #[test]
+    fn unarmed_hero_damage_against_giant_rats_is_at_most_one() {
+        assert_eq!(
+            Combat::apply_unarmed_hero_rat_damage_cap(true, false, true, 0),
+            0
+        );
+        assert_eq!(
+            Combat::apply_unarmed_hero_rat_damage_cap(true, false, true, 12),
+            UNARMED_HERO_RAT_DAMAGE_CAP
+        );
+
+        // Equipping any weapon restores the ordinary combat calculation. The
+        // opening hero's first available weapon is the Sharpened Stick.
+        assert_eq!(
+            Combat::apply_unarmed_hero_rat_damage_cap(true, true, true, 12),
+            12
+        );
+        assert_eq!(
+            Combat::apply_unarmed_hero_rat_damage_cap(true, false, false, 12),
+            12
+        );
+        assert_eq!(
+            Combat::apply_unarmed_hero_rat_damage_cap(false, false, true, 12),
+            12
+        );
     }
 
     #[test]

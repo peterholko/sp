@@ -14,7 +14,7 @@ The opening-session follow-up removes the completed starter Burrow and moves
 all survival supplies into the run's existing Shipwreck. Fresh heroes keep
 their class, statistics, abilities, recipes, and five basic plans; their
 inventory contains an unequipped Sharpened Stick plus equipped Tattered Shirt
-and Tattered Pants. The lit starter Campfire remains and contains 20 ordinary
+and Tattered Pants. The lit starter Campfire remains and contains 30 ordinary
 Firewood.
 
 A lit standalone Campfire provides a one-hex visibility bubble centered on the
@@ -91,20 +91,24 @@ gathering rates are unchanged. Timber continues to be a legal Log substitute
 in the existing construction engine, but the guided path uses the five
 salvaged Logs and leaves the Timber as valuable storage salvage.
 
-The first successful owner Shipwreck investigation is the authoritative
-survivor-discovery beat. It records the search facts, reveals that someone is
-trapped in the wreck, and arms the run's single randomized wave of one to three
-Giant Rats. Repeated investigation cannot replay the discovery, create another
-opening wave, or schedule another rescue. The investigation counts only if its
-timed action completes while the living hero is still investigating, remains
-adjacent to the Shipwreck, and is outside the combat lock. Movement, death, or
-combat contact—including damage that does not otherwise establish a combat
-lock—cancels that attempt without recording discovery or arming the wave; the
-player can investigate again once it is safe. The
-successful investigation replaces the old 90-second hostile deadline with a
-one-second post-search grace. With the encounter system's one-second polling
-cadence, the rats appear within roughly one to two seconds. They spawn on the Shipwreck tile and
-immediately fan out to distinct, spatially separated passable adjacent tiles.
+The first valid owner Shipwreck investigation arms the run's single randomized
+wave of one to three Giant Rats. One second after the action begins, the rats
+spawn and cancel that exact investigation before its two-second timer can
+complete. The wreck therefore remains unsearched and item transfer remains
+locked. The tutorial temporarily directs the player to clear the opening wave,
+then returns to **Search the Shipwreck** so the player must complete a second
+investigation. That successful retry is the authoritative rescue beat: it
+records the search facts and immediately schedules the trapped survivor to
+emerge from the wreck. Repeated investigation cannot replay the ambush, create
+another opening wave, or schedule another rescue.
+
+An investigation request is accepted only while the living hero is adjacent to
+the owned Shipwreck and outside the combat lock. Once the first valid attempt
+arms the ambush, cancelling, moving, or reconnecting cannot re-roll or suppress
+that one-time wave. With the encounter system's one-second polling cadence, the
+rats appear within roughly one to two seconds of the first investigation
+starting. They spawn on the Shipwreck tile and immediately fan out to distinct,
+spatially separated passable adjacent tiles.
 If fewer safe adjacent tiles are available, only the rats with reserved paths
 move and the blocked remainder stay on the wreck. These scripted opening rats
 use a dedicated 6 HP, 0 defense combat profile so ordinary precise Sharpened
@@ -120,11 +124,12 @@ foundation, staged materials, and accumulated construction work remain. Once
 the threat is clear, guidance returns to the unfinished Burrow instead of
 restarting either task.
 
-The rescued villager is scheduled exactly once only after both independent
-facts are true: the entire randomized opening wave has been defeated and the
-player owns a completed normal Burrow. Either fact may be completed first. No
-elapsed-time-only path can release the villager; the former fixed 1,100-tick
-distress call and 1,110-tick rescue-eligibility gate are removed. The rescued
+The rescued villager is scheduled exactly once by the first successfully
+completed Shipwreck investigation. The rat ambush cancels the first attempt,
+but neither a completed Burrow nor a separate all-rats-defeated gate is part of
+the rescue condition. No elapsed-time-only path can release the villager; the
+former fixed 1,100-tick distress call and 1,110-tick rescue-eligibility gate
+are removed. The rescued
 villager, merchant, and introductory Necromancer retain their authored
 narrative anchors. After every rat is defeated and the existing later phase
 gates are reached, the Wild Boar/Giant Crab follow-up and then the Spider each
@@ -132,8 +137,18 @@ choose a randomized valid, passable, reachable, unoccupied tile two to four
 tiles from the run's assigned hero start. If no safe candidate exists, spawning
 waits and retries instead of overlapping an occupied or invalid tile.
 At-most-once history, danger unlock, and Offline Protection remain
-authoritative, preserving the search, salvage, complete-the-fight-and-build,
-then rescue flow without a parallel tutorial state machine.
+authoritative, preserving the interrupted search, opening fight, successful
+retry, and immediate rescue flow without a parallel tutorial state machine.
+
+The survivor's immediate speech is limited to thanking the hero for the rescue.
+The former five-second Watchtower/Lumbercamp speech is removed. Sixty online
+seconds later, the survivor recommends building a Burrow to store the
+Shipwreck supplies, but only if that player still has no completed Burrow and
+the rescued villager remains alive. The reminder is run-owned, so Offline
+Protection rebases its deadline and True Death cleanup removes it. A new
+villager's ambient morale-dialogue cooldown begins when that villager is first
+observed by the morale system, rather than at world tick zero, preventing an
+unrelated complaint from overlapping the rescue sequence in an older world.
 
 The exact implementation surface for this follow-up is:
 
@@ -185,9 +200,9 @@ follow-up.
 
 The event-driven rescue sequencing described above supersedes the fixed
 distress/rescue timing exercised by this earlier validation record. The current
-source adds focused regressions for interrupted and retryable investigation,
-same-update combat and lethal damage, the one-second post-search grace,
-Burrow-first and rats-first rescue ordering, reconnect/idempotency, partial
+source adds focused regressions for the first-search rat interruption and
+required retry, same-update combat and lethal damage, immediate successful-search
+rescue, reconnect/idempotency, partial
 Burrow preservation, public Campfire ignition, overlapping light bubbles,
 burnout, shelter compatibility, observer-source policy, and desktop fire
 presentation.
@@ -287,17 +302,17 @@ encounter-history and objective fixes remain current.
   ticks, the Wild Boar/Giant Crab follow-up gate at 2,600 ticks, and the Spider
   gate at 3,600 ticks. The current opening removes the fixed survivor call and
   rescue deadline. It uses the first successful Shipwreck investigation for
-  discovery, one delayed one-to-three Giant Rat wave, the completed-Burrow plus
-  all-rats-defeated rescue gate, and randomized follow-up positions described
+  rescue, one delayed one-to-three Giant Rat wave, the successful-investigation
+  rescue trigger, and randomized follow-up positions described
   above. `PlayerIntroState` owns broad introduction/danger facts;
   `IntroEncounterState` owns follow-up phase facts.
 * The first successful Shipwreck investigation records `scavenge_shipwreck`
-  and the existing `explore_poi` fact, reveals the survivor, and arms the one
-  opening wave. The rescued villager is queued only after the entire wave is
-  defeated and a normal Burrow is complete. That villager is created already
-  owned by the player with zero base damage and a Crude Torch, shares the
-  existing Watchtower plan, and schedules the merchant after 1,800 ticks and
-  introductory Necromancer after 3,000 ticks.
+  and the existing `explore_poi` fact and immediately queues the survivor. The
+  opening wave is armed by the interrupted first attempt. That villager is created already
+  owned by the player with zero base damage and a Crude Torch, and schedules
+  the merchant after five game days and the introductory Necromancer after
+  3,000 ticks. The Watchtower plan is no longer granted at rescue; its deed is
+  sold by the traveling merchant instead.
 * `objectives_system` observes the hero inventory, live structures, villagers,
   and persistent villager orders every 50 ticks. Completed Prospect, Gather,
   and Refine events record the post-rescue forest-production history. The
@@ -330,26 +345,31 @@ encounter-history and objective fixes remain current.
    Sharpened Stick, inspect the Shipwreck, recover supplies and build the Burrow,
    temporarily prioritize the opening fight whenever its rats are active, then return to unfinished
    construction. Only after both the completed Burrow and defeated wave does
-   guidance advance to meeting the survivor, prospecting a forest, assigning
-   the settler to persistent Logging, and having the hero hunt and butcher a
-   carcass for Hide. The Shelter Tent upgrade follows that material lesson,
-   before completing a basic settlement and choosing an expansion. Guidance
+   guidance advance to meeting the survivor, prospecting a forest, ordering the
+   villager to Follow, then ordering persistent Logging, and having the hero
+   hunt and butcher a carcass for Hide, then cook the resulting Raw Meat at the
+   Campfire. After the Lumbercamp is completed, guidance explicitly
+   teaches assigning the villager to its permanent workplace, then sends the
+   hero to prospect Grasslands until Spring Water is actually revealed and fill
+   an Empty Waterskin there. The Shelter Tent upgrade and fortification follow
+   that renewable-water lesson before the late-threat objective. Guidance
    does not automate combat, construction, rescue, gathering, or assignment.
 3. **First-villager purpose.** The rescued villager is already player-owned, so
    `recruit_villager` completes as soon as the entity appears and gives no
    actionable work step. The existing objective resource will record a
    one-time `prospect_forest` fact only after the rescued survivor exists and a
-   forest Prospect completes. The internal `assign_first_villager` fact now
-   requires an actual persistent `Order::Gather { Log }`; a generic structure
-   assignment no longer completes it. Guidance then hands hunting and carcass
+   forest Prospect completes. The new `order_villager_to_follow` fact requires
+   an accepted Follow order from a living owned villager. The internal
+   `assign_first_villager` fact then requires a later persistent
+   `Order::Gather { Log }`; a generic structure assignment or a Logging order
+   issued before Follow no longer completes it. Guidance then hands hunting and carcass
    refining back to the hero and never assigns, gathers, refines, or transfers
    anything automatically.
-4. **Completed-structure dead end.** `objectives_system` currently counts every
-   `ClassStructure`, including Founded/Building/Stalled foundations, toward
-   `build_3_structures`. That can remove settlement guidance before three
-   structures function. The objective will count only structures accepted by
-   the existing `Structure::is_built` rule. Normal plans, requirements, costs,
-   transfers, and construction time remain authoritative.
+4. **Retired three-structure objective.** `build_3_structures` remains an
+   internal compatibility fact for existing runtime snapshots and the legacy
+   objectives packet, but it is not ordered, displayed, scored, or announced as
+   a tutorial objective. Normal plans, requirements, costs, transfers, and
+   construction time remain authoritative.
 
 The one presentation cleanup stays within the existing introductory copy,
 notices, and desktop/mobile Survival Thread. The recommended card labels why

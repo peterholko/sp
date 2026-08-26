@@ -79,16 +79,19 @@ export default class MerchantQuantityPanel extends React.Component<MQPProps, any
     const merchantStyle = {
       top: '50%',
       left: '50%',
-      width: '333px',
+      width: 'min(333px, calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)))',
       height: '119px',
-      marginTop: '-59px',
-      marginLeft: '-166px',
+      transform: 'translate(-50%, -50%)',
       position: 'fixed',
       zIndex: MOBILE_DIALOG_Z
     } as React.CSSProperties
 
     const merchantPanelStyle = {
-      position: 'fixed'
+      position: 'absolute',
+      inset: 0,
+      width: '100%',
+      height: '100%',
+      objectFit: 'fill',
     } as React.CSSProperties
 
     const spanNameStyle = {
@@ -102,28 +105,34 @@ export default class MerchantQuantityPanel extends React.Component<MQPProps, any
     } as React.CSSProperties
 
     const leftStyle = {
-      transform: 'translate(20px, 30px)',
-      position: 'fixed'
+      left: '18px',
+      top: '30px',
+      position: 'absolute',
     } as React.CSSProperties
 
     const rightStyle = {
-      transform: 'translate(265px, 30px)',
-      position: 'fixed'
+      right: '18px',
+      top: '30px',
+      position: 'absolute',
     } as React.CSSProperties
 
     const transferStyle = {
-      transform: 'translate(140px, 30px)',
-      position: 'fixed'
+      left: '50%',
+      top: '30px',
+      transform: 'translateX(-50%)',
+      position: 'absolute',
     } as React.CSSProperties
 
     const buySellButtonStyle = {
-      transform: 'translate(116px, 90px)',
-      position: 'fixed'
+      left: 'calc(50% - 50px)',
+      bottom: '3px',
+      position: 'absolute',
     } as React.CSSProperties
 
     const cancelButtonStyle = {
-      transform: 'translate(166px, 90px)',
-      position: 'fixed'
+      left: '50%',
+      bottom: '3px',
+      position: 'absolute',
     } as React.CSSProperties
 
     return (

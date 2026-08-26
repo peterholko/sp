@@ -61,9 +61,11 @@ export default class ResourcePanel extends React.Component<ResourceProps, any> {
 
 
     return (
-      <HalfPanel left={false} 
-                 panelType={'resource'} 
-                 hideExitButton={false}>
+      <HalfPanel left={true}
+                 panelType={'resource'}
+                 hideExitButton={false}
+                 zIndexBonus={100}
+                 bringToFrontKey={this.props.resourceData}>
         <img src={'/static/art/items/' + this.props.resourceData.image + '.png'} style={imageStyle} />
         <span style={spanNameStyle}>{this.props.resourceData.name}</span>
         <table style={tableStyle}>
@@ -93,4 +95,3 @@ export default class ResourcePanel extends React.Component<ResourceProps, any> {
     );
   }
 }
-

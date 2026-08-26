@@ -45,6 +45,7 @@ pub const EXHAUSTED_WARNING2_AT: i32 = GAME_HOUR * 9;
 pub const EXHAUSTED_DEATH_AT: i32 = GAME_HOUR * 12;
 
 pub const DEHYDRATED_SCORE: f32 = 90.0;
+pub const DEHYDRATED_RECOVERY_SCORE: f32 = 80.0;
 pub const STARVING_SCORE: f32 = 90.0;
 pub const EXHAUSTED_SCORE: f32 = 90.0;
 
@@ -131,6 +132,7 @@ pub const SUBCLASS_RESOURCE: &str = "resource";
 pub const SUBCLASS_FARM: &str = "farm";
 pub const SUBCLASS_CORPSE: &str = "corpse";
 pub const SUBCLASS_CAMPFIRE: &str = "campfire";
+pub const SUBCLASS_WELL: &str = "well";
 
 pub const GROUP_TAX_COLLECTOR: &str = "Tax Collector";
 
@@ -210,6 +212,9 @@ pub const STONE: &str = "Stone";
 //pub const WATER: &str = "Water";
 pub const FOOD: &str = "Food";
 pub const DRINK: &str = "Drink";
+pub const FORAGE: &str = "Forage";
+// Accepted only as a legacy gather-category alias. New resource sites and
+// clients use `Forage` so the action is not limited to literal plants.
 pub const PLANT: &str = "Plant";
 pub const GAME_ANIMAL: &str = "Game Animal";
 pub const SPRING_WATER: &str = "Spring Water";

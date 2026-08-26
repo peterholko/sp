@@ -2,6 +2,11 @@ import * as React from "react";
 import okbutton from "ui_comp/okbutton.png";
 import { Global } from "../../core/global";
 import { GameEvent } from "../../core/gameEvent";
+import {
+  INTRO_SLIDES,
+  INTRO_SLIDE_FADE_MS,
+  INTRO_SLIDE_HOLD_MS,
+} from "../../core/introSlides";
 import { MOBILE_DIALOG_Z } from "./mobileLayers";
 
 interface IntroProps {
@@ -9,40 +14,101 @@ interface IntroProps {
 
 interface IntroState {
   currentPanel: number;
+  slideVisible: boolean;
 }
 
 export default class IntroPanel extends React.Component<IntroProps, IntroState> {
+  private displayTimer?: number;
+  private fadeTimer?: number;
+  private preloadedImages: HTMLImageElement[] = [];
+
   constructor(props) {
     super(props);
 
     this.state = {
       currentPanel: 0,
+      slideVisible: false,
     };
 
     this.handleOkClick = this.handleOkClick.bind(this);
   }
 
+  componentDidMount() {
+    this.preloadSlides();
+
+    this.fadeTimer = window.setTimeout(() => {
+      this.fadeTimer = undefined;
+      this.setState({ slideVisible: true }, this.scheduleAutomaticAdvance);
+    }, 50);
+  }
+
+  componentWillUnmount() {
+    this.clearSlideshowTimers();
+    this.preloadedImages = [];
+  }
+
+  preloadSlides = () => {
+    this.preloadedImages = INTRO_SLIDES.slice(1).map((slide) => {
+      const image = new Image();
+      image.src = slide.image;
+      return image;
+    });
+  };
+
+  clearSlideshowTimers = () => {
+    if (this.displayTimer !== undefined) {
+      window.clearTimeout(this.displayTimer);
+      this.displayTimer = undefined;
+    }
+
+    if (this.fadeTimer !== undefined) {
+      window.clearTimeout(this.fadeTimer);
+      this.fadeTimer = undefined;
+    }
+  };
+
+  scheduleAutomaticAdvance = () => {
+    if (this.state.currentPanel >= INTRO_SLIDES.length - 1) {
+      return;
+    }
+
+    this.displayTimer = window.setTimeout(
+      this.fadeToNextSlide,
+      INTRO_SLIDE_FADE_MS + INTRO_SLIDE_HOLD_MS,
+    );
+  };
+
+  fadeToNextSlide = () => {
+    if (!this.state.slideVisible || this.state.currentPanel >= INTRO_SLIDES.length - 1) {
+      return;
+    }
+
+    this.clearSlideshowTimers();
+    this.setState({ slideVisible: false });
+    this.fadeTimer = window.setTimeout(() => {
+      this.fadeTimer = undefined;
+      this.setState((state) => ({
+        currentPanel: Math.min(state.currentPanel + 1, INTRO_SLIDES.length - 1),
+        slideVisible: true,
+      }), this.scheduleAutomaticAdvance);
+    }, INTRO_SLIDE_FADE_MS);
+  };
+
   handleOkClick() {
-    if (this.state.currentPanel < 1) {
-      this.setState({ currentPanel: this.state.currentPanel + 1 });
+    if (!this.state.slideVisible) {
+      return;
+    }
+
+    if (this.state.currentPanel < INTRO_SLIDES.length - 1) {
+      this.fadeToNextSlide();
     } else {
+      this.clearSlideshowTimers();
       Global.gameEmitter.emit(GameEvent.INTRO_OK_CLICK, {});
     }
   }
 
   render() {
-    const panels = [
-      `Your ship broke apart on the rocks. You crawled ashore with what you could carry. Two of your crew were not so fortunate.
-
-In this untamed land of peril and opportunity, survival is your first challenge.
-
-Welcome to Perilous.`,
-      `Your campfire is already lit. Search the shipwreck for salvaged supplies, then face the opening threats near the wreck.
-
-The wilderness here is unforgiving.`,
-    ];
-
-    const introText = panels[this.state.currentPanel];
+    const introSlide = INTRO_SLIDES[this.state.currentPanel];
 
     const overlayStyle: React.CSSProperties = {
       position: 'fixed',
@@ -68,23 +134,39 @@ The wilderness here is unforgiving.`,
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'center',
-      gap: '20px',
+      gap: '12px',
     };
 
-    const shipwreckStyle: React.CSSProperties = {
+    const introImageStyle: React.CSSProperties = {
       width: '100%',
-      maxWidth: '275px',
+      maxWidth: '360px',
       height: 'auto',
+      transform: 'translateY(8px)',
+      opacity: this.state.slideVisible ? 1 : 0,
+      transition: `opacity ${INTRO_SLIDE_FADE_MS}ms ease-in-out`,
+      willChange: 'opacity',
+    };
+
+    const indicatorsStyle: React.CSSProperties = {
+      color: '#c8a56b',
+      fontSize: '11px',
+      letterSpacing: '5px',
+      lineHeight: 1,
     };
 
     const textStyle: React.CSSProperties = {
       textAlign: 'center',
-      color: 'white',
-      fontFamily: 'Cinzel',
-      fontSize: '14px',
-      lineHeight: 1.5,
+      transform: 'translateY(8px)',
+      color: '#efe4cf',
+      fontFamily: "'IM Fell English', Alegreya, Georgia, serif",
+      fontSize: '17px',
+      lineHeight: 1.4,
+      letterSpacing: '0.15px',
       whiteSpace: 'pre-wrap',
       margin: 0,
+      opacity: this.state.slideVisible ? 1 : 0,
+      transition: `opacity ${INTRO_SLIDE_FADE_MS}ms ease-in-out`,
+      willChange: 'opacity',
     };
 
     const submitStyle: React.CSSProperties = {
@@ -94,9 +176,17 @@ The wilderness here is unforgiving.`,
     return (
       <div style={overlayStyle}>
         <div style={cardStyle}>
-          <img src={"/static/art/ui/intro_shipwreck.png"} style={shipwreckStyle} alt="Shipwreck" />
-          <p style={textStyle}>{introText}</p>
-          <img src={okbutton} style={submitStyle} onClick={this.handleOkClick} alt="Continue" />
+          <img src={introSlide.image} style={introImageStyle} alt={introSlide.alt} />
+          <div style={indicatorsStyle} aria-label={`Slide ${this.state.currentPanel + 1} of ${INTRO_SLIDES.length}`}>
+            {INTRO_SLIDES.map((_slide, index) => index === this.state.currentPanel ? "●" : "○")}
+          </div>
+          <p style={textStyle}>{introSlide.text}</p>
+          <img
+            src={okbutton}
+            style={submitStyle}
+            onClick={this.handleOkClick}
+            title={this.state.currentPanel === INTRO_SLIDES.length - 1 ? "Begin" : "Continue"}
+            alt={this.state.currentPanel === INTRO_SLIDES.length - 1 ? "Begin" : "Continue"} />
         </div>
       </div>
     );

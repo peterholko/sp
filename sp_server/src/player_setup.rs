@@ -12,7 +12,7 @@ use crate::game::{
     Merchant, MerchantSailState, Monolith, ObjQuery, PlayerIntroEncounters, PlayerIntroEntry,
     PlayerIntroState, SpawnPositions, EARLY_GAME_ENEMY_TEMPLATES,
 };
-use crate::item::{Inventory, Slot};
+use crate::item::Inventory;
 use crate::obj::{
     ActiveShelter, Assignments, Campfire, LastCombatTick, NewObj, UpdateObj, WorkQueue,
 };
@@ -44,7 +44,7 @@ use crate::{
     },
     recipe::Recipes,
     skill::Skills,
-    structure::Plans,
+    structure::{Plans, WELL},
     templates::{ObjTemplate, Templates},
     villager_util::{self, VillagerUtil},
 };
@@ -190,16 +190,9 @@ pub fn new(
     // A fresh hero reaches the wreck with basic clothing and a carried starter
     // weapon. Survival supplies, tools, and class equipment are recovered
     // manually from that run's Shipwreck below.
-    let shirt = inventory.new(
+    inventory.add_equipped_tattered_clothing(
         ids.new_item_id(),
-        "Tattered Shirt".to_string(),
-        1,
-        &templates.item_templates,
-    );
-    let pants = inventory.new(
         ids.new_item_id(),
-        "Tattered Pants".to_string(),
-        1,
         &templates.item_templates,
     );
     inventory.new(
@@ -208,9 +201,6 @@ pub fn new(
         1,
         &templates.item_templates,
     );
-
-    inventory.equip(shirt.id, Some(Slot::Chest));
-    inventory.equip(pants.id, Some(Slot::Pants));
 
     let hero = Obj {
         id: Id(hero_id),
@@ -334,7 +324,7 @@ pub fn new(
         campfire.inventory.new(
             ids.new_item_id(),
             "Firewood".to_string(),
-            20,
+            30,
             &templates.item_templates,
         );
 
@@ -390,21 +380,6 @@ pub fn new(
             entity: campfire_entity_id,
             attrs: vec![(IMAGE.to_string(), "campfirelit".to_string())],
         });
-    }
-
-    // Villager obj
-    let villager_id = ids.new_obj_id();
-
-    let villager_template_name = "Human Villager".to_string();
-    let villager_template = templates.obj_templates.get(villager_template_name.clone());
-
-    let image: String;
-
-    if let Some(template_images) = villager_template.images {
-        let random_image = rand::thread_rng().gen_range(0..template_images.len());
-        image = template_images[random_image].clone();
-    } else {
-        image = Obj::template_to_image(&villager_template.template);
     }
 
     /*let mut villager = Obj {
@@ -711,7 +686,7 @@ pub fn new(
     // from depending on finding an exact same-family experiment source.
     recipes.create(player_id, "Bone Dagger".to_string(), &templates);
     recipes.create(player_id, "Flint Hatchet".to_string(), &templates);
-    recipes.create(player_id, "Stone-Tipped Spear".to_string(), &templates);
+    recipes.create(player_id, "Bone-Tipped Spear".to_string(), &templates);
     recipes.create(player_id, "Bone War Club".to_string(), &templates);
     recipes.create(player_id, "Throwing Spear".to_string(), &templates);
     recipes.create(player_id, "Hide Cap".to_string(), &templates);
@@ -734,12 +709,12 @@ pub fn new(
     recipes.create(player_id, "Training Bow".to_string(), &templates);
     recipes.create(player_id, "Hunting Bow".to_string(), &templates);
 
-    // Starting plans (survival basics only — more plans acquired through exploration and villager)
+    // Starting plans. The rescued villager now provides the Burrow,
+    // Lumbercamp, Shelter Tent, and Stockade deeds as the opening settlement
+    // chain advances.
     plans.add(player_id, "Campfire".to_string(), 0, 0);
-    plans.add(player_id, "Burrow".to_string(), 0, 0);
-    plans.add(player_id, "Shelter Tent".to_string(), 0, 0);
-    plans.add(player_id, "Stockade".to_string(), 0, 0);
     plans.add(player_id, "Crafting Tent".to_string(), 0, 0);
+    plans.add(player_id, WELL.to_string(), 0, 0);
 
     let mut thirst_attr = HashMap::new();
     thirst_attr.insert(item::AttrKey::Thirst, item::AttrVal::Num(90.0));
@@ -847,16 +822,22 @@ pub fn new(
     let mut hauling: Vec<i32> = Vec::new();
     for _ in 0..MERCHANT_HIRE_VILLAGERS {
         let cargo_id = ids.new_obj_id();
+        let mut cargo_inventory = Inventory {
+            owner: cargo_id,
+            items: Vec::new(),
+        };
+        cargo_inventory.add_equipped_tattered_clothing(
+            ids.new_item_id(),
+            ids.new_item_id(),
+            &templates.item_templates,
+        );
         let mut cargo = Obj::create_nospawn(
             cargo_id,
             merchant_player_id,
             "Human Villager".to_string(),
             empire_pos,
             State::None,
-            Inventory {
-                owner: cargo_id,
-                items: Vec::new(),
-            },
+            cargo_inventory,
             templates,
         );
         cargo.name = Name(VillagerUtil::generate_name());
@@ -976,12 +957,21 @@ pub fn new(
         items: Vec::new(),
     };
 
-    // General survival supplies. The Crude Hatchet matches the hero's carried
+    // General survival supplies. Two Crude Hatchets let the hero and rescued
+    // villager both work the Logging chain. Each matches the hero's carried
     // Sharpened Stick combat profile while providing the ordinary Logging tool
     // attribute needed to lumberjack trees.
+    for _ in 0..2 {
+        shipwreck_inventory.new(
+            ids.new_item_id(),
+            "Crude Hatchet".to_string(),
+            1,
+            &templates.item_templates,
+        );
+    }
     shipwreck_inventory.new(
         ids.new_item_id(),
-        "Crude Hatchet".to_string(),
+        "Foraging Kit".to_string(),
         1,
         &templates.item_templates,
     );
@@ -1194,9 +1184,9 @@ pub fn new(
     }
 
     // Register the initial encounter chain: one rat wave, then boar/crab, then spider.
-    // The first completed Shipwreck investigation discovers the survivor. The
-    // rescued villager appears only after this entire rat wave is defeated and
-    // the player has completed a normal Burrow.
+    // The first completed Shipwreck investigation rescues the survivor. The
+    // opening ambush interrupts the initial attempt, so no villager appears
+    // until the player successfully completes a later investigation.
     let villager_spawn_pos = Position {
         x: start_location.villager_pos[0],
         y: start_location.villager_pos[1],
@@ -1252,6 +1242,7 @@ pub fn new(
         player_id,
         InitialEncounterEntry {
             rat_ids,
+            opening_rat_ambush_armed: false,
             opening_enemy_spawned: vec![false; opening_rat_count],
             opening_enemy_defeated: vec![false; opening_rat_count],
             phase1_spawn,
@@ -1788,6 +1779,72 @@ mod tests {
                 start_location.name,
                 mausoleum_pos,
             );
+        }
+    }
+
+    #[test]
+    fn authored_graveyards_start_outside_sanctuary_and_hero_vision() {
+        let start_location_file =
+            File::open("templates/player_start.yaml").expect("Could not open start locations");
+        let start_locations: Vec<StartLocation> =
+            serde_yaml::from_reader(start_location_file).expect("Could not read start locations");
+        let obj_template_file =
+            File::open("templates/obj_template.yaml").expect("Could not open object templates");
+        let obj_templates: Vec<crate::templates::ObjTemplate> =
+            serde_yaml::from_reader(obj_template_file).expect("Could not read object templates");
+        let max_novice_hero_vision = obj_templates
+            .iter()
+            .filter(|template| {
+                matches!(
+                    template.template.as_str(),
+                    "Novice Warrior" | "Novice Ranger" | "Novice Mage"
+                )
+            })
+            .filter_map(|template| template.base_vision)
+            .max()
+            .expect("Novice heroes must define starting vision");
+        let map = Map::load_map();
+        let initial_sanctuary_radius = sanctuary_radius(0);
+
+        for start_location in start_locations {
+            let Some(graveyard_pos) = start_location.graveyard_pos.as_ref() else {
+                continue;
+            };
+            let hero_pos = Position {
+                x: start_location.hero_pos[0],
+                y: start_location.hero_pos[1],
+            };
+            let monolith_pos = Position {
+                x: start_location.monolith_pos[0],
+                y: start_location.monolith_pos[1],
+            };
+            let graveyard_pos = Position {
+                x: graveyard_pos[0],
+                y: graveyard_pos[1],
+            };
+
+            assert!(
+                Map::dist(monolith_pos, graveyard_pos) >= initial_sanctuary_radius,
+                "{} Graveyard at {:?} must start outside its sanctuary centered at {:?}",
+                start_location.name,
+                graveyard_pos,
+                monolith_pos,
+            );
+            assert!(
+                Map::dist(hero_pos, graveyard_pos) > max_novice_hero_vision,
+                "{} Graveyard at {:?} must remain hidden beyond every novice hero's starting vision from {:?}",
+                start_location.name,
+                graveyard_pos,
+                hero_pos,
+            );
+            if start_location.name == "startpos3" {
+                assert!(
+                    Map::is_passable(graveyard_pos.x, graveyard_pos.y, &map),
+                    "{} moved Graveyard at {:?} must use passable terrain",
+                    start_location.name,
+                    graveyard_pos,
+                );
+            }
         }
     }
 

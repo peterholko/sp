@@ -5,6 +5,7 @@ import {
   rarityBorderColor,
   rarityDisplayName,
   rarityTooltip,
+  signatureDisplayName,
 } from './itemRarity';
 
 describe('item rarity presentation', () => {
@@ -13,6 +14,7 @@ describe('item rarity presentation', () => {
     expect(rarityDisplayName({ name: 'bones' })).toBe('bones');
     expect(rarityBorderColor('Common')).toBeNull();
     expect(isSignatureComponent({})).toBe(false);
+    expect(signatureDisplayName({ name: 'Cooked Meat' })).toBeNull();
   });
 
   test('only elevated rarities receive a border colour', () => {
@@ -29,6 +31,7 @@ describe('item rarity presentation', () => {
     expect(rarityDisplayName(item)).toBe('Rare Frostmane Raw Hide');
     expect(rarityTooltip(item)).toContain("Stout, Hunter's");
     expect(isSignatureComponent(item)).toBe(true);
+    expect(signatureDisplayName(item)).toBe('Rare Frostmane Raw Hide');
   });
 
   test('signature candidates must satisfy a recipe requirement', () => {

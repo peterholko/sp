@@ -10,6 +10,7 @@ import { NetworkEvent } from "../../core/networkEvent";
 import { getNeedStatusIcon, NeedKind } from "./needStatus";
 import { getHalfPanelOffsetMarginTop } from "../../core/uiLayout";
 import { characterImageUrl } from "../../core/portraitCatalog";
+import { villagerPanelPresentation } from "../../core/villagerPanelPresentation";
 
 interface VillagerPanelProps {
   villagerData,
@@ -65,28 +66,18 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
     
     var effects = this.props.villagerData.effects.join();
 
-    var activity;
-
-    if(this.props.activity && this.props.activity[this.props.villagerData.id] != null) {
-      activity = this.props.activity[this.props.villagerData.id];
-    } else {
-      activity = this.props.villagerData.activity;
-    }
-
-    var needs;
-
-    if(this.props.needsData && this.props.needsData.id == this.props.villagerData.id) {
-      needs = this.props.needsData;
-    } else {
-      needs = this.props.villagerData;
-    }
+    const status = villagerPanelPresentation(
+      this.props.villagerData,
+      this.props.activity,
+      this.props.needsData,
+    );
 
     /*for(var i = 0; i < this.props.villagerData.effects.length; i++) {
       effects = effects + ', ' + this.props.villagerData.effects[i];
     }*/
 
     const heroStyle = {
-      transform: 'translate(-197px, 25px)',
+      transform: 'translate(-197px, 20px)',
       position: 'fixed',
       width: '72px',
       height: '72px',
@@ -152,43 +143,41 @@ export default class VillagerPanel extends React.Component<VillagerPanelProps, a
           <tbody>
 	  <tr>
             <td>Activity: </td>
-            <td>{activity}</td>
+            <td>{status.activity}</td>
           </tr>
 
            <tr>
             <td>Order: </td>
-            <td>{this.props.villagerData.order}</td>
+            <td>{status.order}</td>
           </tr>
  
           <tr>
             <td>Thirst: </td>
-            {this.renderNeedValue("thirst", needs.thirst)}
+            {this.renderNeedValue("thirst", status.thirst)}
           </tr>    
           <tr>
             <td>Hunger: </td>
-            {this.renderNeedValue("hunger", needs.hunger)}
+            {this.renderNeedValue("hunger", status.hunger)}
           </tr>     
           <tr>
             <td>Tiredness: </td>
-            {this.renderNeedValue("tiredness", needs.tiredness)}
+            {this.renderNeedValue("tiredness", status.tiredness)}
           </tr>                       
           <tr>
             <td>Hp: </td>
-            <td>{this.props.villagerData.hp} /  
-                {this.props.villagerData.base_hp}</td>
+            <td>{status.hp}</td>
           </tr>
           <tr>
             <td>Stamina: </td>
-            <td>{this.props.villagerData.stamina} /  
-                {this.props.villagerData.base_stamina}</td>
+            <td>{status.stamina}</td>
           </tr>
           <tr>
             <td>Speed: </td>
-            <td>{this.props.villagerData.base_speed}</td>
+            <td>{status.speed}</td>
           </tr>
           <tr>
             <td>State: </td>
-            <td>{this.props.villagerData.state}</td>
+            <td>{status.state}</td>
           </tr>
           <tr>
             <td>Shelter: </td>

@@ -34,6 +34,31 @@ assert.equal(
   'an unrelated object cannot opt in by image alone',
 );
 
+const litShelterTent = fireAnimationPresentation({
+  state: 'none',
+  subclass: 'shelter',
+  image: 'tentlit',
+});
+assert.equal(litShelterTent?.kind, 'lit-shelter-tent');
+assert.equal(litShelterTent?.offsetX, 53);
+assert.equal(litShelterTent?.offsetY, 42);
+assert.ok((litShelterTent?.scale || 0) < 1, 'Shelter Tent flames use a compact overlay');
+assert.ok((litShelterTent?.depth || 0) < 3, 'Shelter Tent flames remain behind units');
+assert.equal(litShelterTent?.additiveBlend, true);
+assert.equal(
+  fireAnimationPresentation({ state: 'none', subclass: 'shelter', image: 'tent' }),
+  null,
+  'an unlit Shelter Tent has no flame animation',
+);
+assert.equal(
+  fireAnimationPresentation(
+    { state: 'none', subclass: 'shelter', image: 'tentlit' },
+    false,
+  ),
+  null,
+  'desktop gating also disables the Shelter Tent flame enhancement',
+);
+
 const burningObject = fireAnimationPresentation({
   state: 'burning',
   subclass: 'campfire',

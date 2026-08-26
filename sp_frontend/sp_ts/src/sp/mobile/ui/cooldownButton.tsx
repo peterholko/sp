@@ -35,6 +35,11 @@ export default class CooldownButton extends React.Component<CooldownButtonProps,
     Global.gameEmitter.on(this.props.cooldownEvent || NetworkEvent.EXPLORE, this.handleExplore, this);
   }
 
+  componentWillUnmount() {
+    Global.gameEmitter.off(this.props.cooldownEvent || NetworkEvent.EXPLORE, this.handleExplore, this);
+    this.stopTimer();
+  }
+
   handleExplore(message) {
     this.setState({ cooldown: message[this.props.timeKey || 'explore_time'] })
     this.startTimer();
@@ -81,7 +86,14 @@ export default class CooldownButton extends React.Component<CooldownButtonProps,
     } as React.CSSProperties
 
     return (
-      <div id={this.props.imageName} className={this.props.className}>
+      <button
+        type="button"
+        id={this.props.imageName}
+        className={this.props.className}
+        onClick={this.handleClick}
+        title={this.props.title}
+        aria-label={this.props.title}
+      >
         {this.state.cooldown != -1 &&
           <img src={cooldownbg} style={cooldownBgStyle} />}
 
@@ -89,11 +101,10 @@ export default class CooldownButton extends React.Component<CooldownButtonProps,
           <span style={spanStyle}>{this.state.cooldown}</span>}
 
         <img src={this.props.imageButton}
-          title={this.props.title}
           alt={this.props.title}
-          aria-label={this.props.title}
-          onClick={this.handleClick} />
-      </div>
+          aria-hidden="true" />
+        <span>{this.props.title}</span>
+      </button>
     );
   }
 }

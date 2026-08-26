@@ -3,6 +3,18 @@ export interface OperateWorkPresentation {
   imageName: string;
 }
 
+export interface WorkQueueWorkerState {
+  name?: string;
+  image?: string;
+}
+
+export interface WorkQueueWorkerPresentation {
+  assigned: boolean;
+  id: number | null;
+  name: string;
+  image: string | null;
+}
+
 const DEFAULT_OPERATE_PRESENTATION: OperateWorkPresentation = {
   name: 'Operate',
   imageName: 'recipe.png',
@@ -27,4 +39,29 @@ export function operateWorkPresentation(structureName?: string): OperateWorkPres
     default:
       return DEFAULT_OPERATE_PRESENTATION;
   }
+}
+
+export function workQueueWorkerPresentation(
+  villagerId: unknown,
+  objectStates: Record<string, WorkQueueWorkerState | undefined>,
+): WorkQueueWorkerPresentation {
+  const id = Number(villagerId);
+
+  if (!Number.isFinite(id) || id < 0) {
+    return {
+      assigned: false,
+      id: null,
+      name: 'Unassigned',
+      image: null,
+    };
+  }
+
+  const worker = objectStates[String(id)];
+
+  return {
+    assigned: true,
+    id,
+    name: worker?.name || `Worker ${id}`,
+    image: worker?.image || null,
+  };
 }

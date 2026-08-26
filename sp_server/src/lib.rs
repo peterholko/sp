@@ -41,6 +41,7 @@ pub mod obj;
 pub mod safe_logout;
 pub mod world;
 
+mod admin_status;
 mod combat;
 mod effect;
 mod encounter;
@@ -184,6 +185,7 @@ pub fn register_all_types(app: &mut App) {
         .register_type::<game::Minions>()
         .register_type::<game::PlayerStat>()
         .register_type::<game::PlayerStats>()
+        .register_type::<game::RescuedVillagerDeedProgress>()
         .register_type::<ids::Ids>()
         .register_type::<item::AttrKey>()
         .register_type::<item::AttrVal>()

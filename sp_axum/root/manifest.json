@@ -3,12 +3,14 @@
   "name": "Survive Perilous RPG",
   "icons": [
     {
-      "src": "/perilouslogo-180x180.png",
+      "src": "/perilouslogo-180x180.png?v=20260822-stockade-light",
       "sizes": "180x180",
       "type": "image/png"
     }
   ],
-  "start_url": ".",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
   "display": "fullscreen",
   "theme_color": "#000000",
   "background_color": "#000000"

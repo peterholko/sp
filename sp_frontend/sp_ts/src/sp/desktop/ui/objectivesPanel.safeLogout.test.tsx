@@ -112,7 +112,7 @@ panel.handleCrisisStatus(crisisStatus);
 const coexistenceNodes = descendants(panel.render());
 assert.ok(
   coexistenceNodes.some((node) => node.props?.['aria-label'] === 'Personal goblin crisis status'),
-  'preparation guidance remains inside the existing crisis card',
+  'the compact crisis card remains present when preparation option data is received',
 );
 assert.ok(
   coexistenceNodes.some((node) => node.props?.['aria-label'] === 'Safe Logout status'),

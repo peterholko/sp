@@ -5,10 +5,50 @@ export const STAT_BAR_WIDTH = 124;
 export const STAT_BAR_HEIGHT = 14;
 export const LARGE_SCREEN_WIDTH = 1024;
 
-export const DESKTOP_CAMERA_ZOOM = 1.0;
+export const DESKTOP_CAMERA_ZOOM_OUT = 1;
+export const DESKTOP_CAMERA_ZOOM_IN = 2;
+export const DESKTOP_CAMERA_ZOOM = DESKTOP_CAMERA_ZOOM_IN;
 export const DESKTOP_CANVAS_WIDTH = 1200;
 export const DESKTOP_CANVAS_HEIGHT = 1000;
 export const WIDE_SCREEN_MIN = 1800;
+
+export interface DesktopZoomControl {
+  nextZoom: number;
+  label: '+' | '−';
+  title: string;
+}
+
+export interface CombatZoomTransition {
+  zoom: number;
+  restoreZoom: number;
+}
+
+export function desktopZoomControl(currentZoom: number): DesktopZoomControl {
+  if (currentZoom >= DESKTOP_CAMERA_ZOOM_IN) {
+    return {
+      nextZoom: DESKTOP_CAMERA_ZOOM_OUT,
+      label: '−',
+      title: 'Zoom out to 1×',
+    };
+  }
+
+  return {
+    nextZoom: DESKTOP_CAMERA_ZOOM_IN,
+    label: '+',
+    title: 'Zoom in to 2×',
+  };
+}
+
+export function combatZoomTransition(currentZoom: number): CombatZoomTransition | null {
+  if (currentZoom >= DESKTOP_CAMERA_ZOOM_IN) {
+    return null;
+  }
+
+  return {
+    zoom: DESKTOP_CAMERA_ZOOM_IN,
+    restoreZoom: currentZoom,
+  };
+}
 
 const VIEWPORT_MARGIN = 24;
 const DESKTOP_MIN_W = 1100;

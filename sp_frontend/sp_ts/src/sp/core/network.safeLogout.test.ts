@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { Global } from './global';
-import { Network } from './network';
+import { Network, networkReconnectDelayMs } from './network';
 import { NetworkEvent } from './networkEvent';
 import {
   SAFE_LOGOUT_COMPLETION_MESSAGE,
@@ -28,12 +28,12 @@ class MemoryStorage {
 
 class FakeClock {
   private nextId = 1;
-  readonly callbacks = new Map<number, () => void>();
+  readonly callbacks = new Map<number, { callback: () => void; delayMs: number }>();
 
-  setTimeout(callback: () => void): number {
+  setTimeout(callback: () => void, delayMs = 0): number {
     const id = this.nextId;
     this.nextId += 1;
-    this.callbacks.set(id, callback);
+    this.callbacks.set(id, { callback, delayMs });
     return id;
   }
 
@@ -45,7 +45,7 @@ class FakeClock {
     while (this.callbacks.size > 0) {
       const pending = Array.from(this.callbacks.entries());
       this.callbacks.clear();
-      pending.forEach(([, callback]) => callback());
+      pending.forEach(([, entry]) => entry.callback());
     }
   }
 }
@@ -140,12 +140,18 @@ let reloadCount = 0;
     reload: () => { reloadCount += 1; },
   },
   sessionStorage: storage,
-  setTimeout: (callback: () => void) => clock.setTimeout(callback),
+  setTimeout: (callback: () => void, delayMs?: number) => clock.setTimeout(callback, delayMs),
   clearTimeout: (id: number) => clock.clearTimeout(id),
 };
 (globalThis as any).document = { visibilityState: 'visible' };
 (globalThis as any).WebSocket = FakeWebSocket;
 Global.gameEmitter = emitter;
+
+assert.deepEqual(
+  [0, 1, 2, 3, 4, 10].map(networkReconnectDelayMs),
+  [500, 1000, 2000, 4000, 8000, 8000],
+  'automatic reconnect uses exponential backoff capped at eight seconds',
+);
 
 const network = new Network();
 Global.network = network;
@@ -218,8 +224,11 @@ assert.equal(emitter.count(NetworkEvent.NETWORK_ERROR), 1, 'later ordinary failu
 secondSocket.closed();
 clock.runAll();
 assert.equal(emitter.count(NetworkEvent.SERVER_OFFLINE), 1, 'ordinary close reaches the health/reconnect surface');
-
-network.connect();
+assert.equal(
+  FakeWebSocket.instances.length,
+  3,
+  'ordinary close automatically creates a replacement socket',
+);
 assert.deepEqual(
   Global.protectedSettlements,
   {},

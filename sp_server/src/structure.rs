@@ -18,6 +18,7 @@ pub const MINE: &str = "Mine";
 pub const LUMBERCAMP: &str = "Lumbercamp";
 pub const QUARRY: &str = "Quarry";
 pub const TRAPPER: &str = "Trapper";
+pub const WELL: &str = "Well";
 
 pub const WALL: &str = "Wall";
 
@@ -84,6 +85,10 @@ impl Structure {
                             build_time: obj_template.build_cost.unwrap_or_default(),
                             req: obj_template.req.clone().unwrap_or_default(),
                             upgrade_req: obj_template.upgrade_req.clone().unwrap_or_default(),
+                            placement_resource: Structure::placement_resource(
+                                &obj_template.template,
+                            )
+                            .map(str::to_string),
                         };
 
                         available_list.push(structure);
@@ -240,6 +245,15 @@ impl Structure {
         return resource;
     }
 
+    /// Resource deposit that must be visible on the foundation tile. Most
+    /// structures have no deposit-bound placement requirement.
+    pub fn placement_resource(structure_template: &str) -> Option<&'static str> {
+        match structure_template {
+            WELL => Some(SPRING_WATER),
+            _ => None,
+        }
+    }
+
     pub fn is_built(state: State) -> bool {
         !matches!(
             state,
@@ -286,6 +300,12 @@ mod tests {
         assert_eq!(plans[0].structure, "Shelter Tent");
         assert!(plans.contains(7, "Small Tent"));
         assert!(plans.contains(7, "Shelter Tent"));
+    }
+
+    #[test]
+    fn well_requires_a_spring_water_placement_resource() {
+        assert_eq!(Structure::placement_resource(WELL), Some(SPRING_WATER));
+        assert_eq!(Structure::placement_resource(LUMBERCAMP), None);
     }
 }
 

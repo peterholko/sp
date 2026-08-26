@@ -53,7 +53,7 @@ export default class HeroPanel extends React.Component<HeroPanelProps, any> {
       ?? 'None';
 
     const heroStyle = {
-      transform: 'translate(-195px, 25px)',
+      transform: 'translate(-195px, 20px)',
       position: 'fixed',
       width: '72px',
       height: '72px',

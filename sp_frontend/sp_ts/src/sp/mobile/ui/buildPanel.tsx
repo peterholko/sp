@@ -86,6 +86,7 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
                 { label: 'HP', value: this.state.structure.base_hp },
                 { label: 'Defense', value: this.state.structure.base_def },
                 { label: 'Build Time', value: this.state.structure.build_time },
+                { label: 'Placement', value: this.state.structure.placement_resource, hidden: !this.state.structure.placement_resource },
               ]} />
             </>
           }
@@ -99,4 +100,3 @@ export default class BuildPanel extends React.Component<BuildPanelProps, any> {
     );
   }
 }
-

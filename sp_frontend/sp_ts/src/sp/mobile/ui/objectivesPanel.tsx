@@ -8,6 +8,18 @@ import {
   crisisStatusView,
   normalizeCrisisStatus,
 } from "../../core/crisisStatus";
+import {
+  SAFE_LOGOUT_ARIA_LIVE,
+  SafeLogoutStatusPacket,
+  SafeLogoutStatusView,
+  SafeLogoutUiState,
+  beginSafeLogoutCancellation,
+  beginSafeLogoutRequest,
+  clearSafeLogoutStatus,
+  receiveSafeLogoutStatus,
+  safeLogoutStatusView,
+  shouldRenderSafeLogout,
+} from "../../core/safeLogoutStatus";
 
 interface ObjectiveProgress {
   id: string;
@@ -44,7 +56,7 @@ interface LegendaryThreat {
   captains_defeated: number;
 }
 
-interface ObjectivesState {
+interface ObjectivesState extends SafeLogoutUiState {
   build_campfire: boolean;
   build_3_structures: boolean;
   recruit_villager: boolean;
@@ -76,6 +88,9 @@ const crisisToneColor: Record<CrisisTone, string> = {
 };
 
 export default class ObjectivesPanel extends React.Component<{}, ObjectivesState> {
+  private safeLogoutRequestLocked = false;
+  private safeLogoutCancelLocked = false;
+
   constructor(props) {
     super(props);
     this.state = {
@@ -89,12 +104,17 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       discoveryEvent: null,
       crisisStatus: null,
       expanded: false,
+      safeLogoutStatus: null,
+      safeLogoutRequestInFlight: false,
+      safeLogoutCancelInFlight: false,
     };
     this.toggleExpanded = this.toggleExpanded.bind(this);
+    this.handleBeginSafeLogout = this.handleBeginSafeLogout.bind(this);
+    this.handleCancelSafeLogout = this.handleCancelSafeLogout.bind(this);
   }
 
   toggleExpanded() {
-    this.setState({ expanded: !this.state.expanded });
+    this.setState(state => ({ expanded: !state.expanded }));
   }
 
   componentDidMount() {
@@ -103,9 +123,14 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.on(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.on(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
     Global.gameEmitter.on(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_STATUS, this.handleSafeLogoutStatus, this);
+    Global.gameEmitter.on(NetworkEvent.SAFE_LOGOUT_RESET, this.handleSafeLogoutReset, this);
     Global.gameEmitter.on(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.on(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
+
+    const latest = Global.network?.getLatestSafeLogoutStatus?.();
+    if (latest) this.handleSafeLogoutStatus(latest);
   }
 
   componentWillUnmount() {
@@ -114,6 +139,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     Global.gameEmitter.off(NetworkEvent.THREAT_STATE, this.handleThreatState, this);
     Global.gameEmitter.off(NetworkEvent.DISCOVERY_EVENT, this.handleDiscoveryEvent, this);
     Global.gameEmitter.off(NetworkEvent.CRISIS_STATUS, this.handleCrisisStatus, this);
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_STATUS, this.handleSafeLogoutStatus, this);
+    Global.gameEmitter.off(NetworkEvent.SAFE_LOGOUT_RESET, this.handleSafeLogoutReset, this);
     Global.gameEmitter.off(NetworkEvent.INFO_TRUE_DEATH, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.SELECT_CLASS, this.handleRunReset, this);
     Global.gameEmitter.off(NetworkEvent.FIRST_LOGIN, this.handleRunReset, this);
@@ -145,7 +172,59 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     this.setState({ crisisStatus: normalizeCrisisStatus(message) });
   }
 
+  handleSafeLogoutStatus(message: SafeLogoutStatusPacket) {
+    const view = safeLogoutStatusView(message);
+    const keepRequestLocked = Boolean(
+      this.safeLogoutRequestLocked && view && view.state === 'online' && view.canRequest && !view.reason,
+    );
+    const keepCancelLocked = Boolean(this.safeLogoutCancelLocked && view && view.pending);
+    this.safeLogoutRequestLocked = keepRequestLocked;
+    this.safeLogoutCancelLocked = keepCancelLocked;
+    this.setState({
+      ...receiveSafeLogoutStatus(message),
+      safeLogoutRequestInFlight: keepRequestLocked,
+      safeLogoutCancelInFlight: keepCancelLocked,
+    });
+  }
+
+  handleSafeLogoutReset() {
+    this.safeLogoutRequestLocked = false;
+    this.safeLogoutCancelLocked = false;
+    this.setState(clearSafeLogoutStatus());
+  }
+
+  handleBeginSafeLogout() {
+    if (this.safeLogoutRequestLocked) return;
+    const current: SafeLogoutUiState = this.state;
+    const next = beginSafeLogoutRequest(current);
+    if (next === current) return;
+
+    this.safeLogoutRequestLocked = true;
+    if (!Global.network?.sendRequestSafeLogout()) {
+      this.safeLogoutRequestLocked = false;
+      return;
+    }
+    this.setState(next);
+  }
+
+  handleCancelSafeLogout() {
+    if (this.safeLogoutCancelLocked) return;
+    const current: SafeLogoutUiState = this.state;
+    const next = beginSafeLogoutCancellation(current);
+    if (next === current) return;
+
+    this.safeLogoutCancelLocked = true;
+    if (!Global.network?.sendCancelSafeLogout()) {
+      this.safeLogoutCancelLocked = false;
+      return;
+    }
+    this.setState(next);
+  }
+
   handleRunReset() {
+    Global.network?.clearLatestSafeLogoutStatus?.();
+    this.safeLogoutRequestLocked = false;
+    this.safeLogoutCancelLocked = false;
     this.setState({
       build_campfire: false,
       build_3_structures: false,
@@ -156,6 +235,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       threatState: null,
       discoveryEvent: null,
       crisisStatus: null,
+      expanded: false,
+      ...clearSafeLogoutStatus(),
     });
   }
 
@@ -187,24 +268,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
         action_hint: 'Rescue or hire a settler.',
         lesson: 'Villagers turn one-off survival into repeatable work.',
         reward: 'A new worker and new guidance.',
-      },
-      {
-        id: 'build_3_structures',
-        title: 'Build three structures',
-        state: this.state.build_3_structures ? 'complete' : 'locked',
-        category: 'Settlement',
-        action_hint: 'Add buildings that solve rest, storage, and defense.',
-        lesson: 'Each building should answer a visible problem.',
-        reward: 'A camp that can survive pressure.',
-      },
-      {
-        id: 'survive_5_nights',
-        title: 'Survive five nights',
-        state: this.state.survive_5_nights ? 'complete' : 'locked',
-        category: 'Survival',
-        action_hint: 'Use daylight to prepare before danger rises.',
-        lesson: 'Threats are pressure signals.',
-        reward: 'A stable foothold.',
       },
     ];
   }
@@ -328,11 +391,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       fontWeight: 'bold',
       lineHeight: 1.25,
     };
-    const preparationStateColor = (state: string) => {
-      if (state === 'ready') return '#8fbf88';
-      if (state === 'needs_attention') return '#f2d27a';
-      return '#a9adb1';
-    };
     const urgentStyle: React.CSSProperties = {
       ...bodyStyle,
       color: crisis.assaultActive ? '#ffaaaa' : accent,
@@ -368,23 +426,6 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
             <span>{crisis.preparationLabel}</span>
           </div>}
 
-        {crisis.preparationOptions.length > 0 &&
-          <section style={detailSectionStyle} aria-label="Settlement preparation">
-            <div style={detailHeadingStyle}>Prepare your settlement</div>
-            {crisis.preparationOptions.map((option) =>
-              <div key={option.id} style={optionRowStyle}>
-                <div style={optionHeaderStyle}>
-                  <span>{option.label}</span>
-                  <span style={{ color: preparationStateColor(option.state) }}>
-                    {option.stateLabel}
-                  </span>
-                </div>
-                {option.detail && <div style={labelStyle}>{option.detail}</div>}
-                {option.actionHint &&
-                  <div style={labelStyle}><strong>Action:</strong> {option.actionHint}</div>}
-              </div>)}
-          </section>}
-
         {crisis.assaultActive &&
           <div style={statusRowStyle}>
             <span>Attackers remaining</span>
@@ -412,6 +453,62 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     );
   }
 
+  renderSafeLogout(
+    safeLogout: SafeLogoutStatusView,
+    sectionStyle: React.CSSProperties,
+    bodyStyle: React.CSSProperties,
+  ) {
+    const pending = safeLogout.pending;
+    const requestDisabled = !safeLogout.canRequest || this.state.safeLogoutRequestInFlight;
+    const cancelDisabled = !safeLogout.canCancel || this.state.safeLogoutCancelInFlight;
+    const cardStyle: React.CSSProperties = {
+      ...sectionStyle,
+      marginTop: 0,
+      marginBottom: '10px',
+      padding: '9px',
+      border: '1px solid rgba(143, 183, 217, .65)',
+      borderRadius: '4px',
+      background: 'rgba(143, 183, 217, .06)',
+    };
+    const buttonStyle: React.CSSProperties = {
+      width: '100%',
+      minHeight: '42px',
+      marginTop: '8px',
+      padding: '7px 10px',
+      border: '1px solid rgba(201, 170, 113, .68)',
+      borderRadius: '4px',
+      background: '#25282b',
+      color: '#f2e7cf',
+      fontFamily: 'Verdana',
+      fontSize: '11px',
+    };
+
+    return (
+      <section style={cardStyle} aria-label="Safe Logout status">
+        <div style={{ color: '#f2e7cf', fontWeight: 'bold', marginBottom: '4px' }}>
+          {safeLogout.protected ? 'Settlement Protected' : 'Safe Logout'}
+        </div>
+        <div style={bodyStyle} role="status" aria-live={SAFE_LOGOUT_ARIA_LIVE}>
+          {safeLogout.message}
+        </div>
+        {pending &&
+          <div style={{ color: '#f2d27a', fontSize: '18px', fontWeight: 'bold', textAlign: 'center', margin: '7px 0' }}>
+            {safeLogout.countdownLabel || 'Countdown updating…'}
+          </div>}
+        {safeLogout.state === 'online' && !safeLogout.activeAssault &&
+          <button type="button" style={{ ...buttonStyle, opacity: requestDisabled ? .55 : 1 }}
+            onClick={this.handleBeginSafeLogout} disabled={requestDisabled}>
+            {this.state.safeLogoutRequestInFlight ? 'Requesting…' : 'Begin Safe Logout'}
+          </button>}
+        {pending &&
+          <button type="button" style={{ ...buttonStyle, opacity: cancelDisabled ? .55 : 1 }}
+            onClick={this.handleCancelSafeLogout} disabled={cancelDisabled}>
+            {this.state.safeLogoutCancelInFlight ? 'Cancelling…' : 'Cancel'}
+          </button>}
+      </section>
+    );
+  }
+
   render() {
     const packetObjectives = this.state.objectiveState && this.state.objectiveState.objectives
       ? this.state.objectiveState.objectives
@@ -419,6 +516,10 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
     const objectives: ObjectiveProgress[] = packetObjectives || this.legacyObjectives();
     const activeObjective = this.activeObjective(objectives);
     const crisis = crisisStatusView(this.state.crisisStatus);
+    const safeLogout = safeLogoutStatusView(this.state.safeLogoutStatus);
+    const visibleSafeLogout = safeLogout && shouldRenderSafeLogout(this.state.safeLogoutStatus)
+      ? safeLogout
+      : null;
     const threatState = this.state.threatState;
     const discoveryEvent = this.state.discoveryEvent;
     const sortedRisks = this.sortedRisks();
@@ -428,7 +529,7 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       ? threatState.legendary_threats
       : [];
 
-    if (!activeObjective && !threatState && !discoveryEvent && !crisis) {
+    if (!activeObjective && !threatState && !discoveryEvent && !crisis && !visibleSafeLogout) {
       return null;
     }
 
@@ -436,9 +537,11 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
     const chipStyle: React.CSSProperties = {
       position: 'fixed',
-      right: 'calc(20px + env(safe-area-inset-right, 0px))',
-      bottom: 'calc(166px + env(safe-area-inset-bottom, 0px))',
-      width: '132px',
+      top: 'calc(90px + env(safe-area-inset-top, 0px))',
+      right: 'calc(8px + env(safe-area-inset-right, 0px))',
+      left: 'calc(8px + env(safe-area-inset-left, 0px))',
+      width: 'auto',
+      minHeight: '36px',
       backgroundColor: 'rgba(8, 10, 12, 0.82)',
       border: '1px solid rgba(201, 170, 113, 0.38)',
       borderRadius: '4px',
@@ -449,9 +552,12 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       fontFamily: 'Verdana',
       fontSize: '10px',
       lineHeight: 1.25,
-      padding: '8px 9px',
-      textAlign: 'center',
+      padding: '5px 9px',
+      textAlign: 'left',
       boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
     };
 
     const drawerStyle: React.CSSProperties = {
@@ -582,6 +688,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
       : '';
     const chipLabel = crisis && crisis.urgent
       ? crisisChipLabel
+      : visibleSafeLogout && visibleSafeLogout.pending
+        ? visibleSafeLogout.countdownLabel || 'Safe Logout pending'
       : activeObjective
         ? activeObjective.title
         : crisisChipLabel;
@@ -594,8 +702,8 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
           onClick={this.toggleExpanded}
           aria-expanded={false}
         >
-          <div style={{ color: '#c9aa71', fontWeight: 'bold', textTransform: 'uppercase' }}>Survival</div>
-          {chipLabel && <div>{chipLabel}</div>}
+          <span style={{ color: '#c9aa71', fontWeight: 'bold', textTransform: 'uppercase', marginRight: '7px' }}>Survival</span>
+          {chipLabel && <span>{chipLabel}</span>}
         </button>
       );
     }
@@ -609,6 +717,9 @@ export default class ObjectivesPanel extends React.Component<{}, ObjectivesState
 
         <div style={bodyStylePanel}>
             {crisis && this.renderCrisisSection(crisis, sectionStyle, bodyStyle, labelStyle)}
+
+            {visibleSafeLogout
+              && this.renderSafeLogout(visibleSafeLogout, sectionStyle, bodyStyle)}
 
             {activeObjective &&
               <div>

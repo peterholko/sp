@@ -20,6 +20,7 @@ export type VillagerActivityIcon =
 
 const VILLAGER_ACTIVITY_ICONS: Record<string, VillagerActivityIcon> = {
   gathering: 'gathering',
+  foraging: 'gathering',
   harvesting: 'gathering',
   planting: 'gathering',
   tending: 'gathering',
@@ -39,6 +40,7 @@ const VILLAGER_ACTIVITY_ICONS: Record<string, VillagerActivityIcon> = {
 
 const GATHERING_ACTIVITY_ICONS: Record<string, VillagerActivityIcon> = {
   gathering: 'gathering',
+  foraging: 'gathering',
   harvesting: 'gathering',
   planting: 'gathering',
   tending: 'gathering',

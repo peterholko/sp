@@ -104,6 +104,13 @@
   sell_quantity: 100
   impact_factor: 0.1
 
+- name: Burrow Deed
+  buy_price: 10
+  buy_quantity: 100
+  sell_price: 20
+  sell_quantity: 100
+  impact_factor: 0.1
+
 - name: Lumbercamp Deed
   buy_price: 50
   buy_quantity: 100
@@ -143,6 +150,20 @@
   buy_price: 20
   buy_quantity: 100
   sell_price: 40
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Stockade Deed
+  buy_price: 30
+  buy_quantity: 100
+  sell_price: 60
+  sell_quantity: 100
+  impact_factor: 0.1
+
+- name: Watchtower Deed
+  buy_price: 50
+  buy_quantity: 100
+  sell_price: 100
   sell_quantity: 100
   impact_factor: 0.1
 

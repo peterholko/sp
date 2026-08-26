@@ -1,4 +1,7 @@
-export type FireAnimationKind = 'burning-object' | 'lit-campfire';
+export type FireAnimationKind =
+  | 'burning-object'
+  | 'lit-campfire'
+  | 'lit-shelter-tent';
 
 export const FIRE_ANIMATION_FRAME_COUNT = 15;
 
@@ -40,10 +43,23 @@ const LIT_CAMPFIRE_PRESENTATION: FireAnimationPresentation = {
   additiveBlend: true,
 };
 
+const LIT_SHELTER_TENT_PRESENTATION: FireAnimationPresentation = {
+  kind: 'lit-shelter-tent',
+  // The Shelter Tent's retained Campfire sits to the lower-right of the tent.
+  // These values align the shared flame sheet with the fire in `tentlit.png`.
+  offsetX: 53,
+  offsetY: 42,
+  depth: 2.5,
+  scale: 0.44,
+  alpha: 0.78,
+  additiveBlend: true,
+};
+
 /**
  * Maps authoritative object presentation state to the shared fire animation.
- * Campfire `is_lit` is not part of MapObj, but the server atomically swaps its
- * image between `campfire` and `campfirelit` whenever that state changes.
+ * Fire-capability `is_lit` is not part of MapObj, but the server atomically
+ * swaps the image (`campfire`/`campfirelit` or `tent`/`tentlit`) whenever that
+ * state changes.
  */
 export function fireAnimationPresentation(
   objectState?: FireAnimationSource | null,
@@ -63,6 +79,14 @@ export function fireAnimationPresentation(
     && objectState.image === 'campfirelit'
   ) {
     return LIT_CAMPFIRE_PRESENTATION;
+  }
+
+  if (
+    litCampfireAnimationEnabled
+    && objectState.subclass === 'shelter'
+    && objectState.image === 'tentlit'
+  ) {
+    return LIT_SHELTER_TENT_PRESENTATION;
   }
 
   return null;

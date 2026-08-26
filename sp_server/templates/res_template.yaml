@@ -189,33 +189,88 @@
   skill_req: 25
   level: 1
 
-- name: Amitanian Grape
-  type: Plant
-  image: grape
-  terrain: 
+- name: Useful Underbrush
+  type: Forage
+  image: plantfibers
+  terrain:
     - Grasslands
     - Grassland Hills
     - Plains
     - Plains Hills
-  yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]    
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
-  quantity: [0, 10, 25, 100, 200, 500, 1000]
-  skill_req: 0
-  level: 1
-
-- name: Honeybell Berries
-  type: Plant
-  image: berries
-  terrain: 
     - Deciduous Forest
+    - Rainforest
+    - Jungle
+    - Frozen Forest
     - Pine Forest
+    - Palm Forest
   yield_rate: [50, 25, 15, 8, 2]
-  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]   
-  quantity_rate: [25, 25, 20, 15, 8, 5, 2]
+  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
+  quantity_rate: [50, 25, 12, 7, 4, 2, 0]
   quantity: [0, 10, 25, 100, 200, 500, 1000]
   skill_req: 0
   level: 1
+  produces:
+    - Cragroot Maple Stick
+    - Plant Fibers
+
+- name: Resinous Trees
+  type: Forage
+  image: resin
+  terrain:
+    - Deciduous Forest
+    - Rainforest
+    - Jungle
+    - Frozen Forest
+    - Pine Forest
+    - Palm Forest
+  yield_rate: [50, 25, 15, 8, 2]
+  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
+  quantity_rate: [50, 25, 12, 7, 4, 2, 0]
+  quantity: [0, 10, 25, 100, 200, 500, 1000]
+  skill_req: 0
+  level: 1
+  produces:
+    - Cragroot Maple Resin
+    - Springbranch Maple Resin
+    - Redvale Maple Resin
+
+- name: Wild Food Patch
+  type: Forage
+  image: berries
+  terrain:
+    - Grasslands
+    - Grassland Hills
+    - Plains
+    - Plains Hills
+    - Deciduous Forest
+    - Rainforest
+    - Jungle
+    - Frozen Forest
+    - Pine Forest
+    - Palm Forest
+  yield_rate: [50, 25, 15, 8, 2]
+  yield_mod: [0.05, 0.15, 0.5, 1.0, 4.0]
+  quantity_rate: [50, 25, 12, 7, 4, 2, 0]
+  quantity: [0, 10, 25, 100, 200, 500, 1000]
+  skill_req: 0
+  level: 1
+  produces:
+    - Honeybell Berries
+    - Mushroom
+    - Honey
+    - Pine Nuts
+    - Edible Bark
+  produces_by_terrain:
+    Grasslands: [Honeybell Berries]
+    Grassland Hills: [Honeybell Berries]
+    Plains: [Mushroom]
+    Plains Hills: [Mushroom]
+    Deciduous Forest: [Honeybell Berries, Mushroom, Honey]
+    Rainforest: [Mushroom, Honey]
+    Jungle: [Mushroom, Honey]
+    Frozen Forest: [Edible Bark]
+    Pine Forest: [Pine Nuts]
+    Palm Forest: [Honey]
 
 - name: Moonlit Spring Water
   type: Spring Water

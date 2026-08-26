@@ -435,6 +435,7 @@ pub struct ResTemplate {
     pub properties: Option<Vec<String>>,
     pub num_properties: Option<i32>,
     pub produces: Option<Vec<String>>,
+    pub produces_by_terrain: Option<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Resource, Deref, DerefMut)]
@@ -837,6 +838,28 @@ mod tests {
     }
 
     #[test]
+    fn resin_torch_uses_its_dedicated_unlit_and_lit_art_names() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        let item = templates
+            .item_templates
+            .iter()
+            .find(|template| template.name == "Resin Torch")
+            .expect("Resin Torch item template");
+        let recipe = templates
+            .recipe_templates
+            .iter()
+            .find(|template| template.name == "Resin Torch")
+            .expect("Resin Torch recipe template");
+
+        assert_eq!(item.image, "resintorch");
+        assert_eq!(recipe.image.as_deref(), Some(item.image.as_str()));
+        assert_eq!(format!("lit{}", item.image), "litresintorch");
+    }
+
+    #[test]
     fn structure_wood_requirements_are_explicitly_flexible_or_strict() {
         let mut app = App::new();
         app.add_plugins(TemplatesPlugin);
@@ -958,7 +981,7 @@ mod tests {
             "Improvised Sling",
             "Stone Knife",
             "Bone Dagger",
-            "Stone-Tipped Spear",
+            "Bone-Tipped Spear",
             "Bone War Club",
             "Throwing Spear",
         ] {
@@ -983,6 +1006,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Plant Fibers", 2)],
             "Crude Bandages should be renewable from gathered fiber"
+        );
+
+        assert_eq!(
+            recipe("Bone-Tipped Spear")
+                .req
+                .iter()
+                .map(|requirement| (requirement.req_type.as_str(), requirement.quantity))
+                .collect::<Vec<_>>(),
+            vec![("Stick", 1), ("bones", 1), ("Twine", 1)],
+            "the primitive spear should consume a bone tip rather than a Pebble"
+        );
+        assert!(
+            templates
+                .recipe_templates
+                .iter()
+                .all(|recipe| recipe.name != "Stone-Tipped Spear"),
+            "the replaced Stone-Tipped Spear recipe should not remain available"
         );
 
         let herbal_poultice = recipe("Herbal Poultice");
@@ -1094,6 +1134,34 @@ mod tests {
             missing.is_empty(),
             "harvesting tools without durability: {missing:?}"
         );
+    }
+
+    #[test]
+    fn forage_sites_replace_literal_plant_nodes_and_cover_the_expected_outputs() {
+        let mut app = App::new();
+        app.add_plugins(TemplatesPlugin);
+
+        let templates = app.world().resource::<Templates>();
+        for name in ["Useful Underbrush", "Resinous Trees", "Wild Food Patch"] {
+            assert_eq!(
+                templates.res_templates.get(name).unwrap().res_type,
+                crate::constants::FORAGE
+            );
+        }
+        assert!(!templates.res_templates.contains_key("Amitanian Grape"));
+        assert!(!templates.res_templates.contains_key("Honeybell Berries"));
+
+        let wild_food = templates.res_templates.get("Wild Food Patch").unwrap();
+        let outputs = wild_food.produces_by_terrain.as_ref().unwrap();
+        assert_eq!(outputs["Grasslands"], vec!["Honeybell Berries"]);
+        assert_eq!(outputs["Pine Forest"], vec!["Pine Nuts"]);
+        assert_eq!(outputs["Frozen Forest"], vec!["Edible Bark"]);
+        assert!(wild_food
+            .produces
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|item| item != "Pebble"));
     }
 
     #[test]
@@ -1440,7 +1508,7 @@ mod tests {
 
         for (name, subclass, rating, durability) in [
             ("Sharpened Stick", "Spear", 1.0, 25),
-            ("Stone-Tipped Spear", "Spear", 2.0, 45),
+            ("Bone-Tipped Spear", "Spear", 2.0, 45),
             ("Throwing Spear", "Throwing", 2.0, 40),
             ("Copper Spear", "Spear", 3.0, 75),
             ("Iron Spear", "Spear", 4.0, 120),
@@ -1497,7 +1565,7 @@ mod tests {
         assert!(tannery.upgrade_req.is_some());
 
         for (recipe_name, tier) in [
-            ("Stone-Tipped Spear", 0),
+            ("Bone-Tipped Spear", 0),
             ("Copper Spear", 1),
             ("Iron Spear", 2),
             ("Mithril Glaive", 3),

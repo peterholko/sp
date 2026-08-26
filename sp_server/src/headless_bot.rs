@@ -91,7 +91,7 @@ const BURROW_REQS: &[(&str, i32)] = &[("Logs or Timber", 5)];
 const CAMPFIRE_REQS: &[(&str, i32)] = &[("Stick", 1), ("Resin", 1)];
 const STOCKADE_REQS: &[(&str, i32)] = &[("Log", STOCKADE_LOG_COST)];
 // Resource type villagers can harvest tool-free (yields berries/grapes -> food).
-const PLANT_RES: &str = "Plant";
+const PLANT_RES: &str = "Forage";
 
 const EXPLORE_OFFSETS: [(i32, i32); 8] = [
     (6, 0),
@@ -237,7 +237,7 @@ pub struct Bot {
     explore_cursor: usize,
     job: Option<BuildJob>,
     walls_attempted: usize,
-    shipwreck_search_issued: bool, // sent this run's one opening investigation
+    shipwreck_search_issued: bool, // sent at least one opening investigation this run
     upgrade_enabled: bool, // loot Soulshards + empower the sanctuary (BOT_NO_UPGRADE to disable)
     dbg_last_day: i32,     // last day a FOOD_DEBUG line was emitted
     hunts: u32,            // hunt actions issued (diagnostic)
@@ -664,6 +664,22 @@ impl Bot {
             return self.opening_action(&hero, view, map);
         }
 
+        // Villager progression now delivers structure knowledge as tangible
+        // deeds. The bot exercises the same inventory Use action a player must
+        // use before the corresponding foundation or upgrade becomes available.
+        if let Some(deed_id) = view
+            .inventory
+            .iter()
+            .find(|item| item.class == crate::item::DEED && item.quantity > 0)
+            .map(|item| item.id)
+        {
+            return Some(PlayerEvent::Use {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id: deed_id,
+            });
+        }
+
         let crisis_hold = self.balance_policy.stay_near_settlement_after_warning
             && matches!(
                 view.crisis_phase,
@@ -746,7 +762,7 @@ impl Bot {
             && !crisis_hold
             && needs_comfortable
             && view.villagers.len() < TARGET_VILLAGERS
-            && self.shipwreck_search_issued
+            && view.shipwreck_searched
             && self.balance_policy.recruit_shipwreck_villager
         {
             if let Some(action) = self.hire_action(&hero, view, map) {
@@ -809,7 +825,7 @@ impl Bot {
         else {
             return false;
         };
-        self.shipwreck_search_issued && shipwreck.inventory.is_empty() && view.has_built("storage")
+        view.shipwreck_searched && shipwreck.inventory.is_empty() && view.has_built("storage")
     }
 
     // Drive only the revised new-run opening. Combat and emergency survival
@@ -824,7 +840,7 @@ impl Bot {
     ) -> Option<PlayerEvent> {
         // Mirror the first tutorial step before investigating the wreck. This
         // also ensures the opening rat wave cannot catch the bot bare-handed.
-        if !self.shipwreck_search_issued {
+        if !view.shipwreck_searched {
             if let Some(stick_id) = view
                 .inventory
                 .iter()
@@ -840,13 +856,23 @@ impl Bot {
             }
         }
 
-        let (shipwreck_id, shipwreck_pos, salvage_item_id) = view
+        let (shipwreck_id, shipwreck_pos, salvage_item_id, salvage_log_item_id) = view
             .pois
             .iter()
             .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
-            .map(|poi| (poi.id, poi.pos, poi.inventory.first().map(|item| item.id)))?;
+            .map(|poi| {
+                (
+                    poi.id,
+                    poi.pos,
+                    poi.inventory.first().map(|item| item.id),
+                    poi.inventory
+                        .iter()
+                        .find(|item| item.class == crate::constants::LOG)
+                        .map(|item| item.id),
+                )
+            })?;
 
-        if !self.shipwreck_search_issued {
+        if !view.shipwreck_searched {
             if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
                 self.shipwreck_search_issued = true;
                 return Some(PlayerEvent::InvestigatePOI {
@@ -857,23 +883,23 @@ impl Bot {
             return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
         }
 
-        // Transfer one ordinary inventory stack per decision. This is the same
-        // manual POI-to-hero operation available to a player; no bot-only item
-        // grant or synthetic storage path is used.
-        if let Some(item_id) = salvage_item_id {
-            if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
-                return Some(PlayerEvent::ItemTransfer {
-                    player_id: self.player_id,
-                    source_id: shipwreck_id,
-                    target_id: hero.id,
-                    item_id,
-                });
-            }
-            return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
+        // The rescued villager's deed is the authoritative Burrow unlock. Use
+        // it before salvaging so a full pack cannot strand the opening build.
+        if let Some(deed_id) = view
+            .inventory
+            .iter()
+            .find(|item| item.class == crate::item::DEED && item.quantity > 0)
+            .map(|item| item.id)
+        {
+            return Some(PlayerEvent::Use {
+                player_id: self.player_id,
+                obj_id: hero.id,
+                item_id: deed_id,
+            });
         }
 
-        // Preserve the Warrior's recovered class protection. Ranger weapon
-        // selection remains combat-driven.
+        // Preserve recovered class equipment before the remaining salvage is
+        // shuttled into the new Burrow.
         if let Some(helm_id) = view
             .inventory
             .iter()
@@ -887,7 +913,6 @@ impl Bot {
                 status: true,
             });
         }
-
         // Recovering enough Logs removes the old mandatory gathering step. The
         // shared stick remains every class's starter weapon; the Crude Hatchet
         // is available as the dedicated logging fallback if salvage runs short.
@@ -907,6 +932,17 @@ impl Bot {
 
         if !view.has_built("storage") {
             if actual_burrow_log_supply(view) < BURROW_REQS[0].1 {
+                if let Some(item_id) = salvage_log_item_id {
+                    if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
+                        return Some(PlayerEvent::ItemTransfer {
+                            player_id: self.player_id,
+                            source_id: shipwreck_id,
+                            target_id: hero.id,
+                            item_id,
+                        });
+                    }
+                    return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
+                }
                 return self.logging_action(hero, view, map);
             }
 
@@ -922,6 +958,47 @@ impl Bot {
                 self.job = self.next_build_job(view, map);
             }
             return self.advance_job(view, map);
+        }
+
+        // Once the Burrow exists, shuttle each recovered stack through the
+        // hero into storage. Depositing before the next pickup keeps heavy,
+        // non-stackable corpse items from deadlocking the salvage loop.
+        let storage = view
+            .structures
+            .iter()
+            .find(|structure| structure.subclass == "storage" && structure.built)?;
+        if let Some(item_id) = view
+            .inventory
+            .iter()
+            .find(|item| {
+                !item.equipped && item.name != "Sharpened Stick" && item.name != "Training Bow"
+            })
+            .map(|item| item.id)
+        {
+            if Map::is_adjacent_including_source(hero.pos, storage.pos) {
+                return Some(PlayerEvent::ItemTransfer {
+                    player_id: self.player_id,
+                    source_id: hero.id,
+                    target_id: storage.id,
+                    item_id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, storage.pos, view, map);
+        }
+
+        // Transfer one ordinary Shipwreck stack per decision. This remains the
+        // same player-facing POI-to-hero operation; the bot receives no
+        // synthetic items or bot-only storage shortcut.
+        if let Some(item_id) = salvage_item_id {
+            if Map::is_adjacent_including_source(hero.pos, shipwreck_pos) {
+                return Some(PlayerEvent::ItemTransfer {
+                    player_id: self.player_id,
+                    source_id: shipwreck_id,
+                    target_id: hero.id,
+                    item_id,
+                });
+            }
+            return self.step_adjacent_to(hero.pos, shipwreck_pos, view, map);
         }
 
         None
@@ -956,6 +1033,7 @@ impl Bot {
         if here.is_some_and(|resource| resource.log_revealed) {
             return Some(PlayerEvent::Gather {
                 player_id: self.player_id,
+                res_type: crate::constants::LOG.to_string(),
             });
         }
         if here.is_some_and(|resource| resource.has_log) {
@@ -1493,7 +1571,7 @@ impl Bot {
         //    campfire, so a hero-inventory-only check abandoned the cook the moment
         //    the meat left the pack (staged meat rotted unattended while the bot
         //    wandered off to hunt more).
-        //    COOK FIRST: the campfire carries its own 20 Firewood, so cooking
+        //    COOK FIRST: the campfire carries its own 30 Firewood, so cooking
         //    usually needs no hero-side fuel at all — only fall back
         //    to ensure_firewood (split a Burrow Log into 5 Firewood) when the cook
         //    can't proceed for lack of fuel anywhere.
@@ -1593,6 +1671,7 @@ impl Bot {
             }
             return Some(PlayerEvent::Gather {
                 player_id: self.player_id,
+                res_type: crate::constants::FORAGE.to_string(),
             });
         }
 
@@ -1683,6 +1762,7 @@ impl Bot {
         if here.map_or(false, |t| t.game_revealed) {
             return Some(PlayerEvent::Gather {
                 player_id: self.player_id,
+                res_type: crate::constants::GAME_ANIMAL.to_string(),
             });
         }
         if here.map_or(false, |t| t.has_game) {
@@ -2083,6 +2163,7 @@ impl Bot {
         {
             return Some(PlayerEvent::Gather {
                 player_id: self.player_id,
+                res_type: crate::constants::FORAGE.to_string(),
             });
         }
         // Otherwise walk toward the nearest revealed resource tile within reach.
@@ -2588,15 +2669,18 @@ mod tests {
             .expect("carried starter stick")
             .id;
         let equip = bot.step(&view, game.map()).expect("starter equip action");
-        assert!(matches!(
-            &equip,
-            PlayerEvent::Equip {
-                player_id: event_player_id,
-                obj_id,
-                item_id,
-                status: true,
-            } if *event_player_id == player_id && *obj_id == hero.id && *item_id == stick_id
-        ));
+        assert!(
+            matches!(
+                &equip,
+                PlayerEvent::Equip {
+                    player_id: event_player_id,
+                    obj_id,
+                    item_id,
+                    status: true,
+                } if *event_player_id == player_id && *obj_id == hero.id && *item_id == stick_id
+            ),
+            "unexpected first opening action: {equip:?}"
+        );
         game.inject(equip);
         game.tick(3);
         view = game.observe_for_player(player_id);
@@ -2609,20 +2693,41 @@ mod tests {
             }) if event_player_id == player_id && target_id == shipwreck_id
         ));
         assert!(bot.shipwreck_search_issued);
+        assert!(
+            matches!(
+                bot.step(&view, game.map()),
+                Some(PlayerEvent::InvestigatePOI {
+                    player_id: event_player_id,
+                    target_id,
+                }) if event_player_id == player_id && target_id == shipwreck_id
+            ),
+            "an issued but incomplete Shipwreck search must be retried"
+        );
     }
 
     #[test]
     fn searched_opening_uses_manual_transfer_from_owned_shipwreck() {
         let mut game = HeadlessGame::new(1_000);
         let player_id = game.spawn_hero("Warrior", "OwnedShipwreckTransferBot");
-        let view = game.observe_for_player(player_id);
+        let mut view = game.observe_for_player(player_id);
+        view.shipwreck_searched = true;
+        view.inventory
+            .iter_mut()
+            .find(|item| item.name == "Sharpened Stick")
+            .expect("starter stick")
+            .equipped = true;
         let hero = view.hero.expect("opening hero");
         let shipwreck = view
             .pois
             .iter()
             .find(|poi| poi.template == "Shipwreck" && poi.run_owned)
             .expect("run-associated Shipwreck");
-        let first_salvage_id = shipwreck.inventory.first().expect("starter salvage").id;
+        let opening_log_id = shipwreck
+            .inventory
+            .iter()
+            .find(|item| item.class == crate::constants::LOG)
+            .expect("starter Logs")
+            .id;
 
         let mut bot = Bot::for_balance_scenario(player_id, CrisisBalanceScenario::BasicSurvival);
         bot.shipwreck_search_issued = true;
@@ -2636,7 +2741,7 @@ mod tests {
             }) if event_player_id == player_id
                 && source_id == shipwreck.id
                 && target_id == hero.id
-                && item_id == first_salvage_id
+                && item_id == opening_log_id
         ));
     }
 
@@ -2668,7 +2773,7 @@ mod tests {
         game.restrict_to_preparation_pair_start_location()
             .expect("fixed production-opening start");
         let player_id = game.spawn_hero("Warrior", "ProductionOpeningBot");
-        // Intro timing and post-search grace have dedicated integration tests.
+        // Intro timing and the first-search ambush have dedicated integration tests.
         // Keep their randomized combat out of this production-economy proof;
         // only deadlines move, while every salvage/build action remains real.
         game.defer_intro_encounter_deadlines_for_fixture()
@@ -2683,7 +2788,7 @@ mod tests {
         for _ in 0..MAX_DECISIONS {
             let view = game.observe_for_player(player_id);
             max_actual_logs = max_actual_logs.max(actual_log_count(&view.inventory));
-            if view.has_built("storage") {
+            if bot.opening_complete(&view) {
                 assert!(investigated_owned_wreck);
                 assert!(manual_salvage_transfers > 0);
                 assert_eq!(
@@ -2692,7 +2797,16 @@ mod tests {
                 );
                 assert!(max_actual_logs >= BURROW_REQS[0].1);
                 assert!(normal_burrow_foundation);
-                assert!(view.inventory.iter().any(|item| item.class == "Timber"));
+                assert!(
+                    view.inventory.iter().any(|item| item.class == "Timber")
+                        || view.structures.iter().any(|structure| {
+                            structure
+                                .inventory
+                                .iter()
+                                .any(|item| item.class == "Timber")
+                        }),
+                    "the flexible Burrow requirement must preserve the starter Timber"
+                );
                 assert!(view
                     .pois
                     .iter()
@@ -3522,7 +3636,7 @@ mod tests {
 
         for _ in 0..MAX_DECISIONS {
             let view = game.observe_for_player(player_id);
-            if view.has_built("storage") {
+            if bot.opening_complete(&view) {
                 assert!(
                     view.pois
                         .iter()
@@ -3535,7 +3649,7 @@ mod tests {
                         .opening_enemy_spawned
                         .iter()
                         .all(|spawned| !spawned),
-                    "class-combat fixture setup must finish during the production post-salvage warning grace"
+                    "class-combat fixture setup must retain its explicit opening-ambush hold"
                 );
                 bot.advance_phase(&view);
                 return true;
@@ -3559,8 +3673,8 @@ mod tests {
             bot.advance_phase(&view);
             game.tick(DECISION_TICKS);
             if owned_shipwreck_investigation_issued {
-                // Investigation resets the production rat deadline, so defer
-                // it after each fixture pump across the input boundary.
+                // Keep the fixture's explicit encounter hold across each input
+                // boundary while the production opening finishes.
                 game.defer_intro_encounter_deadlines_for_fixture()
                     .expect("deferred post-investigation intro deadlines");
             }
