@@ -41,6 +41,7 @@ pub mod obj;
 pub mod safe_logout;
 pub mod world;
 
+mod admin_status;
 mod combat;
 mod effect;
 mod encounter;

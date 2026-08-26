@@ -37,6 +37,7 @@ use tokio::sync::{mpsc::Sender, watch};
 use async_compat::Compat;
 use std::env;
 
+use crate::admin_status::{refresh_admin_status_system, AdminStatusState};
 use crate::combat::{Combat, CombatEffectsChanged, CombatSpellQuery};
 use crate::common::{
     Dehydrated, Exhausted, Heat, Hunger, Starving, Target, TaskTarget, Thirst, Tired, Transport,
@@ -156,6 +157,26 @@ impl Clients {
                 .any(|(client_id, client)| Self::client_is_active(client_id, client, player_id)),
             Err(_) => false,
         }
+    }
+
+    /// Snapshot the player ids that currently own an authoritative live
+    /// connection. This intentionally omits connection UUIDs from operational
+    /// reporting so the admin surface cannot expose network credentials or
+    /// connection-control identifiers.
+    pub fn online_player_ids(&self) -> Vec<i32> {
+        let Ok(clients) = self.0.lock() else {
+            return Vec::new();
+        };
+        let mut player_ids = clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                Self::client_is_active(client_id, client, client.player_id)
+                    .then_some(client.player_id)
+            })
+            .collect::<Vec<_>>();
+        player_ids.sort_unstable();
+        player_ids.dedup();
+        player_ids
     }
 
     /// Snapshot the active connection identities for one player. Production
@@ -5550,6 +5571,12 @@ impl Plugin for GamePlugin {
             // filesystem persistence path. A production snapshot failure is
             // logged and skipped so it cannot terminate the live simulation.
             app.add_systems(Update, snapshot_system.run_if(in_state(AppState::Running)));
+            app.add_systems(
+                PostUpdate,
+                refresh_admin_status_system
+                    .after(SafeLogoutPostUpdateSet::Lifecycle)
+                    .run_if(in_state(AppState::Running)),
+            );
         }
 
         app.add_systems(Update, update_game_tick.run_if(in_state(AppState::Running)))
@@ -6175,6 +6202,7 @@ impl Game {
 
         //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
         let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
+        let admin_status = AdminStatusState::default();
 
         //Create the client to game channel, note the sender will be cloned by each connected client
         let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
@@ -6188,6 +6216,7 @@ impl Game {
                 database_managers.clone(),
                 client_to_game_sender,
                 clients.clone(),
+                admin_status.clone(),
                 true,
             )))
             .detach();
@@ -6196,6 +6225,7 @@ impl Game {
 
         commands.insert_resource(database_managers);
         commands.insert_resource(clients);
+        commands.insert_resource(admin_status);
         commands.insert_resource(network_receiver);
     }
 
@@ -6215,6 +6245,7 @@ impl Game {
 
         //Initialize Arc Mutex Hashmap to store the client to game channel per connected client
         let clients = Clients(Arc::new(Mutex::new(HashMap::new())));
+        let admin_status = AdminStatusState::default();
 
         //Create the client to game channel, note the sender will be cloned by each connected client
         let (client_to_game_sender, client_to_game_receiver) = unbounded::<PlayerEvent>();
@@ -6229,6 +6260,7 @@ impl Game {
                 database_managers.clone(),
                 client_to_game_sender,
                 clients.clone(),
+                admin_status.clone(),
                 false,
             )))
             .detach();
@@ -6250,6 +6282,7 @@ impl Game {
         commands.insert_resource(database_managers);
         commands.insert_resource(entity_obj_map);
         commands.insert_resource(clients);
+        commands.insert_resource(admin_status);
         commands.insert_resource(network_receiver);
         commands.insert_resource(processed_map_events);
         commands.insert_resource(perception_updates);

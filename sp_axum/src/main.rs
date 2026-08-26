@@ -9,6 +9,7 @@ use axum::http::HeaderValue;
 use axum::http::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
+use axum::response::Html;
 use axum::response::IntoResponse;
 use axum::response::Json;
 use axum::response::Response;
@@ -51,6 +52,9 @@ use uuid::Uuid;
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_CHECK_HEADER_VALUE: &str = "true";
+const ADMIN_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const ADMIN_STATUS_HEADER_VALUE: &str = "true";
+const ADMIN_DASHBOARD_HTML: &str = include_str!("../root/admin.html");
 
 mod account;
 
@@ -205,6 +209,113 @@ impl AccountStatus {
 struct HealthResponse {
     healthy: bool,
     message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminRuntimeSummary {
+    connected: usize,
+    safe_logout_pending: usize,
+    offline_protected: usize,
+    disconnected: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminPositionSnapshot {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminHeroSnapshot {
+    id: i32,
+    name: String,
+    template: String,
+    class: String,
+    position: AdminPositionSnapshot,
+    state: String,
+    activity: String,
+    hp: i32,
+    max_hp: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminSafeLogoutSnapshot {
+    requested_tick: Option<i32>,
+    seconds_remaining: Option<i32>,
+    start_position: Option<AdminPositionSnapshot>,
+    protected_since_tick: Option<i32>,
+    protected_for_seconds: Option<i32>,
+    last_protection_end_tick: Option<i32>,
+    cancel_reason: Option<String>,
+    rejection_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminCrisisSnapshot {
+    kind: String,
+    phase: String,
+    pressure: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminRuntimePlayerSnapshot {
+    player_id: i32,
+    connected: bool,
+    presence: String,
+    hero: Option<AdminHeroSnapshot>,
+    safe_logout: AdminSafeLogoutSnapshot,
+    crisis: Option<AdminCrisisSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminRuntimeSnapshot {
+    generated_at_unix_ms: u64,
+    game_tick: i32,
+    game_day: i32,
+    time_of_day: String,
+    summary: AdminRuntimeSummary,
+    players: Vec<AdminRuntimePlayerSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminDashboardPlayer {
+    #[serde(flatten)]
+    runtime: AdminRuntimePlayerSnapshot,
+    account_name: Option<String>,
+    account_hero_name: Option<String>,
+    account_state: Option<String>,
+    account_last_login: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminDashboardResponse {
+    generated_at_unix_ms: u64,
+    game_tick: i32,
+    game_day: i32,
+    time_of_day: String,
+    summary: AdminRuntimeSummary,
+    players: Vec<AdminDashboardPlayer>,
+}
+
+#[derive(Debug)]
+struct AdminAccountDetails {
+    account_name: Option<String>,
+    hero_name: Option<String>,
+    player_state: String,
+    last_login: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizedAdmin {
+    player_id: i32,
+    session: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdminAccessError {
+    Unauthorized,
+    Forbidden,
+    Unavailable,
 }
 
 #[derive(Clone)]
@@ -417,6 +528,10 @@ async fn main() {
 
     let app = Router::new()
         .nest_service("/", ServeDir::new("root"))
+        .route("/admin", get(admin_dashboard_handler))
+        .route("/admin/", get(admin_dashboard_handler))
+        .route("/admin.html", get(admin_dashboard_handler))
+        .route("/admin/api/status", get(admin_status_handler))
         .route("/session", get(session_handler))
         .route("/auth", post(auth_handler))
         .route("/register", post(register_handler))
@@ -497,7 +612,7 @@ async fn cache_control_middleware(request: Request<Body>, next: Next) -> Respons
 }
 
 fn is_html_path(path: &str) -> bool {
-    path == "/" || path.ends_with(".html")
+    path == "/" || path == "/admin" || path == "/admin/" || path.ends_with(".html")
 }
 
 fn is_revalidated_asset_path(path: &str) -> bool {
@@ -632,6 +747,231 @@ async fn logout_handler(State(state): State<AppState>, jar: CookieJar) -> Respon
         .into_response()
 }
 
+fn admin_access_error_response(error: AdminAccessError) -> Response {
+    let (status, message) = match error {
+        AdminAccessError::Unauthorized => (
+            StatusCode::UNAUTHORIZED,
+            "An authenticated admin session is required.",
+        ),
+        AdminAccessError::Forbidden => (
+            StatusCode::FORBIDDEN,
+            "This account does not have admin access.",
+        ),
+        AdminAccessError::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Admin authentication is temporarily unavailable.",
+        ),
+    };
+    admin_json_error_response(status, message)
+}
+
+fn apply_admin_response_headers(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(EXPIRES, HeaderValue::from_static("0"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+        ),
+    );
+}
+
+fn admin_json_error_response(status: StatusCode, message: &str) -> Response {
+    let mut response = (
+        status,
+        Json(AuthError {
+            msg: message.to_string(),
+        }),
+    )
+        .into_response();
+    apply_admin_response_headers(&mut response);
+    response
+}
+
+fn require_admin_flag(is_admin: Option<bool>) -> Result<(), AdminAccessError> {
+    is_admin
+        .unwrap_or(false)
+        .then_some(())
+        .ok_or(AdminAccessError::Forbidden)
+}
+
+async fn authorize_admin(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<AuthorizedAdmin, AdminAccessError> {
+    let session = jar
+        .get("session")
+        .map(|cookie| cookie.value().to_string())
+        .ok_or(AdminAccessError::Unauthorized)?;
+    let conn = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| AdminAccessError::Unavailable)?;
+    let row = conn
+        .query_opt(
+            "SELECT s.player_id, s.created_at, s.last_login, a.is_admin FROM sessions s JOIN accounts a ON a.player_id = s.player_id WHERE s.session = $1",
+            &[&session],
+        )
+        .await
+        .map_err(|_| AdminAccessError::Unavailable)?
+        .ok_or(AdminAccessError::Unauthorized)?;
+
+    let created_at: DateTime<Utc> = row.get("created_at");
+    let last_login: Option<DateTime<Utc>> = row.get("last_login");
+    if session_is_expired(created_at, last_login) {
+        let _ = conn
+            .execute("DELETE FROM sessions WHERE session = $1", &[&session])
+            .await;
+        return Err(AdminAccessError::Unauthorized);
+    }
+
+    require_admin_flag(row.get::<_, Option<bool>>("is_admin"))?;
+
+    conn.execute(
+        "UPDATE sessions SET last_login = NOW() WHERE session = $1 AND (last_login IS NULL OR last_login < NOW() - INTERVAL '5 minutes')",
+        &[&session],
+    )
+    .await
+    .map_err(|_| AdminAccessError::Unavailable)?;
+
+    Ok(AuthorizedAdmin {
+        player_id: row.get("player_id"),
+        session,
+    })
+}
+
+async fn admin_dashboard_handler(State(state): State<AppState>, jar: CookieJar) -> Response {
+    if let Err(error) = authorize_admin(&state, &jar).await {
+        return admin_access_error_response(error);
+    }
+
+    let mut response = Html(ADMIN_DASHBOARD_HTML).into_response();
+    apply_admin_response_headers(&mut response);
+    response
+}
+
+async fn admin_status_handler(State(state): State<AppState>, jar: CookieJar) -> Response {
+    let admin = match authorize_admin(&state, &jar).await {
+        Ok(admin) => admin,
+        Err(error) => return admin_access_error_response(error),
+    };
+
+    let runtime = match timeout(
+        ADMIN_STATUS_TIMEOUT,
+        fetch_admin_runtime_status(
+            state.ws_health_url.clone(),
+            state.ws_health_allow_invalid_certs,
+            admin.session,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(runtime)) => runtime,
+        Ok(Err(error)) => {
+            tracing::warn!(
+                admin_player_id = admin.player_id,
+                error = %error,
+                "admin_status_fetch_failed"
+            );
+            return admin_json_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The game server status feed is unavailable.",
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                admin_player_id = admin.player_id,
+                "admin_status_fetch_timed_out"
+            );
+            return admin_json_error_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                "The game server status feed timed out.",
+            );
+        }
+    };
+
+    let player_ids = runtime
+        .players
+        .iter()
+        .map(|player| player.player_id)
+        .collect::<Vec<_>>();
+    let mut accounts = HashMap::new();
+    if !player_ids.is_empty() {
+        let conn = match state.pool.get().await {
+            Ok(conn) => conn,
+            Err(error) => {
+                tracing::warn!(error = %error, "admin_status_account_pool_failed");
+                return admin_access_error_response(AdminAccessError::Unavailable);
+            }
+        };
+        let rows = match conn
+            .query(
+                "SELECT player_id, account_name, hero_name, player_state, last_login FROM accounts WHERE player_id = ANY($1)",
+                &[&player_ids],
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, "admin_status_account_query_failed");
+                return admin_access_error_response(AdminAccessError::Unavailable);
+            }
+        };
+        for row in rows {
+            accounts.insert(
+                row.get::<_, i32>("player_id"),
+                AdminAccountDetails {
+                    account_name: row.get("account_name"),
+                    hero_name: row.get("hero_name"),
+                    player_state: row.get("player_state"),
+                    last_login: row.get("last_login"),
+                },
+            );
+        }
+    }
+
+    let players = runtime
+        .players
+        .into_iter()
+        .map(|runtime| {
+            let account = accounts.remove(&runtime.player_id);
+            AdminDashboardPlayer {
+                runtime,
+                account_name: account
+                    .as_ref()
+                    .and_then(|account| account.account_name.clone()),
+                account_hero_name: account
+                    .as_ref()
+                    .and_then(|account| account.hero_name.clone()),
+                account_state: account.as_ref().map(|account| account.player_state.clone()),
+                account_last_login: account
+                    .and_then(|account| account.last_login)
+                    .map(|last_login| last_login.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    let response = AdminDashboardResponse {
+        generated_at_unix_ms: runtime.generated_at_unix_ms,
+        game_tick: runtime.game_tick,
+        game_day: runtime.game_day,
+        time_of_day: runtime.time_of_day,
+        summary: runtime.summary,
+        players,
+    };
+    let mut response = Json(response).into_response();
+    apply_admin_response_headers(&mut response);
+    response
+}
+
 async fn health_handler(State(state): State<AppState>) -> Response {
     let health_check = timeout(
         HEALTH_CHECK_TIMEOUT,
@@ -668,6 +1008,64 @@ async fn health_handler(State(state): State<AppState>) -> Response {
         )
             .into_response(),
     }
+}
+
+async fn fetch_admin_runtime_status(
+    url: String,
+    allow_invalid_certs: bool,
+    session: String,
+) -> Result<AdminRuntimeSnapshot, String> {
+    let request = build_admin_status_request(&url, &session)?;
+    let (mut ws_stream, _) = if allow_invalid_certs {
+        let connector = TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()
+            .map_err(|error| format!("failed to build internal TLS connector: {error}"))?;
+        connect_async_tls_with_config(request, None, false, Some(Connector::NativeTls(connector)))
+            .await
+            .map_err(|error| format!("failed to connect to game status feed: {error}"))?
+    } else {
+        connect_async(request)
+            .await
+            .map_err(|error| format!("failed to connect to game status feed: {error}"))?
+    };
+
+    while let Some(message) = ws_stream
+        .next()
+        .await
+        .transpose()
+        .map_err(|error| format!("error receiving game status: {error}"))?
+    {
+        match message {
+            Message::Text(text) => {
+                return serde_json::from_str(&text)
+                    .map_err(|error| format!("invalid game status response: {error}"));
+            }
+            Message::Close(_) => {
+                return Err("game status feed closed without a snapshot".to_string());
+            }
+            _ => continue,
+        }
+    }
+
+    Err("game status feed ended without a snapshot".to_string())
+}
+
+fn build_admin_status_request(url: &str, session: &str) -> Result<Request<()>, String> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| format!("failed to build game status request: {error}"))?;
+    request.headers_mut().insert(
+        "x-admin-status",
+        HeaderValue::from_static(ADMIN_STATUS_HEADER_VALUE),
+    );
+    request.headers_mut().insert(
+        "cookie",
+        HeaderValue::from_str(&format!("session={session}"))
+            .map_err(|_| "invalid admin session credential".to_string())?,
+    );
+    Ok(request)
 }
 
 async fn check_websocket_health(url: String, allow_invalid_certs: bool) -> Result<(), String> {
@@ -2106,6 +2504,98 @@ mod tests {
     }
 
     #[test]
+    fn admin_privilege_requires_an_explicit_true_flag() {
+        assert_eq!(require_admin_flag(Some(true)), Ok(()));
+        assert_eq!(
+            require_admin_flag(Some(false)),
+            Err(AdminAccessError::Forbidden)
+        );
+        assert_eq!(require_admin_flag(None), Err(AdminAccessError::Forbidden));
+    }
+
+    #[test]
+    fn admin_status_request_carries_internal_marker_and_session_cookie() {
+        let request = build_admin_status_request("wss://127.0.0.1:8443", "test-session-credential")
+            .expect("admin status request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get("x-admin-status")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("cookie")
+                .and_then(|value| value.to_str().ok()),
+            Some("session=test-session-credential")
+        );
+        assert!(!request
+            .uri()
+            .to_string()
+            .contains("test-session-credential"));
+    }
+
+    #[test]
+    fn admin_errors_are_non_cacheable_and_not_frameable() {
+        let response = admin_access_error_response(AdminAccessError::Forbidden);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, no-cache, must-revalidate, max-age=0")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-frame-options")
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+    }
+
+    #[test]
+    fn admin_runtime_contract_deserializes_safe_logout_state() {
+        let snapshot: AdminRuntimeSnapshot = serde_json::from_str(
+            r#"{
+                "generated_at_unix_ms": 123,
+                "game_tick": 500,
+                "game_day": 1,
+                "time_of_day": "Dawn",
+                "summary": {"connected": 0, "safe_logout_pending": 0, "offline_protected": 1, "disconnected": 0},
+                "players": [{
+                    "player_id": 7,
+                    "connected": false,
+                    "presence": "offline_protected",
+                    "hero": null,
+                    "safe_logout": {
+                        "requested_tick": null,
+                        "seconds_remaining": null,
+                        "start_position": null,
+                        "protected_since_tick": 400,
+                        "protected_for_seconds": 10,
+                        "last_protection_end_tick": null,
+                        "cancel_reason": null,
+                        "rejection_reason": null
+                    },
+                    "crisis": null
+                }]
+            }"#,
+        )
+        .expect("valid game status contract");
+
+        assert_eq!(snapshot.summary.offline_protected, 1);
+        assert_eq!(
+            snapshot.players[0].safe_logout.protected_for_seconds,
+            Some(10)
+        );
+    }
+
+    #[test]
     fn trusted_device_cookie_is_http_only_secure_and_strict() {
         let mut headers = HeaderMap::new();
         append_trusted_device_cookie(&mut headers, "server-generated-secret");
@@ -2135,6 +2625,8 @@ mod tests {
     fn app_shell_and_executable_assets_are_always_revalidated() {
         assert!(is_html_path("/"));
         assert!(is_html_path("/index.html"));
+        assert!(is_html_path("/admin"));
+        assert!(is_html_path("/admin.html"));
         assert!(is_revalidated_asset_path("/sp2.mobile.js"));
         assert!(is_revalidated_asset_path("/service-worker.js"));
         assert!(is_revalidated_asset_path("/manifest.json"));

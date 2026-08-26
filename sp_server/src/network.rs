@@ -80,6 +80,7 @@ use std::sync::Mutex;
 
 use rustrict::CensorStr;
 
+use crate::admin_status::AdminStatusState;
 use dotenvy::dotenv;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2048,6 +2049,7 @@ pub async fn tokio_setup(
     database_managers: DatabaseManagers,
     client_to_game_sender: CBSender<PlayerEvent>,
     clients: Clients,
+    admin_status: AdminStatusState,
     reset_game: bool,
 ) {
     // Load environment variables from .env file
@@ -2289,6 +2291,7 @@ pub async fn tokio_setup(
         let streams = streams.clone();
         let pool = pool.clone();
         let stream_to_manager_sender = stream_to_manager_sender.clone();
+        let admin_status = admin_status.clone();
 
         tokio::spawn(async move {
             match tls_acceptor.accept(stream).await {
@@ -2301,6 +2304,7 @@ pub async fn tokio_setup(
                         streams,
                         pool,
                         stream_to_manager_sender,
+                        admin_status,
                     )
                     .await;
                 }
@@ -2395,6 +2399,7 @@ async fn accept_connection(
     streams: Streams,
     pool: Pool,
     stream_to_manager_sender: tokio::sync::mpsc::Sender<ActiveStream>,
+    admin_status: AdminStatusState,
 ) {
     if let Err((client_id, e)) = handle_connection(
         peer,
@@ -2404,6 +2409,7 @@ async fn accept_connection(
         streams.clone(),
         pool,
         stream_to_manager_sender,
+        admin_status,
     )
     .await
     {
@@ -2428,6 +2434,7 @@ async fn handle_connection(
     streams: Streams,
     pool: Pool,
     stream_to_manager_sender: tokio::sync::mpsc::Sender<ActiveStream>,
+    admin_status: AdminStatusState,
 ) -> Result<(), (Uuid, Error)> {
     //Get the number of clients for a client id
     //let num_clients = clients.lock().unwrap().keys().len() as i32;
@@ -2451,6 +2458,7 @@ async fn handle_connection(
     // Shared session ID state
     let mut session_id: Option<String> = None;
     let mut health_check: bool = false;
+    let mut admin_status_request: bool = false;
 
     let callback = |req: &Request, response: Response| {
         let headers = req.headers();
@@ -2460,6 +2468,8 @@ async fn handle_connection(
             health_check = true;
             Ok(response)
         } else {
+            admin_status_request = headers.get("x-admin-status").is_some();
+
             // Check if cookie is in headers
             let Some(cookie) = headers.get("cookie") else {
                 // Return error
@@ -2550,36 +2560,23 @@ async fn handle_connection(
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
-    //Create a tokio sync channel to for messages from the game to each client
-    let (game_to_client_sender, mut game_to_client_receiver) = tokio::sync::mpsc::channel(100);
-
     // Get the player id from the session
     let player_id: i32 = row_session.get("player_id");
 
-    if let Err(error) = client
-        .execute(
-            "UPDATE sessions SET last_login = NOW() WHERE session = $1",
-            &[&session_id],
-        )
-        .await
-    {
-        println!("Unable to refresh authenticated session: {error}");
-        return Err((client_id, Error::AttackAttempt));
+    // Axum already refreshed and authorized admin dashboard requests. Avoid a
+    // second database write on every five-second status poll.
+    if !admin_status_request {
+        if let Err(error) = client
+            .execute(
+                "UPDATE sessions SET last_login = NOW() WHERE session = $1",
+                &[&session_id],
+            )
+            .await
+        {
+            println!("Unable to refresh authenticated session: {error}");
+            return Err((client_id, Error::AttackAttempt));
+        }
     }
-
-    let (manager_to_stream_sender, mut manager_to_stream_receiver) =
-        tokio::sync::mpsc::channel::<String>(100);
-
-    //Store the connection in the connections hashmap
-    println!("Inserting stream into streams hashmap");
-    streams.0.lock().unwrap().insert(
-        client_id,
-        Stream {
-            client_id: client_id,
-            player_id: player_id,
-            sender: manager_to_stream_sender,
-        },
-    );
 
     // Get the player account_name from the accounts table
     let row_account = client
@@ -2617,6 +2614,64 @@ async fn handle_connection(
     let is_admin: bool = row_account
         .get::<_, Option<bool>>("is_admin")
         .unwrap_or(false);
+
+    // Operational status requests are authenticated twice: Axum authorizes
+    // the page/API first, and the game socket independently verifies the same
+    // unexpired admin session. This path deliberately returns before creating
+    // a Stream or Client, so polling cannot displace an active game socket.
+    if admin_status_request {
+        if !is_admin {
+            warn!(
+                "admin_status_access_denied player_id={} reason=not_admin",
+                player_id
+            );
+            send_websocket_message(
+                &mut ws_sender,
+                Message::Text(r#"{"error":"insufficient_privileges"}"#.into()),
+            )
+            .await
+            .map_err(|error| (client_id, error))?;
+            return Ok(());
+        }
+
+        let snapshot = admin_status.snapshot().ok_or_else(|| {
+            (
+                client_id,
+                Error::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    "admin status snapshot lock is unavailable",
+                )),
+            )
+        })?;
+        let serialized = serde_json::to_string(&snapshot).map_err(|error| {
+            (
+                client_id,
+                Error::Io(io::Error::new(io::ErrorKind::InvalidData, error)),
+            )
+        })?;
+        send_websocket_message(&mut ws_sender, Message::Text(serialized.into()))
+            .await
+            .map_err(|error| (client_id, error))?;
+        let _ = send_websocket_message(&mut ws_sender, Message::Close(None)).await;
+        info!("admin_status_snapshot_served player_id={}", player_id);
+        return Ok(());
+    }
+
+    // Only gameplay sockets receive outbound queues and enter the authoritative
+    // connection registries.
+    let (game_to_client_sender, mut game_to_client_receiver) = tokio::sync::mpsc::channel(100);
+    let (manager_to_stream_sender, mut manager_to_stream_receiver) =
+        tokio::sync::mpsc::channel::<String>(100);
+
+    println!("Inserting stream into streams hashmap");
+    streams.0.lock().unwrap().insert(
+        client_id,
+        Stream {
+            client_id,
+            player_id,
+            sender: manager_to_stream_sender,
+        },
+    );
 
     let row_score = client.query_one("SELECT hero_name, hero_rank, total_xp, COALESCE(total_score, total_xp) as total_score, COALESCE(score_survival, 0) as score_survival, COALESCE(score_progression, 0) as score_progression, COALESCE(score_wealth, 0) as score_wealth, COALESCE(score_defense, 0) as score_defense, COALESCE(score_valor, 0) as score_valor, COALESCE(score_legacy, 0) as score_legacy, COALESCE(days_survived, 0) as days_survived, COALESCE(highest_pressure_level, 0) as highest_pressure_level, COALESCE(waves_survived, 0) as waves_survived, COALESCE(legendary_kills, 0) as legendary_kills, COALESCE(hideouts_cleared, 0) as hideouts_cleared, fate, COALESCE(crisis_tier, 0) as crisis_tier FROM scores WHERE player_id = $1 ORDER BY created_at DESC LIMIT 1", &[&player_id]).await;
 

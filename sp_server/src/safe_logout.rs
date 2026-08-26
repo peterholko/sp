@@ -53,7 +53,7 @@ pub enum PlayerWorldPresence {
 }
 
 impl PlayerWorldPresence {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Online => "online",
             Self::SafeLogoutPending => "safe_logout_pending",
@@ -80,7 +80,7 @@ pub enum SafeLogoutCancelReason {
 }
 
 impl SafeLogoutCancelReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Moved => "moved",
             Self::EnteredCombat => "entered_combat",
@@ -118,7 +118,7 @@ pub enum SafeLogoutRejectionReason {
 }
 
 impl SafeLogoutRejectionReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::NotOnline => "not_online",
             Self::InvalidRun => "invalid_run",
