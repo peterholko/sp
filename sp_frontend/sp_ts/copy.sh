@@ -12,6 +12,7 @@ server_tileset="$repo_root/sp_server/tileset"
 
 cp dist/sp2.desktop.js "$axum_root/"
 cp dist/sp2.mobile.js "$axum_root/"
+cp index.html "$axum_root/index.html"
 
 mkdir -p "$axum_root/static/art"
 mkdir -p "$axum_root/static/art/ui/activity"

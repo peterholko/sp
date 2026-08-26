@@ -24,8 +24,7 @@ CHANGED=$(git diff --name-only "$OLD_HEAD" "$NEW_HEAD" || true)
 if echo "$CHANGED" | grep -Eq '^(sp_frontend/)'; then
   cd /home/peter/sp/sp_frontend/sp_ts
   npm ci
-  npm run dev
-  ./copy.sh
+  npm run rebuild:ux
   sudo -n "$SYSTEMCTL" restart sp_axum
 fi
 

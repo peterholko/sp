@@ -44,6 +44,7 @@ use tokio_tungstenite::connect_async_tls_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::Connector;
+use tower_http::compression::CompressionLayer;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
@@ -436,7 +437,8 @@ async fn main() {
             ws_health_allow_invalid_certs,
             rate_limiter: Arc::new(Mutex::new(HashMap::new())),
         })
-        .layer(middleware::from_fn(cache_control_middleware));
+        .layer(middleware::from_fn(cache_control_middleware))
+        .layer(CompressionLayer::new().br(true).gzip(true));
 
     // configure certificate and private key used by https
     let config = RustlsConfig::from_pem_file(
@@ -499,7 +501,7 @@ fn is_html_path(path: &str) -> bool {
 }
 
 fn is_revalidated_asset_path(path: &str) -> bool {
-    path.ends_with(".js") || path.ends_with(".css")
+    path.ends_with(".js") || path.ends_with(".css") || path == "/manifest.json"
 }
 
 async fn session_handler(State(state): State<AppState>, jar: CookieJar) -> Response {
@@ -2059,6 +2061,7 @@ async fn scores_handler(State(state): State<AppState>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     #[test]
     fn account_status_depends_on_credentials_not_generated_name() {
@@ -2126,5 +2129,41 @@ mod tests {
         assert_ne!(digest, credential);
         assert_eq!(digest.len(), 64);
         assert_eq!(digest, trusted_device_hash(credential));
+    }
+
+    #[test]
+    fn app_shell_and_executable_assets_are_always_revalidated() {
+        assert!(is_html_path("/"));
+        assert!(is_html_path("/index.html"));
+        assert!(is_revalidated_asset_path("/sp2.mobile.js"));
+        assert!(is_revalidated_asset_path("/service-worker.js"));
+        assert!(is_revalidated_asset_path("/manifest.json"));
+        assert!(!is_revalidated_asset_path("/static/art/stockade.png"));
+    }
+
+    #[tokio::test]
+    async fn compression_layer_negotiates_brotli_for_large_text_responses() {
+        let app = Router::new()
+            .route("/asset.js", get(|| async { "x".repeat(4096) }))
+            .layer(CompressionLayer::new().br(true).gzip(true));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/asset.js")
+                    .header("Accept-Encoding", "br, gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Encoding")
+                .and_then(|value| value.to_str().ok()),
+            Some("br")
+        );
     }
 }
