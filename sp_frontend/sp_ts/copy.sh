@@ -32,6 +32,7 @@ for ui_art_file in \
   intro_01_new_lands.png \
   intro_02_shipwreck.png \
   intro_03_ashore.png \
+  login_background.png \
   terrainfeaturebutton.png \
   terrainfeaturebutton_click.png
 do

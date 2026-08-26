@@ -1121,6 +1121,13 @@ export default class LoginControl extends React.Component<any, any> {
 
     return (
       <div>
+        {(!this.state.hideLandingPage || this.state.showLoginPanel || this.state.showResetPanel) && (
+          <div
+            className="login-background"
+            style={{ backgroundImage: "url('/static/art/ui/login_background.png')" }}
+            aria-hidden="true"
+          />
+        )}
         {!this.state.hideLandingPage && (
           <div className="container">
             <img src={logo} style={logoStyle} />

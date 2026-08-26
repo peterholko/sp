@@ -64,6 +64,30 @@ p {
   -webkit-transform: translate(-50%, -50%);
       -ms-transform: translate(-50%, -50%);
           transform: translate(-50%, -50%);
+  z-index: 2;
+}
+
+.login-background {
+  background-color: #10161c;
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  inset: 0;
+  pointer-events: none;
+  position: fixed;
+  z-index: 0;
+}
+
+.login-background::after {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(5, 8, 11, 0.22) 0%,
+    rgba(5, 8, 11, 0.09) 48%,
+    rgba(0, 0, 0, 0.44) 100%
+  );
+  content: '';
+  inset: 0;
+  position: absolute;
 }
 
 @media (orientation: portrait) {
